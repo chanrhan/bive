@@ -34,7 +34,7 @@ pnpm 워크스페이스 · TypeScript strict · ESM. 상세는 `docs/architectur
 ## 4. 작업 방식
 
 - 이슈 1개 = 브랜치 1개 = PR 1개. 브랜치 `feat/<이슈번호>-<slug>` · `fix/` · `chore/` · `docs/`. PR 본문 첫 줄 `Closes #<번호>`, 머지는 squash.
-- 커밋: `type(scope): 요약 (#이슈)`. type = feat · fix · chore · docs · test · refactor. 커밋 · PR · 코드 주석에 모델 이름을 쓰지 않는다.
+- 커밋: `type(scope): 요약 (#이슈)`. type = feat · fix · chore · docs · test · refactor. 코드 · 주석 · PR 제목 · 본문에 모델 이름을 쓰지 않는다. 커밋 메시지 끝의 공동 작성자(`Co-Authored-By`) · 세션 링크 트레일러는 세션이 지정한 값을 그대로 쓴다.
 - 언어: 문서 · 이슈 · PR · UI 문구 · 주석은 한국어, 식별자 · 파일명은 영어. UI 문구는 `docs/spec/screens.md` 1.1 원칙(명사형, 이모지 금지, 코드 표기 금지)을 따른다.
 - 라벨: `type:feature` `type:bug` `type:chore` `type:docs` · `area:app` `area:orchestrator` `area:store` `area:parser` `area:shared` `area:ci` `area:docs` · `needs-human`.
 - 모든 PR은 CI(`ci`) 통과 + `pr-reviewer` 스킬 검토 후 머지. 리뷰 지적은 최대 2회 수정 반복, 그래도 안 되면 이슈를 쪼갠다.
