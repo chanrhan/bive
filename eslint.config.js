@@ -98,6 +98,11 @@ const rendererPatterns = [
     allowTypeImports: true,
     message: 'renderer는 shared를 import type으로만 가져올 수 있습니다 (architecture.md 2장).',
   },
+  {
+    regex: '^(\\.\\./)+(packages/)?shared/(src|dist)(/|$)',
+    allowTypeImports: true,
+    message: 'renderer는 shared를 import type으로만 가져올 수 있습니다 (architecture.md 2장).',
+  },
 ];
 
 /**
@@ -112,15 +117,14 @@ const restrict = (patterns) => ({
   '@typescript-eslint/no-restricted-imports': ['error', { patterns }],
   'no-restricted-syntax': [
     'error',
-    ...patterns
-      .filter((p) => !p.allowTypeImports)
-      .map((p) => ({
-        // esquery 정규식 리터럴은 내부에 '/'를 허용하지 않으므로 \x2F로 바꾼다
-        selector: `ImportExpression[source.value=/${p.regex.replace(/\//g, '\\x2F')}/${
-          p.caseSensitive === false ? 'i' : ''
-        }]`,
-        message: p.message,
-      })),
+    // 동적 import()는 항상 런타임 import라서 allowTypeImports 패턴도 그대로 막는다
+    ...patterns.map((p) => ({
+      // esquery 정규식 리터럴은 내부에 '/'를 허용하지 않으므로 \x2F로 바꾼다
+      selector: `ImportExpression[source.value=/${p.regex.replace(/\//g, '\\x2F')}/${
+        p.caseSensitive === false ? 'i' : ''
+      }]`,
+      message: p.message,
+    })),
   ],
 });
 
