@@ -1,0 +1,51 @@
+name: 버그
+description: 검수 · 사용 중 발견한 결함
+title: "[버그] "
+labels: ["type:bug"]
+body:
+  - type: input
+    id: screen
+    attributes:
+      label: 화면 · 요구사항 ID
+      description: SCR-xx, PRD ID (예 SCR-02 · NRM-01)
+    validations:
+      required: true
+  - type: textarea
+    id: symptom
+    attributes:
+      label: 현상
+      description: 무엇이 보이는가 (문구 · 상태 · 로그)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 재현
+      description: 명령 · 클릭 순서. 기본 브랜치 커밋 해시 포함
+      placeholder: |
+        1. main@<sha> 에서 pnpm install && pnpm build
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 기대 동작
+      description: 어느 문서의 어느 문장 기준인지 (docs/spec/... 절 번호)
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 심각도
+      options:
+        - "차단 (완료 기준 흐름 진행 불가)"
+        - "높음 (요구사항 미충족)"
+        - "낮음 (문구 · 스타일 · 상태 표시)"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 근거
+      description: 스크린샷 경로, 테스트 출력, 프로토타입 대조 결과
