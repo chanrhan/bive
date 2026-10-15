@@ -1,0 +1,28 @@
+{
+  "name": "@bive/shared",
+  "version": "0.0.0",
+  "private": true,
+  "description": "도메인 타입 · 상태 enum · IPC 프로토콜 스키마 · ID",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "eslint": "10.12.0",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

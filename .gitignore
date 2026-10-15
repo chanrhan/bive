@@ -1,0 +1,19 @@
+# 의존성 · 빌드 산출물
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# 도구 캐시 · 로그
+.eslintcache
+*.log
+__pycache__/
+
+# 에이전트 작업 디렉터리
+.claude/worktrees/
+
+# 운영체제 · 편집기
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
