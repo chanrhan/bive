@@ -1,0 +1,24 @@
+name: needs-human
+description: 사람만 할 수 있는 일
+title: "[needs-human] "
+labels: ["needs-human"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 사람이 할 일
+      description: 구체적인 조작 · 결정. 끝났을 때 어떻게 알 수 있는지
+    validations:
+      required: true
+  - type: textarea
+    id: blocked
+    attributes:
+      label: 막히는 작업
+      description: 이슈 키 · 마일스톤. 이것 없이도 계속할 수 있는 일은 무엇인지
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: 맥락
+      description: 시도한 것, 오류 메시지, 관련 ADR
