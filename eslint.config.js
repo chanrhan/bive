@@ -71,7 +71,8 @@ const packagePatterns = (from, target) => [
 const sharedPatterns = [
   {
     regex: '^@bive/',
-    message: 'shared 패키지는 다른 워크스페이스 패키지를 import할 수 없습니다 (architecture.md 2장).',
+    message:
+      'shared 패키지는 다른 워크스페이스 패키지를 import할 수 없습니다 (architecture.md 2장).',
   },
   ...PACKAGES.filter((p) => p !== 'shared').flatMap((p) => packagePatterns('shared', p).slice(1)),
   {
@@ -85,7 +86,8 @@ const sharedPatterns = [
 const rendererPatterns = [
   {
     regex: '^electron(/|$)',
-    message: 'renderer는 electron을 import할 수 없습니다. preload의 window.bive만 씁니다 (architecture.md 2장).',
+    message:
+      'renderer는 electron을 import할 수 없습니다. preload의 window.bive만 씁니다 (architecture.md 2장).',
   },
   {
     regex: NODE_BUILTIN_REGEX,
@@ -113,7 +115,8 @@ const restrict = (patterns) => ({
     ...patterns
       .filter((p) => !p.allowTypeImports)
       .map((p) => ({
-        selector: `ImportExpression[source.value=/${p.regex.replace(/\//g, '\\/')}/${
+        // esquery 정규식 리터럴은 내부에 '/'를 허용하지 않으므로 \x2F로 바꾼다
+        selector: `ImportExpression[source.value=/${p.regex.replace(/\//g, '\\x2F')}/${
           p.caseSensitive === false ? 'i' : ''
         }]`,
         message: p.message,
@@ -124,8 +127,14 @@ const restrict = (patterns) => ({
 /** @type {Record<typeof PACKAGES[number], RestrictedPattern[]>} */
 const productPatterns = {
   shared: [...testOnlyPatterns, ...sharedPatterns],
-  store: [...testOnlyPatterns, ...FORBIDDEN_PACKAGES.store.flatMap((t) => packagePatterns('store', t))],
-  parser: [...testOnlyPatterns, ...FORBIDDEN_PACKAGES.parser.flatMap((t) => packagePatterns('parser', t))],
+  store: [
+    ...testOnlyPatterns,
+    ...FORBIDDEN_PACKAGES.store.flatMap((t) => packagePatterns('store', t)),
+  ],
+  parser: [
+    ...testOnlyPatterns,
+    ...FORBIDDEN_PACKAGES.parser.flatMap((t) => packagePatterns('parser', t)),
+  ],
   orchestrator: [
     ...testOnlyPatterns,
     ...FORBIDDEN_PACKAGES.orchestrator.flatMap((t) => packagePatterns('orchestrator', t)),

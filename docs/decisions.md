@@ -266,3 +266,10 @@
 - 맥락: SCR-01은 빈 폴더 → 요구사항 작성, 기존 프로젝트(미연결) → [BIVE 동기화] 노출(P1, PRJ-02)로 나누지만, M1(P0)에는 동기화가 없고 M1 픽스처(`scripts/reset-fixture.sh`)는 비어 있지 않은 미연결 폴더다(로드맵 v1 검토 지적 8).
 - 결정: M1에서는 비어 있지 않은 미연결 폴더도 PRJ-01대로 `.bive.json`을 만들고 SCR-02로 들어간다. [BIVE 동기화]는 미노출(ADR-035). M4-01부터는 비어 있지 않은 미연결 폴더를 처음 열면 `.bive.json`을 만든 뒤 SCR-01에 [BIVE 동기화]를 보이고(사이드바로 다른 화면 이동 가능), 빈 폴더와 이미 연결된 폴더는 바로 SCR-02로 들어간다.
 - 결과: M1-01 · M4-01.
+
+## ADR-037 TypeScript 7과 ESLint 파서용 TypeScript 6 병행
+
+- 상태: 제안 (에이전트) · 2026-10-15
+- 맥락: architecture.md 6장은 `typescript` 7을 정했다. TypeScript 7.0.2(네이티브 구현)는 설치 · `tsc` 동작이 확인됐지만 기존 컴파일러 JS API를 내보내지 않고(`exports`가 `version.cjs`와 `unstable/*`뿐), `typescript-eslint` 8.71.2의 peer 범위는 `typescript >=4.8.4 <6.1.0`이라 ESLint가 TypeScript 파일을 파싱할 수 없다(M0-01).
+- 결정: 타입 검사 · 빌드(`tsc`)는 각 패키지 devDependency `typescript@7.0.2`로 한다. 루트 devDependency에는 ESLint 파서 전용으로 `typescript@6.0.3`(peer 범위 안의 최신)을 둔다. pnpm은 루트의 `typescript-eslint` peer를 루트 `typescript`로, 패키지 스크립트의 `tsc`는 패키지의 `node_modules/.bin`으로 해석한다. 타입 정보가 필요한 lint 규칙(type-aware)은 쓰지 않는다.
+- 결과: M0-01. `typescript-eslint`가 TypeScript 7을 지원하면 루트 `typescript`를 7로 올리고 이 ADR을 닫는다. 그 전까지 TypeScript 7에만 있는 문법은 lint 파싱 오류가 날 수 있다.

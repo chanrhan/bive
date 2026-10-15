@@ -3,6 +3,8 @@ dist/
 coverage/
 pnpm-lock.yaml
 .claude/
+# 줄 끝 표시(위반 · 허용)를 줄 단위로 유지해야 하는 규칙 예제
+**/test/lint-fixtures/
 # 사람이 쓰는 문서 · 템플릿 · 기존 스크립트는 형식 검사 대상에서 뺀다
 docs/
 .github/
