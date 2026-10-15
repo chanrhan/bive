@@ -1,0 +1,61 @@
+# 저장소 기본 검사. 잡 이름 `ci`는 브랜치 보호의 필수 상태 검사 이름으로 쓰이므로 바꾸지 않는다.
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# 같은 PR(또는 같은 ref)의 이전 실행은 새 실행이 시작되면 취소한다. main push는 취소하지 않는다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v7
+
+      # 버전을 지정하지 않으면 루트 package.json의 packageManager(pnpm@x.y.z)를 따른다
+      - name: pnpm 설치
+        uses: pnpm/action-setup@v6
+
+      - name: Node 22 설치 · pnpm 저장소 캐시
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 의존성 설치
+        run: pnpm install --frozen-lockfile
+
+      - name: 린트
+        run: pnpm lint
+
+      - name: 타입 검사
+        run: pnpm typecheck
+
+      - name: 단위 테스트
+        run: pnpm test
+
+      - name: 빌드
+        run: pnpm build
+
+      - name: 형식 검사
+        run: pnpm format:check
+
+      # 화면 e2e 자리 (M0-07, #10에서 추가).
+      # 러너에 미리 깔린 시스템 Chromium을 쓰도록 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH를 넘기고
+      # `playwright install`로 브라우저를 내려받지 않는다 (ADR-028).
+      # - name: 화면 e2e
+      #   run: pnpm e2e
+      #   env:
+      #     PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: <시스템 Chromium 경로>
