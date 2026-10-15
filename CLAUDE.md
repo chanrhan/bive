@@ -61,6 +61,10 @@ VM: Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 
 | npm 레지스트리 | `npm view electron version` → 44.7.2 (접근 가능) |
 | GitHub | `gh api repos/chanrhan/bive` 동작 (프록시가 인증 주입, `gh auth status`의 "token invalid" 경고는 무시). `git push` 동작. Actions 설정 API(`/actions/permissions`)는 프록시가 차단 |
 | Claude 인증 | 환경에 `ANTHROPIC_API_KEY` 없음 → 실제 Claude Agent SDK 호출 불가. 테스트는 가짜 에이전트 어댑터로 수행 (ADR-016) |
+| Electron | `pnpm add -D electron@44.7.2` 후 `xvfb-run -a electron --version` → root라서 `--no-sandbox` 필요 (ADR-028) |
+| better-sqlite3 | 13.0.3 프리빌트로 `sqlite_version()` = 3.53.4 확인 |
+| Playwright | `@playwright/test@1.64.1`은 chromium 1248을 찾으나 VM에는 1194만 있음 → `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome` (ADR-028) |
+| pnpm 빌드 스크립트 | pnpm 10이 postinstall을 기본 차단 → 루트 `pnpm.onlyBuiltDependencies` 필요 |
 
 설치 · 빌드 · 테스트 명령은 M0에서 scaffold를 만든 뒤 실제로 실행해 보고 아래에 채운다.
 
