@@ -153,6 +153,8 @@ export default defineConfig(
       '**/dist/**',
       '**/coverage/**',
       '.claude/**',
+      // 독립 프로젝트(워크스페이스 밖). 자체 의존성 · 설정만 쓴다 (architecture.md 2장)
+      'fixtures/**',
       // 규칙 위반 예제. lint-rules.test.ts가 제품 경로로 가장해 직접 검사한다
       '**/test/lint-fixtures/**',
     ],

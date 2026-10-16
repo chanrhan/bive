@@ -4,6 +4,13 @@ dist/
 coverage/
 *.tsbuildinfo
 
+# 픽스처 빌드 산출물 · 생성 코드 · 임시 DB (fixtures/*/.gitignore와 같은 내용)
+fixtures/*/.next/
+fixtures/*/next-env.d.ts
+fixtures/*/src/generated/
+fixtures/**/*.db
+fixtures/**/*.db-journal
+
 # 도구 캐시 · 로그
 .eslintcache
 *.log

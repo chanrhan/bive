@@ -1,0 +1,15 @@
+// 데이터베이스 연결 주소는 prisma.config.ts가 DATABASE_URL에서 읽는다.
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Item {
+  id        Int      @id @default(autoincrement())
+  name      String
+  createdAt DateTime @default(now())
+}
