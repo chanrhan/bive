@@ -174,6 +174,10 @@ export class ProposalRepository {
     // 순번을 쓰기 전에 형식부터 검증한다
     Proposal.parse({ ...fields, displayId: 'PRP-001' });
     return withTransaction(this.#db, () => {
+      // 같은 ID는 덮어쓰기 금지 트리거(`proposals_no_replace`)가 막지만, 순번을 쓰기 전에 충돌로 알린다
+      if (this.#select.get(input.id) !== undefined) {
+        throw new ConflictError(ENTITY, input.id, '이미 있습니다');
+      }
       const proposal = Proposal.parse({
         ...fields,
         displayId: this.#sequences.nextDisplayId('PRP'),

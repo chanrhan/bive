@@ -254,4 +254,48 @@ describe('proposals 테이블 · 리포지토리', () => {
       expect(store.proposals.get(proposal.id)?.state).toBe('rejected');
     });
   });
+
+  it.each([
+    ['recursive_triggers ON (기본 연결)', true],
+    ['recursive_triggers OFF', false],
+  ])(
+    '트리거를 지우지 않은 REPLACE로 처리된 제안을 대기 · 위조 본문으로 되돌릴 수 없다: %s',
+    (_, recursive) => {
+      withStore((store) => {
+        const proposal = store.proposals.create(proposalInput());
+        store.proposals.decide(proposal.id, {
+          state: 'rejected',
+          decision: { at: T1, by: human, rejectReason: '중복' },
+        });
+        store.db.pragma(`recursive_triggers = ${recursive ? 'ON' : 'OFF'}`);
+        const forge = (verb: string) =>
+          store.db
+            .prepare(
+              `${verb} proposals (id, display_id, kind, target_ref, payload, diff, rationale, author,
+               source, risk, read_at, state, decision, adr_id, run_id, created_at)
+               SELECT id, display_id, kind, target_ref, '{"text":"위조"}', diff, rationale, author,
+               source, risk, read_at, 'pending', NULL, adr_id, run_id, created_at
+               FROM proposals WHERE id = ?`,
+            )
+            .run(proposal.id);
+        for (const verb of ['REPLACE INTO', 'INSERT OR REPLACE INTO']) {
+          expect(() => forge(verb)).toThrow(/덮어쓰기 금지/);
+        }
+        expect(store.proposals.get(proposal.id)).toMatchObject({
+          state: 'rejected',
+          payload: proposal.payload,
+        });
+        expect(store.proposals.list()).toHaveLength(1);
+      });
+    },
+  );
+
+  it('같은 ID로 다시 등록하면 충돌이고 순번을 소비하지 않는다', () => {
+    withStore((store) => {
+      const input = proposalInput();
+      store.proposals.create(input);
+      expect(() => store.proposals.create(input)).toThrow(ConflictError);
+      expect(store.proposals.create(proposalInput()).displayId).toBe('PRP-002');
+    });
+  });
 });

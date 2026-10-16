@@ -237,7 +237,7 @@ describe('proposal.approve: 규범 반영 + 승인 기록 (행동 · 주체 · �
 
     await expect(h.client.call('approvalLog.list', { projectId: h.project.id })).resolves.toEqual({
       entries: [result.approvalLog],
-      chain: { valid: true, brokenAtSeq: null },
+      chain: { valid: true, brokenAtSeq: null, reason: null },
     });
     await expect(
       h.client.call('proposal.count', { projectId: h.project.id }),
@@ -316,7 +316,7 @@ describe('proposal.approve: 규범 반영 + 승인 기록 (행동 · 주체 · �
     const listed = await h.client.call('approvalLog.list', { projectId: h.project.id });
     expect(listed).toEqual({
       entries: [firstResult.approvalLog, result.approvalLog],
-      chain: { valid: true, brokenAtSeq: null },
+      chain: { valid: true, brokenAtSeq: null, reason: null },
     });
     await expect(
       h.client.call('approvalLog.list', {
@@ -325,7 +325,7 @@ describe('proposal.approve: 규범 반영 + 승인 기록 (행동 · 주체 · �
       }),
     ).resolves.toEqual({
       entries: [result.approvalLog],
-      chain: { valid: true, brokenAtSeq: null },
+      chain: { valid: true, brokenAtSeq: null, reason: null },
     });
   });
 
@@ -594,7 +594,114 @@ describe('approvalLog.list: 해시 체인 검증 결과', () => {
       store.db.prepare('UPDATE approval_log SET at = ? WHERE seq = 2').run(iso(T0 - 86_400_000));
     });
     const listed = await h.client.call('approvalLog.list', { projectId: h.project.id });
-    expect(listed.chain).toEqual({ valid: false, brokenAtSeq: 2 });
+    expect(listed.chain).toEqual({ valid: false, brokenAtSeq: 2, reason: 'hash_mismatch' });
     expect(listed.entries).toHaveLength(3);
+  });
+
+  it('형식이 깨진 기록이 있어도 -32001이 아니라 chain.valid=false이고 깨진 기록은 entries에서 빠진다', async () => {
+    for (const text of ['가', '나']) {
+      const proposal = submitRequirement(text);
+      await h.client.call('proposal.approve', {
+        projectId: h.project.id,
+        id: proposal.id,
+        author: human,
+      });
+    }
+    h.read((store) => {
+      store.db.exec('DROP TRIGGER approval_log_no_update');
+      store.db
+        .prepare(`UPDATE approval_log SET actor = '{"kind":"agent","role":"chat"}' WHERE seq = 2`)
+        .run();
+    });
+    const listed = await h.client.call('approvalLog.list', { projectId: h.project.id });
+    expect(listed.chain).toMatchObject({ valid: false, brokenAtSeq: 2 });
+    expect(listed.entries.map((entry) => entry.seq)).toEqual([1]);
+  });
+
+  it('끝 기록을 잘라 내면 체인은 이어지지만 처리된 제안과 대조해 decision_without_log로 잡는다', async () => {
+    for (const text of ['가', '나']) {
+      const proposal = submitRequirement(text);
+      await h.client.call('proposal.approve', {
+        projectId: h.project.id,
+        id: proposal.id,
+        author: human,
+      });
+    }
+    h.read((store) => {
+      store.db.exec('DROP TRIGGER approval_log_no_delete');
+      store.db.prepare('DELETE FROM approval_log WHERE seq = 2').run();
+    });
+    const listed = await h.client.call('approvalLog.list', { projectId: h.project.id });
+    expect(listed.chain).toEqual({
+      valid: false,
+      brokenAtSeq: null,
+      reason: 'decision_without_log',
+    });
+    expect(listed.entries).toHaveLength(1);
+  });
+});
+
+describe('원자성 · 덮어쓰기 우회 (회귀)', () => {
+  it('규범 생성 뒤 승인 기록 추가가 실패하면 요구사항 · 순번 · 제안 처리 · 기록이 모두 되돌려진다', async () => {
+    const proposal = submitRequirement();
+    // 승인 기록 INSERT만 실패하게 만든다 (규범 생성 · 제안 처리는 그 앞에서 이미 실행된다)
+    h.read((store) =>
+      store.db.exec(`CREATE TRIGGER test_fail_append BEFORE INSERT ON approval_log
+        BEGIN SELECT RAISE(ABORT, '강제 실패'); END`),
+    );
+    await expect(
+      h.client.call('proposal.approve', {
+        projectId: h.project.id,
+        id: proposal.id,
+        author: human,
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.InternalError });
+    h.read((store) => {
+      expect(store.requirements.list()).toEqual([]);
+      expect(store.sequences.last('REQ')).toBe(0);
+      expect(store.sequences.last('PRP')).toBe(1);
+      expect(store.proposals.get(proposal.id)).toEqual(proposal);
+      expect(store.approvalLog.list()).toEqual([]);
+      store.db.exec('DROP TRIGGER test_fail_append');
+    });
+    // 원인을 없애면 같은 제안을 정상 승인할 수 있고 번호도 REQ-001부터다
+    const result = await h.client.call('proposal.approve', {
+      projectId: h.project.id,
+      id: proposal.id,
+      author: human,
+    });
+    expect(result.applied).toMatchObject({ requirement: { displayId: 'REQ-001' } });
+    expect(result.approvalLog.seq).toBe(1);
+  });
+
+  it('거절된 제안을 REPLACE로 대기 · 위조 본문으로 되돌릴 수 없어 승인으로 위조 본문이 반영되지 않는다', async () => {
+    const proposal = submitRequirement('원래 본문');
+    await h.client.call('proposal.reject', {
+      projectId: h.project.id,
+      id: proposal.id,
+      author: human,
+      reason: '중복',
+    });
+    h.read((store) => {
+      expect(() =>
+        store.db
+          .prepare(
+            `REPLACE INTO proposals (id, display_id, kind, target_ref, payload, diff, rationale,
+             author, source, risk, read_at, state, decision, adr_id, run_id, created_at)
+             SELECT id, display_id, kind, target_ref, '{"text":"위조"}', diff, rationale, author,
+             source, risk, read_at, 'pending', NULL, adr_id, run_id, created_at
+             FROM proposals WHERE id = ?`,
+          )
+          .run(proposal.id),
+      ).toThrow(/덮어쓰기 금지/);
+    });
+    await expect(
+      h.client.call('proposal.approve', {
+        projectId: h.project.id,
+        id: proposal.id,
+        author: human,
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.StateConflict });
+    expect(h.read((store) => store.requirements.list())).toEqual([]);
   });
 });

@@ -4,6 +4,7 @@
 import { z } from 'zod';
 
 import {
+  ApprovalLogBreakReason,
   ApprovalLogEntry,
   Author,
   EntityRef,
@@ -303,8 +304,9 @@ export const ProposalRejectResult = z.strictObject({
 export type ProposalRejectResult = z.infer<typeof ProposalRejectResult>;
 
 /**
- * `approvalLog.list`: 승인 기록을 순번 순으로. `targetRef`로 거른다.
- * `chain`은 거르기 전 전체 기록의 해시 체인 검증 결과다 (`brokenAtSeq` = 처음 어긋난 순번).
+ * `approvalLog.list`: 승인 기록을 순번 순으로. `targetRef`로 거른다. 형식이 깨진 기록은 `entries`에서 빠진다.
+ * `chain`은 거르기 전 전체 기록의 검증 결과다: 해시 체인 + 형식 + 처리된 제안마다 승인 기록이 있는지.
+ * `brokenAtSeq` = 처음 어긋난 순번(기록이 없는 경우인 `decision_without_log`면 `null`), `reason` = 이유.
  */
 export const ApprovalLogListParams = z.strictObject({
   projectId: Ulid,
@@ -316,6 +318,7 @@ export const ApprovalLogListResult = z.strictObject({
   chain: z.strictObject({
     valid: z.boolean(),
     brokenAtSeq: z.int().positive().nullable(),
+    reason: ApprovalLogBreakReason.nullable(),
   }),
 });
 export type ApprovalLogListResult = z.infer<typeof ApprovalLogListResult>;

@@ -79,8 +79,11 @@ export const createProposalHandlers = ({ biveHome, now }: ProposalHandlerDeps): 
       ),
     'approvalLog.list': ({ projectId, targetRef }) =>
       withProjectStore(biveHome, projectId, (store) => {
-        const { valid, brokenAtSeq } = store.approvalLog.verify();
-        return { entries: store.approvalLog.list(targetRef), chain: { valid, brokenAtSeq } };
+        const { valid, brokenAtSeq, reason } = store.approvalLog.verify();
+        return {
+          entries: store.approvalLog.list(targetRef),
+          chain: { valid, brokenAtSeq, reason },
+        };
       }),
   };
 };

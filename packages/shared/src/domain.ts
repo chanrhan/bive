@@ -348,6 +348,23 @@ export type ProposalPayload = z.infer<typeof ProposalPayload>;
 export const Sha256Hex = z.string().regex(/^[0-9a-f]{64}$/, 'SHA-256 16진수가 아닙니다');
 export type Sha256Hex = z.infer<typeof Sha256Hex>;
 
+/**
+ * 승인 기록 검증 실패 이유 (ADR-050).
+ * - `seq_gap`: 순번이 1부터 1씩 늘지 않는다 (기록이 빠졌거나 끼어들었다)
+ * - `prev_hash_mismatch`: 앞 기록의 해시와 다르다
+ * - `hash_mismatch`: 내용이 해시와 맞지 않는다 (기록이 고쳐졌다)
+ * - `malformed`: 해시는 맞지만 기록 형식이 깨졌다
+ * - `decision_without_log`: 처리된 제안에 맞는 승인 기록이 없다 (끝 기록이 잘려 나갔을 수 있다)
+ */
+export const ApprovalLogBreakReason = z.enum([
+  'seq_gap',
+  'prev_hash_mismatch',
+  'hash_mismatch',
+  'malformed',
+  'decision_without_log',
+]);
+export type ApprovalLogBreakReason = z.infer<typeof ApprovalLogBreakReason>;
+
 /** 첫 승인 기록의 `prevHash`. */
 export const APPROVAL_LOG_GENESIS_HASH = '0'.repeat(64);
 

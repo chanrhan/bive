@@ -49,6 +49,7 @@ describe('프로젝트별 DB 생성 · 마이그레이션', () => {
       expect(existsSync(store.path)).toBe(true);
       expect(store.db.pragma('journal_mode', { simple: true })).toBe('wal');
       expect(store.db.pragma('foreign_keys', { simple: true })).toBe(1);
+      expect(store.db.pragma('recursive_triggers', { simple: true })).toBe(1);
       expect(listAppliedMigrations(store.db).map((m) => m.version)).toEqual(
         PROJECT_MIGRATIONS.map((m) => m.version),
       );

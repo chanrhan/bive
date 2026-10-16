@@ -117,6 +117,85 @@ describe('approval_log 리포지토리', () => {
     });
   });
 
+  it.each([
+    ['recursive_triggers ON (기본 연결)', true],
+    ['recursive_triggers OFF', false],
+  ])('트리거를 지우지 않은 REPLACE로 기록을 덮어쓸 수 없다: %s', (_, recursive) => {
+    withStore((store) => {
+      const first = store.approvalLog.append(approve());
+      const second = store.approvalLog.append(
+        approve({ action: 'reject', detail: { reason: '중복' } }),
+      );
+      store.db.pragma(`recursive_triggers = ${recursive ? 'ON' : 'OFF'}`);
+      const overwrite = (verb: string, seq: number, hash: string) =>
+        store.db
+          .prepare(
+            `${verb} approval_log (seq, at, action, actor, target_ref, client_id, detail, prev_hash, hash)
+             SELECT ?, at, 'approve', actor, target_ref, client_id, '{}', prev_hash, ?
+             FROM approval_log WHERE seq = 2`,
+          )
+          .run(seq, hash);
+      for (const verb of ['REPLACE INTO', 'INSERT OR REPLACE INTO']) {
+        // 같은 순번으로 덮어쓰기 · 같은 해시를 가진 새 순번으로 넣기 (유일 제약 충돌로 원래 행 삭제)
+        expect(() => overwrite(verb, 2, 'b'.repeat(64))).toThrow(/덮어쓰기 금지/);
+        expect(() => overwrite(verb, 3, second.hash)).toThrow(/덮어쓰기 금지/);
+      }
+      expect(store.approvalLog.list()).toEqual([first, second]);
+      expect(store.approvalLog.verify()).toMatchObject({ valid: true });
+    });
+  });
+
+  it('형식이 깨진 행: list는 빼고 돌려주며 verify가 잡는다', () => {
+    withStore((store) => {
+      const first = store.approvalLog.append(approve());
+      store.approvalLog.append(approve());
+      tamper(
+        store,
+        `UPDATE approval_log SET actor = '{"kind":"agent","role":"chat"}' WHERE seq = 2`,
+      );
+      expect(store.approvalLog.list()).toEqual([first]);
+      expect(store.approvalLog.verify()).toMatchObject({ valid: false, brokenAtSeq: 2 });
+    });
+  });
+
+  it('처리된 제안에 맞는 승인 기록이 없으면 decision_without_log (끝 기록 잘라내기 일부 검출)', () => {
+    withStore((store) => {
+      const proposal = store.proposals.create({
+        id: newId(),
+        kind: 'requirement_new',
+        targetRef: null,
+        payload: { text: '본문' },
+        diff: { before: null, after: { text: '본문' } },
+        rationale: '근거',
+        author: { kind: 'agent', role: 'chat' },
+        source: 'chat',
+        risk: null,
+        adrId: null,
+        runId: null,
+        createdAt: T0,
+      });
+      const targetRef = { entity: 'Proposal', id: proposal.id } as const;
+      store.proposals.decide(proposal.id, {
+        state: 'rejected',
+        decision: { at: T1, by: human, rejectReason: '중복' },
+      });
+      // 기록 없이 처리된 상태 = 끝 기록이 잘려 나간 것과 같다
+      expect(store.approvalLog.verify()).toEqual({
+        valid: false,
+        brokenAtSeq: null,
+        reason: 'decision_without_log',
+        proposalId: proposal.id,
+      });
+      // 상태와 맞지 않는 행동(승인)의 기록으로는 채워지지 않는다
+      store.approvalLog.append(approve({ targetRef }));
+      expect(store.approvalLog.verify()).toMatchObject({ reason: 'decision_without_log' });
+      store.approvalLog.append(
+        approve({ targetRef, action: 'reject', detail: { reason: '중복' } }),
+      );
+      expect(store.approvalLog.verify()).toEqual({ valid: true, brokenAtSeq: null, reason: null });
+    });
+  });
+
   it('체인 검증: 내용 변조 · 중간 삭제 · prevHash 바꿔치기를 처음 어긋난 순번으로 잡는다', () => {
     withStore((store) => {
       for (let i = 0; i < 3; i += 1) store.approvalLog.append(approve());

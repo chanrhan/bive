@@ -26,21 +26,41 @@ interface ApprovalLogRow {
 
 const COLUMNS = 'seq, at, action, actor, target_ref, client_id, detail, prev_hash, hash';
 
+/** JSON 열을 읽는다. 해석할 수 없으면 원문 문자열 그대로 둔다(체인 검증이 형식 위반으로 잡는다). */
+const readJson = (text: string): unknown => {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+};
+
 /** 행을 스키마 검증 없이 기록 모양으로 옮긴다 (체인 검증은 고쳐진 행도 읽어야 한다). */
 const rawEntry = (row: ApprovalLogRow): ApprovalLogEntry =>
   ({
     seq: row.seq,
     at: row.at,
     action: row.action,
-    actor: JSON.parse(row.actor) as unknown,
-    targetRef: JSON.parse(row.target_ref) as unknown,
+    actor: readJson(row.actor),
+    targetRef: readJson(row.target_ref),
     clientId: row.client_id,
-    detail: JSON.parse(row.detail) as unknown,
+    detail: readJson(row.detail),
     prevHash: row.prev_hash,
     hash: row.hash,
   }) as ApprovalLogEntry;
 
-const toEntry = (row: ApprovalLogRow): ApprovalLogEntry => ApprovalLogEntry.parse(rawEntry(row));
+/** 처리된 제안 가운데 상태에 맞는 승인 기록(승인 ↔ approve · approve_edited, 거절 ↔ reject)이 없는 첫 제안. */
+const DECISION_WITHOUT_LOG = `
+SELECT p.id FROM proposals p
+WHERE p.state IN ('approved', 'rejected') AND NOT EXISTS (
+  SELECT 1 FROM approval_log a
+  WHERE json_extract(a.target_ref, '$.entity') = 'Proposal'
+    AND json_extract(a.target_ref, '$.id') = p.id
+    AND ((p.state = 'approved' AND a.action IN ('approve', 'approve_edited'))
+      OR (p.state = 'rejected' AND a.action = 'reject'))
+)
+ORDER BY length(p.display_id), p.display_id
+LIMIT 1`;
 
 export class ApprovalLogRepository {
   readonly #db: SqliteDatabase;
@@ -48,6 +68,7 @@ export class ApprovalLogRepository {
   readonly #last;
   readonly #selectAll;
   readonly #selectByTarget;
+  readonly #decisionWithoutLog;
 
   constructor(db: SqliteDatabase) {
     this.#db = db;
@@ -66,6 +87,7 @@ export class ApprovalLogRepository {
        WHERE json_extract(target_ref, '$.entity') = @entity AND json_extract(target_ref, '$.id') = @id
        ORDER BY seq`,
     );
+    this.#decisionWithoutLog = db.prepare<[], { id: string }>(DECISION_WITHOUT_LOG);
   }
 
   /**
@@ -104,15 +126,35 @@ export class ApprovalLogRepository {
     });
   }
 
-  /** 순번 순으로 돌려준다. `targetRef`를 주면 그 대상의 기록만. */
+  /**
+   * 순번 순으로 돌려준다. `targetRef`를 주면 그 대상의 기록만.
+   * 형식이 깨진 행(저장소 밖에서 고친 행)은 빼고 돌려준다. 그런 행은 `verify()`가 잡는다.
+   */
   list(targetRef?: EntityRef): ApprovalLogEntry[] {
     const rows =
       targetRef === undefined ? this.#selectAll.all() : this.#selectByTarget.all(targetRef);
-    return rows.map(toEntry);
+    return rows.flatMap((row) => {
+      const parsed = ApprovalLogEntry.safeParse(rawEntry(row));
+      return parsed.success ? [parsed.data] : [];
+    });
   }
 
-  /** 전체 기록의 해시 체인을 검증한다. 저장된 행을 스키마 검증 없이 그대로 해시한다. */
+  /**
+   * 승인 기록을 검증한다: 전체 기록의 해시 체인 · 형식(`verifyApprovalLogChain`), 그다음 처리된 제안마다
+   * 상태에 맞는 승인 기록이 있는지. 저장된 행을 스키마 검증 없이 그대로 해시한다.
+   */
   verify(): ChainVerification {
-    return verifyApprovalLogChain(this.#selectAll.all().map(rawEntry));
+    const chain = verifyApprovalLogChain(this.#selectAll.all().map(rawEntry));
+    if (!chain.valid) return chain;
+    const orphan = this.#decisionWithoutLog.get();
+    if (orphan !== undefined) {
+      return {
+        valid: false,
+        brokenAtSeq: null,
+        reason: 'decision_without_log',
+        proposalId: orphan.id,
+      };
+    }
+    return chain;
   }
 }

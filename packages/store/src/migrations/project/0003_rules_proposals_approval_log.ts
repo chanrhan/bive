@@ -10,6 +10,9 @@ import type { Migration } from '../../migrate.js';
  *   잠정 승인(`provisional`)은 상태 값만 예약한다 (ADR-012, M3-17)
  * - `approval_log`: 추가 전용 승인 기록. 수정 · 삭제는 트리거로 막는다. 각 행은 앞 행의 해시(`prev_hash`)를 포함한
  *   SHA-256 해시 체인이다 (계산 · 검증은 `approval-chain.ts`)
+ * - `INSERT OR REPLACE`(`REPLACE INTO`)는 충돌 행을 지우고 새로 넣는데, `recursive_triggers`가 꺼진 연결에서는
+ *   DELETE · UPDATE 트리거가 돌지 않는다. 연결 설정에 기대지 않도록 두 테이블에 같은 키 행이 이미 있으면 거부하는
+ *   BEFORE INSERT 트리거를 둔다 (ADR-050)
  * 형식 검증(ULID · 시각 · 표시 ID · 주체 형태)은 `@bive/shared` 스키마가 맡고, 여기서는 기본 제약만 둔다.
  */
 export const migration: Migration = {
@@ -71,6 +74,12 @@ CREATE TABLE proposals (
 
 CREATE INDEX proposals_state ON proposals (state);
 
+CREATE TRIGGER proposals_no_replace BEFORE INSERT ON proposals
+WHEN EXISTS (SELECT 1 FROM proposals WHERE id = NEW.id OR display_id = NEW.display_id)
+BEGIN
+  SELECT RAISE(ABORT, 'proposals: 같은 제안이 이미 있습니다 (덮어쓰기 금지)');
+END;
+
 CREATE TRIGGER proposals_content_immutable BEFORE UPDATE ON proposals
 WHEN NEW.id IS NOT OLD.id OR NEW.display_id IS NOT OLD.display_id OR NEW.kind IS NOT OLD.kind
   OR NEW.target_ref IS NOT OLD.target_ref OR NEW.payload IS NOT OLD.payload
@@ -106,6 +115,12 @@ CREATE TABLE approval_log (
   prev_hash TEXT NOT NULL CHECK (length(prev_hash) = 64),
   hash TEXT NOT NULL UNIQUE CHECK (length(hash) = 64)
 ) STRICT;
+
+CREATE TRIGGER approval_log_no_replace BEFORE INSERT ON approval_log
+WHEN EXISTS (SELECT 1 FROM approval_log WHERE seq = NEW.seq OR hash = NEW.hash)
+BEGIN
+  SELECT RAISE(ABORT, 'approval_log: 승인 기록은 추가만 할 수 있습니다 (덮어쓰기 금지)');
+END;
 
 CREATE TRIGGER approval_log_no_update BEFORE UPDATE ON approval_log
 BEGIN
