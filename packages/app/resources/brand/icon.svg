@@ -1,26 +1,4 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="BIVE 아이콘">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#4F46E5"/>
-      <stop offset="0.55" stop-color="#3730A3"/>
-      <stop offset="1" stop-color="#1E1B4B"/>
-    </linearGradient>
-    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.14"/>
-      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
-    </linearGradient>
-  </defs>
-  <rect width="256" height="256" rx="58" fill="url(#bg)"/>
-  <rect x="1" y="1" width="254" height="254" rx="57" fill="none" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="2"/>
-  <rect width="256" height="128" rx="58" fill="url(#gloss)"/>
-  <path d="M 62 216 H 194" stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="8" stroke-linecap="round"/>
-  <g fill="none" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M 78 50 V 178"/>
-    <path d="M 78 50 H 122 A 27 27 0 0 1 122 104 H 78"/>
-    <path d="M 78 104 H 134 A 37 37 0 0 1 134 178 H 78"/>
-  </g>
-  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M 150 176 L 170 196 L 208 150" stroke="#1E1B4B" stroke-width="40"/>
-    <path d="M 150 176 L 170 196 L 208 150" stroke="#34D399" stroke-width="22"/>
-  </g>
+  <defs><linearGradient id="plate" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#141418"/><stop offset="1" stop-color="#0A0A0D"/></linearGradient></defs><rect width="256" height="256" rx="58" fill="url(#plate)"/><rect x="0.75" y="0.75" width="254.5" height="254.5" rx="57.25" fill="none" stroke="#FFFFFF" stroke-opacity="0.09" stroke-width="1.5"/>
+  <path fill="#F5F5F7" d="M 39.39 56 H 80.61 L 128.00 141.03 L 175.39 56 H 216.61 L 128.00 178 Z"/><rect x="66.00" y="192" width="124" height="18" rx="4.5" fill="#2DD4BF"/>
 </svg>
