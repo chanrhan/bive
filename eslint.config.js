@@ -153,6 +153,8 @@ export default defineConfig(
       '**/dist/**',
       '**/coverage/**',
       '.claude/**',
+      // 테스트 산출물 (스크린샷 · Playwright 보고서)
+      'artifacts/**',
       // 독립 프로젝트(워크스페이스 밖). 자체 의존성 · 설정만 쓴다 (architecture.md 2장)
       'fixtures/**',
       // 규칙 위반 예제. lint-rules.test.ts가 제품 경로로 가장해 직접 검사한다
@@ -181,6 +183,11 @@ export default defineConfig(
     files: ['packages/app/src/renderer/**/*.{ts,tsx,js,mjs,cjs}'],
     languageOptions: { globals: { ...globals.browser } },
     rules: restrict([...productPatterns.app, ...rendererPatterns]),
+  },
+  // app 화면 e2e: Node(Playwright 테스트)와 브라우저(page.evaluate · addInitScript 함수) 문맥이 섞인다
+  {
+    files: ['packages/app/e2e/**/*.ts'],
+    languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },
   prettier,
 );

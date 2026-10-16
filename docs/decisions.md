@@ -325,3 +325,16 @@
   - 개발 CLI(`pnpm --filter @bive/app cli`): `ping`, `rpc <method> [json]`. `rpc`는 이름이 `.list` · `.get` · `.status` · `.summary`로 끝나는 조회 메서드만 접속 전에 허용한다. 종료 코드 0 성공, 1 접속 · 원격 오류, 2 사용법 위반 · 허용되지 않는 메서드.
   - 빌드: electron-vite 출력은 `packages/app/dist/{main,preload,renderer}`. main은 shared를 번들에 넣고(빌드 전 shared `dist` 필요, ADR-039 유지), preload는 CommonJS 한 파일(`index.cjs`)이다.
 - 결과: M0-06. #10 · #13의 가짜 브리지는 위 `window.bive` 계약(거부값 = JSON-RPC 오류 객체)을 흉내 낸다. 패키징 구성 이슈에서 `dist` 실행 방식을 실측하고 이 ADR을 고친다. Windows 분리 기동은 실기기 확인이 필요하다(architecture.md 9장).
+
+## ADR-043 화면 e2e 하네스: 셸 화면 ID · 상태 이름 · 문구 검사 범위 · 브라우저 처리
+
+- 상태: 제안 (에이전트) · 2026-10-16
+- 맥락: architecture.md 8장은 화면 e2e를 Vite 개발 서버 렌더러 + 가짜 브리지 + `checklists/scr-xx.ts` + `artifacts/screens/<SCR-ID>/<state>.png`로 정했지만, SCR-01~21이 아닌 앱 공통 틀(셸)의 ID, 상태 이름의 표기, "화면 문구"에 무엇이 들어가는지, CI 러너의 브라우저 마련 방법은 정하지 않았다. 기존 `ci.yml` 주석은 "`playwright install` 금지"(ADR-028)를 적었지만 ADR-028은 이 VM의 사실 기록이다(M0-07, #10).
+- 결정:
+  - 셸 ID: 레이아웃 · 사이드바처럼 모든 화면이 공유하는 틀은 `SCR-00`으로 부르고 `e2e/checklists/scr-00-shell.ts`에 둔다. 테스트 전용 ID이며 화면 정의서 1.3의 목록에는 넣지 않는다.
+  - 상태 이름: `기본` · `빈` · `로딩` · `에러` 네 개. 스크린샷 파일 이름에도 그대로 쓴다. 체크리스트에 없는 상태를 검사하면 실패한다(정의 없는 상태를 조용히 통과시키지 않음).
+  - 문구 검사 범위: 보이는 요소의 렌더된 텍스트(`innerText`) · `title` · `aria-label` · `aria-description` · `placeholder` · `alt` · 입력 값 · 문서 제목. 숨김(`display:none` · `visibility:hidden` · `hidden`) 요소는 뺀다. 패턴은 PRD ID `\b(PRJ|NRM|RUN|JDG|DSN|TODO|COST|MET|COL|NFR)-\d\d\b`, 화면 코드 `\bSCR-\d\d\b`, 이모지 `\p{Extended_Pictographic}`. 요소 검사가 실패해도 스크린샷은 남긴다.
+  - 가짜 브리지: 응답 표에 없는 메서드는 `-32601`, `system.hello`는 `-32020`으로 거부해 실제 main 순서(ADR-042)를 따른다. 응답 값은 IPC처럼 복제해 넘긴다.
+  - 브라우저: `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`가 있으면 그 실행 파일, 없으면 Playwright 기본 번들. 이 VM은 `/opt/pw-browsers/chromium-1194/chrome-linux/chrome`을 지정하고 설치하지 않는다(ADR-028). GitHub 러너는 미리 깔린 Google Chrome이 있으면 그 경로를 지정하고, 없을 때만 `playwright install chromium --with-deps`로 설치하며 `~/.cache/ms-playwright`를 Playwright 버전별로 캐시한다. 산출물 `artifacts/`는 실패 여부와 관계없이 CI 아티팩트로 올린다.
+  - Vite 서버는 HMR을 끄고 띄워 React 플러그인의 인라인 프리앰블 없이 index.html의 CSP를 그대로 둔다. 다른 작업 트리의 서버를 재사용하지 않도록 매번 새로 띄운다(포트 `BIVE_E2E_PORT`, 기본 5179).
+- 결과: M0-07. 화면 이슈는 `scr-XX-<slug>.ts`를 추가하고 `checklists/index.ts`에 등록한다. 러너 Chrome 버전이 Playwright와 맞지 않아 실패하면 러너 Chrome 사용을 끄고 설치 경로만 쓰도록 바꾼다(되돌리기 쉬움).

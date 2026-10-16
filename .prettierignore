@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
+artifacts/
 pnpm-lock.yaml
 .claude/
 # 독립 프로젝트(워크스페이스 밖). Next.js가 tsconfig.json을 자체 형식으로 다시 쓴다
