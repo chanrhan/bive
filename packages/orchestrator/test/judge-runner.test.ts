@@ -308,14 +308,16 @@ describe('JudgeRunner · next-prisma-sqlite', () => {
   });
 
   it('시간 초과는 runner_error이고 띄운 프로세스 · 임시 DB를 정리한다', async () => {
+    // 앞 테스트의 빌드 캐시가 있으면 다시 빌드가 몇 초 만에 끝나므로 지우고 처음부터 빌드하게 한다
+    rmSync(path.join(fixtureDir, '.next'), { recursive: true, force: true });
     const dbDirsBefore = tempDbDirs();
     const result = await runner.run({
       projectId,
       runId,
       worktreeDir: fixtureDir,
       profile: 'next-prisma-sqlite',
-      // 이 VM 기준 수집 · 마이그레이션 뒤 빌드 도중에 끊긴다 (느린 환경에서는 앞 단계에서 끊길 수 있다)
-      timeoutMs: 6_000,
+      // 새 빌드는 이 VM 약 18초 · CI 약 8초라 빌드 도중에 끊긴다 (느린 환경에서는 앞 단계에서 끊길 수 있다)
+      timeoutMs: 3_000,
     });
     expect(result.status).toBe('runner_error');
     expect(result.message).toMatch(/^판정 시간 초과 \((collect|migrate|build|start) 단계\)$/);
