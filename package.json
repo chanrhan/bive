@@ -12,6 +12,7 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "build": "pnpm -r run build",
+    "smoke": "pnpm --filter @bive/app smoke",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

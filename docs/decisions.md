@@ -311,3 +311,17 @@
   - 앱 클라이언트(#9)는 '이미 실행 중' 직후 또는 기동 직후 접속할 때 ENOENT · ECONNREFUSED를 짧게 재시도해야 한다(잠금을 잡은 뒤 소켓을 bind하기 전 틈이 있다).
   - 실행: `pnpm --filter @bive/orchestrator start`는 빌드 없이 tsx로 `src/cli.ts`를 `@bive/source` 조건과 함께 실행한다(ADR-039). 빌드 산출물은 `node packages/orchestrator/dist/cli.js`.
 - 결과: M0-05. 앱(#9)은 같은 순서(접속 → hello → 요청)로 붙는다. 알려진 한계: 죽은 pid가 무관한 프로세스에 재사용되면 "이미 실행 중"으로 판단해 기동하지 않는다(보수적 방향, 잠금 파일을 지우면 풀림). 두 기동이 같은 죽은 잠금을 동시에 인수하는 좁은 경합은 인수 직전 재확인으로만 줄였다. Windows named pipe 실동작 · 권한은 실기기 확인이 필요하다(architecture.md 9장).
+
+## ADR-042 앱의 오케스트레이터 기동 · 브리지 계약 · 실행 방식
+
+- 상태: 제안 (에이전트) · 2026-10-16
+- 맥락: architecture.md 2장은 app이 orchestrator를 import하지 못하게 하고(실행 파일 경로로만 기동), 5장은 렌더러 경로를 `window.bive.invoke` → preload(허용 목록) → `ipcRenderer.invoke('bive:rpc')` → main(zod 검증) → 파이프로만 정했다. 오케스트레이터를 어떤 런타임 · 경로로 띄울지(C-17, ADR-028 "패키징은 M1 실측 후"), `window.bive` 오류의 형태, 알림 채널, `app.pid`의 쓰임은 정해져 있지 않다(M0-06, #9).
+- 결정:
+  - 경로: app은 `$BIVE_HOME/run`의 파이프 · 토큰 · 잠금 경로 규칙을 `packages/app/src/main/run-paths.ts`에 따로 두고, `test/run-paths.test.ts`가 orchestrator 원본(`run-paths.ts`)과 OS별로 대조한다. `app.pid`도 같은 폴더에 둔다.
+  - 기동: `orchestrator.pid`의 pid가 살아 있으면 붙고, 없거나 죽었으면 분리 프로세스(detached · stdio ignore · unref · windowsHide)로 띄운다. 접속은 토큰 파일 읽기 → 연결 → `system.hello` 순서이고, ENOENT · ECONNREFUSED · `-32020`(죽은 인스턴스의 토큰을 읽은 경우)은 100ms 간격으로 5초까지 재시도한다(ADR-041). 기다리는 동안 붙으려던 인스턴스가 사라지면 그때 띄운다. 기동 실패(실행 파일 없음)는 바로 오류다. 앱 종료 때는 연결만 닫고 오케스트레이터는 유휴 종료에 맡긴다(NFR-06).
+  - 실행 방식: `BIVE_ORCHESTRATOR_MODE`(source | dist)가 있으면 그 값, 없으면 Electron `app.isPackaged`로 고른다. 개발(`source`)은 시스템 Node(`BIVE_NODE_PATH`, 없으면 PATH의 `node`, CLI는 자기 Node)로 `--conditions=@bive/source --import tsx packages/orchestrator/src/cli.ts`를 orchestrator 폴더에서 실행한다(`pnpm --filter @bive/orchestrator start`와 같음). 패키징(`dist`)은 잠정으로 Electron 실행 파일 + `ELECTRON_RUN_AS_NODE=1` + `resources/orchestrator/dist/cli.js`이며, 패키징 빌드가 없어 실측 전이다(C-17).
+  - 브리지: `window.bive`는 `invoke(method, params)` · `on(event, cb)` 두 키뿐이다. 채널은 `bive:rpc`(invoke, `{ method, params }` → `{ ok: true, result }` 또는 `{ ok: false, error }`)와 `bive:event`(main → renderer, `{ event, params }`). `invoke`는 결과로 풀리고 실패하면 JSON-RPC 오류 객체 `{ code, message, data? }`로 거부된다. `on`은 구독 해제 함수를 돌려준다. 샌드박스 preload는 electron 외 모듈을 불러올 수 없어 메서드 검증을 하지 않고, main이 오케스트레이터에 접속(필요하면 기동)하기 전에 형식 `-32600` → `system.hello` 거부 `-32020` → 등록 여부 `-32601` → 파라미터 스키마 `-32602` 순으로 검증한다(ADR-039). 오케스트레이터에 접속하지 못하면 `-32603` "오케스트레이터 연결 실패", 그 밖의 예외는 `-32603` "내부 오류"이며 둘 다 `data`를 싣지 않는다. 원본 오류(로컬 경로 · 시스템 메시지)는 main 로그에만 남긴다. 창은 `contextIsolation: true` · `sandbox: true` · `nodeIntegration: false`를 명시한다.
+  - `app.pid`: 앱 main이 시작할 때 자기 pid를 원자적으로 쓰고(0600) 종료할 때 자기 pid일 때만 지운다. 오케스트레이터 수명 판단에는 쓰지 않는다(연결 수 기준, ADR-041).
+  - 개발 CLI(`pnpm --filter @bive/app cli`): `ping`, `rpc <method> [json]`. `rpc`는 이름이 `.list` · `.get` · `.status` · `.summary`로 끝나는 조회 메서드만 접속 전에 허용한다. 종료 코드 0 성공, 1 접속 · 원격 오류, 2 사용법 위반 · 허용되지 않는 메서드.
+  - 빌드: electron-vite 출력은 `packages/app/dist/{main,preload,renderer}`. main은 shared를 번들에 넣고(빌드 전 shared `dist` 필요, ADR-039 유지), preload는 CommonJS 한 파일(`index.cjs`)이다.
+- 결과: M0-06. #10 · #13의 가짜 브리지는 위 `window.bive` 계약(거부값 = JSON-RPC 오류 객체)을 흉내 낸다. 패키징 구성 이슈에서 `dist` 실행 방식을 실측하고 이 ADR을 고친다. Windows 분리 기동은 실기기 확인이 필요하다(architecture.md 9장).
