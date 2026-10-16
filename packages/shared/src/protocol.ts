@@ -116,12 +116,30 @@ export const PingResult = z.strictObject({
 });
 export type PingResult = z.infer<typeof PingResult>;
 
+/** 파이프 프로토콜 버전. 메시지 형태가 호환되지 않게 바뀌면 올린다. */
+export const PROTOCOL_VERSION = 1;
+
+/**
+ * `system.hello`: 연결 후 첫 메시지 (architecture.md 5장, ADR-027).
+ * 토큰은 `$BIVE_HOME/run/token` 내용. 버전이 다르면 -32602, 토큰이 다르면 -32020이고 둘 다 연결을 닫는다.
+ */
+export const SystemHelloParams = z.strictObject({
+  protocolVersion: z.literal(PROTOCOL_VERSION),
+  token: z.string().min(1),
+});
+export type SystemHelloParams = z.infer<typeof SystemHelloParams>;
+export const SystemHelloResult = z.strictObject({
+  orchestratorVersion: z.string().min(1),
+});
+export type SystemHelloResult = z.infer<typeof SystemHelloResult>;
+
 /**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
  */
 export const METHODS = {
   ping: { params: PingParams, result: PingResult },
+  'system.hello': { params: SystemHelloParams, result: SystemHelloResult },
 } as const satisfies Record<string, MethodSpec>;
 
 export type MethodName = keyof typeof METHODS;
