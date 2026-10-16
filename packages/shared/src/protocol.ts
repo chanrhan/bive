@@ -3,6 +3,9 @@
 // 파라미터 · 결과가 메서드 스키마와 맞지 않으면 -32602로 처리한다.
 import { z } from 'zod';
 
+import { Author, Requirement } from './domain.js';
+import { Ulid } from './id.js';
+
 export const JSONRPC_VERSION = '2.0';
 
 /** 오류 코드: JSON-RPC 표준 + BIVE 정의 (architecture.md 5장). */
@@ -147,6 +150,58 @@ export const SystemStatusResult = z.strictObject({
 });
 export type SystemStatusResult = z.infer<typeof SystemStatusResult>;
 
+// ── 요구사항 (NRM-01, M1-02, ADR-047) ─────────────────────
+// - 모든 요청에 `projectId`가 필수다. 등록되지 않은 프로젝트 · 없는 요구사항은 -32004
+// - 바꾸는 요청(create · update · delete)은 주체 `author`를 싣는다. 파이프로는 사람(`human`)의 직접 편집만
+//   받고 바로 반영한다(승인 불필요). 에이전트 주체는 -32020 (에이전트 경로는 제안 승인, NRM-04)
+// - delete는 소프트 삭제(`deletedAt`)다. 이미 삭제됐거나 삭제된 것을 고치면 -32009
+// - list는 삭제되지 않은 것만 표시 ID 순으로, get은 삭제된 것도 돌려준다(`deletedAt`으로 구분)
+
+/** 요구사항 본문. 공백만 있는 본문은 받지 않는다. 저장은 받은 그대로 한다. */
+export const RequirementText = z
+  .string()
+  .refine((text) => text.trim().length > 0, '요구사항 본문이 비어 있습니다');
+
+/** `requirement.create`: 새 요구사항. 표시 ID(`REQ-NNN`)는 저장소가 정한다. */
+export const RequirementCreateParams = z.strictObject({
+  projectId: Ulid,
+  text: RequirementText,
+  author: Author,
+});
+export type RequirementCreateParams = z.infer<typeof RequirementCreateParams>;
+
+/** `requirement.update`: 본문을 바꾼다. `updatedAt` · `updatedBy`가 함께 바뀐다. */
+export const RequirementUpdateParams = z.strictObject({
+  projectId: Ulid,
+  id: Ulid,
+  text: RequirementText,
+  author: Author,
+});
+export type RequirementUpdateParams = z.infer<typeof RequirementUpdateParams>;
+
+/** `requirement.delete`: 소프트 삭제. `deletedAt` · `updatedAt` · `updatedBy`가 채워진다. */
+export const RequirementDeleteParams = z.strictObject({
+  projectId: Ulid,
+  id: Ulid,
+  author: Author,
+});
+export type RequirementDeleteParams = z.infer<typeof RequirementDeleteParams>;
+
+/** `requirement.get`: ID로 1건. */
+export const RequirementGetParams = z.strictObject({ projectId: Ulid, id: Ulid });
+export type RequirementGetParams = z.infer<typeof RequirementGetParams>;
+
+/** `requirement.list`: 삭제되지 않은 요구사항 전부. */
+export const RequirementListParams = z.strictObject({ projectId: Ulid });
+export type RequirementListParams = z.infer<typeof RequirementListParams>;
+
+/** create · update · delete · get 결과. 이후 이슈가 자식 규칙 등 필드를 더할 수 있게 객체로 감싼다. */
+export const RequirementResult = z.strictObject({ requirement: Requirement });
+export type RequirementResult = z.infer<typeof RequirementResult>;
+
+export const RequirementListResult = z.strictObject({ requirements: z.array(Requirement) });
+export type RequirementListResult = z.infer<typeof RequirementListResult>;
+
 /**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
@@ -155,6 +210,11 @@ export const METHODS = {
   ping: { params: PingParams, result: PingResult },
   'system.hello': { params: SystemHelloParams, result: SystemHelloResult },
   'system.status': { params: SystemStatusParams, result: SystemStatusResult },
+  'requirement.create': { params: RequirementCreateParams, result: RequirementResult },
+  'requirement.update': { params: RequirementUpdateParams, result: RequirementResult },
+  'requirement.delete': { params: RequirementDeleteParams, result: RequirementResult },
+  'requirement.get': { params: RequirementGetParams, result: RequirementResult },
+  'requirement.list': { params: RequirementListParams, result: RequirementListResult },
 } as const satisfies Record<string, MethodSpec>;
 
 export type MethodName = keyof typeof METHODS;

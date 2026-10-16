@@ -161,6 +161,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       orchestratorVersion: version,
       handlers: createHandlers({
         orchestratorVersion: version,
+        biveHome: options.biveHome,
         status: {
           startedAt,
           get connectionCount() {

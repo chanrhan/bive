@@ -1,5 +1,5 @@
-import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
@@ -56,6 +56,45 @@ describe('프로젝트별 DB 생성 · 마이그레이션', () => {
       store.close();
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'DB 파일 · WAL 파일은 0600, 디렉터리는 0700 (umask와 무관)',
+    () => {
+      const id = newId();
+      const previous = process.umask(0o022);
+      try {
+        const store = openProjectStore(id, { home: home() });
+        try {
+          store.requirements.create({
+            id: newId(),
+            text: '쓰기를 일으켜 WAL 파일을 만든다',
+            author: { kind: 'human' },
+            normState: 'approved',
+            createdAt: fixedNow(),
+          });
+          expect(statSync(store.path).mode & 0o777).toBe(0o600);
+          expect(statSync(`${store.path}-wal`).mode & 0o777).toBe(0o600);
+          expect(statSync(dirname(store.path)).mode & 0o777).toBe(0o700);
+        } finally {
+          store.close();
+        }
+        // 이미 있던 파일의 권한이 넓어져 있어도 열 때 다시 좁힌다
+        const path = bivePaths(home()).projectDb(id);
+        chmodSync(path, 0o644);
+        openProjectStore(id, { home: home(), create: false }).close();
+        expect(statSync(path).mode & 0o777).toBe(0o600);
+
+        const registry = openRegistry({ home: home() });
+        try {
+          expect(statSync(registry.path).mode & 0o777).toBe(0o600);
+        } finally {
+          registry.close();
+        }
+      } finally {
+        process.umask(previous);
+      }
+    },
+  );
 
   it('BIVE_HOME 환경 변수(임시 디렉터리)를 기본 경로로 쓴다', () => {
     const id = newId();

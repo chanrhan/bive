@@ -90,6 +90,9 @@ importers:
       '@bive/shared':
         specifier: workspace:*
         version: link:../shared
+      '@bive/store':
+        specifier: workspace:*
+        version: link:../store
     devDependencies:
       '@types/node':
         specifier: 22.20.5

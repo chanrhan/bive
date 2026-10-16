@@ -158,7 +158,10 @@ export type Settings = z.infer<typeof Settings>;
 
 // ── 규범 ─────────────────────────────────────────────────
 
-/** 요구사항 (NRM-01, NRM-08). */
+/**
+ * 요구사항 (NRM-01, NRM-08). `author`는 생성 주체, `updatedBy`는 마지막 수정(소프트 삭제 포함) 주체다 (ADR-047).
+ * 생성 직후에는 `updatedAt = createdAt`, `updatedBy = author`.
+ */
 export const Requirement = z.strictObject({
   id: Ulid,
   displayId: displayIdSchema('REQ'),
@@ -168,6 +171,7 @@ export const Requirement = z.strictObject({
   unrulable: z.strictObject({ reason: NonEmptyString }).nullable(),
   createdAt: Timestamp,
   updatedAt: Timestamp,
+  updatedBy: Author,
   deletedAt: Timestamp.nullable(),
 });
 export type Requirement = z.infer<typeof Requirement>;

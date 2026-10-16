@@ -293,7 +293,7 @@
 - 상태: 제안 (에이전트) · 2026-10-16
 - 맥락: ADR-025는 프로젝트별 저장소 `$BIVE_HOME/projects/<projectId>/`만 정했고, 여러 프로젝트를 나열(`project.list`)할 등록부의 형식과 위치, 스키마 변경 방식은 문서에 없다(M0-04).
 - 결정: 등록부는 프로젝트별 DB와 분리한 SQLite 파일 `$BIVE_HOME/registry.db`(`registered_projects`: 프로젝트 ID · 등록 시각)로 둔다. 프로젝트 내용(이름 · 경로 · 기준 브랜치)의 원본은 프로젝트별 `bive.db`의 `projects` 행 하나뿐이다. 등록은 프로젝트별 DB 생성 · 행 저장 뒤 마지막에 등록부 항목을 넣고, 등록 해제는 등록부 항목만 지운다(규범 · 기록 보존). 등록부에 있는데 프로젝트별 DB가 없으면 목록 조회가 오류를 낸다. 스키마는 `packages/store/src/migrations/<project|registry>/<NNNN>_<name>.ts`를 순서대로 적용하고 `schema_migrations`에 SQL 해시를 남긴다. 기록과 코드가 다르거나 DB가 코드보다 새 버전이면 그 DB를 열지 않는다.
-- 결과: M0-04. JSON 파일 대신 SQLite를 써서 쓰기가 원자적이고 같은 마이그레이션 러너를 쓴다. 같은 값을 두 곳에 두지 않으므로 경로 변경은 프로젝트별 DB만 고친다. 폴더 경로로 프로젝트를 찾는 색인은 두지 않는다(`.bive.json`의 `projectId`로 찾는다, M1-01). 필요해지면 등록부에 마이그레이션을 추가한다.
+- 결과: M0-04. JSON 파일 대신 SQLite를 써서 쓰기가 원자적이고 같은 마이그레이션 러너를 쓴다. 같은 값을 두 곳에 두지 않으므로 경로 변경은 프로젝트별 DB만 고친다. 폴더 경로로 프로젝트를 찾는 색인은 두지 않는다(`.bive.json`의 `projectId`로 찾는다, M1-01). 필요해지면 등록부에 마이그레이션을 추가한다. `ProjectRepository.delete`는 물리 삭제다(Project만의 예외: 등록 실패 정리용이고 규범 · 기록이 아님). 규범 · 기록 엔터티(요구사항 · 규칙 · 제안 등)는 `deletedAt` 소프트 삭제다(NRM-07, ADR-047). DB 파일은 만들거나 열 때 0600으로 맞춘다(`-wal` · `-shm`도 같은 권한, M1-02).
 
 ## ADR-041 파이프 서버 인증 전 처리 · 프레임 상한 · 유휴 종료 · 단일 인스턴스 잠금
 
@@ -370,3 +370,15 @@
 - 맥락: #10(ADR-043) 리뷰의 비차단 지적. 기본 포트 5179가 고정이라 같은 VM의 여러 작업 트리가 동시에 e2e를 돌리면 충돌했고, 가짜 브리지의 `on`은 같은 함수를 두 번 구독하면 한 번으로 합쳐져 실제 preload(구독마다 독립)와 달랐다. 같은 페이지에 `mockBive`를 두 번 부르면 브라우저 안 재정의 오류로 조용히 깨졌고, 체크리스트 `absent`의 뜻(보이지 않음 / DOM에 없음)이 주석과 구현에서 달랐다.
 - 결정: `BIVE_E2E_PORT`가 없으면 기본 포트는 `5179 + (작업 트리 경로 SHA-256 앞 4바이트 % 500)`이고, config가 그 값을 `process.env.BIVE_E2E_PORT`에 다시 써서 worker가 같은 값을 본다. 가짜 `on`은 구독 1건마다 항목을 만들고 해제 함수는 자기 항목만 지운다. `mockBive`는 같은 페이지에 두 번 부르면 Node 쪽에서 오류를 던진다(응답 변경은 `setResponse`). `absent: true`는 "DOM에 없음"(`toHaveCount(0)`, 역할 선택자도 숨김 요소 포함)이며 미노출은 렌더링하지 않는 것으로 구현한다(ADR-035).
 - 결과: M0-10에서 함께 처리. ADR-043의 "기본 5179"는 이 ADR로 바뀐다.
+
+## ADR-047 요구사항 수정 주체 · CRUD RPC 계약 · 표시 ID 순번
+
+- 상태: 제안 (에이전트) · 2026-10-16
+- 맥락: M1-02(#15) 수용 기준은 사람의 `requirement.update`가 제안 없이 바로 반영되고 "수정 시각과 주체가 바뀜"을 단언하는 것이다. 그런데 `Requirement` 스키마(architecture.md 3장)에는 생성 주체 `author`만 있고 수정 주체가 없다. architecture.md 5장 초안은 `requirement.get · update · delete`를 `{id}`만으로 적었지만 저장소는 프로젝트별 DB라 프로젝트 ID 없이는 찾을 수 없고, 누가 바꾸는지(사람 · 에이전트)를 RPC가 어떻게 아는지도 정하지 않았다. 표시 ID 순번을 어디에 두는지, 삭제된 번호를 다시 쓰는지, 삭제된 요구사항을 조회 · 수정할 수 있는지도 문서에 없다.
+- 결정:
+  - `Requirement`에 `updatedBy: Author`(마지막 수정 · 소프트 삭제 주체)를 더한다. 생성 직후 `updatedAt = createdAt`, `updatedBy = author`. 생성 주체 `author` · `createdAt`은 바뀌지 않는다. 변경 내용 이력은 NormChange(M3-12)가 맡는다.
+  - RPC: 모든 `requirement.*` 파라미터에 `projectId`(ULID)가 필수다. 바꾸는 요청(`create` `{projectId, text, author}` · `update` `{projectId, id, text, author}` · `delete` `{projectId, id, author}`)은 주체를 싣고, 오케스트레이터는 `author.kind === 'human'`만 받아 승인 없이 바로 반영한다(NRM-01). 에이전트 주체는 `-32020`이다(에이전트 경로는 제안 승인뿐, NRM-04 · M1-09). 결과는 `{requirement}`(`get` 포함), 목록은 `{requirements}`로 감싸 이후 이슈가 필드를 더할 수 있게 한다. 사람이 만든 요구사항의 `normState`는 `approved`.
+  - 본문은 공백만 있으면 `-32602`(받은 문자열은 그대로 저장). 등록부에 없는 프로젝트 · 프로젝트별 DB나 행이 없는 프로젝트 · 없는 요구사항은 `-32004`이고, 이때 저장소를 새로 만들지 않는다.
+  - 삭제는 `deletedAt` · `updatedAt` · `updatedBy`를 채우는 소프트 삭제다. `list`는 삭제되지 않은 것만 표시 ID 순으로, `get`은 삭제된 것도 돌려준다(`deletedAt`으로 구분). 삭제된 것의 재삭제 · 수정은 `-32009`. 되살리기는 없다.
+  - 표시 ID 순번은 프로젝트별 DB의 `display_id_sequences`(접두 → 마지막 순번)에 두고 생성 트랜잭션 안에서 올린다. 삭제돼도 번호를 다시 쓰지 않는다. 규칙 · 제안 등 다른 접두도 같은 테이블을 쓴다.
+- 결과: M1-02. 마이그레이션 `project/0002_requirements`. #17(SCR-02 화면) · #38(SCR-06 편집)은 `author: {kind: 'human'}`을 실어 부르고, #22(M1-09)는 제안 승인 때 저장소 `ProjectStore.requirements`를 직접 써 에이전트 주체 요구사항을 넣으며, #21(M1-08)은 `requirement.create` 뒤 rule-writer 세션 시작을 붙인다. 주체를 요청에 싣는 방식은 파이프 접속 자체가 사람(앱)이라는 전제 위의 이중 확인이며, 에이전트는 파이프에 접근하지 않는다(NFR-01). 필드를 더한 것이므로 기각하면 `updatedBy`만 빼면 된다.

@@ -3,5 +3,6 @@
 // 머지된 파일은 고치지 않는다 (적용 기록의 SQL 해시와 달라지면 DB를 열지 않는다).
 import type { Migration } from '../../migrate.js';
 import { migration as m0001 } from './0001_projects.js';
+import { migration as m0002 } from './0002_requirements.js';
 
-export const PROJECT_MIGRATIONS: readonly Migration[] = [m0001];
+export const PROJECT_MIGRATIONS: readonly Migration[] = [m0001, m0002];
