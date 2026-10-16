@@ -12,6 +12,7 @@ import { ProjectRepository } from './repositories/project-repository.js';
 import { ProposalRepository } from './repositories/proposal-repository.js';
 import { RequirementRepository } from './repositories/requirement-repository.js';
 import { RuleRepository } from './repositories/rule-repository.js';
+import { SettingsRepository } from './repositories/settings-repository.js';
 
 export interface OpenStoreOptions extends MigrateOptions {
   /** 저장소 루트. 생략하면 `BIVE_HOME` 또는 `~/.bive`. */
@@ -31,6 +32,8 @@ export class ProjectStore {
   readonly proposals: ProposalRepository;
   /** 추가 전용 승인 기록 · 해시 체인 (NFR-01, ADR-027). */
   readonly approvalLog: ApprovalLogRepository;
+  /** 프로젝트 설정 1행 (예산 · 모델 등, COST-01 · NFR-07). */
+  readonly settings: SettingsRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -44,6 +47,7 @@ export class ProjectStore {
     this.rules = new RuleRepository(db, this.sequences);
     this.proposals = new ProposalRepository(db, this.sequences);
     this.approvalLog = new ApprovalLogRepository(db);
+    this.settings = new SettingsRepository(db, projectId);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

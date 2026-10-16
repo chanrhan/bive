@@ -8,12 +8,16 @@ import {
   ApprovalLogEntry,
   Author,
   EntityRef,
+  MissingSettingPath,
   Proposal,
   ProposalPayload,
   Requirement,
+  RoleSettings,
   Rule,
+  RunLimits,
+  Settings,
 } from './domain.js';
-import { ProposalKind, ProposalState } from './enums.js';
+import { AgentRole, ProposalKind, ProposalState } from './enums.js';
 import { Ulid } from './id.js';
 
 export const JSONRPC_VERSION = '2.0';
@@ -323,6 +327,77 @@ export const ApprovalLogListResult = z.strictObject({
 });
 export type ApprovalLogListResult = z.infer<typeof ApprovalLogListResult>;
 
+// ── 설정 (COST-01, NFR-07, SCR-21, M1-05, ADR-057) ───────────
+// - 모든 요청에 `projectId`가 필수다. 등록되지 않은 프로젝트는 -32004
+// - `settings.update`는 주체 `author`를 싣고 사람(`human`)만 받는다. 에이전트 주체는 -32020
+// - 저장은 미설정(`null`)을 허용하고, 실행 전 검사는 `settings.validateForRun`이 한다.
+//   실행 생성 등 설정이 필요한 요청은 미설정이면 -32010(`data.reason = SETTINGS_INCOMPLETE`)으로 거부한다
+
+/** 설정 미비(-32010)의 `error.data.reason` 값과 사람이 읽는 메시지. */
+export const SETTINGS_INCOMPLETE_REASON = 'SETTINGS_INCOMPLETE';
+export const SETTINGS_INCOMPLETE_MESSAGE = '예산 · 모델 미설정';
+
+/** -32010 오류의 `data`: 이유 + 비어 있는 항목 경로. */
+export const SettingsIncompleteData = z.strictObject({
+  reason: z.literal(SETTINGS_INCOMPLETE_REASON),
+  missing: z.array(MissingSettingPath).min(1),
+});
+export type SettingsIncompleteData = z.infer<typeof SettingsIncompleteData>;
+
+/** `settings.get`: 프로젝트 설정. 한 번도 저장하지 않았으면 기본값(전부 미설정, 변경 주체 · 시각 `null`). */
+export const SettingsGetParams = z.strictObject({ projectId: Ulid });
+export type SettingsGetParams = z.infer<typeof SettingsGetParams>;
+export const SettingsResult = z.strictObject({ settings: Settings });
+export type SettingsResult = z.infer<typeof SettingsResult>;
+
+/** 역할 하나의 바꿀 값. 없는 키는 그대로, `null`은 미설정으로 되돌린다. */
+export const RoleSettingsPatch = RoleSettings.partial();
+export type RoleSettingsPatch = z.infer<typeof RoleSettingsPatch>;
+
+/**
+ * `settings.update`의 `patch`: 예산 · 모델만 바꾼다 (M1, ADR-010 · ADR-035). 없는 키는 그대로 둔다.
+ * 승인 대기 상한 · 잠정 승인 · 자동 모드 · 설치 허용 목록은 그 화면을 여는 이슈가 키를 더한다.
+ */
+export const SettingsPatch = z.strictObject({
+  run: RunLimits.partial().optional(),
+  roles: z.partialRecord(AgentRole, RoleSettingsPatch).optional(),
+});
+export type SettingsPatch = z.infer<typeof SettingsPatch>;
+
+/** `settings.update`: 사람만. 바꾼 뒤 `updatedAt` · `updatedBy`가 요청 시각 · 주체가 된다. */
+export const SettingsUpdateParams = z.strictObject({
+  projectId: Ulid,
+  patch: SettingsPatch,
+  author: Author,
+});
+export type SettingsUpdateParams = z.infer<typeof SettingsUpdateParams>;
+
+/**
+ * `settings.validateForRun`: 실행 전 설정 검사 (NFR-07). `roles`를 생략하면 M1 필수 역할
+ * (rule-writer · test-writer · implementer). 실행 전체 한도(USD · 턴)는 항상 검사한다.
+ */
+export const SettingsValidateParams = z.strictObject({
+  projectId: Ulid,
+  roles: z.array(AgentRole).min(1).optional(),
+});
+export type SettingsValidateParams = z.infer<typeof SettingsValidateParams>;
+
+/**
+ * 검사 결과. 통과면 `{ ok: true }`, 아니면 -32010 오류와 같은 코드 · 이유 · 메시지와 비어 있는 항목.
+ * 화면은 이 결과로 검증 상태를 보이고, 실행 생성(`run.create`) 등은 같은 내용을 -32010 오류로 돌려준다.
+ */
+export const SettingsValidateResult = z.discriminatedUnion('ok', [
+  z.strictObject({ ok: z.literal(true) }),
+  z.strictObject({
+    ok: z.literal(false),
+    code: z.literal(ErrorCode.SettingsIncomplete),
+    reason: z.literal(SETTINGS_INCOMPLETE_REASON),
+    message: z.literal(SETTINGS_INCOMPLETE_MESSAGE),
+    missing: z.array(MissingSettingPath).min(1),
+  }),
+]);
+export type SettingsValidateResult = z.infer<typeof SettingsValidateResult>;
+
 /**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
@@ -344,6 +419,9 @@ export const METHODS = {
   'proposal.amend': { params: ProposalAmendParams, result: ProposalApproveResult },
   'proposal.reject': { params: ProposalRejectParams, result: ProposalRejectResult },
   'approvalLog.list': { params: ApprovalLogListParams, result: ApprovalLogListResult },
+  'settings.get': { params: SettingsGetParams, result: SettingsResult },
+  'settings.update': { params: SettingsUpdateParams, result: SettingsResult },
+  'settings.validateForRun': { params: SettingsValidateParams, result: SettingsValidateResult },
 } as const satisfies Record<string, MethodSpec>;
 
 export type MethodName = keyof typeof METHODS;
