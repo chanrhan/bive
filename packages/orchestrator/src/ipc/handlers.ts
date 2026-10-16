@@ -2,6 +2,7 @@
 import { createProposalHandlers } from './proposal-handlers.js';
 import { createRequirementHandlers } from './requirement-handlers.js';
 import type { MethodHandlers } from './server.js';
+import { createSettingsHandlers } from './settings-handlers.js';
 
 /** `system.status`가 읽는 오케스트레이터 상태 (ADR-045). */
 export interface StatusSource {
@@ -38,4 +39,5 @@ export const createHandlers = ({
   }),
   ...createRequirementHandlers({ biveHome, now }),
   ...createProposalHandlers({ biveHome, now }),
+  ...createSettingsHandlers({ biveHome, now }),
 });

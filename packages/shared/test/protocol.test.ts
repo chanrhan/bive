@@ -316,6 +316,86 @@ describe('requirement.* (M1-02, ADR-047)', () => {
   });
 });
 
+describe('settings.* (M1-05, ADR-057)', () => {
+  const PROJECT = '01JA0000000000000000000001';
+  const human = { kind: 'human' } as const;
+  const request = (method: string, params: unknown) =>
+    parseRequest({ jsonrpc: '2.0', id: 1, method, params });
+  const code = (result: ReturnType<typeof parseRequest>): number | null =>
+    result.ok ? null : result.error.code;
+
+  it('설정 메서드 3개가 등록돼 있다', () => {
+    for (const name of ['settings.get', 'settings.update', 'settings.validateForRun']) {
+      expect(isMethodName(name)).toBe(true);
+    }
+  });
+
+  it.each([
+    ['settings.get', { projectId: PROJECT }],
+    ['settings.update', { projectId: PROJECT, patch: {}, author: human }],
+    [
+      'settings.update',
+      {
+        projectId: PROJECT,
+        patch: {
+          run: { maxBudgetUsd: 5 },
+          roles: { 'rule-writer': { model: 'test-model', maxTurns: 20 }, chat: { model: null } },
+        },
+        author: human,
+      },
+    ],
+    ['settings.validateForRun', { projectId: PROJECT }],
+    ['settings.validateForRun', { projectId: PROJECT, roles: ['planner'] }],
+  ])('%s 파라미터 통과', (method, params) => {
+    expect(request(method, params).ok).toBe(true);
+  });
+
+  it.each([
+    ['projectId 누락', 'settings.get', {}],
+    ['주체 누락', 'settings.update', { projectId: PROJECT, patch: {} }],
+    [
+      '모르는 패치 키',
+      'settings.update',
+      { projectId: PROJECT, patch: { autoMode: true }, author: human },
+    ],
+    [
+      '모르는 역할',
+      'settings.update',
+      { projectId: PROJECT, patch: { roles: { reviewer: { model: 'm' } } }, author: human },
+    ],
+    [
+      '0 USD 한도',
+      'settings.update',
+      { projectId: PROJECT, patch: { run: { maxBudgetUsd: 0 } }, author: human },
+    ],
+    [
+      '소수 턴',
+      'settings.update',
+      { projectId: PROJECT, patch: { roles: { implementer: { maxTurns: 2.5 } } }, author: human },
+    ],
+    ['빈 역할 목록', 'settings.validateForRun', { projectId: PROJECT, roles: [] }],
+  ])('%s → -32602', (_, method, params) => {
+    expect(code(request(method, params))).toBe(-32602);
+  });
+
+  it('검사 결과: 통과 또는 -32010 · 이유 · 메시지 · 빈 항목', () => {
+    const fail = {
+      ok: false,
+      code: -32010,
+      reason: 'SETTINGS_INCOMPLETE',
+      message: '예산 · 모델 미설정',
+      missing: ['run.maxBudgetUsd', 'roles.test-writer.model'],
+    };
+    const ok = (result: unknown) =>
+      parseResponse('settings.validateForRun', { jsonrpc: '2.0', id: 1, result }).ok;
+    expect(ok({ ok: true })).toBe(true);
+    expect(ok(fail)).toBe(true);
+    expect(ok({ ...fail, missing: [] })).toBe(false);
+    expect(ok({ ...fail, code: -32001 })).toBe(false);
+    expect(ok({ ...fail, missing: ['roles.reviewer.model'] })).toBe(false);
+  });
+});
+
 describe('proposal.* · approvalLog.list (M1-09, ADR-050)', () => {
   const PROJECT = '01JA0000000000000000000001';
   const PRP = '01JA0000000000000000000003';
