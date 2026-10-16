@@ -32,7 +32,7 @@
 
 **완료 기준 흐름** (`main` 최신 checkout):
 1. `pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test && pnpm build` → 종료 코드 0.
-2. `pnpm e2e` → `e2e/harness.spec.ts` · `e2e/layout.spec.ts` 통과, `artifacts/screens/layout/default.png` 생성. 레이아웃에 사이드바(상단 프로젝트명 · 알림 아이콘, 기획 · 설계 · 실행 메뉴, 하단 연결 상태 · 설정 아이콘) · 중앙 · 오른쪽 360px 채팅 자리가 있다.
+2. `pnpm e2e` → `e2e/harness.spec.ts` · `e2e/layout.spec.ts` 통과, `artifacts/screens/SCR-00/기본.png`(셸 화면 ID · 상태 이름은 ADR-043)와 `artifacts/layout/chat-strip-1000.png` 생성. 레이아웃에 사이드바(상단 프로젝트명 · 알림 아이콘, 기획 · 설계 · 실행 메뉴, 하단 연결 상태 · 설정 아이콘) · 중앙 · 오른쪽 360px 채팅 자리가 있다.
 3. `export BIVE_HOME=$(mktemp -d); xvfb-run -a pnpm smoke` → 종료 코드 0. 스모크가 창 제목 "BIVE", `window.bive`의 키가 `invoke` · `on` 두 개, `require` 부재, 사이드바 하단 "연결됨"을 확인한다.
 4. `export BIVE_HOME=$(mktemp -d); BIVE_IDLE_SHUTDOWN_MS=8000 pnpm --filter @bive/orchestrator start & sleep 3` → `pnpm --filter @bive/orchestrator start; echo $?` → 곧바로 `0`(단일 인스턴스) → `pnpm --filter @bive/app cli ping` → 표준 출력 `pong` → `stat -c %a $BIVE_HOME/run/token` → `600` → `sleep 12; kill -0 $(cat $BIVE_HOME/run/orchestrator.pid)` → 실패(유휴 자동 종료).
 5. `FX=$(mktemp -d)/fx; scripts/reset-fixture.sh $FX && pnpm -C $FX test` → HTTP 인수 테스트 1개 통과. `git -C $FX log --oneline main | wc -l` → `1`.
@@ -359,3 +359,4 @@ PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 �
 - 2026-10-15 v2 검토(REQUEST_CHANGES) 반영. 수용 기준을 전 이슈 4항목 이하 · 테스트 파일 · 명령 · 오류 코드 명시로 재작성, 완료 기준 흐름을 헤드리스 실행 가능 명령으로 재작성(준비 블록 · `BIVE_SCENARIO` · pid 파일 · `cli`), M1 흐름에 PRD 6장 M1 기준 대응 단계(예산 초과 · 끊김 · 앱 종료 유지 · 금지 경로 · 승인 호출 거부 · Windows) 추가. 분할 9건(M0-06→M0-10, M1-04→M1-25, M1-06→M1-26, M1-10→M1-27, M1-11→M1-28, M1-21→M1-29, M4-10→M4-16, M6-03→M6-07, M6-05→M6-08), 추가 2건(M1-24 판정 러너, M3-19 대상 블록 · 위험도 표시). 의존 보강 · 범위 중복 정리 · 커버리지 양방향 일치. 새 ADR-029~036. 이슈 81개 → 92개(M0 10 · M1 29 · M2 3 · M3 19 · M4 16 · M5 7 · M6 8).
 - 2026-10-15 2차 검토 반영: 의존 5곳 추가(M1-20 · M1-22 · M1-25 · M3-12 · M4-01), 변이 주입 · planner · 채팅 역할의 설정 칸(M3-07 · M4-01 · M5-01), M4 흐름 설정 저장을 1단계로, `.bive.json` 미추적 처리(M1-13 · M3 흐름 5), 도구 기록 결과 `denied` + 사유로 통일.
 - 2026-10-15 발행: 마일스톤 7개, 이슈 92개 (GitHub #1~#7 마일스톤, 이슈 #4~#95). `scripts/publish-roadmap.py`로 발행하고 `이슈` 열에 번호를 기록.
+- 2026-10-16 M0 흐름 2의 스크린샷 경로를 ADR-043(SCR-00 · 상태 이름)에 맞게 수정 (#109).
