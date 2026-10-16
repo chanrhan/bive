@@ -1,0 +1,9 @@
+/* 생성 주체 아이콘 (screens.md 1.4): 글자와 같은 흐린 색, 글자보다 약간 작게 (1.1). */
+
+.author-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+}

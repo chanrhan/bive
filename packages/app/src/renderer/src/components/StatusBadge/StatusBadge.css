@@ -1,0 +1,41 @@
+/* 상태 배지 (screens.md 1.4). 정상은 흐린 점, 예외만 글자 + 색. 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.status-badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  max-width: 100%;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-1);
+  font-size: var(--font-size-1);
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.status-badge[data-tone='normal'] {
+  padding: 0;
+}
+
+.status-dot {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-normal-dot-color);
+}
+
+.status-badge[data-tone='danger'] {
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 16%, transparent);
+}
+
+.status-badge[data-tone='warning'] {
+  color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 16%, transparent);
+}
+
+.status-badge[data-tone='info'] {
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+}
