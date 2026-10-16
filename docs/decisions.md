@@ -273,3 +273,10 @@
 - 맥락: architecture.md 6장은 `typescript` 7을 정했다. TypeScript 7.0.2(네이티브 구현)는 설치 · `tsc` 동작이 확인됐지만 기존 컴파일러 JS API를 내보내지 않고(`exports`가 `version.cjs`와 `unstable/*`뿐), `typescript-eslint` 8.71.2의 peer 범위는 `typescript >=4.8.4 <6.1.0`이라 ESLint가 TypeScript 파일을 파싱할 수 없다(M0-01).
 - 결정: 타입 검사 · 빌드(`tsc`)는 각 패키지 devDependency `typescript@7.0.2`로 한다. 루트 devDependency에는 ESLint 파서 전용으로 `typescript@6.0.3`(peer 범위 안의 최신)을 둔다. pnpm은 루트의 `typescript-eslint` peer를 루트 `typescript`로, 패키지 스크립트의 `tsc`는 패키지의 `node_modules/.bin`으로 해석한다. 타입 정보가 필요한 lint 규칙(type-aware)은 쓰지 않는다.
 - 결과: M0-01. `typescript-eslint`가 TypeScript 7을 지원하면 루트 `typescript`를 7로 올리고 이 ADR을 닫는다. 그 전까지 TypeScript 7에만 있는 문법은 lint 파싱 오류가 날 수 있다. 루트 `node_modules/.bin/tsc` · tsserver는 6.0.3이라 편집기 진단이나 루트 `npx tsc`는 CI(7.0.2)와 다를 수 있다.
+
+## ADR-039 IPC 오류 코드 판단 순서 · 패키지 간 import 해석
+
+- 상태: 제안 (에이전트) · 2026-10-16
+- 맥락: architecture.md 5장은 "스키마 불일치 = `-32602`"라고만 하고, JSON-RPC 표준의 `-32700`(해석 실패) · `-32600`(형식 위반) · `-32601`(없는 메서드)과의 관계를 정하지 않았다. 또 워크스페이스 패키지의 `exports`가 `dist`만 가리켜 다른 패키지가 shared를 쓰려면 빌드가 먼저 필요했다(M0-03).
+- 결정: 받는 쪽은 JSON 해석 `-32700` → 메시지 형식(JSON-RPC 2.0 봉투) `-32600` → 메서드 등록 여부 `-32601` → 메서드별 파라미터 스키마 `-32602` 순으로 판단한다. 요청한 쪽이 받은 응답의 형식 · 결과가 메서드 스키마와 다르면 `-32602`로 처리한다. 봉투는 모르는 필드를 거부하고(strict), 파라미터가 없는 메서드에 `params`를 넣으면 `-32602`다. import 해석은 사용자 정의 조건 `@bive/source`(→ `src`)를 typecheck · vitest에서만 켜고 빌드 · 런타임은 `dist`를 쓴다(architecture.md 2장 끝).
+- 결과: M0-03 · M0-04(파이프 서버). 표준 코드를 그대로 따르므로 되돌리기 쉽다. store · parser가 import 대상이 되면 같은 조건을 `exports`에 추가한다.
