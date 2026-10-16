@@ -20,7 +20,7 @@ export const AppLayout = (): React.JSX.Element => {
       data-chat={collapsed ? 'collapsed' : 'docked'}
     >
       {/* 프로젝트 · 할 일 건수는 M1(프로젝트 열기 · 할 일)에서 연결한다. 지금은 근거 값이 없다 */}
-      <Sidebar projectName={null} todoCount={null} connection={connection.view} />
+      <Sidebar projectName={null} todoCount={null} connection={connection} />
       <MainArea />
       <ChatPanel collapsed={collapsed} />
     </div>

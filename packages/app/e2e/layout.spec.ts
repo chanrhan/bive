@@ -21,6 +21,20 @@ const box = async (locator: Locator): Promise<{ x: number; y: number; w: number;
 
 const connection = (page: Page): Locator => page.getByTestId('connection-status');
 
+/** 연결 상태 아이콘(점)과 글자의 계산된 색. */
+const connectionColors = (page: Page): Promise<{ icon: string; label: string; muted: string }> =>
+  connection(page).evaluate((status) => {
+    const icon = status.querySelector('svg');
+    const label = status.querySelector('span');
+    if (icon === null || label === null) throw new Error('아이콘 · 글자 없음');
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--color-text-muted)';
+    document.body.append(probe);
+    const muted = getComputedStyle(probe).color;
+    probe.remove();
+    return { icon: getComputedStyle(icon).color, label: getComputedStyle(label).color, muted };
+  });
+
 test.describe('기본 배치 (1440px)', () => {
   test.beforeEach(async ({ page }) => {
     await mockBive(page, { responses: { 'system.status': { result: STATUS } } });
@@ -136,6 +150,19 @@ test.describe('연결 상태 (system.status)', () => {
     await expect(connection(page)).toHaveText(CONNECTION_TEXT.connected);
     await expect(connection(page)).toHaveAttribute('data-state', 'connected');
     expect(await bive.calls()).toContainEqual({ method: 'system.status', params: undefined });
+    // 정상 상태: 아이콘(점)은 글자와 같은 흐린 색 (1.1 글자 옆 아이콘 · 예외만 강조)
+    const colors = await connectionColors(page);
+    expect(colors.icon).toBe(colors.label);
+    expect(colors.label).toBe(colors.muted);
+  });
+
+  test('연결 끊김은 아이콘 · 글자가 같은 강조 색이다', async ({ page }) => {
+    await mockBive(page, { responses: { 'system.status': { error: FAILED } } });
+    await page.goto('/');
+    await expect(connection(page)).toHaveAttribute('data-state', 'disconnected');
+    const colors = await connectionColors(page);
+    expect(colors.icon).toBe(colors.label);
+    expect(colors.label).not.toBe(colors.muted);
   });
 
   test('system.status 실패 → 연결 끊김 (에러 상태 체크리스트)', async ({ page }) => {

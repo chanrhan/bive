@@ -46,7 +46,8 @@ export type LinkConnect = (options: { launch: boolean }) => Promise<EnsureResult
 
 /**
  * 오케스트레이터 연결 1개를 유지한다. 요청 때 연결이 없거나 끊겼으면 다시 접속한다.
- * 한 번도 붙지 못했으면 필요할 때 기동하고, 한 번 붙은 뒤 끊기면 다시 띄우지 않고 붙기만 한다 (ADR-045).
+ * 기동은 첫 접속 시도 한 번만 허용한다(성공 · 실패와 무관). 그 뒤의 접속(첫 기동 실패 뒤의 재시도,
+ * 끊긴 뒤의 재접속)은 다시 띄우지 않고 실행 중인 인스턴스에 붙기만 한다 (ADR-045).
  * 동시에 들어온 요청은 같은 접속 시도를 기다린다.
  */
 export class OrchestratorLink {
@@ -58,8 +59,8 @@ export class OrchestratorLink {
   #connecting: Promise<EnsureResult> | null = null;
   #state: ConnectionState = 'disconnected';
   #closed = false;
-  /** 한 번이라도 접속했는지. 그 뒤로는 기동하지 않는다 */
-  #everConnected = false;
+  /** 기동을 허용한 접속을 이미 시도했는지. 그 뒤로는 기동하지 않는다 */
+  #launchAttempted = false;
   #lastFailureLog: string | null = null;
 
   /** `log`: main 프로세스 로그 (기본 표준 오류). 렌더러로 가지 않는 상세를 남긴다 */
@@ -72,9 +73,9 @@ export class OrchestratorLink {
     return this.#state;
   }
 
-  /** 한 번 붙은 뒤에는 접속 때 기동하지 않는다. */
+  /** 다음 접속이 기동을 허용하는지. 첫 접속 시도 전에만 참이다. */
   get launchAllowed(): boolean {
-    return !this.#everConnected;
+    return !this.#launchAttempted;
   }
 
   /** 연결 상태가 바뀔 때마다 부른다. 돌려준 함수를 부르면 끊는다. */
@@ -98,7 +99,9 @@ export class OrchestratorLink {
     this.#connecting ??= (async () => {
       this.#setState('connecting');
       try {
-        const result = await this.#connect({ launch: this.launchAllowed });
+        const launch = this.launchAllowed;
+        this.#launchAttempted = true;
+        const result = await this.#connect({ launch });
         if (this.#closed) {
           result.client.destroy();
           throw new Error('연결 관리자가 닫힘');
@@ -118,7 +121,6 @@ export class OrchestratorLink {
   #attach(result: EnsureResult): void {
     const { client } = result;
     this.#current = result;
-    this.#everConnected = true;
     this.#lastFailureLog = null;
     this.#setState('connected');
     client.onNotification((n) => {
@@ -153,6 +155,14 @@ export class OrchestratorLink {
       throw new PipeRpcError(rpcError(ErrorCode.InternalError, CONNECT_FAILED_MESSAGE));
     }
     return client.request(method, params);
+  }
+
+  /**
+   * 지금 연결만 끊는다(응답 없는 연결을 버릴 때). 다음 요청 때 다시 붙는다(기동 없음).
+   * 대기 중인 요청은 연결 끊김 오류로 끝나므로 쌓이지 않는다.
+   */
+  dropConnection(): void {
+    this.#current?.client.destroy();
   }
 
   /** 연결을 닫는다. 오케스트레이터 프로세스는 건드리지 않는다. */

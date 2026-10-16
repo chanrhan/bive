@@ -1,17 +1,11 @@
 // 사이드바 하단 오케스트레이터 연결 상태 (screens.md 1.2, ADR-045).
 // 처음 한 번 `system.status`를 직접 부르고, 이후는 main이 1초마다 보내는 `system.connection` 알림을 따른다.
-import type { SystemStatusResult } from '@bive/shared';
+// 상태(연결됨 · 끊김)가 바뀔 때만 다시 그린다 (매초 알림마다 레이아웃 전체를 다시 그리지 않음).
 import { useEffect, useState } from 'react';
 
 import { CONNECTION_EVENT, type ConnectionEventParams } from '../../../common/bridge.js';
 
 export type ConnectionView = 'checking' | 'connected' | 'disconnected';
-
-export interface ConnectionInfo {
-  view: ConnectionView;
-  /** 마지막으로 받은 상태 (연결됨일 때만) */
-  status: SystemStatusResult | null;
-}
 
 const isConnectionEvent = (value: unknown): value is ConnectionEventParams => {
   if (typeof value !== 'object' || value === null) return false;
@@ -20,8 +14,9 @@ const isConnectionEvent = (value: unknown): value is ConnectionEventParams => {
   return state === 'connected' && typeof status === 'object' && status !== null;
 };
 
-export const useConnection = (): ConnectionInfo => {
-  const [info, setInfo] = useState<ConnectionInfo>({ view: 'checking', status: null });
+export const useConnection = (): ConnectionView => {
+  // 같은 값이면 React가 다시 그리지 않는다
+  const [view, setView] = useState<ConnectionView>('checking');
 
   useEffect(() => {
     let active = true;
@@ -30,18 +25,14 @@ export const useConnection = (): ConnectionInfo => {
     const off = window.bive.on(CONNECTION_EVENT, (params) => {
       if (!active || !isConnectionEvent(params)) return;
       heard = true;
-      setInfo(
-        params.state === 'connected'
-          ? { view: 'connected', status: params.status }
-          : { view: 'disconnected', status: null },
-      );
+      setView(params.state);
     });
     window.bive.invoke('system.status').then(
-      (status) => {
-        if (active && !heard) setInfo({ view: 'connected', status });
+      () => {
+        if (active && !heard) setView('connected');
       },
       () => {
-        if (active && !heard) setInfo({ view: 'disconnected', status: null });
+        if (active && !heard) setView('disconnected');
       },
     );
     return () => {
@@ -50,5 +41,5 @@ export const useConnection = (): ConnectionInfo => {
     };
   }, []);
 
-  return info;
+  return view;
 };

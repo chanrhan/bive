@@ -1,7 +1,7 @@
 // 오케스트레이터 연결 감시 (screens.md 1.2 사이드바 하단 연결 상태, ADR-045).
 // 1초마다 `system.status`를 불러 그 결과를 `system.connection` 알림으로 렌더러에 보낸다.
 // 연결이 끊기면 바로 '끊김'을 보내고, 다음 주기부터 다시 붙기만 한다(오케스트레이터를 띄우지 않음:
-// OrchestratorLink가 한 번 붙은 뒤에는 기동하지 않는다). Electron에 의존하지 않아 단위 테스트에서 그대로 부른다.
+// OrchestratorLink는 첫 접속 시도 한 번만 기동을 허용한다). Electron에 의존하지 않아 단위 테스트에서 그대로 부른다.
 import type { SystemStatusResult } from '@bive/shared';
 
 import type { ConnectionEventParams } from '../common/bridge.js';
@@ -12,13 +12,16 @@ export const CONNECTION_POLL_INTERVAL_MS = 1000;
 
 /**
  * 상태 확인 한 번의 대기 한도. 접속 재시도(최대 5초, ADR-042)보다 길게 둔다.
- * 넘으면 끊김으로 보고 다음 주기로 넘어간다(응답 없는 오케스트레이터에서 감시가 멈추지 않게).
+ * 넘으면 끊김으로 보고 지금 연결을 버린 뒤 다음 주기로 넘어간다(응답 없는 오케스트레이터에서
+ * 감시가 멈추거나 대기 요청이 쌓이지 않게).
  */
 export const CONNECTION_CHECK_TIMEOUT_MS = 10_000;
 
 export interface ConnectionMonitorTarget {
   request(method: string, params?: unknown): Promise<unknown>;
   onStateChange(listener: (state: ConnectionState) => void): () => void;
+  /** 응답 없는 연결을 버린다(대기 한도 초과 때) */
+  dropConnection?(): void;
 }
 
 export interface ConnectionMonitorOptions {
@@ -90,7 +93,10 @@ export class ConnectionMonitor {
           timeout = setTimeout(() => resolve(TIMED_OUT), this.#timeoutMs);
         }),
       ]);
-      if (result === TIMED_OUT) return { state: 'disconnected' };
+      if (result === TIMED_OUT) {
+        this.#target.dropConnection?.();
+        return { state: 'disconnected' };
+      }
       // 결과는 파이프 클라이언트가 shared 스키마로 이미 검증했다
       return { state: 'connected', status: result as SystemStatusResult };
     } catch {
