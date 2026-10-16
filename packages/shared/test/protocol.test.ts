@@ -316,6 +316,95 @@ describe('requirement.* (M1-02, ADR-047)', () => {
   });
 });
 
+describe('proposal.* · approvalLog.list (M1-09, ADR-050)', () => {
+  const PROJECT = '01JA0000000000000000000001';
+  const PRP = '01JA0000000000000000000003';
+  const human = { kind: 'human' } as const;
+  const request = (method: string, params: unknown) =>
+    parseRequest({ jsonrpc: '2.0', id: 1, method, params });
+
+  it('제안 · 승인 기록 메서드가 등록돼 있고 규칙 · 계약 쓰기 · 제안 등록 메서드는 없다', () => {
+    for (const name of [
+      'proposal.list',
+      'proposal.count',
+      'proposal.get',
+      'proposal.markRead',
+      'proposal.approve',
+      'proposal.amend',
+      'proposal.reject',
+      'approvalLog.list',
+    ]) {
+      expect(isMethodName(name)).toBe(true);
+    }
+    for (const name of ['rule.update', 'contract.update', 'proposal.create', 'proposal.submit']) {
+      expect(isMethodName(name)).toBe(false);
+    }
+  });
+
+  it.each([
+    ['proposal.list', { projectId: PROJECT, state: 'pending' }],
+    ['proposal.count', { projectId: PROJECT }],
+    ['proposal.approve', { projectId: PROJECT, id: PRP, author: human }],
+    [
+      'proposal.approve',
+      {
+        projectId: PROJECT,
+        id: PRP,
+        author: { kind: 'agent', role: 'chat' },
+        edited: { text: 'a' },
+      },
+    ],
+    ['proposal.amend', { projectId: PROJECT, id: PRP, author: human, edited: { text: 'a' } }],
+    // 빈 사유는 스키마가 아니라 오케스트레이터의 도메인 검증(-32001)이 거부한다
+    ['proposal.reject', { projectId: PROJECT, id: PRP, author: human, reason: '' }],
+    ['approvalLog.list', { projectId: PROJECT, targetRef: { entity: 'Proposal', id: PRP } }],
+  ])('%s 파라미터를 받는다', (method, params) => {
+    expect(request(method, params).ok).toBe(true);
+  });
+
+  it.each([
+    ['수정 본문 없는 amend', 'proposal.amend', { projectId: PROJECT, id: PRP, author: human }],
+    ['사유 키 없는 reject', 'proposal.reject', { projectId: PROJECT, id: PRP, author: human }],
+    [
+      '모르는 모양의 수정 본문',
+      'proposal.approve',
+      { projectId: PROJECT, id: PRP, author: human, edited: { body: 'x' } },
+    ],
+    ['모르는 상태 필터', 'proposal.list', { projectId: PROJECT, state: 'done' }],
+  ])('%s → -32602', (_, method, params) => {
+    const result = request(method, params);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe(-32602);
+  });
+
+  it('proposal.count 결과는 모든 종류의 건수를 가진다', () => {
+    const pendingByKind = {
+      requirement_new: 1,
+      requirement_change: 0,
+      rule_new: 2,
+      rule_change: 0,
+      contract_new: 0,
+      design_change: 0,
+      rule_title_change: 0,
+      contract_change: 0,
+    };
+    expect(
+      parseResponse('proposal.count', {
+        jsonrpc: '2.0',
+        id: 1,
+        result: { pending: 3, pendingByKind },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      parseResponse('proposal.count', {
+        jsonrpc: '2.0',
+        id: 1,
+        result: { pending: 1, pendingByKind: { requirement_new: 1 } },
+      }),
+    ).toMatchObject({ ok: false, error: { code: -32602 } });
+  });
+});
+
 describe('ping 왕복', () => {
   it('요청 → 서버 검증 → 응답 → 클라이언트 검증', () => {
     // 클라이언트: 파라미터 없는 요청

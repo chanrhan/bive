@@ -15,6 +15,7 @@ import { createHandlers } from '../src/ipc/handlers.js';
 import { PipeServer } from '../src/ipc/server.js';
 import { NetPipeTransport } from '../src/ipc/transport.js';
 import { startOrchestrator, type Orchestrator } from '../src/orchestrator.js';
+import { ProposalService } from '../src/proposals/proposal-service.js';
 import { connect, type TestClient } from './helpers/client.js';
 import { cleanup, makeBiveHome } from './helpers/process.js';
 
@@ -299,6 +300,79 @@ describe('requirement.delete: deletedAt을 채우는 소프트 삭제', () => {
       author: human,
     });
     expect(next.requirement.displayId).toBe('REQ-003');
+  });
+});
+
+describe('requirement.delete: 자식 규칙은 남고 부모만 해제된다 (M1-09, ADR-050)', () => {
+  it('삭제 뒤 자식 규칙이 그대로 남고 parentRequirementId가 비며 해제 시각이 남는다', async () => {
+    const h = await harness();
+    const proposals = new ProposalService({ biveHome: h.biveHome, now: () => h.clock.now });
+    const parent = await h.client.call('requirement.create', {
+      projectId: h.project.id,
+      text: '사용자는 이메일로 가입할 수 있다',
+      author: human,
+    });
+    const other = await h.client.call('requirement.create', {
+      projectId: h.project.id,
+      text: '가입한 사용자는 로그인할 수 있다',
+      author: human,
+    });
+
+    // 규칙은 제안 → 사람 승인으로만 생긴다
+    const approveRule = async (parentRequirementId: string, title: string) => {
+      const proposal = proposals.submit(h.project.id, {
+        kind: 'rule_new',
+        payload: {
+          title,
+          statement: `WHEN ${title} THE SYSTEM SHALL 요청을 거부한다`,
+          kind: 'business',
+          checkKinds: ['test'],
+          parentRequirementId,
+        },
+        rationale: '요구사항 분해',
+        author: ruleWriter,
+        source: 'rule_generation',
+      });
+      const { applied } = await h.client.call('proposal.approve', {
+        projectId: h.project.id,
+        id: proposal.id,
+        author: human,
+      });
+      if (applied.entity !== 'Rule') throw new Error('규칙이 아님');
+      return applied.rule;
+    };
+    const childA = await approveRule(parent.requirement.id, '중복 이메일 가입 거부');
+    const childB = await approveRule(parent.requirement.id, '형식이 틀린 이메일 가입 거부');
+    const unrelated = await approveRule(other.requirement.id, '틀린 비밀번호 로그인 거부');
+
+    h.clock.now = T0 + 7_000;
+    await h.client.call('requirement.delete', {
+      projectId: h.project.id,
+      id: parent.requirement.id,
+      author: human,
+    });
+
+    const store = openProjectStore(h.project.id, { home: h.biveHome, create: false });
+    try {
+      for (const child of [childA, childB]) {
+        expect(store.rules.get(child.id)).toEqual({
+          ...child,
+          parentRequirementId: null,
+          parentDetachedAt: iso(T0 + 7_000),
+          updatedAt: iso(T0 + 7_000),
+        });
+      }
+      // 규칙은 지워지지 않고 목록에 남는다. 다른 요구사항의 규칙은 그대로다
+      expect(store.rules.list().map((rule) => rule.id)).toEqual([
+        childA.id,
+        childB.id,
+        unrelated.id,
+      ]);
+      expect(store.rules.get(unrelated.id)).toEqual(unrelated);
+      expect(store.rules.listByParent(parent.requirement.id)).toEqual([]);
+    } finally {
+      store.close();
+    }
   });
 });
 
