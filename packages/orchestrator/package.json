@@ -17,12 +17,17 @@
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node --conditions=@bive/source --import tsx src/cli.ts"
   },
   "devDependencies": {
     "@types/node": "22.20.5",
     "eslint": "10.12.0",
+    "tsx": "4.23.15",
     "typescript": "7.0.2",
     "vitest": "5.0.5"
+  },
+  "dependencies": {
+    "@bive/shared": "workspace:*"
   }
 }

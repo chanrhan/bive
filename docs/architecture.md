@@ -214,12 +214,13 @@ stateDiagram-v2
 - 프레임: UTF-8 JSON 1줄 = 메시지 1개 (`\n` 구분). JSON-RPC 2.0 요청 · 응답 · 알림
 - 검증: 모든 요청 · 응답 · 알림을 `shared/protocol` zod 스키마로 양쪽에서 검증. 스키마 불일치 = `-32602`
 - 연결 수립: `system.hello { protocolVersion, token }`. 토큰 = `~/.bive/run/token` (0600, 기동마다 갱신). 불일치 시 연결 종료
+- 인증 전 메시지 처리 · 프레임 상한(1 MiB) · 유휴 종료(`BIVE_IDLE_SHUTDOWN_MS`) · 단일 인스턴스 잠금(`run/orchestrator.pid`)은 ADR-041. 구현 `orchestrator/src/ipc/{transport,server}.ts` · `lifecycle.ts` · `lock.ts`
 - 렌더러 경로: renderer `window.bive.invoke(method, params)` → preload(허용 목록 확인) → `ipcRenderer.invoke('bive:rpc')` → main(zod 검증) → 파이프. 알림은 main → `webContents.send` → `window.bive.on(event, cb)`
 - main 전용 (파이프 아님): `app.pickFolder` (OS 대화상자), `app.openInIde` (MET-01, P1)
 
 | 메서드 | 파라미터 → 결과 | 출처 | 단계 |
 |---|---|---|---|
-| `system.hello` | `{protocolVersion, token}` → `{orchestratorVersion}` | PRD 5.1 | M1 |
+| `system.hello` | `{protocolVersion, token}` → `{orchestratorVersion}` | PRD 5.1, ADR-041 | M0 |
 | `system.status` | — → `{projects[], runningRuns}` (사이드바 연결 상태) | 화면 1.2 | M1 |
 | `project.open` | `{path}` → `{project, created}` (설정 파일 생성 여부) | PRJ-01 | M1 |
 | `project.list` · `project.get` | — / `{projectId}` → 프로젝트 | PRJ-01 | M1 |

@@ -20,6 +20,7 @@ import {
   parseNotification,
   parseRequest,
   parseResponse,
+  PROTOCOL_VERSION,
   rpcError,
 } from '../src/index.js';
 
@@ -159,6 +160,33 @@ describe('메서드 레지스트리', () => {
     expect(isMethodName('toString')).toBe(false);
     expect(isMethodName('system.unknown')).toBe(false);
     expect(METHOD_NAMES).toEqual(Object.keys(METHODS));
+  });
+
+  it('system.hello: 프로토콜 버전 · 토큰 → 오케스트레이터 버전', () => {
+    expect(isMethodName('system.hello')).toBe(true);
+    const request = createRequest(1, 'system.hello', {
+      protocolVersion: PROTOCOL_VERSION,
+      token: 'abc',
+    });
+    const received = parseRequest(throughFrame(request));
+    expect(received.ok && received.request.method).toBe('system.hello');
+    const response = createSuccessResponse(1, 'system.hello', { orchestratorVersion: '0.0.0' });
+    expect(parseResponse('system.hello', throughFrame(response))).toEqual({
+      ok: true,
+      id: 1,
+      result: { orchestratorVersion: '0.0.0' },
+    });
+  });
+
+  it.each([
+    ['토큰 누락', { protocolVersion: PROTOCOL_VERSION }],
+    ['빈 토큰', { protocolVersion: PROTOCOL_VERSION, token: '' }],
+    ['버전 불일치', { protocolVersion: PROTOCOL_VERSION + 1, token: 'abc' }],
+    ['모르는 필드', { protocolVersion: PROTOCOL_VERSION, token: 'abc', extra: 1 }],
+  ])('system.hello %s → -32602', (_, params) => {
+    const result = parseRequest({ jsonrpc: '2.0', id: 2, method: 'system.hello', params });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe(-32602);
   });
 });
 
