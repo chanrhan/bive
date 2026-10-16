@@ -1,9 +1,10 @@
 // 판정 러너의 자식 프로세스 도우미 (JDG-01).
 // - 셸 없이 실행한다 (`shell: false`, 인자 배열 그대로). 출력은 파일 서술자로 로그 파일에 바로 쓴다
-// - POSIX에서는 새 프로세스 그룹으로 띄워 종료할 때 그룹 전체(next build 워커 · next start 하위 프로세스)를 끝낸다
+// - POSIX에서는 새 프로세스 그룹으로 띄우고, 종료할 때 그룹 전체와 미리 찾은 하위 프로세스 트리
+//   (자기 그룹을 따로 만드는 next build의 타입 검사 등)를 함께 끝낸다
 // - 환경 변수는 허용 목록만 넘긴다 (architecture.md 10장 "환경 변수 정리")
-import { type ChildProcess, spawn } from 'node:child_process';
-import { appendFileSync, closeSync, openSync } from 'node:fs';
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
+import { appendFileSync, closeSync, openSync, readdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 
 /** 자식 프로세스에 넘기는 부모 환경 변수 허용 목록. 나머지(VITEST_* · NODE_ENV · 비밀 값 등)는 넘기지 않는다. */
@@ -128,30 +129,119 @@ export const waitExit = (child: ChildProcess): Promise<ExitInfo> => {
   });
 };
 
-/** 프로세스(POSIX에서는 프로세스 그룹 전체)에 신호를 보낸다. 이미 끝났으면 무시. */
-export const signalTree = (child: ChildProcess, signal: NodeJS.Signals): void => {
-  if (child.pid === undefined) return;
+interface ProcInfo {
+  pid: number;
+  ppid: number;
+  /** 시작 시각 표식 (Linux /proc stat 22번째 필드). PID 재사용 확인용, 모르면 빈 문자열 */
+  start: string;
+}
+
+const readLinuxStat = (pid: string): ProcInfo | null => {
   try {
-    if (isWindows) child.kill(signal);
-    else process.kill(-child.pid, signal);
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // 2번째 필드(실행 파일 이름)에 공백 · 괄호가 있을 수 있어 마지막 ')' 뒤부터 나눈다
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    return { pid: Number(pid), ppid: Number(fields[1]), start: fields[19] ?? '' };
+  } catch {
+    return null;
+  }
+};
+
+/** 현재 프로세스 표 (pid · ppid). Linux는 /proc, 그 밖 POSIX는 ps. */
+const readProcessTable = (): ProcInfo[] => {
+  if (isWindows) return [];
+  if (process.platform === 'linux') {
+    try {
+      return readdirSync('/proc')
+        .filter((name) => /^\d+$/.test(name))
+        .map(readLinuxStat)
+        .filter((info): info is ProcInfo => info !== null);
+    } catch {
+      return [];
+    }
+  }
+  try {
+    return execFileSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' })
+      .split('\n')
+      .map((line) => line.trim().split(/\s+/))
+      .filter((cols) => cols.length === 2)
+      .map(([pid, ppid]) => ({ pid: Number(pid), ppid: Number(ppid), start: '' }));
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * `root`의 모든 하위 프로세스. 하위 프로세스가 자기 프로세스 그룹을 따로 만들면(next build의 타입 검사 등)
+ * 그룹 신호가 닿지 않고, 부모가 끝나면 init으로 옮겨져 찾을 수 없으므로 종료 전에 미리 찾아 둔다.
+ */
+const descendants = (root: number): ProcInfo[] => {
+  const table = readProcessTable();
+  const found: ProcInfo[] = [];
+  const queue = [root];
+  while (queue.length > 0) {
+    const parent = queue.shift();
+    for (const info of table) {
+      if (info.ppid === parent && !found.some((f) => f.pid === info.pid)) {
+        found.push(info);
+        queue.push(info.pid);
+      }
+    }
+  }
+  return found;
+};
+
+/** 스냅숏의 프로세스가 아직 같은 프로세스인지 (PID 재사용이면 신호를 보내지 않는다). */
+const isSameProcess = (info: ProcInfo): boolean => {
+  if (info.start === '') return true;
+  return readLinuxStat(String(info.pid))?.start === info.start;
+};
+
+const trySignal = (pid: number, signal: NodeJS.Signals): void => {
+  try {
+    process.kill(pid, signal);
   } catch {
     // ESRCH: 이미 끝남
   }
 };
 
+/** 스냅숏에 있던 하위 프로세스에 신호를 보낸다. */
+const signalSnapshot = (snapshot: readonly ProcInfo[], signal: NodeJS.Signals): void => {
+  for (const info of snapshot) if (isSameProcess(info)) trySignal(info.pid, signal);
+};
+
+/**
+ * 프로세스와 그 하위 전체에 신호를 보낸다: POSIX 프로세스 그룹 + 미리 찾은 하위 프로세스.
+ * 이미 끝났으면 무시. 보낸 대상 스냅숏을 돌려준다.
+ */
+export const signalTree = (child: ChildProcess, signal: NodeJS.Signals): ProcInfo[] => {
+  if (child.pid === undefined) return [];
+  if (isWindows) {
+    child.kill(signal);
+    return [];
+  }
+  const snapshot = descendants(child.pid);
+  trySignal(-child.pid, signal);
+  trySignal(child.pid, signal);
+  signalSnapshot(snapshot, signal);
+  return snapshot;
+};
+
 /**
  * 프로세스를 끝낸다: SIGTERM → `graceMs` 뒤에도 살아 있으면 SIGKILL.
- * 부모가 끝난 뒤에도 그룹에 남은 하위 프로세스가 있을 수 있어 마지막에 그룹 SIGKILL을 한 번 더 보낸다.
+ * 부모가 끝난 뒤에도 남은 하위 프로세스가 있을 수 있어 마지막에 그룹 · 스냅숏 전체에 SIGKILL을 보낸다.
  */
 export const stopProcess = async (child: ChildProcess, graceMs = 5_000): Promise<void> => {
+  const snapshot: ProcInfo[] = [];
   if (!exitedAlready(child)) {
     const exited = waitExit(child);
-    signalTree(child, 'SIGTERM');
-    const timer = setTimeout(() => signalTree(child, 'SIGKILL'), graceMs);
+    snapshot.push(...signalTree(child, 'SIGTERM'));
+    const timer = setTimeout(() => snapshot.push(...signalTree(child, 'SIGKILL')), graceMs);
     await exited;
     clearTimeout(timer);
   }
-  signalTree(child, 'SIGKILL');
+  if (child.pid !== undefined && !isWindows) trySignal(-child.pid, 'SIGKILL');
+  signalSnapshot(snapshot, 'SIGKILL');
 };
 
 export interface CommandResult extends ExitInfo {
@@ -171,14 +261,16 @@ export const runCommand = async (
   }
   const child = startProcess(cmd, args, options);
   let timedOut = false;
+  let killed: ProcInfo[] = [];
   const timer = setTimeout(() => {
     timedOut = true;
-    signalTree(child, 'SIGKILL');
+    killed = signalTree(child, 'SIGKILL');
   }, options.timeoutMs);
   const exit = await waitExit(child);
   clearTimeout(timer);
   // 정상 종료여도 그룹에 남은 하위 프로세스를 정리한다
-  signalTree(child, 'SIGKILL');
+  if (child.pid !== undefined && !isWindows) trySignal(-child.pid, 'SIGKILL');
+  signalSnapshot(killed, 'SIGKILL');
   return { ...exit, timedOut, durationMs: Date.now() - started };
 };
 
