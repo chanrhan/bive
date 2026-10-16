@@ -3,7 +3,7 @@
 // - [+ 새 요구사항]: 목록 맨 위 입력 줄 → requirement.create 1회 → 목록 다시 불러오기
 //   (저장 뒤 규칙 제안은 오케스트레이터 쪽 이슈 #21이 붙인다. 화면은 호출만 한다)
 // - 상세 자리: 고른 항목의 상세 내용 · 직접 편집 · 삭제는 이슈 #38. 지금은 빈 틀이고 고른 항목이 없으면 "선택 항목 없음"
-// - 상태(ADR-053): 프로젝트 없음 = "프로젝트 없음" · 로딩 = 목록 자리 비움(문구 · 스켈레톤 없음) ·
+// - 상태(ADR-053): 프로젝트 조회 중 = 비움 · 프로젝트 없음 = "프로젝트 없음" · 로딩 = 목록 자리 비움(문구 · 스켈레톤 없음) ·
 //   불러오기 실패 = 목록 자리에 "요구사항 불러오기 실패" · 0건 = "요구사항 없음"(ADR-029)
 import './RequirementsScreen.css';
 
@@ -25,19 +25,20 @@ import {
 import { useRequirements } from './useRequirements.js';
 
 export const RequirementsScreen = (): React.JSX.Element => {
-  const project = useProject();
+  const { project, loading } = useProject();
   if (project === null) {
+    // 현재 프로젝트를 아직 조회 중이면 문구 없이 기다린다 ("프로젝트 없음"이 잠깐 보이지 않게)
     return (
       <div
         className="requirements-screen"
         data-testid="requirements-screen"
-        data-state="no-project"
+        data-state={loading ? 'project-loading' : 'no-project'}
       >
-        <EmptyState text={TEXT.noProject} />
+        {!loading && <EmptyState text={TEXT.noProject} />}
       </div>
     );
   }
-  // 프로젝트가 바뀌면 고른 항목 · 입력 줄을 새로 시작한다
+  // 프로젝트가 바뀌면 고른 항목 · 입력 줄 · 목록을 새로 시작한다(이전 프로젝트 목록을 보이지 않음)
   return <RequirementsPanes key={project.id} projectId={project.id} />;
 };
 

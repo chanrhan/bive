@@ -72,7 +72,8 @@ export const NewRequirementInput = ({
           setFailed(false);
         }}
         onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing) return;
+          // 조합 중(isComposing, 일부 환경은 keyCode 229만 준다)의 키는 조합 확정용이다
+          if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
           if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             submit();

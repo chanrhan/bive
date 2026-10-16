@@ -4,12 +4,18 @@
 // - 빈: "요구사항 없음"(ADR-029), [+ 새 요구사항]은 그대로
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-053 (로딩 = 목록 자리 비움, 에러 = "요구사항 불러오기 실패")
 // 시각 문구는 e2e가 Asia/Seoul 시간대로 연다는 전제다 (scr-02.spec.ts).
-import type { Requirement } from '@bive/shared';
+import type { Project, Requirement } from '@bive/shared';
 
 import type { ElementCheck, ScreenChecklist } from './types.js';
 
-/** 가짜 브리지가 보내는 현재 프로젝트. */
-export const PROJECT = { id: '01JAAAAAAAAAAAAAAAAAAAAAAA', name: 'sample-next-app' } as const;
+/** 가짜 브리지의 `project.current` 결과 (현재 프로젝트). */
+export const PROJECT: Project = {
+  id: '01JAAAAAAAAAAAAAAAAAAAAAAA',
+  name: 'sample-next-app',
+  rootPath: '/work/sample-next-app',
+  baseBranch: 'main',
+  createdAt: '2026-10-14T00:00:00.000Z',
+};
 
 const base = {
   author: { kind: 'human' },

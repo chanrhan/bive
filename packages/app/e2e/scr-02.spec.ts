@@ -2,9 +2,13 @@
 // 1) checklists/scr-02.ts의 기본(카드 1줄 문장, 2줄 ID · 예외 · 시각, 생성 주체 아이콘) · 빈("요구사항 없음") 상태
 // 2) [+ 새 요구사항] → 목록 맨 위 입력 줄, Ctrl+Enter(⌘↵) → requirement.create 1회, Esc → 호출 없이 닫힘
 // 3) 필터 칩 4종(상태 · 작성 · 승인 · 블록), 블록은 값이 없어 0건 비활성
-// 데이터는 가짜 브리지의 requirement.list · requirement.create 응답과 project.current 알림으로만 만든다.
+// 데이터는 가짜 브리지의 project.current · requirement.list · requirement.create 응답과
+// project.opened 알림(PROJECT_OPENED_EVENT)으로만 만든다.
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
+import type { Project } from '@bive/shared';
+
+import { PROJECT_OPENED_EVENT } from '../src/common/bridge.js';
 import { CHIPS, PROJECT, REQUIREMENTS, VISIBLE_ORDER } from './checklists/scr-02.js';
 import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
 import { collectVisibleText, expectScreen, findForbiddenText } from './support/expectScreen.js';
@@ -13,8 +17,14 @@ import { collectVisibleText, expectScreen, findForbiddenText } from './support/e
 test.use({ timezoneId: 'Asia/Seoul' });
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
-/** main → renderer 현재 프로젝트 알림 (src/renderer/src/project/ProjectContext.tsx의 PROJECT_EVENT). */
-const PROJECT_EVENT = 'project.current';
+/** 프로젝트 전환 검사용 다른 프로젝트. */
+const OTHER_PROJECT: Project = {
+  id: '01JCCCCCCCCCCCCCCCCCCCCCCC',
+  name: 'other-app',
+  rootPath: '/work/other-app',
+  baseBranch: 'main',
+  createdAt: '2026-10-15T00:00:00.000Z',
+};
 
 const NEW_TEXT = '비밀번호 재설정 링크는 30분 뒤 만료';
 const NEW_REQUIREMENT = {
@@ -39,10 +49,10 @@ const openScreen = async (
   const bive = await mockBive(page, {
     responses: {
       'system.status': { result: STATUS },
+      'project.current': { result: { project: project ? PROJECT : null } },
       'requirement.list': { result: { requirements: REQUIREMENTS } },
       ...responses,
     },
-    events: project ? [{ event: PROJECT_EVENT, params: { project: PROJECT } }] : [],
   });
   await page.goto('/');
   await page.getByRole('button', { name: '요구사항', exact: true }).click();
@@ -247,6 +257,33 @@ test.describe('새 요구사항 입력 줄 (수용 기준 2)', () => {
     expect(await callsOf(bive, 'requirement.create')).toEqual([]);
   });
 
+  test('한글 조합 중의 Ctrl+Enter · Esc는 가로채지 않는다 (저장 · 닫기 없음)', async ({ page }) => {
+    const bive = await openScreen(page, {
+      'requirement.create': { result: { requirement: NEW_REQUIREMENT } },
+    });
+    await newButton(page).click();
+    await input(page).fill(NEW_TEXT);
+    await input(page).evaluate((element) => {
+      const keydown = (init: KeyboardEventInit): void => {
+        element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...init }));
+      };
+      keydown({ key: 'Enter', ctrlKey: true, isComposing: true });
+      keydown({ key: 'Enter', metaKey: true, isComposing: true });
+      keydown({ key: 'Escape', isComposing: true });
+      // 조합 상태를 keyCode 229로만 알리는 환경
+      keydown({ key: 'Enter', ctrlKey: true, keyCode: 229 });
+      keydown({ key: 'Escape', keyCode: 229 });
+    });
+    await expect(input(page)).toBeVisible();
+    await expect(input(page)).toHaveValue(NEW_TEXT);
+    expect(await callsOf(bive, 'requirement.create')).toEqual([]);
+
+    // 조합이 끝난 뒤의 Ctrl+Enter는 저장한다
+    await input(page).press('Control+Enter');
+    await expect(page.getByTestId('new-requirement')).toHaveCount(0);
+    expect(await callsOf(bive, 'requirement.create')).toHaveLength(1);
+  });
+
   test('저장 중에 다시 눌러도 1회만 부른다', async ({ page }) => {
     const bive = await openScreen(page, {
       'requirement.create': { result: { requirement: NEW_REQUIREMENT }, delayMs: 400 },
@@ -354,6 +391,37 @@ test.describe('필터 칩 (수용 기준 3)', () => {
   });
 });
 
+test.describe('프로젝트 전환 (ADR-034 · ADR-053)', () => {
+  test('다른 프로젝트가 열리면 이전 목록 없이 로딩부터 하고, 필터를 비우고 새 프로젝트로 다시 부른다', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    await chipButton(page, 'author').click();
+    await page.getByTestId('filter-option').filter({ hasText: '에이전트' }).click();
+    await page.keyboard.press('Escape');
+    expect(await cardIds(page)).toEqual(['REQ-002']);
+    await expect(page.getByTestId('list-result')).toBeVisible();
+
+    // 새 프로젝트의 목록은 잠시 대기한다. 이전 필터가 남아 있으면 에이전트 항목만 보이는 데이터다
+    await bive.setResponse('requirement.list', {
+      result: { requirements: REQUIREMENTS },
+      delayMs: 1500,
+    });
+    await bive.emit(PROJECT_OPENED_EVENT, { project: OTHER_PROJECT, created: false, empty: false });
+
+    await expect(page.getByTestId('requirements-loading')).toBeVisible();
+    await expect(page.getByTestId('card')).toHaveCount(0);
+    await expect(page.getByTestId('list-view')).toHaveCount(0);
+
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    await expect(chipButton(page, 'author')).toHaveText('작성');
+    await expect(page.getByTestId('filter-chip-author')).toHaveAttribute('data-selected', 'false');
+    await expect(page.getByTestId('list-result')).toHaveCount(0);
+    const listCalls = await callsOf(bive, 'requirement.list');
+    expect(listCalls.at(-1)?.params).toEqual({ projectId: OTHER_PROJECT.id });
+  });
+});
+
 test.describe('화면 문구', () => {
   /** 화면 정의서 1.1 금지 패턴(PRD ID · 화면 코드 · 이모지) + 개발 단계 · 미구현 문구(ADR-035). */
   const STAGE_TEXT = [/\bM\d\b/, /준비 중/, /로딩/, /Loading/i];
@@ -377,7 +445,7 @@ test.describe('화면 문구', () => {
     await expectCleanText(page);
     await page.keyboard.press('Escape');
 
-    // 다른 화면에 갔다 오면 다시 불러온다: 로딩 → 에러
+    // 다른 화면에 갔다 오면 다시 불러온다: 응답 대기(로딩) 상태
     await bive.setResponse('requirement.list', { pending: true });
     await page.getByRole('button', { name: '검증', exact: true }).click();
     await page.getByRole('button', { name: '요구사항', exact: true }).click();
