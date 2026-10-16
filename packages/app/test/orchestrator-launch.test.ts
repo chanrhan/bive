@@ -280,6 +280,24 @@ describe('ensureOrchestrator: 접속 재시도 (ADR-041)', () => {
     );
     expect(Date.now() - started).toBeLessThan(2000);
   });
+
+  it('띄운 자식이 비정상 종료하면 제한 시간을 기다리지 않고 오류', async () => {
+    const home = makeBiveHome();
+    const command = { ...sourceCommand(home), args: ['-e', 'process.exit(3)'] };
+    const started = Date.now();
+    await expect(ensureOrchestrator({ biveHome: home, command })).rejects.toThrow(
+      '오케스트레이터 기동 실패: 비정상 종료 (코드 3',
+    );
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('자식이 종료 코드 0(이미 실행 중)으로 끝나면 실패로 보지 않고 접속을 계속 시도한다', async () => {
+    const home = makeBiveHome();
+    const command = { ...sourceCommand(home), args: ['-e', ''] };
+    await expect(ensureOrchestrator({ biveHome: home, command, timeoutMs: 800 })).rejects.toThrow(
+      '오케스트레이터 접속 시간 초과',
+    );
+  });
 });
 
 describe('실행 방식 판단', () => {
@@ -337,11 +355,19 @@ describe('OrchestratorLink', () => {
   });
 
   it('접속에 실패하면 -32603 오케스트레이터 연결 실패로 거부한다', async () => {
-    const link = new OrchestratorLink(() => Promise.reject(new Error('없음')));
+    const logs: string[] = [];
+    const link = new OrchestratorLink(
+      () => Promise.reject(new Error('/tmp/x/run/token 없음')),
+      (m) => logs.push(m),
+    );
     const error = await link.request('ping').catch((e: unknown) => e);
     expect(error).toBeInstanceOf(PipeRpcError);
-    expect((error as PipeRpcError).code).toBe(ErrorCode.InternalError);
-    expect((error as PipeRpcError).message).toBe('오케스트레이터 연결 실패');
+    // 응답에는 코드 · 고정 메시지만, 원본 메시지(경로)는 main 로그에만 (ADR-042)
+    expect((error as PipeRpcError).toErrorObject()).toEqual({
+      code: ErrorCode.InternalError,
+      message: '오케스트레이터 연결 실패',
+    });
+    expect(logs).toEqual(['오케스트레이터 연결 실패: /tmp/x/run/token 없음']);
     expect(link.state).toBe('disconnected');
   });
 });

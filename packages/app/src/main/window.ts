@@ -1,4 +1,4 @@
-// 메인 창 (architecture.md 10장 "렌더러 격리"): contextIsolation · nodeIntegration 끔 · sandbox는 Electron 기본(켜짐).
+// 메인 창 (architecture.md 10장 "렌더러 격리"): contextIsolation · sandbox 켬, nodeIntegration 끔, CSP는 index.html.
 import path from 'node:path';
 
 import { BrowserWindow } from 'electron';
@@ -15,6 +15,8 @@ export const createMainWindow = (baseDir: string): BrowserWindow => {
       preload: path.join(baseDir, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      // Electron 기본값도 켜짐이지만 기본값 변경에 기대지 않도록 명시한다
+      sandbox: true,
     },
   });
   window.once('ready-to-show', () => window.show());

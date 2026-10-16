@@ -52,7 +52,7 @@ pnpm 워크스페이스 · TypeScript strict · ESM. 경계는 ESLint `no-restri
 | `packages/parser` (M2) | import 그래프 · 블록 판정 · Prisma→ERD · jscpd · 테스트 요청 경로 스캔 · OpenAPI 대조 | `shared` | `store`, `orchestrator`, `app` (순수 함수: 파일 입력 → 결과) |
 | `packages/orchestrator` | 파이프 서버 · 실행 엔진 · 에이전트 어댑터 · 고정 도구 · 판정기 · 예산 · git · 감시자 | `shared`, `store`, `parser`, `@anthropic-ai/claude-agent-sdk` | `app` |
 | `packages/app` main | 창 · 파이프 클라이언트 · 오케스트레이터 기동 · 폴더 선택 대화상자 | `shared`, `electron` | `store`, `orchestrator`, `parser` (프로세스 경계 넘는 import 금지, 실행 파일 경로로만 기동) |
-| `packages/app` preload | `window.bive` 노출, 메서드 허용 목록 | `shared` (타입 · 메서드 이름 상수) | Node 모듈 직접 노출 |
+| `packages/app` preload | `window.bive` 노출(`invoke` · `on`만). 메서드 허용 목록은 main (ADR-042) | `electron`, `shared` (타입만) | Node 모듈 직접 노출 |
 | `packages/app` renderer | 화면 21개 (SCR-01~21) | `shared` (`import type`만), `react` | `electron`, Node 모듈, 다른 패키지 런타임 코드 |
 | `fixtures/sample-next-app` | 테스트 대상 프로젝트 (Next.js · Prisma · SQLite · Vitest, PRD 6장) | 자체 의존성만 | 워크스페이스 패키지 전부 |
 
@@ -215,7 +215,7 @@ stateDiagram-v2
 - 검증: 모든 요청 · 응답 · 알림을 `shared/protocol` zod 스키마로 양쪽에서 검증. 스키마 불일치 = `-32602`
 - 연결 수립: `system.hello { protocolVersion, token }`. 토큰 = `~/.bive/run/token` (0600, 기동마다 갱신). 불일치 시 연결 종료
 - 인증 전 메시지 처리 · 프레임 상한(1 MiB) · 유휴 종료(`BIVE_IDLE_SHUTDOWN_MS`) · 단일 인스턴스 잠금(`run/orchestrator.pid`)은 ADR-041. 구현 `orchestrator/src/ipc/{transport,server}.ts` · `lifecycle.ts` · `lock.ts`
-- 렌더러 경로: renderer `window.bive.invoke(method, params)` → preload(허용 목록 확인) → `ipcRenderer.invoke('bive:rpc')` → main(zod 검증) → 파이프. 알림은 main → `webContents.send` → `window.bive.on(event, cb)`
+- 렌더러 경로: renderer `window.bive.invoke(method, params)` → preload(그대로 전달) → `ipcRenderer.invoke('bive:rpc')` → main(허용 목록 확인 · zod 검증, 접속 전) → 파이프. 알림은 main → `webContents.send('bive:event')` → `window.bive.on(event, cb)`. 샌드박스 preload는 electron 외 모듈을 불러올 수 없어 검증은 main이 맡는다 (ADR-042)
 - main 전용 (파이프 아님): `app.pickFolder` (OS 대화상자), `app.openInIde` (MET-01, P1)
 
 | 메서드 | 파라미터 → 결과 | 출처 | 단계 |
@@ -352,7 +352,7 @@ stateDiagram-v2
 | 판정 근거는 실행기 결과만 (JDG-01) | `orchestrator/src/judge/runner.ts`: BIVE 전용 vitest 설정(`judge/<runId>/vitest.config.mjs`)으로 직접 실행, 프로젝트 설정 미사용. Run · Rule 상태 변경 함수는 `judge`만 호출 | "통과" 보고 시나리오 |
 | 인수 테스트는 HTTP로만 (JDG-01) | `orchestrator/src/judge/acceptance-lint.ts`: 테스트 파일 import 허용 목록 (vitest · BIVE HTTP 도우미 · Node 내장) 위반 시 테스트 작성 단계 미종료 | 소스 import 테스트 거부 |
 | 인수 테스트 변조 방지 | implementer 경로 가드에서 인수 테스트 디렉터리 쓰기 거부 + 해시 대조 (4장) | 해시 불일치 시나리오 |
-| 렌더러 격리 | `app/src/main/window.ts`: `contextIsolation: true` · `sandbox: true` · `nodeIntegration: false` · CSP. preload 메서드 허용 목록 | Electron 스모크에서 `require` 부재 확인 |
+| 렌더러 격리 | `app/src/main/window.ts`: `contextIsolation: true` · `sandbox: true` · `nodeIntegration: false`, CSP는 `renderer/index.html`. preload는 `invoke` · `on`만 노출, 메서드 허용 목록 · 스키마 검증은 `app/src/main/rpc-bridge.ts` (ADR-042) | Electron 스모크에서 `window.bive` 키 · `require` 부재 확인 |
 | 같은 사용자 다른 프로세스 (완전 차단 불가, PRD 5.1) | 소켓 0600 · 토큰 · ApprovalLog 해시 체인으로 변조 증거 | 해시 체인 검증 테스트 |
 
 - 블록 밖 쓰기는 차단하지 않고 측정 (DSN-02, NFR-02). 차단은 역할별 금지 경로만

@@ -34,20 +34,30 @@ export const removeAppPid = (paths: AppRunPaths, pid: number): void => {
 
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
 
+/** 접속 실패 응답 메시지. 상세(`data`)는 붙이지 않는다. */
+export const CONNECT_FAILED_MESSAGE = '오케스트레이터 연결 실패';
+
+const defaultLog = (message: string): void => {
+  console.error(message);
+};
+
 /**
  * 오케스트레이터 연결 1개를 유지한다. 요청 때 연결이 없거나 끊겼으면 다시 접속(필요하면 기동)한다.
  * 동시에 들어온 요청은 같은 접속 시도를 기다린다.
  */
 export class OrchestratorLink {
   readonly #connect: () => Promise<EnsureResult>;
+  readonly #log: (message: string) => void;
   readonly #notificationListeners = new Set<(notification: PipeNotification) => void>();
   #current: EnsureResult | null = null;
   #connecting: Promise<EnsureResult> | null = null;
   #state: ConnectionState = 'disconnected';
   #closed = false;
 
-  constructor(connect: () => Promise<EnsureResult>) {
+  /** `log`: main 프로세스 로그 (기본 표준 오류). 렌더러로 가지 않는 상세를 남긴다 */
+  constructor(connect: () => Promise<EnsureResult>, log: (message: string) => void = defaultLog) {
     this.#connect = connect;
+    this.#log = log;
   }
 
   get state(): ConnectionState {
@@ -100,16 +110,19 @@ export class OrchestratorLink {
     return () => this.#notificationListeners.delete(listener);
   }
 
-  /** 요청. 연결 실패는 -32603 `오케스트레이터 연결 실패`로 바꾼다. */
+  /**
+   * 요청. 연결 실패는 -32603 `오케스트레이터 연결 실패`로 바꾼다.
+   * 원본 오류(로컬 경로 · 시스템 메시지)는 응답에 싣지 않고 main 로그에만 남긴다 (ADR-041 · ADR-042).
+   */
   async request(method: string, params?: unknown): Promise<unknown> {
     let client: PipeClient;
     try {
       client = (await this.connect()).client;
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new PipeRpcError(
-        rpcError(ErrorCode.InternalError, '오케스트레이터 연결 실패', { detail }),
+      this.#log(
+        `오케스트레이터 연결 실패: ${error instanceof Error ? error.message : String(error)}`,
       );
+      throw new PipeRpcError(rpcError(ErrorCode.InternalError, CONNECT_FAILED_MESSAGE));
     }
     return client.request(method, params);
   }
@@ -127,6 +140,8 @@ export interface MainSessionOptions extends Omit<EnsureOptions, 'biveHome'> {
   biveHome: string;
   /** 기록할 앱 main pid (기본 현재 프로세스) */
   appPid?: number;
+  /** main 로그 (기본 표준 오류) */
+  log?: (message: string) => void;
 }
 
 export interface MainSession {
@@ -139,10 +154,10 @@ export interface MainSession {
 
 /** 앱 main 시작: app.pid를 쓰고 연결 관리자를 만든다. 접속은 `link.connect()` 또는 첫 요청 때. */
 export const startMainSession = (options: MainSessionOptions): MainSession => {
-  const { appPid = process.pid, ...ensure } = options;
+  const { appPid = process.pid, log, ...ensure } = options;
   const paths = appRunPaths(options.biveHome, options.platform, options.username);
   writeAppPid(paths, appPid);
-  const link = new OrchestratorLink(() => ensureOrchestrator(ensure));
+  const link = new OrchestratorLink(() => ensureOrchestrator(ensure), log);
   let disposed = false;
   return {
     paths,

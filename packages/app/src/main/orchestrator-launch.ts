@@ -170,7 +170,8 @@ export const ensureOrchestrator = async (options: EnsureOptions): Promise<Ensure
 
   let launched = false;
   let spawnedPid: number | null = null;
-  let spawnError: Error | null = null;
+  /** 띄운 자식이 실행되지 못했거나 비정상 종료한 이유. 있으면 기다리지 않고 바로 실패한다 */
+  let launchFailure: string | null = null;
 
   const runningPid = (): number | null => {
     const pid = readPidFile(paths.orchestratorPid);
@@ -181,13 +182,18 @@ export const ensureOrchestrator = async (options: EnsureOptions): Promise<Ensure
     if (!launched && runningPid() === null) {
       const child = spawnDetached(spawn, options.command);
       child.once('error', (error) => {
-        spawnError = error;
+        launchFailure ??= `실행 불가 (${error.message})`;
+      });
+      // 종료 코드 0은 '이미 실행 중'(다른 기동이 먼저 잠금을 잡음)이므로 계속 접속을 시도한다 (ADR-041)
+      child.once('exit', (code, signal) => {
+        if (code !== 0)
+          launchFailure ??= `비정상 종료 (코드 ${code ?? '없음'}, 신호 ${signal ?? '없음'})`;
       });
       launched = true;
       spawnedPid = child.pid ?? null;
     }
-    if (spawnError !== null) {
-      throw new Error(`오케스트레이터 기동 실패: ${(spawnError as Error).message}`);
+    if (launchFailure !== null) {
+      throw new Error(`오케스트레이터 기동 실패: ${launchFailure as string}`);
     }
     try {
       const token = readFileSync(paths.token, 'utf8');

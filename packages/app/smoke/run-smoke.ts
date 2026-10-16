@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { _electron } from 'playwright-core';
+import { _electron, type ElectronApplication } from 'playwright-core';
 
 import { electronArgs } from '../src/launch-flags.js';
 import { isProcessAlive, readPidFile } from '../src/main/orchestrator-launch.js';
@@ -49,10 +49,11 @@ const main = async (): Promise<void> => {
   env.BIVE_HOME = biveHome;
   env.BIVE_IDLE_SHUTDOWN_MS = String(IDLE_SHUTDOWN_MS);
 
+  let app: ElectronApplication | null = null;
   try {
     const args = electronArgs({ appDir: APP_DIR, userArgs: [], uid: process.getuid?.(), env });
     console.log(`Electron 실행: ${electronPath} ${args.join(' ')}`);
-    const app = await _electron.launch({
+    app = await _electron.launch({
       executablePath: electronPath,
       args,
       env,
@@ -104,6 +105,7 @@ const main = async (): Promise<void> => {
     );
 
     await app.close();
+    app = null;
     const code = await exited;
     check(code === 0, '앱 종료 코드 0', code);
     check(readPidFile(paths.appPid) === null, '앱 종료 뒤 app.pid 삭제');
@@ -122,6 +124,14 @@ const main = async (): Promise<void> => {
       `오케스트레이터 유휴 종료 (${IDLE_SHUTDOWN_MS}ms)`,
     );
   } finally {
+    // 확인이 중간에 실패해도 Electron을 남기지 않는다: 정상 종료를 시도하고, 안 되면 강제 종료
+    if (app !== null) {
+      const electronProcess = app.process();
+      await Promise.race([app.close().catch(() => undefined), sleep(10_000)]);
+      if (electronProcess.exitCode === null && electronProcess.signalCode === null) {
+        electronProcess.kill('SIGKILL');
+      }
+    }
     // 남은 오케스트레이터가 있으면 정리한다
     const leftover = readPidFile(paths.orchestratorPid);
     if (leftover !== null && isProcessAlive(leftover)) {
