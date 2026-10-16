@@ -1,6 +1,11 @@
 /** 패키지 식별자. */
 export const PACKAGE_NAME = '@bive/orchestrator';
 
+export * from './agent/adapter.js';
+export * from './agent/claude-sdk-adapter.js';
+export * from './agent/scenario.js';
+export * from './agent/scripted-adapter.js';
+export * from './agent/select.js';
 export * from './ipc/handlers.js';
 export * from './ipc/project-store-access.js';
 export * from './ipc/requirement-handlers.js';

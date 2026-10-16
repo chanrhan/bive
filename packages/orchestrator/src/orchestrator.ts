@@ -1,7 +1,9 @@
-// 오케스트레이터 기동 · 종료: 단일 인스턴스 잠금 → 토큰 → 파이프 서버 → 수명 감시 (PRD 5.1, ADR-027 · ADR-041).
+// 오케스트레이터 기동 · 종료: 어댑터 선택 → 단일 인스턴스 잠금 → 토큰 → 파이프 서버 → 수명 감시
+// (PRD 5.1, ADR-027 · ADR-041 · ADR-049).
 import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 
+import { type AgentSelection, selectAgent } from './agent/select.js';
 import { createHandlers } from './ipc/handlers.js';
 import { PipeServer } from './ipc/server.js';
 import { NetPipeTransport, type PipeTransport } from './ipc/transport.js';
@@ -24,6 +26,8 @@ export interface OrchestratorOptions {
   username?: string;
   transport?: PipeTransport;
   version?: string;
+  /** 에이전트 어댑터. 생략하면 `BIVE_AGENT` · `BIVE_SCENARIO`로 고른다 (잘못되면 AgentConfigError) */
+  agent?: AgentSelection;
 }
 
 export interface Orchestrator {
@@ -32,6 +36,8 @@ export interface Orchestrator {
   readonly version: string;
   /** 죽은 pid의 잠금을 인수하고 기동했는지 */
   readonly staleLockTakenOver: boolean;
+  /** 기동 시 고른 에이전트 어댑터. 실행 엔진(M1-14)이 세션을 열 때 쓴다 */
+  readonly agent: AgentSelection;
   /** 실행 엔진이 진행 중 실행을 알리는 자리 */
   readonly runs: RunTracker;
   readonly connectionCount: number;
@@ -83,6 +89,8 @@ const unlinkTokenIfOurs = (tokenPath: string, token: string): void => {
  * 잠금을 잡으면 이전 소켓 파일(비정상 종료 잔여물)을 지우고 토큰을 새로 쓴 뒤 듣기 시작한다.
  */
 export const startOrchestrator = async (options: OrchestratorOptions): Promise<StartResult> => {
+  // 설정 오류는 잠금 · 파일을 건드리기 전에 드러낸다
+  const agent = options.agent ?? selectAgent(process.env, { biveHome: options.biveHome });
   const platform = options.platform ?? process.platform;
   const paths = runPaths(options.biveHome, platform, options.username ?? os.userInfo().username);
   const version = options.version ?? ORCHESTRATOR_VERSION;
@@ -188,6 +196,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         token: ownToken,
         version,
         staleLockTakenOver: locked.staleTakenOver,
+        agent,
         runs: lifecycle,
         get connectionCount() {
           return listening.connectionCount;

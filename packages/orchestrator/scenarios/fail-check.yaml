@@ -1,0 +1,159 @@
+# 구현 실패 (architecture.md 8장 "구현 실패 3회", roadmap M1 완료 기준 흐름 8).
+# 구현 세션이 매번 잘못된 version 값을 넣어 대상 인수 테스트를 끝내 통과시키지 못한다.
+# 구현 단계 최대 3회(회귀 2회) 뒤 실행이 실패해야 한다. 4번째 이후 구현 세션은 마지막 세션을 반복한다.
+name: fail-check
+description: 테스트 작성이 버전 인수 테스트를 쓰고, 구현이 세 번 모두 형식이 틀린 version을 넣어 통과하지 못함
+roles:
+  rule-writer:
+    sessions:
+      - turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답의 버전
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 version 필드에 MAJOR.MINOR.PATCH 형식의 버전 문자열을 담는다
+              kind: business
+              checkKinds: [test]
+              rationale: 요구사항의 '버전 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+          - message: 규칙 제안 1건을 등록했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0198
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 1620
+              outputTokens: 410
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 5200
+              costUSD: 0.0198
+  test-writer:
+    sessions:
+      - turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-version.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 버전. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                const SEMVER = /^\d+\.\d+\.\d+$/;
+
+                describe('GET /api/health 버전', () => {
+                  it('응답 JSON의 version이 MAJOR.MINOR.PATCH 형식 문자열이다', async () => {
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as { ok?: unknown; version?: unknown };
+                    expect(body.ok).toBe(true);
+                    expect(typeof body.version).toBe('string');
+                    expect(String(body.version)).toMatch(SEMVER);
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0376
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2080
+              outputTokens: 760
+              cacheReadInputTokens: 4100
+              cacheCreationInputTokens: 6050
+              costUSD: 0.0376
+  implementer:
+    sessions:
+      - description: 1회차 - version을 숫자로 넣음
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 버전을 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true, version: 1 });
+                }
+          - message: 헬스 체크 응답에 버전을 추가했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0563
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 3010
+              outputTokens: 1090
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0563
+      - description: 2회차 - 접두 v를 붙임
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 버전을 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true, version: 'v0.1.0' });
+                }
+          - message: 버전 값을 문자열로 고쳤습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0571
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 3060
+              outputTokens: 1110
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0571
+      - description: 3회차 - 필드 이름을 틀림
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 버전을 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true, appVersion: '0.1.0' });
+                }
+          - message: 버전 필드를 다시 고쳤습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0549
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 2980
+              outputTokens: 1050
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0549

@@ -11,7 +11,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "scenarios"
   ],
   "scripts": {
     "lint": "eslint .",
@@ -29,6 +30,8 @@
   },
   "dependencies": {
     "@bive/shared": "workspace:*",
-    "@bive/store": "workspace:*"
+    "@bive/store": "workspace:*",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
   }
 }

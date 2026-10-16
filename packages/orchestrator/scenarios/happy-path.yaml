@@ -1,0 +1,110 @@
+# 정상 완주 (architecture.md 8장, roadmap M1 완료 기준 흐름 3 · 6 · 7).
+# 형식: src/agent/scenario.ts. 자리표시자 {{이름}}은 세션 vars(requirementId · ruleId)와 biveHome · workDir로 채운다.
+# 대상 픽스처: fixtures/sample-next-app (GET /api/health가 { ok: true } 반환). 인수 테스트 위치 ADR-026.
+name: happy-path
+description: 규칙 작성이 제안 2개, 테스트 작성이 서버 시각 인수 테스트, 구현이 헬스 체크 응답에 time 필드를 추가해 통과
+roles:
+  rule-writer:
+    sessions:
+      - turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답의 서버 시각
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 time 필드에 응답 시점의 서버 시각을 ISO 8601 UTC 문자열로 담는다
+              kind: business
+              checkKinds: [test]
+              rationale: 요구사항의 '서버 시각 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답 형식 유지
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 상태 코드 200과 JSON 본문의 ok 값 true를 유지한다
+              kind: business
+              checkKinds: [test]
+              rationale: 시각 필드를 더해도 기존 상태 확인 응답이 깨지지 않아야 함
+          - message: 규칙 제안 2건을 등록했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0312
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 1840
+              outputTokens: 620
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 5200
+              costUSD: 0.0312
+  test-writer:
+    sessions:
+      - turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 서버 시각. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+
+                describe('GET /api/health 서버 시각', () => {
+                  it('응답 JSON의 time이 응답 시점의 ISO 8601 UTC 시각이다', async () => {
+                    const before = Date.now();
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+                    const after = Date.now();
+
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as { ok?: unknown; time?: unknown };
+                    expect(body.ok).toBe(true);
+                    expect(typeof body.time).toBe('string');
+                    const time = String(body.time);
+                    expect(time).toMatch(ISO_UTC);
+                    const at = Date.parse(time);
+                    expect(at).toBeGreaterThanOrEqual(before - 1000);
+                    expect(at).toBeLessThanOrEqual(after + 1000);
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0421
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2310
+              outputTokens: 940
+              cacheReadInputTokens: 4100
+              cacheCreationInputTokens: 6050
+              costUSD: 0.0421
+  implementer:
+    sessions:
+      - turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 서버 시각을 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true, time: new Date().toISOString() });
+                }
+          - message: 헬스 체크 응답에 서버 시각(time)을 추가했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0587
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 3120
+              outputTokens: 1180
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0587
