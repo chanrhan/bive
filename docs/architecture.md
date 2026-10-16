@@ -76,6 +76,12 @@ interface AgentSession {
 - `ScriptedAdapter`: 시나리오 파일의 도구 호출 · 파일 변경 · 비용 메시지를 순서대로 재생. 도구 호출은 실제 고정 도구 · 경로 가드를 통과 (가드도 함께 검증). 모든 자동 테스트가 사용 (Claude 인증 없음)
 - 실행 엔진은 `AgentEvent`만 소비. 에이전트 텍스트는 이벤트 로그로만 저장, 상태 전이 입력 아님 (JDG-01)
 
+패키지 간 import 해석 (M0-03)
+- `@bive/shared`의 `exports` 맨 앞에 사용자 정의 조건 `@bive/source` → `./src/index.ts`를 두고, 그 뒤 `types` · `default`는 `dist`를 가리킨다. store · parser가 import 대상이 되면 같은 조건을 추가한다
+- 타입 검사: `tsconfig.base.json`의 `customConditions: ["@bive/source"]`로 src를 읽는다. 단위 테스트: 각 패키지 `vitest.config.ts`의 `ssr.resolve.conditions`에 같은 조건을 넣는다. 따라서 `pnpm typecheck` · `pnpm test`는 빌드 없이 통과한다
+- 빌드: 각 `tsconfig.build.json`이 `customConditions: []`로 덮어써 `dist`의 선언 파일을 쓴다 (`pnpm -r build`가 의존 순서대로 빌드). Node · Electron 런타임은 이 조건을 모르므로 항상 `dist`를 읽는다
+- 증명: `packages/store/test/shared-import.test.ts`
+
 ## 3. 데이터 모델
 
 공통 규칙

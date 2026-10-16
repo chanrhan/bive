@@ -1,2 +1,7 @@
-/** 패키지 식별자. 워크스페이스 뼈대 확인용 최소 export (M0-01). */
+/** 패키지 식별자. */
 export const PACKAGE_NAME = '@bive/shared';
+
+export * from './domain.js';
+export * from './enums.js';
+export * from './id.js';
+export * from './protocol.js';
