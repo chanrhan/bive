@@ -19,4 +19,5 @@ export * from './pipe-path.js';
 export * from './proposals/proposal-service.js';
 export * from './run-paths.js';
 export * from './token.js';
+export * from './tools/index.js';
 export * from './version.js';
