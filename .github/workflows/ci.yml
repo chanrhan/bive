@@ -56,6 +56,10 @@ jobs:
       - name: 형식 검사
         run: pnpm format:check
 
+      # 초기화 스크립트의 경로 가드 · 추적 파일 복사 검사 (임시 복사본에서 실행, 실제 저장소는 건드리지 않음)
+      - name: 초기화 스크립트 검사
+        run: scripts/test-reset-fixture.sh
+
       # 테스트 대상 픽스처 (M0-08). 루트 워크스페이스 밖의 독립 프로젝트라 자기 lockfile로 따로 설치한다.
       - name: 픽스처 의존성 설치
         working-directory: fixtures/sample-next-app
