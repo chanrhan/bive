@@ -353,7 +353,7 @@ stateDiagram-v2
 | 사용자 · 프로젝트 설정 비로드, 자동 메모리 비활성 (PRD 5.1) | 같은 파일: `settingSources: []`, `persistSession: false`, 자동 메모리 끔 (설정 키는 M0 확인) | 옵션 스냅샷 |
 | 서브 에이전트 금지 (ADR-007) | 같은 파일: `agents` 미지정 + 내장 도구 없음 → 생성 경로 없음 | init 도구 목록 검사 |
 | 계정 MCP 차단 · 도구 기록 (NFR-02) | `orchestrator/src/tools/session-guard.ts`(ADR-052): init 메시지의 `tools` · `mcp_servers`가 역할 허용 목록과 다르면 세션 중단 → 실행 `failed`. Run.toolManifest 기록 | 추가 MCP 시나리오 |
-| 명령은 고정 도구로만 (NFR-02) | `orchestrator/src/tools/commands.ts`: 허용 argv 템플릿 (`run_tests` · `prisma_generate` · `prisma_migrate` · `install_package`=허용 목록) · `execFile` · 타임아웃 · 환경 변수 정리 | 임의 인자 거부 테스트 |
+| 명령은 고정 도구로만 (NFR-02) | `orchestrator/src/tools/commands.ts`: 허용 argv 템플릿 (`run_tests` · `prisma_generate` · `prisma_migrate` · `install_package`=허용 목록) · 셸 없는 실행(`spawn`, 프로세스 그룹 정리, ADR-052) · 타임아웃 · 환경 변수 정리 | 임의 인자 거부 테스트 |
 | 커밋 · 병합은 오케스트레이터만 (RUN-08) | `orchestrator/src/git/*`. 에이전트 도구에 git 없음, 워크트리 `.git` 쓰기 경로 가드 거부 | `.git` 쓰기 거부 테스트 |
 | 판정 근거는 실행기 결과만 (JDG-01) | `orchestrator/src/judge/runner.ts`: BIVE 전용 vitest 설정(`judge/<runId>/vitest.config.mjs`)으로 직접 실행, 프로젝트 설정 미사용. Run · Rule 상태 변경 함수는 `judge`만 호출 | "통과" 보고 시나리오 |
 | 인수 테스트는 HTTP로만 (JDG-01) | `orchestrator/src/judge/acceptance-lint.ts`: 테스트 파일 import 허용 목록 (vitest · BIVE HTTP 도우미 · Node 내장) 위반 시 테스트 작성 단계 미종료 | 소스 import 테스트 거부 |

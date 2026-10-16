@@ -1,6 +1,8 @@
 // 고정 도구 실행기 (NFR-01 · NFR-02 · ADR-024 · ADR-052). `SessionSpec.tools`에 넘기는 ToolExecutor 구현.
 // 역할 허용 목록 밖 이름은 `denied`(`unknown_tool`), 인자는 도구 정의 스키마로 검증하고,
 // 모든 호출(거부 · 오류 포함)을 ToolCallRecord로 남긴다. 기록 저장은 실행 엔진(M1-14)이 콜백으로 받는다.
+import path from 'node:path';
+
 import type { AgentRole } from '@bive/shared';
 
 import type { ToolExecutor, ToolResult } from '../agent/adapter.js';
@@ -106,6 +108,12 @@ export class FixedToolExecutor implements ToolExecutor {
     this.now = options.now ?? (() => new Date());
   }
 
+  /** 예외 메시지에서 세션 루트 절대 경로를 지운다 (모델 · 기록에 호스트 경로를 노출하지 않음). */
+  private hidePaths(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.split(`${this.guard.root}${path.sep}`).join('').split(this.guard.root).join('.');
+  }
+
   /** init 이벤트의 세션 ID를 기록에 쓴다. */
   setSessionId(sessionId: string): void {
     this.sessionId = sessionId;
@@ -121,7 +129,7 @@ export class FixedToolExecutor implements ToolExecutor {
       result = outcome.result;
       summary = outcome.summary;
     } catch (error) {
-      result = failed('tool_failed', error instanceof Error ? error.message : String(error));
+      result = failed('tool_failed', this.hidePaths(error));
     }
     const record: ToolCallRecord = {
       at: startedAt.toISOString(),

@@ -9,6 +9,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -25,10 +26,13 @@ const isWindows = process.platform === 'win32';
 
 /**
  * 가짜 실행 파일: 받은 argv · cwd · 환경 변수를 JSON 한 줄로 출력하고 호출 기록 파일에 덧붙인다.
- * `-t` 값으로 동작을 바꾼다: `exit-3`(종료 코드 3) · `sleep`(오래 대기) · `flood`(긴 출력).
+ * `-t` 값으로 동작을 바꾼다: `exit-3`(종료 코드 3) · `sleep`(오래 대기) · `flood`(긴 출력) ·
+ * `ignore-term`(SIGTERM 무시, 자기 pid 기록) · `grandchild`(출력 통로를 물려받은 손자를 남기고 바로 끝남,
+ * 손자 pid 기록).
  */
 const FAKE_SCRIPT = (name: string, logFile: string): string => `#!/usr/bin/env node
 const fs = require('node:fs');
+const { spawn } = require('node:child_process');
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(logFile)}, JSON.stringify({ bin: ${JSON.stringify(name)}, args }) + '\\n');
 const t = args.indexOf('-t') >= 0 ? args[args.indexOf('-t') + 1] : undefined;
@@ -36,7 +40,27 @@ if (t === 'flood') process.stdout.write('x'.repeat(200000) + '\\nFLOOD_END\\n');
 process.stdout.write(JSON.stringify({ bin: ${JSON.stringify(name)}, args, cwd: process.cwd(), env: process.env }) + '\\n');
 if (t === 'exit-3') process.exit(3);
 if (t === 'sleep') setTimeout(() => {}, 20000);
+if (t === 'ignore-term') {
+  fs.writeFileSync(${JSON.stringify(logFile)} + '.pid', String(process.pid));
+  process.on('SIGTERM', () => {});
+  setInterval(() => {}, 1000);
+}
+if (t === 'grandchild') {
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => console.log("late"), 20000)'], { stdio: 'inherit' });
+  fs.writeFileSync(${JSON.stringify(logFile)} + '.pid', String(child.pid));
+  child.unref();
+}
 `;
+
+/** 프로세스가 살아 있는지 */
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 interface FakeRun {
   bin: string;
@@ -92,6 +116,20 @@ const calls = (): { bin: string; args: string[] }[] =>
         .map((line) => JSON.parse(line) as { bin: string; args: string[] })
     : [];
 
+/** ignore-term 모드의 자식 · grandchild 모드의 손자 pid. 없으면 `null`. */
+const readPid = (): number | null => {
+  const file = `${logFile}.pid`;
+  return existsSync(file) ? Number(readFileSync(file, 'utf8')) : null;
+};
+
+const waitUntil = async (condition: () => boolean, timeoutMs = 3000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('조건을 기다리다 시간 초과');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+};
+
 /** 결과 본문에서 가짜 실행 파일의 JSON 출력을 꺼낸다. */
 const fakeRun = (result: ToolResult): FakeRun => {
   const line = result.content.split('\n').find((l) => l.startsWith('{"bin"'));
@@ -104,7 +142,7 @@ const implementer = (
 ): FixedToolExecutor =>
   createRoleTools({ role: 'implementer', sessionRoot: root, biveHome: home, commands: options });
 
-describe.skipIf(isWindows)('허용 argv 템플릿 실행 (execFile)', () => {
+describe.skipIf(isWindows)('허용 argv 템플릿 실행 (셸 없는 spawn)', () => {
   it('run_tests는 인자 없이 node_modules/.bin/vitest run을 세션 루트에서 실행한다', async () => {
     const tools = implementer();
     const result = await tools.execute('run_tests', {});
@@ -193,12 +231,31 @@ describe.skipIf(isWindows)('허용 argv 템플릿 실행 (execFile)', () => {
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(env.GITHUB_TOKEN).toBeUndefined();
     expect(env.NODE_OPTIONS).toBeUndefined();
-    const allowed = new Set<string>([...COMMAND_ENV_ALLOWLIST, 'CI', 'NO_COLOR', 'FORCE_COLOR']);
+    const allowed = new Set<string>([
+      ...COMMAND_ENV_ALLOWLIST,
+      'DATABASE_URL',
+      'CI',
+      'NO_COLOR',
+      'FORCE_COLOR',
+    ]);
     // Node가 스스로 넣는 변수 외에는 허용 목록 밖 변수가 없다
     const extra = Object.keys(env).filter(
       (key) => !allowed.has(key) && !/^(_|PWD|SHLVL|OLDPWD)$/u.test(key),
     );
     expect(extra).toEqual([]);
+  });
+
+  it('DATABASE_URL은 원본 환경에서 물려받지 않고 오케스트레이터가 넘긴 값만 쓴다', async () => {
+    const tools = implementer({
+      baseEnv: {
+        PATH: process.env.PATH,
+        DATABASE_URL: 'file:/home/user/.bive/projects/p1/bive.db',
+      },
+    });
+
+    const env = fakeRun(await tools.execute('run_tests', {})).env;
+
+    expect(env.DATABASE_URL).toBeUndefined();
   });
 
   it('0이 아닌 종료 코드는 error(nonzero_exit)이고 출력이 본문에 담긴다', async () => {
@@ -217,6 +274,34 @@ describe.skipIf(isWindows)('허용 argv 템플릿 실행 (execFile)', () => {
 
     expect(result).toMatchObject({ status: 'error', reason: 'timeout' });
     expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  it('SIGTERM을 무시하는 자식은 유예 뒤 SIGKILL로 멈추고 결과는 timeout', async () => {
+    const started = Date.now();
+    const result = await implementer({ timeoutMs: { run_tests: 500 }, killGraceMs: 300 }).execute(
+      'run_tests',
+      { testNamePattern: 'ignore-term' },
+    );
+
+    expect(result).toMatchObject({ status: 'error', reason: 'timeout' });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    const pid = readPid();
+    expect(pid).not.toBeNull();
+    await waitUntil(() => !alive(pid as number));
+  });
+
+  it('출력 통로를 물려받은 손자가 있어도 자식이 끝나면 바로 결과를 내고 손자를 정리한다', async () => {
+    const started = Date.now();
+    const result = await implementer({ timeoutMs: { run_tests: 10_000 } }).execute('run_tests', {
+      testNamePattern: 'grandchild',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(Date.now() - started).toBeLessThan(5_000);
+    const grandchild = readPid();
+    expect(grandchild).not.toBeNull();
+    await waitUntil(() => !alive(grandchild as number));
+    expect(result.content).not.toContain('late');
   });
 
   it('출력은 상한 크기의 끝부분만 돌려준다', async () => {
@@ -246,8 +331,27 @@ describe.skipIf(isWindows)('허용 argv 템플릿 실행 (execFile)', () => {
 
     const result = await pending;
 
-    expect(result.status).toBe('error');
-    expect(result.reason).not.toBe('timeout');
+    expect(result).toMatchObject({ status: 'error', reason: 'aborted' });
+  });
+
+  it('.bin 실행 파일이 의존성 폴더 밖을 가리키면 실행하지 않는다', async () => {
+    const outsideBin = makeTemp('bive-outside-bin-');
+    writeExecutable(path.join(outsideBin, 'evil'), FAKE_SCRIPT('evil', logFile));
+    const bin = path.join(root, 'node_modules', '.bin', 'vitest');
+    rmSync(bin);
+    symlinkSync(path.join(outsideBin, 'evil'), bin);
+
+    const result = await implementer().execute('run_tests', {});
+
+    expect(result).toMatchObject({ status: 'error', reason: 'command_unavailable' });
+    expect(calls()).toEqual([]);
+  });
+
+  it('없는 테스트 파일은 넘기지 않는다', async () => {
+    const result = await implementer().execute('run_tests', { files: ['./--config=evil.ts'] });
+
+    expect(result).toMatchObject({ status: 'error', reason: 'not_found' });
+    expect(calls()).toEqual([]);
   });
 });
 

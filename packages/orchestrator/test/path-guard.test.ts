@@ -1,13 +1,19 @@
 // 파일 도구 경로 가드 (이슈 #20 수용 기준 2 · 3, NFR-01 · NFR-02 · ADR-024 · ADR-052).
 // 읽기 · 쓰기 · 목록 · 검색 네 도구 모두에서 세션 루트 밖 · `$BIVE_HOME/projects` · `$BIVE_HOME/run` ·
-// `.git` · `.bive.json` · 심볼릭 링크 우회를 거부하고, 역할별 쓰기 금지 경로를 지키는지 확인한다.
+// `.git` · `.bive.json` · 심볼릭 · 하드 링크 우회 · 세션 루트 안의 `$BIVE_HOME` · FIFO를 막고,
+// 역할별 쓰기 금지 경로를 지키는지 확인한다.
+import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -35,6 +41,8 @@ const makeTemp = (prefix: string): string => {
   tempDirs.push(dir);
   return dir;
 };
+
+const readdirNames = (dir: string): string[] => readdirSync(dir).sort();
 
 const put = (file: string, content: string): void => {
   mkdirSync(path.dirname(file), { recursive: true });
@@ -354,5 +362,188 @@ describe('PathGuard 단위', () => {
           biveHome: home,
         }),
     ).toThrow(/세션 루트/u);
+  });
+});
+
+const isWindows = process.platform === 'win32';
+
+describe('하드 링크', () => {
+  it('루트 밖 파일의 하드 링크는 읽기 · 쓰기 · 검색 모두 막고 원본을 바꾸지 않는다', async () => {
+    linkSync(path.join(outside, 'secret.txt'), path.join(worktree, 'src', 'hard.txt'));
+    const tools = implementer();
+
+    for (const [name, args] of [
+      ['read_file', { path: 'src/hard.txt' }],
+      ['write_file', { path: 'src/hard.txt', content: 'OVERWRITTEN\n' }],
+      ['search_files', { query: SECRET, path: 'src/hard.txt' }],
+    ] as const) {
+      const result = await tools.execute(name, args);
+      expect(result, name).toMatchObject({ status: 'denied', reason: 'path_denied' });
+      expectNoLeak(result.content);
+    }
+    expect(await tools.execute('search_files', { query: SECRET })).toEqual({
+      status: 'ok',
+      content: '(일치 없음)',
+    });
+    expect(readFileSync(path.join(outside, 'secret.txt'), 'utf8')).toBe(`${SECRET}\n`);
+  });
+
+  it('node_modules 안의 하드 링크(pnpm 저장소)는 읽을 수 있지만 쓸 수 없다', async () => {
+    put(path.join(outside, 'store', 'index.js'), 'module.exports = 1;\n');
+    put(path.join(worktree, 'node_modules', '.pnpm', 'x@1', 'placeholder'), '');
+    linkSync(
+      path.join(outside, 'store', 'index.js'),
+      path.join(worktree, 'node_modules', '.pnpm', 'x@1', 'index.js'),
+    );
+    const tools = implementer();
+
+    expect(await tools.execute('read_file', { path: 'node_modules/.pnpm/x@1/index.js' })).toEqual({
+      status: 'ok',
+      content: 'module.exports = 1;\n',
+    });
+    expect(
+      await tools.execute('write_file', { path: 'node_modules/.pnpm/x@1/index.js', content: 'x' }),
+    ).toMatchObject({ status: 'denied', reason: 'path_denied' });
+    expect(readFileSync(path.join(outside, 'store', 'index.js'), 'utf8')).toBe(
+      'module.exports = 1;\n',
+    );
+  });
+
+  it('쓰기는 임시 파일 + rename으로 바꿔 기존 inode를 건드리지 않고 권한을 유지한다', async () => {
+    const file = path.join(worktree, 'scripts', 'run.sh');
+    put(file, '#!/bin/sh\necho old\n');
+    chmodSync(file, 0o755);
+    const before = statSync(file).ino;
+
+    const result = await implementer().execute('write_file', {
+      path: 'scripts/run.sh',
+      content: '#!/bin/sh\necho new\n',
+    });
+
+    expect(result.status).toBe('ok');
+    expect(readFileSync(file, 'utf8')).toBe('#!/bin/sh\necho new\n');
+    expect(statSync(file).ino).not.toBe(before);
+    if (!isWindows) expect(statSync(file).mode & 0o777).toBe(0o755);
+    // 임시 파일이 남지 않는다
+    expect((await implementer().execute('list_files', { path: 'scripts' })).content).toBe(
+      'scripts/run.sh',
+    );
+  });
+});
+
+describe('node_modules 쓰기 금지 (implementer)', () => {
+  it.each([
+    ['node_modules/.bin/vitest'],
+    ['node_modules/vitest/vitest.mjs'],
+    ['packages/web/node_modules/x/index.js'],
+    ['NODE_MODULES/.bin/vitest'],
+  ])('%s 쓰기 거부', async (target) => {
+    const result = await implementer().execute('write_file', {
+      path: target,
+      content: '#!/bin/sh\necho PWNED\n',
+    });
+
+    expect(result).toMatchObject({ status: 'denied', reason: 'path_denied' });
+    expect(existsSync(path.join(worktree, target))).toBe(false);
+  });
+});
+
+describe('세션 루트 안의 $BIVE_HOME', () => {
+  let root: string;
+  let innerHome: string;
+
+  beforeEach(() => {
+    root = makeTemp('bive-guard-root-');
+    innerHome = path.join(root, 'bivehome');
+    put(path.join(innerHome, 'projects', 'p', 'bive.db'), `${DB_MARK}\n`);
+    put(path.join(innerHome, 'run', 'token'), `${TOKEN_MARK}\n`);
+    put(path.join(innerHome, 'registry.db'), 'REGISTRY-CONTENT\n');
+    put(path.join(root, 'src', 'a.ts'), 'export const a = 1;\n');
+    link(innerHome, path.join(root, 'homelink'), 'dir');
+  });
+
+  const tools = (): FixedToolExecutor =>
+    createRoleTools({ role: 'implementer', sessionRoot: root, biveHome: innerHome });
+
+  it.each([
+    ['bivehome/projects/p/bive.db'],
+    ['bivehome/run/token'],
+    ['bivehome/registry.db'],
+    ['bivehome'],
+    ['homelink/projects/p/bive.db'],
+    ['homelink/registry.db'],
+  ])('%s: 읽기 · 쓰기 · 목록 · 검색 거부', async (target) => {
+    const executor = tools();
+    for (const [name, args] of [
+      ['read_file', { path: target }],
+      ['write_file', { path: target, content: 'x' }],
+      ['list_files', { path: target, recursive: true }],
+      ['search_files', { query: 'CONTENT', path: target }],
+    ] as const) {
+      const result = await executor.execute(name, args);
+      expect(result, `${name} ${target}`).toMatchObject({
+        status: 'denied',
+        reason: 'path_denied',
+      });
+    }
+    expect(readFileSync(path.join(innerHome, 'registry.db'), 'utf8')).toBe('REGISTRY-CONTENT\n');
+  });
+
+  it('루트 전체 목록 · 검색에 저장소 트리와 내용이 나오지 않는다', async () => {
+    const executor = tools();
+
+    const listed = await executor.execute('list_files', { recursive: true });
+    expect(listed.content.split('\n').some((line) => line.startsWith('bivehome'))).toBe(false);
+    for (const query of [DB_MARK, TOKEN_MARK, 'REGISTRY-CONTENT']) {
+      expect(await executor.execute('search_files', { query })).toEqual({
+        status: 'ok',
+        content: '(일치 없음)',
+      });
+    }
+  });
+});
+
+describe('test-writer 허용 판정은 글자 그대로', () => {
+  it.each([
+    ['BIVE-ACCEPTANCE/RULE-001/t.acc.ts'],
+    ['bive-acceptance./RULE-001/t.acc.ts'],
+    ['bive-acceptance /RULE-001/t.acc.ts'],
+    ['Bive-Acceptance/RULE-001/t.acc.ts'],
+    ['bive-acceptance/t.acc.ts'],
+    ['bive-acceptance/RULE-001/node_modules/x.js'],
+  ])('%s 쓰기 거부 (폴더도 만들지 않음)', async (target) => {
+    const result = await testWriter().execute('write_file', { path: target, content: 'x' });
+
+    expect(result).toMatchObject({ status: 'denied', reason: 'path_denied' });
+    expect(readdirNames(session)).toEqual(['input']);
+  });
+});
+
+describe.skipIf(isWindows)('FIFO · 특수 파일', () => {
+  beforeEach(() => {
+    execFileSync('mkfifo', [path.join(worktree, 'src', 'pipe')]);
+  });
+
+  it('읽기는 막히지 않고 not_a_file', async () => {
+    const result = await implementer().execute('read_file', { path: 'src/pipe' });
+    expect(result).toMatchObject({ status: 'error', reason: 'not_a_file' });
+  });
+
+  it('검색은 FIFO를 건너뛰고 바로 끝난다', async () => {
+    const started = Date.now();
+    const result = await implementer().execute('search_files', { query: 'export const a' });
+
+    expect(result).toEqual({ status: 'ok', content: 'src/a.ts:1: export const a = 1;' });
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it('목록에 FIFO가 나오지 않고, FIFO에 쓰기는 not_a_file', async () => {
+    const tools = implementer();
+    const listed = await tools.execute('list_files', { path: 'src' });
+    expect(listed.content.split('\n')).not.toContain('src/pipe');
+    expect(await tools.execute('write_file', { path: 'src/pipe', content: 'x' })).toMatchObject({
+      status: 'error',
+      reason: 'not_a_file',
+    });
   });
 });

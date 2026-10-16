@@ -25,6 +25,8 @@ export const ERROR_REASONS = [
   /** 명령이 0이 아닌 코드로 끝남 */
   'nonzero_exit',
   'timeout',
+  /** 세션 중단 신호로 명령을 멈춤 */
+  'aborted',
   /** 명령 출력이 하드 상한을 넘어 중단됨 */
   'output_limit',
   /** 이 OS에서 지원하지 않는 명령 */

@@ -258,6 +258,27 @@ describe('checkSessionInit', () => {
     expect(checkSessionInit(init(tools, ['bive']), { role: 'test-writer' }).violation).toBeNull();
   });
 
+  it('다른 서버 접두(mcp__evil__) · 이중 접두는 같은 이름이어도 허용 도구로 보지 않는다', () => {
+    const base = ROLE_TOOL_NAMES['test-writer'].slice(0, 4);
+    for (const impostor of ['mcp__evil__run_tests', 'mcp__bive__mcp__bive__run_tests']) {
+      const { violation } = checkSessionInit(init([...base, impostor], ['bive']), {
+        role: 'test-writer',
+      });
+      expect(violation, impostor).toMatchObject({
+        kind: 'tools_mismatch',
+        missingTools: ['run_tests'],
+      });
+      expect(violation?.unexpectedTools).toHaveLength(1);
+    }
+  });
+
+  it('MCP 서버 이름은 대소문자까지 같아야 한다', () => {
+    const tools = [...ROLE_TOOL_NAMES['rule-writer']];
+    expect(checkSessionInit(init(tools, ['Bive']), { role: 'rule-writer' }).violation?.kind).toBe(
+      'mcp_mismatch',
+    );
+  });
+
   it('같은 도구 · 서버의 중복 보고도 다르다고 본다', () => {
     const tools = [...ROLE_TOOL_NAMES['rule-writer']];
     expect(
