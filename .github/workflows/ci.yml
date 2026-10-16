@@ -72,10 +72,43 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: '1'
 
-      # 화면 e2e 자리 (M0-07, #10에서 추가).
-      # 러너에 미리 깔린 시스템 Chromium을 쓰도록 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH를 넘기고
-      # `playwright install`로 브라우저를 내려받지 않는다 (ADR-028).
-      # - name: 화면 e2e
-      #   run: pnpm e2e
-      #   env:
-      #     PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: <시스템 Chromium 경로>
+      # 화면 e2e (M0-07, architecture.md 8장). 브라우저 처리 (ADR-043):
+      # 러너에 깔린 Google Chrome이 있으면 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH로 그것을 쓰고 내려받지 않는다.
+      # 없을 때만 Playwright Chromium을 설치하고 ~/.cache/ms-playwright를 Playwright 버전별로 캐시한다.
+      # (이 VM에서는 설치하지 않고 /opt/pw-browsers의 Chromium을 지정한다, ADR-028)
+      - name: 화면 e2e 브라우저 확인
+        id: browser
+        run: |
+          chrome="$(command -v google-chrome || command -v google-chrome-stable || true)"
+          if [ -n "$chrome" ]; then
+            echo "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=$chrome" >> "$GITHUB_ENV"
+            echo "system=true" >> "$GITHUB_OUTPUT"
+            "$chrome" --version
+          else
+            echo "system=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "playwright=$(node -p "require('./packages/app/node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: 화면 e2e 브라우저 캐시
+        if: steps.browser.outputs.system != 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.browser.outputs.playwright }}
+
+      - name: 화면 e2e 브라우저 설치
+        if: steps.browser.outputs.system != 'true'
+        run: pnpm --filter @bive/app exec playwright install chromium --with-deps
+
+      - name: 화면 e2e
+        run: pnpm e2e
+
+      # 스크린샷(artifacts/screens) · 실패 추적 · 보고서. 실패해도 올린다
+      - name: 화면 e2e 산출물 업로드
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-artifacts
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

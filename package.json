@@ -13,6 +13,7 @@
     "test": "pnpm -r run test",
     "build": "pnpm -r run build",
     "smoke": "pnpm --filter @bive/app smoke",
+    "e2e": "pnpm --filter @bive/app e2e",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
