@@ -186,7 +186,7 @@ export default defineConfig(
   },
   // app 화면 e2e: Node(Playwright 테스트)와 브라우저(page.evaluate · addInitScript 함수) 문맥이 섞인다
   {
-    files: ['packages/app/e2e/**/*.ts'],
+    files: ['packages/app/e2e/**/*.{ts,tsx}'],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },
   prettier,

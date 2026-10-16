@@ -8,6 +8,6 @@
     "moduleResolution": "bundler",
     "jsx": "react-jsx"
   },
-  "include": ["src/renderer", "src/common"],
+  "include": ["src/renderer", "src/common", "e2e/playground"],
   "exclude": ["dist", "node_modules"]
 }

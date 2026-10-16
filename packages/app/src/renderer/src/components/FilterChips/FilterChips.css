@@ -1,0 +1,111 @@
+/* 필터 칩 (screens.md 1.4 목록). 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.filter-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  max-width: 240px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2);
+  background: transparent;
+}
+
+.filter-chip[data-selected='true'] {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.filter-chip-button,
+.filter-chip-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  height: 26px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-2);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+  cursor: pointer;
+}
+
+.filter-chip[data-selected='true'] .filter-chip-button,
+.filter-chip-button:hover:not(:disabled),
+.filter-chip-clear:hover {
+  color: var(--color-text);
+}
+
+.filter-chip-button:disabled {
+  opacity: var(--opacity-dimmed);
+  cursor: default;
+}
+
+.filter-chip-clear {
+  padding: 0 var(--space-1);
+}
+
+.filter-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter-menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  padding: var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2);
+  background: var(--color-surface-raised);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--color-bg) 60%, transparent);
+}
+
+.filter-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-1);
+  font-size: var(--font-size-2);
+  cursor: pointer;
+}
+
+.filter-option:hover {
+  background: var(--color-surface);
+}
+
+.filter-option input {
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+.filter-option[data-disabled='true'] {
+  opacity: var(--opacity-dimmed);
+  cursor: default;
+}
+
+.filter-option-label {
+  flex: 1;
+  white-space: nowrap;
+}
+
+.filter-count {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  font-variant-numeric: tabular-nums;
+}

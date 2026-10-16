@@ -1,0 +1,65 @@
+/* 2줄 카드 (screens.md 1.4). 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-2);
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+}
+
+button.card {
+  cursor: pointer;
+}
+
+button.card:hover {
+  background: var(--color-surface);
+}
+
+.card[aria-current='true'] {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+}
+
+.card-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.card-line-1 {
+  font-size: var(--font-size-3);
+}
+
+.card-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-line-2 {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  text-overflow: ellipsis;
+}
+
+.card-id {
+  flex: none;
+  font-family: var(--font-mono);
+}
+
+.card-time {
+  flex: none;
+  margin-left: auto;
+}
