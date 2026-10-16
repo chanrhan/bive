@@ -6,5 +6,8 @@
 import type { ComponentType } from 'react';
 
 import type { RouteId } from '../navigation/routes.js';
+import { TodoScreen } from './todo/TodoScreen.js';
 
-export const SCREENS: Partial<Record<RouteId, ComponentType>> = {};
+export const SCREENS: Partial<Record<RouteId, ComponentType>> = {
+  todo: TodoScreen,
+};
