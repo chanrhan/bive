@@ -1,10 +1,14 @@
 # BIVE
 
-**Baseline-Integrated Verification Environment** — 에이전트가 짠 코드를 사람이 읽지 않고도 검증하는 로컬 데스크톱 앱.
+**Baseline-Integrated Verification Environment**
+
+> AI 에이전트가 작성한 코드를, 코드 대신 **규범(요구사항 · 규칙 · 계약)과 판정 결과**로 검증하는 로컬 개발 도구
+
+에이전트가 짠 코드를 사람이 읽지 않고도 검증하는 로컬 데스크톱 앱이다.
 
 사람은 요구사항을 문장으로 적고, 에이전트가 제안한 규칙을 승인하고, 실행을 확인하는 세 가지만 한다. 테스트 작성 → Red 확인 → 구현 → 검사 → 병합은 고정 파이프라인이 사람 개입 없이 끝내고, 판정은 에이전트의 말이 아니라 **인수 테스트의 실행 결과**로만 내린다.
 
-> 상태: M0(기반) 진행 중 · 기준 문서 PRD v0.9 (`docs/spec/prd.md`) · 2026-10-15
+> 상태: M0 기반 진행 중. 모노레포 · CI · 앱 뼈대 · 오케스트레이터 파이프 서버 · 저장소 · 테스트 하네스 · 픽스처까지 들어갔고, 요구사항 → 규칙 → 실행 → 판정 흐름은 아직 없다(M1). 기준 문서 PRD v0.9 (`docs/spec/prd.md`) · 2026-10-16
 
 ## 목차
 
@@ -12,10 +16,12 @@
 2. [전체 구조](#2-전체-구조)
 3. [실행 파이프라인](#3-실행-파이프라인)
 4. [저장소 구조](#4-저장소-구조)
-5. [시작하기](#5-시작하기)
-6. [개발 규칙](#6-개발-규칙)
-7. [문서](#7-문서)
-8. [로드맵](#8-로드맵)
+5. [설치](#5-설치)
+6. [실행](#6-실행)
+7. [테스트](#7-테스트)
+8. [개발 규칙](#8-개발-규칙)
+9. [문서](#9-문서)
+10. [로드맵](#10-로드맵)
 
 ## 1. BIVE는 무엇인가
 
@@ -139,14 +145,14 @@ bive/
 │   ├── orchestrator/   파이프 서버 · 실행 엔진 · 에이전트 어댑터 · 고정 도구 · 판정기 · 예산 · git
 │   └── app/            Electron main · preload · renderer(React)
 ├── fixtures/
-│   └── sample-next-app/  테스트 대상 프로젝트 (Next.js · Prisma · SQLite · Vitest, M0-08)
+│   └── sample-next-app/  테스트 대상 프로젝트 (Next.js · Prisma · SQLite · Vitest). 워크스페이스 밖, 자체 lockfile
 ├── docs/
 │   ├── spec/           prd.md · screens.md · plan.md  (원본, 사람만 수정)
 │   ├── architecture.md 패키지 경계 · 데이터 모델 · 상태 기계 · IPC · 테스트 전략
 │   ├── decisions.md    ADR (결정은 여기에만 남긴다)
 │   ├── roadmap.md      마일스톤 · 이슈 · 수용 기준
 │   └── prototype-map.md 프로토타입 → 화면(SCR) → 렌더러 모듈 대응표
-├── scripts/            gh-rest.sh (GitHub REST 래퍼) · publish-roadmap.py
+├── scripts/            gh-rest.sh (GitHub REST 래퍼) · publish-roadmap.py · reset-fixture.sh · test-reset-fixture.sh
 ├── .claude/skills/     pr-reviewer · publish-roadmap · run-milestone
 ├── CLAUDE.md           개발 규칙 (운영 방식)
 └── eslint.config.js    패키지 경계 · 테스트 전용 모듈 import 금지 규칙
@@ -177,32 +183,63 @@ flowchart BT
 
 프로젝트 폴더에는 `.bive.json`(`projectId` · `schemaVersion`) 하나만 생긴다.
 
-## 5. 시작하기
+## 5. 설치
 
-요구 사항: Node 22.12 이상, pnpm 10 (`packageManager` 필드로 고정).
+요구 사항: Node 22.12 이상, pnpm 10 (루트 `package.json`의 `packageManager`로 고정). GUI가 없는 환경에서 Electron 창을 띄우려면 `xvfb-run`이 필요하다.
 
 ```sh
-pnpm install --frozen-lockfile   # 의존성 설치 (better-sqlite3 · electron · esbuild 빌드 스크립트 허용됨)
-pnpm lint                        # ESLint (패키지 경계 규칙 포함)
-pnpm typecheck                   # tsc --noEmit, 패키지별
-pnpm test                        # vitest, 패키지별
-pnpm build                       # tsc 빌드 → packages/*/dist
-pnpm format:check                # Prettier
+pnpm install --frozen-lockfile   # 워크스페이스 의존성 설치
+pnpm build                       # packages/*/dist 생성
 ```
 
-M0 나머지 이슈에서 추가되는 명령:
+- pnpm 10은 빌드 스크립트를 기본 차단한다. `better-sqlite3` · `electron` · `esbuild`는 루트 `package.json`의 `pnpm.onlyBuiltDependencies`로 허용되어 있다.
+- Electron 바이너리는 설치 때가 아니라 처음 실행할 때 내려받는다.
+- `fixtures/sample-next-app`은 워크스페이스 밖의 독립 프로젝트라 위 설치에 들어가지 않는다. 픽스처 테스트에는 `pnpm -C fixtures/sample-next-app install --frozen-lockfile`을 따로 실행한다.
 
-| 명령 | 내용 | 이슈 |
+## 6. 실행
+
+런타임 데이터는 `BIVE_HOME`(기본 `~/.bive`) 아래에 쌓인다. 개발 중에는 임시 폴더로 덮어쓰는 편이 안전하다. Unix 소켓 경로 제한(Linux 107바이트) 때문에 짧은 경로를 쓴다.
+
+```sh
+export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
+```
+
+| 대상 | 명령 | 설명 |
 |---|---|---|
-| `pnpm e2e` | Playwright로 Vite 개발 서버 렌더러를 열고 화면 체크리스트 검사 · 스크린샷 | M0-07 |
-| `xvfb-run -a pnpm smoke` | Electron 기동 · preload 노출 · 오케스트레이터 연결 표시 확인 | M0-06 |
-| `pnpm --filter @bive/orchestrator start` | 오케스트레이터 단독 기동 (`BIVE_HOME` · `BIVE_IDLE_SHUTDOWN_MS`) | M0-05 |
-| `pnpm --filter @bive/app cli ping` | 파이프로 `ping` → `pong` | M0-06 |
-| `scripts/reset-fixture.sh <dir>` | 픽스처 프로젝트를 복사해 git 저장소로 초기화 | M0-08 |
+| 앱 | `pnpm --filter @bive/app start` | 앱을 빌드한 뒤 Electron 창을 띄운다. 오케스트레이터가 없으면 앱이 분리 프로세스로 띄운다. GUI 없는 VM에서는 앞에 `xvfb-run -a`를 붙이고, root 실행이면 `--no-sandbox`가 자동으로 붙는다 |
+| 오케스트레이터 | `pnpm --filter @bive/orchestrator start` | 단독 기동. 연결된 앱과 진행 중 실행이 없으면 `BIVE_IDLE_SHUTDOWN_MS`(기본 300000ms) 뒤 스스로 종료한다 |
+| CLI | `pnpm --filter @bive/app cli ping` | 파이프로 `ping`을 보내 `pong`을 받는다. 오케스트레이터가 없으면 띄운다. `cli rpc <method> [json]`은 조회 메서드(`*.list` · `*.get` · `*.status` · `*.summary`)만 허용한다 |
 
-헤드리스 환경 메모: GUI가 없는 VM에서는 `xvfb-run -a`로 Electron 창을 띄우고, root로 실행하면 `--no-sandbox`가 필요하다. 모든 자동 테스트는 실제 Claude API 없이 **ScriptedAdapter**(시나리오 파일로 턴을 재생하는 가짜 에이전트, `BIVE_AGENT=scripted`)로 돈다. 실제 SDK 완주는 사람이 확인한다.
+환경 변수:
 
-## 6. 개발 규칙
+| 변수 | 내용 |
+|---|---|
+| `BIVE_HOME` | 데이터 폴더. 기본 `~/.bive` |
+| `BIVE_IDLE_SHUTDOWN_MS` | 오케스트레이터 유휴 종료 대기(ms). 기본 300000 |
+| `BIVE_ORCHESTRATOR_MODE` | 앱이 오케스트레이터를 띄우는 방식. `source`(개발, `tsx`) · `dist`(패키징). 기본은 패키징 여부로 결정 |
+| `BIVE_NODE_PATH` | `source` 방식에서 쓸 Node 실행 파일. 기본 PATH의 `node` |
+| `BIVE_NO_SANDBOX` | `1`이면 Electron에 `--no-sandbox`를 붙인다 (개발 · 테스트 한정, root는 자동) |
+| `BIVE_E2E_PORT` | 화면 e2e의 Vite 서버 포트. 기본 5179 |
+| `BIVE_AGENT` | 에이전트 어댑터 선택(`scripted` · `claude`). M1에서 추가 예정이라 아직 동작하지 않는다 |
+
+## 7. 테스트
+
+모든 자동 테스트는 실제 Claude API 없이 돈다. 에이전트는 **ScriptedAdapter**(시나리오 파일로 턴을 재생하는 가짜 에이전트)가 대신하고, 실제 SDK 완주는 사람이 확인한다 (ADR-016). ScriptedAdapter 자체는 M1에서 들어온다.
+
+| 종류 | 명령 | 내용 |
+|---|---|---|
+| 린트 · 형식 · 타입 | `pnpm lint` · `pnpm format:check` · `pnpm typecheck` | ESLint(패키지 경계 규칙 포함) · Prettier · `tsc --noEmit` |
+| 단위 테스트 | `pnpm test` | 패키지별 vitest |
+| 빌드 | `pnpm build` | `packages/*/dist`, 앱은 electron-vite 출력 |
+| 화면 e2e | `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=<chrome 경로> pnpm e2e` | Playwright로 Vite 개발 서버의 렌더러를 열어 화면 체크리스트 검사 · 스크린샷(`artifacts/screens`). 경로를 주지 않으면 Playwright 기본 브라우저를 쓴다 |
+| Electron 스모크 | `xvfb-run -a pnpm smoke` | 앱을 빌드해 띄우고 preload 노출 · 오케스트레이터 연결 · 종료 뒤 유휴 종료를 확인 |
+| 픽스처 | `pnpm -C fixtures/sample-next-app test` | 임시 SQLite 마이그레이션 → `next build` → `next start` → HTTP 확인 |
+| 픽스처 초기화 | `scripts/reset-fixture.sh <dir> [--verify]` | 픽스처의 추적 파일을 `<dir>`로 복사해 설치하고 git 저장소(커밋 1개)로 만든다. `--verify`는 끝에 픽스처 테스트까지 실행한다 |
+| 초기화 스크립트 검사 | `scripts/test-reset-fixture.sh` | 지우면 안 되는 경로를 거부하는지 검사 |
+
+이 VM(Chromium 1194만 설치)에서의 e2e 실행 방법과 각 명령의 실측 결과는 [`CLAUDE.md`](CLAUDE.md) 6장에 있다. 같은 VM의 worktree 여러 개에서 e2e를 동시에 돌릴 때는 `BIVE_E2E_PORT`를 서로 다르게 준다.
+
+## 8. 개발 규칙
 
 상세는 [`CLAUDE.md`](CLAUDE.md). 요약:
 
@@ -215,7 +252,7 @@ M0 나머지 이슈에서 추가되는 명령:
 - **목 데이터 금지**: 화면 데이터는 파서 · 실행 결과에서만. 목은 테스트 코드 안에서만 (NFR-03).
 - **테스트를 끄거나 건너뛰어 통과시키지 않는다.** 임시 우회는 ADR 없이는 금지.
 
-## 7. 문서
+## 9. 문서
 
 | 문서 | 내용 |
 |---|---|
@@ -229,7 +266,7 @@ M0 나머지 이슈에서 추가되는 명령:
 | [`docs/prototype-map.md`](docs/prototype-map.md) | 프로토타입 파일 → SCR → 렌더러 모듈 |
 | [`docs/needs-human.md`](docs/needs-human.md) | 사람만 할 수 있는 항목 목록 |
 
-## 8. 로드맵
+## 10. 로드맵
 
 | 마일스톤 | 목표 | PRD 단계 |
 |---|---|---|
