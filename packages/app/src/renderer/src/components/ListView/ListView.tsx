@@ -27,7 +27,10 @@ import {
 import { useListFilter } from './filterStore.js';
 
 export interface ListViewProps<T> {
-  /** 필터 상태를 나누는 목록 ID (예: 'rules'). 같은 ID의 목록은 필터 상태를 함께 쓴다 */
+  /**
+   * 필터 상태를 나누는 목록 ID (예: 'rules'). 같은 ID의 목록은 필터 상태를 함께 쓰므로 기준(criteria)도 같아야 한다
+   * (기준에 없는 선택은 지운다)
+   */
   listId: string;
   /** 목록 이름 (접근 가능한 이름, 예: '규칙 목록') */
   label: string;
