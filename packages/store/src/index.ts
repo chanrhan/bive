@@ -11,5 +11,7 @@ export { REGISTRY_MIGRATIONS } from './migrations/registry/index.js';
 export * from './paths.js';
 export * from './project-store.js';
 export * from './registry.js';
+export * from './repositories/display-id-sequences.js';
 export * from './repositories/project-repository.js';
 export * from './repositories/registry-repository.js';
+export * from './repositories/requirement-repository.js';

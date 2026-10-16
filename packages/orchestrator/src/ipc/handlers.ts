@@ -1,4 +1,5 @@
 // 인증된 연결이 부를 수 있는 메서드 처리기. 메서드는 각 이슈에서 여기에 더한다.
+import { createRequirementHandlers } from './requirement-handlers.js';
 import type { MethodHandlers } from './server.js';
 
 /** `system.status`가 읽는 오케스트레이터 상태 (ADR-045). */
@@ -14,6 +15,8 @@ export interface StatusSource {
 export interface HandlerDeps {
   orchestratorVersion: string;
   status: StatusSource;
+  /** `$BIVE_HOME` 절대 경로. 프로젝트 저장소 · 등록부를 여기서 연다 */
+  biveHome: string;
   /** 시계 (기본 `Date.now`) */
   now?: () => number;
 }
@@ -21,6 +24,7 @@ export interface HandlerDeps {
 export const createHandlers = ({
   orchestratorVersion,
   status,
+  biveHome,
   now = Date.now,
 }: HandlerDeps): MethodHandlers => ({
   ping: () => ({ pong: true, version: orchestratorVersion }),
@@ -31,4 +35,5 @@ export const createHandlers = ({
     connections: status.connectionCount,
     runsInProgress: status.activeRunCount,
   }),
+  ...createRequirementHandlers({ biveHome, now }),
 });

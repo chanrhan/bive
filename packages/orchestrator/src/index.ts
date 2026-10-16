@@ -2,6 +2,8 @@
 export const PACKAGE_NAME = '@bive/orchestrator';
 
 export * from './ipc/handlers.js';
+export * from './ipc/project-store-access.js';
+export * from './ipc/requirement-handlers.js';
 export * from './ipc/server.js';
 export * from './ipc/transport.js';
 export * from './lifecycle.js';

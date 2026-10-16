@@ -99,7 +99,7 @@ interface AgentSession {
 | | `models.perRole` (필수), `maxTurns.perRole` | NFR-07, 기획서 4.5 |
 | | `approvalQueueLimit` (기본 40), `provisionalPolicy` (`off` 기본), `autoMode` (`false`), `installAllowlist` (빈 목록) | TODO-04, ADR-012, RUN-05, NFR-02 |
 | | `writingRules` (P2), `updatedAt`, `updatedBy` | NRM-10 |
-| **Requirement** | `id`, `displayId`, `text`, `author`, `normState`, `createdAt`, `updatedAt`, `deletedAt` | NRM-01 |
+| **Requirement** | `id`, `displayId`, `text`, `author`, `normState`, `createdAt`, `updatedAt`, `updatedBy` (마지막 수정 · 삭제 주체), `deletedAt` | NRM-01, ADR-047 |
 | | `unrulable: { reason } \| null` | NRM-08 |
 | | 파생: 상태 = 자식 판정 종합, 결함 = 자식 규칙 0개 ∧ `unrulable` 없음 | 기획서 3.1, NRM-06 |
 | **Rule** | `id`, `displayId`, `title`, `statement` (EARS), `kind` (`architecture` · `tech-constraint` · `business`) | NRM-02, 기획서 3.1 |
@@ -154,6 +154,7 @@ interface AgentSession {
 | `~/.bive/registry.db` | 프로젝트 등록부 (등록된 프로젝트 ID · 등록 시각만) | 불가 |
 
 - 등록부 (M0-04, ADR-040): 프로젝트별 DB와 분리한 SQLite 파일 `registry.db`. 프로젝트 내용(이름 · 경로 · 기준 브랜치)의 원본은 프로젝트별 `bive.db`의 `projects` 행이고, 등록부는 ID만 가진다. 등록은 프로젝트별 DB 생성 → 등록부 추가 순서라 등록부에 있는 ID = 등록이 끝난 프로젝트. 등록 해제는 등록부 항목만 지운다
+- 표시 ID 순번 (M1-02, ADR-047): 프로젝트별 DB `display_id_sequences`(접두 → 마지막 순번). 생성 트랜잭션 안에서 올리고 삭제된 번호도 다시 쓰지 않는다. DB 파일 권한은 0600
 - 마이그레이션 (M0-04): `packages/store/src/migrations/<project|registry>/<NNNN>_<snake_name>.ts` (`export const migration`)를 다음 번호로 추가하고 같은 폴더 `index.ts` 배열 끝에 넣는다. 적용 기록 `schema_migrations`에 SQL 해시를 남기므로 머지된 파일은 고치지 않는다. 테이블은 `STRICT`, 연결은 WAL · `foreign_keys` ON · `synchronous` FULL
 
 ## 4. 실행 파이프라인 상태 기계
@@ -226,10 +227,10 @@ stateDiagram-v2
 | `project.open` | `{path}` → `{project, created}` (설정 파일 생성 여부) | PRJ-01 | M1 |
 | `project.list` · `project.get` | — / `{projectId}` → 프로젝트 | PRJ-01 | M1 |
 | `project.sync` | `{projectId}` → 블록 선언 제안 | PRJ-02 | M2 |
-| `requirement.list` | `{projectId, filter?}` → 카드 목록 | NRM-01, SCR-02 | M1 |
-| `requirement.get` | `{id}` → 본문 · 자식 규칙 · 이력 | SCR-06 | M1 |
-| `requirement.create` | `{projectId, text}` → 요구사항 (사람 작성, 승인 불필요) + 규칙 생성 시작 | NRM-01, NRM-02 | M1 |
-| `requirement.update` · `requirement.delete` | `{id, text}` / `{id}` → 요구사항 | NRM-01 | M1 |
+| `requirement.list` | `{projectId}` → `{requirements}` (삭제 제외, 표시 ID 순). 필터는 화면 이슈에서 | NRM-01, SCR-02, ADR-047 | M1 |
+| `requirement.get` | `{projectId, id}` → `{requirement}` (삭제된 것도). 자식 규칙 · 이력은 해당 이슈에서 | SCR-06, ADR-047 | M1 |
+| `requirement.create` | `{projectId, text, author}` → `{requirement}` (사람 작성만, 승인 불필요). 규칙 생성 시작은 M1-08 | NRM-01, NRM-02, ADR-047 | M1 |
+| `requirement.update` · `requirement.delete` | `{projectId, id, text, author}` / `{projectId, id, author}` → `{requirement}` (사람만, 삭제는 소프트) | NRM-01, ADR-047 | M1 |
 | `requirement.markUnrulable` | `{id, reason}` | NRM-08 | M2 |
 | `rule.list` · `rule.get` | `{projectId, filter?}` / `{id}` → 규칙 · 최신 판정 · 실행 링크 | NRM-02, JDG-02 | M1 |
 | `contract.list` · `contract.get` | 계약 | NRM-03 | M2 |

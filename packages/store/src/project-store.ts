@@ -6,7 +6,9 @@ import { openDatabase, withTransaction, type SqliteDatabase } from './database.j
 import { migrate, type MigrateOptions } from './migrate.js';
 import { PROJECT_MIGRATIONS } from './migrations/project/index.js';
 import { bivePaths, assertProjectId } from './paths.js';
+import { DisplayIdSequences } from './repositories/display-id-sequences.js';
 import { ProjectRepository } from './repositories/project-repository.js';
+import { RequirementRepository } from './repositories/requirement-repository.js';
 
 export interface OpenStoreOptions extends MigrateOptions {
   /** 저장소 루트. 생략하면 `BIVE_HOME` 또는 `~/.bive`. */
@@ -18,6 +20,9 @@ export interface OpenStoreOptions extends MigrateOptions {
 /** 열린 프로젝트별 저장소. 다 쓰면 `close()`를 부른다. */
 export class ProjectStore {
   readonly projects: ProjectRepository;
+  /** 표시 ID 순번 (`REQ-001` 등). 규칙 · 제안 리포지토리도 이것을 함께 쓴다. */
+  readonly sequences: DisplayIdSequences;
+  readonly requirements: RequirementRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -26,6 +31,8 @@ export class ProjectStore {
     readonly db: SqliteDatabase,
   ) {
     this.projects = new ProjectRepository(db);
+    this.sequences = new DisplayIdSequences(db);
+    this.requirements = new RequirementRepository(db, this.sequences);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

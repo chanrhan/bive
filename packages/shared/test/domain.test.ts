@@ -43,6 +43,7 @@ const requirement = {
   unrulable: null,
   createdAt: AT,
   updatedAt: AT,
+  updatedBy: human,
   deletedAt: null,
 };
 
@@ -245,6 +246,12 @@ describe('규범', () => {
     expect(Requirement.parse(requirement)).toEqual(requirement);
     expect(Requirement.safeParse({ ...requirement, displayId: 'RULE-001' }).success).toBe(false);
     expect(Requirement.safeParse({ ...requirement, text: '' }).success).toBe(false);
+    expect(
+      Requirement.safeParse({ ...requirement, updatedBy: { kind: 'agent', role: 'chat' } }).success,
+    ).toBe(true);
+    const withoutUpdatedBy: Record<string, unknown> = { ...requirement };
+    delete withoutUpdatedBy.updatedBy;
+    expect(Requirement.safeParse(withoutUpdatedBy).success).toBe(false);
     expect(
       Requirement.safeParse({ ...requirement, unrulable: { reason: '측정 불가' } }).success,
     ).toBe(true);

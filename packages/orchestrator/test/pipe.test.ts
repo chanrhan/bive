@@ -280,7 +280,9 @@ describe('처리기 오류 · 결과 검증 (PipeServer 직접)', () => {
 
   it('기본 처리기의 ping은 주어진 버전을 돌려준다', async () => {
     const status = { startedAt: 0, connectionCount: 0, activeRunCount: 0 };
-    const { client, close } = await serve(createHandlers({ orchestratorVersion: '9.9.9', status }));
+    const { client, close } = await serve(
+      createHandlers({ orchestratorVersion: '9.9.9', status, biveHome: makeBiveHome() }),
+    );
     await expect(client.call('ping')).resolves.toEqual({ pong: true, version: '9.9.9' });
     await close();
   });
@@ -288,7 +290,12 @@ describe('처리기 오류 · 결과 검증 (PipeServer 직접)', () => {
   it('system.status는 버전 · 가동 시간 · 연결 수 · 진행 중 실행 수를 돌려준다', async () => {
     let now = 1_000;
     const status = { startedAt: 1_000, connectionCount: 3, activeRunCount: 2 };
-    const handlers = createHandlers({ orchestratorVersion: '9.9.9', status, now: () => now });
+    const handlers = createHandlers({
+      orchestratorVersion: '9.9.9',
+      status,
+      biveHome: makeBiveHome(),
+      now: () => now,
+    });
     const { client, close } = await serve(handlers);
     now = 3_500;
     await expect(client.call('system.status')).resolves.toEqual({

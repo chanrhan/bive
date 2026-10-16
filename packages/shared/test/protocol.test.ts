@@ -220,6 +220,102 @@ describe('메서드 레지스트리', () => {
   });
 });
 
+describe('requirement.* (M1-02, ADR-047)', () => {
+  const PROJECT = '01JA0000000000000000000001';
+  const REQ = '01JA0000000000000000000002';
+  const AT = '2026-10-16T00:00:00.000Z';
+  const human = { kind: 'human' } as const;
+  const requirement = {
+    id: REQ,
+    displayId: 'REQ-001',
+    text: '사용자는 이메일로 가입할 수 있다',
+    author: human,
+    normState: 'approved',
+    unrulable: null,
+    createdAt: AT,
+    updatedAt: AT,
+    updatedBy: human,
+    deletedAt: null,
+  } as const;
+
+  const request = (method: string, params: unknown) =>
+    parseRequest({ jsonrpc: '2.0', id: 1, method, params });
+
+  it('create · update · delete · get · list가 등록돼 있다', () => {
+    for (const name of [
+      'requirement.create',
+      'requirement.update',
+      'requirement.delete',
+      'requirement.get',
+      'requirement.list',
+    ]) {
+      expect(isMethodName(name)).toBe(true);
+    }
+  });
+
+  it.each([
+    ['requirement.create', { projectId: PROJECT, text: '본문', author: human }],
+    ['requirement.update', { projectId: PROJECT, id: REQ, text: '본문', author: human }],
+    [
+      'requirement.delete',
+      { projectId: PROJECT, id: REQ, author: { kind: 'agent', role: 'chat' } },
+    ],
+    ['requirement.get', { projectId: PROJECT, id: REQ }],
+    ['requirement.list', { projectId: PROJECT }],
+  ])('%s 파라미터를 받는다 (주체 판단은 오케스트레이터)', (method, params) => {
+    expect(request(method, params).ok).toBe(true);
+  });
+
+  it.each([
+    ['projectId 누락', 'requirement.list', {}],
+    ['projectId가 ULID 아님', 'requirement.get', { projectId: 'p1', id: REQ }],
+    ['공백 본문', 'requirement.create', { projectId: PROJECT, text: ' \n', author: human }],
+    ['주체 누락', 'requirement.update', { projectId: PROJECT, id: REQ, text: '본문' }],
+    [
+      '모르는 필드',
+      'requirement.delete',
+      { projectId: PROJECT, id: REQ, author: human, hard: true },
+    ],
+    [
+      '모르는 주체',
+      'requirement.create',
+      { projectId: PROJECT, text: '본문', author: { kind: 'bot' } },
+    ],
+  ])('%s → -32602', (_, method, params) => {
+    const result = request(method, params);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe(-32602);
+  });
+
+  it('결과: 단건은 { requirement }, 목록은 { requirements }', () => {
+    const single = createSuccessResponse(1, 'requirement.get', { requirement });
+    expect(parseResponse('requirement.get', throughFrame(single))).toEqual({
+      ok: true,
+      id: 1,
+      result: { requirement },
+    });
+    const list = createSuccessResponse(2, 'requirement.list', { requirements: [requirement] });
+    expect(parseResponse('requirement.list', throughFrame(list))).toMatchObject({ ok: true });
+    const deleted = { ...requirement, deletedAt: AT };
+    expect(
+      parseResponse('requirement.delete', {
+        jsonrpc: '2.0',
+        id: 3,
+        result: { requirement: deleted },
+      }),
+    ).toMatchObject({ ok: true });
+    const withoutUpdatedBy: Record<string, unknown> = { ...requirement };
+    delete withoutUpdatedBy.updatedBy;
+    expect(
+      parseResponse('requirement.update', {
+        jsonrpc: '2.0',
+        id: 4,
+        result: { requirement: withoutUpdatedBy },
+      }),
+    ).toMatchObject({ ok: false, error: { code: -32602 } });
+  });
+});
+
 describe('ping 왕복', () => {
   it('요청 → 서버 검증 → 응답 → 클라이언트 검증', () => {
     // 클라이언트: 파라미터 없는 요청
