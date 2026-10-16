@@ -46,6 +46,32 @@ const assertRegistered = (biveHome: string, projectId: string): void => {
 };
 
 /**
+ * 등록된 프로젝트의 저장소를 열어 함수를 실행하고 닫는다. 함수가 던진 오류는 그대로 다시 던진다
+ * (오케스트레이터 내부 API용, 예: `ProposalService.submit`). 등록부에 없거나 프로젝트별 DB · 프로젝트 행이
+ * 없으면 -32004 `RpcError` (저장소를 새로 만들지 않는다).
+ */
+export const withRegisteredProjectStore = <T>(
+  biveHome: string,
+  projectId: string,
+  fn: (store: ProjectStore) => T,
+): T => {
+  assertRegistered(biveHome, projectId);
+  let store: ProjectStore;
+  try {
+    store = openProjectStore(projectId, { home: biveHome, create: false });
+  } catch (error) {
+    if (error instanceof NotFoundError) throw projectNotFound(projectId);
+    throw error;
+  }
+  try {
+    if (store.getProject() === null) throw projectNotFound(projectId);
+    return fn(store);
+  } finally {
+    store.close();
+  }
+};
+
+/**
  * 등록된 프로젝트의 저장소를 열어 함수를 실행하고 닫는다. 함수가 던진 저장소 오류는 IPC 오류로 바꾼다.
  * 등록부에 없거나, 프로젝트별 DB · 프로젝트 행이 없으면 -32004 (저장소를 새로 만들지 않는다).
  */
@@ -55,20 +81,7 @@ export const withProjectStore = <T>(
   fn: (store: ProjectStore) => T,
 ): T => {
   try {
-    assertRegistered(biveHome, projectId);
-    let store: ProjectStore;
-    try {
-      store = openProjectStore(projectId, { home: biveHome, create: false });
-    } catch (error) {
-      if (error instanceof NotFoundError) throw projectNotFound(projectId);
-      throw error;
-    }
-    try {
-      if (store.getProject() === null) throw projectNotFound(projectId);
-      return fn(store);
-    } finally {
-      store.close();
-    }
+    return withRegisteredProjectStore(biveHome, projectId, fn);
   } catch (error) {
     throw toRpcError(error);
   }

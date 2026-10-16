@@ -29,6 +29,8 @@ export interface OpenDatabaseOptions {
  * - WAL 모드: 읽기와 쓰기가 서로 막지 않는다
  * - foreign_keys ON: 연결마다 켜야 한다 (SQLite 기본 OFF)
  * - synchronous FULL: 커밋이 디스크에 닿은 뒤 돌아온다 (무결성 우선, NFR-01)
+ * - recursive_triggers ON: `REPLACE`가 지우는 행에도 DELETE 트리거가 돈다. 추가 전용 · 불변 테이블의 트리거를
+ *   `INSERT OR REPLACE`로 우회하지 못하게 하는 이중 방어 (테이블마다 BEFORE INSERT 트리거도 있다, ADR-050)
  * - 파일 권한 0600 (Unix): 같은 사용자만 읽고 쓴다 (architecture.md 3장)
  * @throws {NotFoundError} `create: false`인데 파일이 없을 때
  */
@@ -49,6 +51,7 @@ export const openDatabase = (file: string, options: OpenDatabaseOptions = {}): S
     }
     db.pragma('foreign_keys = ON');
     db.pragma('synchronous = FULL');
+    db.pragma('recursive_triggers = ON');
     return db;
   } catch (error) {
     db.close();

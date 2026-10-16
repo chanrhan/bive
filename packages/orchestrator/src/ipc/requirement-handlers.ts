@@ -1,7 +1,8 @@
 // `requirement.*` 처리기 (NRM-01, M1-02, ADR-047).
 // - 사람의 직접 편집은 제안 없이 바로 반영하고 수정 시각 · 주체를 기록한다 (NRM-01: 직접 편집은 승인 불필요)
 // - 에이전트 주체의 생성 · 수정 · 삭제는 파이프로 받지 않는다(-32020). 에이전트 경로는 제안 승인뿐이다 (NRM-04)
-// - 삭제는 소프트 삭제다 (NRM-07)
+// - 삭제는 소프트 삭제다 (NRM-07). 자식 규칙은 지우지 않고 부모만 해제한다(같은 트랜잭션, ADR-050).
+//   부모 없는 규칙의 추적성 결함 표시는 M3-11
 import { type Author, createUlidGenerator, ErrorCode } from '@bive/shared';
 
 import { withProjectStore } from './project-store-access.js';
@@ -62,9 +63,14 @@ export const createRequirementHandlers = ({
     },
     'requirement.delete': ({ projectId, id, author }) => {
       assertHuman(author);
-      return withProjectStore(biveHome, projectId, (store) => ({
-        requirement: store.requirements.softDelete(id, { by: author, at: timestamp() }),
-      }));
+      return withProjectStore(biveHome, projectId, (store) =>
+        store.transaction(() => {
+          const at = timestamp();
+          const requirement = store.requirements.softDelete(id, { by: author, at });
+          store.rules.detachFromParent(id, at);
+          return { requirement };
+        }),
+      );
     },
     'requirement.get': ({ projectId, id }) =>
       withProjectStore(biveHome, projectId, (store) => {

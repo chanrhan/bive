@@ -3,7 +3,17 @@
 // 파라미터 · 결과가 메서드 스키마와 맞지 않으면 -32602로 처리한다.
 import { z } from 'zod';
 
-import { Author, Requirement } from './domain.js';
+import {
+  ApprovalLogBreakReason,
+  ApprovalLogEntry,
+  Author,
+  EntityRef,
+  Proposal,
+  ProposalPayload,
+  Requirement,
+  Rule,
+} from './domain.js';
+import { ProposalKind, ProposalState } from './enums.js';
 import { Ulid } from './id.js';
 
 export const JSONRPC_VERSION = '2.0';
@@ -202,6 +212,117 @@ export type RequirementResult = z.infer<typeof RequirementResult>;
 export const RequirementListResult = z.strictObject({ requirements: z.array(Requirement) });
 export type RequirementListResult = z.infer<typeof RequirementListResult>;
 
+// ── 제안 · 승인 기록 (NRM-04, TODO-01, NFR-01, M1-09, ADR-050) ──
+// - 모든 요청에 `projectId`가 필수다. 등록되지 않은 프로젝트 · 없는 제안은 -32004
+// - 처리 요청(approve · amend · reject)은 주체 `author`를 싣고 사람(`human`)만 받는다. 에이전트 주체는 -32020.
+//   토큰 인증 전 연결의 요청은 파이프 서버가 -32020으로 거부하고 연결을 닫는다 (ADR-041)
+// - 이미 처리된(대기 아님) 제안의 처리는 -32009, 거절 사유가 비면 -32001(`data.reason = REJECT_REASON_REQUIRED`)
+// - 수정 본문이 제안 종류의 본문 스키마와 맞지 않으면 -32001(`data.reason = EDITED_PAYLOAD_INVALID`)
+// - 승인하면 같은 트랜잭션에서 규범(요구사항 · 규칙)을 만들고 승인 기록을 1건 추가한다
+// - 승인된 규칙 · 계약을 직접 고치는 RPC(`rule.update` · `contract.update` 등)는 두지 않는다 (NRM-04: 지시로만)
+
+/** 도메인 검증 실패(-32001)의 `error.data.reason` 값. */
+export const DomainErrorReason = {
+  /** 거절 사유가 비었다 (NRM-04) */
+  RejectReasonRequired: 'REJECT_REASON_REQUIRED',
+  /** 수정 본문이 제안 종류와 맞지 않는다 */
+  EditedPayloadInvalid: 'EDITED_PAYLOAD_INVALID',
+} as const;
+export type DomainErrorReason = (typeof DomainErrorReason)[keyof typeof DomainErrorReason];
+
+/** `proposal.list`: 표시 ID 순. `state` · `kind`로 거른다 (생략하면 전부). */
+export const ProposalListParams = z.strictObject({
+  projectId: Ulid,
+  state: ProposalState.optional(),
+  kind: ProposalKind.optional(),
+});
+export type ProposalListParams = z.infer<typeof ProposalListParams>;
+export const ProposalListResult = z.strictObject({ proposals: z.array(Proposal) });
+export type ProposalListResult = z.infer<typeof ProposalListResult>;
+
+/** `proposal.count`: 승인 대기 건수와 종류별 건수 (할 일 배지 · 툴팁, SCR-17). 모든 종류 키가 있다. */
+export const ProposalCountParams = z.strictObject({ projectId: Ulid });
+export type ProposalCountParams = z.infer<typeof ProposalCountParams>;
+export const ProposalCountResult = z.strictObject({
+  pending: z.int().nonnegative(),
+  pendingByKind: z.record(ProposalKind, z.int().nonnegative()),
+});
+export type ProposalCountResult = z.infer<typeof ProposalCountResult>;
+
+/** `proposal.get` · `proposal.markRead`: ID로 1건. markRead는 처음 읽은 시각만 남긴다. */
+export const ProposalGetParams = z.strictObject({ projectId: Ulid, id: Ulid });
+export type ProposalGetParams = z.infer<typeof ProposalGetParams>;
+export const ProposalMarkReadParams = ProposalGetParams;
+export type ProposalMarkReadParams = ProposalGetParams;
+export const ProposalResult = z.strictObject({ proposal: Proposal });
+export type ProposalResult = z.infer<typeof ProposalResult>;
+
+/** `proposal.approve`: 그대로 승인, `edited`가 있으면 수정 후 승인 (본문 전체를 사람이 고친 값으로). */
+export const ProposalApproveParams = z.strictObject({
+  projectId: Ulid,
+  id: Ulid,
+  author: Author,
+  edited: ProposalPayload.optional(),
+});
+export type ProposalApproveParams = z.infer<typeof ProposalApproveParams>;
+
+/** `proposal.amend`: 수정 후 승인. `proposal.approve`에 `edited`를 실은 것과 같다. */
+export const ProposalAmendParams = z.strictObject({
+  projectId: Ulid,
+  id: Ulid,
+  author: Author,
+  edited: ProposalPayload,
+});
+export type ProposalAmendParams = z.infer<typeof ProposalAmendParams>;
+
+/** 승인으로 반영된 규범. */
+export const AppliedNorm = z.discriminatedUnion('entity', [
+  z.strictObject({ entity: z.literal('Requirement'), requirement: Requirement }),
+  z.strictObject({ entity: z.literal('Rule'), rule: Rule }),
+]);
+export type AppliedNorm = z.infer<typeof AppliedNorm>;
+
+export const ProposalApproveResult = z.strictObject({
+  proposal: Proposal,
+  applied: AppliedNorm,
+  approvalLog: ApprovalLogEntry,
+});
+export type ProposalApproveResult = z.infer<typeof ProposalApproveResult>;
+
+/** `proposal.reject`: 사유 필수. 빈 사유는 스키마가 아니라 도메인 검증(-32001)으로 거부한다. */
+export const ProposalRejectParams = z.strictObject({
+  projectId: Ulid,
+  id: Ulid,
+  author: Author,
+  reason: z.string(),
+});
+export type ProposalRejectParams = z.infer<typeof ProposalRejectParams>;
+export const ProposalRejectResult = z.strictObject({
+  proposal: Proposal,
+  approvalLog: ApprovalLogEntry,
+});
+export type ProposalRejectResult = z.infer<typeof ProposalRejectResult>;
+
+/**
+ * `approvalLog.list`: 승인 기록을 순번 순으로. `targetRef`로 거른다. 형식이 깨진 기록은 `entries`에서 빠진다.
+ * `chain`은 거르기 전 전체 기록의 검증 결과다: 해시 체인 + 형식 + 처리된 제안마다 승인 기록이 있는지.
+ * `brokenAtSeq` = 처음 어긋난 순번(기록이 없는 경우인 `decision_without_log`면 `null`), `reason` = 이유.
+ */
+export const ApprovalLogListParams = z.strictObject({
+  projectId: Ulid,
+  targetRef: EntityRef.optional(),
+});
+export type ApprovalLogListParams = z.infer<typeof ApprovalLogListParams>;
+export const ApprovalLogListResult = z.strictObject({
+  entries: z.array(ApprovalLogEntry),
+  chain: z.strictObject({
+    valid: z.boolean(),
+    brokenAtSeq: z.int().positive().nullable(),
+    reason: ApprovalLogBreakReason.nullable(),
+  }),
+});
+export type ApprovalLogListResult = z.infer<typeof ApprovalLogListResult>;
+
 /**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
@@ -215,6 +336,14 @@ export const METHODS = {
   'requirement.delete': { params: RequirementDeleteParams, result: RequirementResult },
   'requirement.get': { params: RequirementGetParams, result: RequirementResult },
   'requirement.list': { params: RequirementListParams, result: RequirementListResult },
+  'proposal.list': { params: ProposalListParams, result: ProposalListResult },
+  'proposal.count': { params: ProposalCountParams, result: ProposalCountResult },
+  'proposal.get': { params: ProposalGetParams, result: ProposalResult },
+  'proposal.markRead': { params: ProposalMarkReadParams, result: ProposalResult },
+  'proposal.approve': { params: ProposalApproveParams, result: ProposalApproveResult },
+  'proposal.amend': { params: ProposalAmendParams, result: ProposalApproveResult },
+  'proposal.reject': { params: ProposalRejectParams, result: ProposalRejectResult },
+  'approvalLog.list': { params: ApprovalLogListParams, result: ApprovalLogListResult },
 } as const satisfies Record<string, MethodSpec>;
 
 export type MethodName = keyof typeof METHODS;

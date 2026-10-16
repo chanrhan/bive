@@ -4,5 +4,6 @@
 import type { Migration } from '../../migrate.js';
 import { migration as m0001 } from './0001_projects.js';
 import { migration as m0002 } from './0002_requirements.js';
+import { migration as m0003 } from './0003_rules_proposals_approval_log.js';
 
-export const PROJECT_MIGRATIONS: readonly Migration[] = [m0001, m0002];
+export const PROJECT_MIGRATIONS: readonly Migration[] = [m0001, m0002, m0003];

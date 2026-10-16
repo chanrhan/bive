@@ -104,7 +104,7 @@ interface AgentSession {
 | | 파생: 상태 = 자식 판정 종합, 결함 = 자식 규칙 0개 ∧ `unrulable` 없음 | 기획서 3.1, NRM-06 |
 | **Rule** | `id`, `displayId`, `title`, `statement` (EARS), `kind` (`architecture` · `tech-constraint` · `business`) | NRM-02, 기획서 3.1 |
 | | `checkKinds[]` (1개 이상: `test` · `pbt` · `contract` · `static` · `structure`) | NRM-02, 기획서 4.2 |
-| | `parentRequirementId` (내장 구조 규칙만 `null`), `builtin: boolean` | NRM-02, JDG-05 |
+| | `parentRequirementId` (내장 구조 규칙만 `null`), `parentDetachedAt` (부모 요구사항 삭제로 부모가 해제된 시각, 그때 `parentRequirementId = null`), `builtin: boolean` | NRM-02, JDG-05, ADR-050 |
 | | `targetBlockIds[]` (1개 이상, P1), `risk` (`low` · `medium` · `high`, P1) | NRM-09 |
 | | `contractId?` (`contract` 검사), `author`, `normState`, 시각 | NRM-03, NFR-03 |
 | | 파생: `judgment` = 최신 JudgmentResult, `mutation` = 최신 변이 결과 (P1) | JDG-02, JDG-04 |
@@ -131,9 +131,10 @@ interface AgentSession {
 | **Proposal** | `id`, `displayId` (`PRP-xxx`), `kind` (`requirement_new` · `requirement_change` · `rule_new` · `rule_change` · `contract_new` · `design_change` · `rule_title_change` · `contract_change`) | TODO-01, TODO-03, SCR-17 |
 | | `targetRef?`, `payload` (제안 본문), `diff` (before · after), `rationale`, `author` (항상 agent) | TODO-01, NFR-03 |
 | | `source` (`rule_generation` · `chat` · `reverse_extraction` · `writing_rules` · `implementation`), `risk?`, `readAt?` | SCR-17, PRJ-03 |
-| | `state` (`pending` · `approved` · `rejected` · `provisional`), `decision: { at, editedPayload?, rejectReason? }` (거절 사유 필수) | NRM-04, NRM-05 |
+| | `state` (`pending` · `approved` · `rejected` · `provisional`), `decision: { at, by (사람), editedPayload?, rejectReason?, appliedRef? }` (거절 사유 필수, 승인은 반영 규범 필수) | NRM-04, NRM-05, ADR-050 |
+| | 본문 스키마: `requirement_new` `{text}` · `rule_new` `{title, statement, kind, checkKinds, parentRequirementId}` (M1은 이 두 종류만 등록 · 승인) | ADR-050 |
 | | `adrId?`, `runId?` (승인 후 생성 실행) | DSN-07 |
-| **ApprovalLog** | `seq`, `at`, `action` (`approve` · `approve_edited` · `reject` · `run_start`), `targetRef`, `clientId`, `prevHash`, `hash` (추가만, 수정 · 삭제 없음) | NFR-01, PRD 5.1 |
+| **ApprovalLog** | `seq`, `at`, `action` (`approve` · `approve_edited` · `reject` · `run_start` · `provisional_grant`(M3-17, 주체 형태는 그때 결정)), `actor` (사람), `targetRef`, `clientId`, `detail` (`diff?` 수정 전후 · `reason?` 거절 사유 · `appliedRef?` 반영 규범), `prevHash`, `hash` (추가만, 수정 · 삭제 · `REPLACE` 덮어쓰기 없음 · DB 트리거로 차단) | NFR-01, PRD 5.1, ADR-050 |
 | **Adr** (P1) | `id`, `number`, `title`, `status` (`proposed` · `accepted`), `context`, `decision`, `consequences`, `author`, 연결 규범 · 실행 · 제안 | SCR-15, DSN-07 |
 | **NormChange** | `id`, `entityType`, `entityId`, `before`, `after`, `at`, `author`, `runId?`, `proposalId?` | NRM-07, NRM-04 |
 | **CodeChange** (P1) | `id`, `runId`, `commit`, `files[]`, `summary`, `reason` (author agent), `adrId?`, `flags` (명세 외 · 범위 밖 · Breaking · ADR 없음) | DSN-06, SCR-14, ADR-008 |
@@ -155,7 +156,8 @@ interface AgentSession {
 
 - 등록부 (M0-04, ADR-040): 프로젝트별 DB와 분리한 SQLite 파일 `registry.db`. 프로젝트 내용(이름 · 경로 · 기준 브랜치)의 원본은 프로젝트별 `bive.db`의 `projects` 행이고, 등록부는 ID만 가진다. 등록은 프로젝트별 DB 생성 → 등록부 추가 순서라 등록부에 있는 ID = 등록이 끝난 프로젝트. 등록 해제는 등록부 항목만 지운다
 - 표시 ID 순번 (M1-02, ADR-047): 프로젝트별 DB `display_id_sequences`(접두 → 마지막 순번). 생성 트랜잭션 안에서 올리고 삭제된 번호도 다시 쓰지 않는다. DB 파일 권한은 0600
-- 마이그레이션 (M0-04): `packages/store/src/migrations/<project|registry>/<NNNN>_<snake_name>.ts` (`export const migration`)를 다음 번호로 추가하고 같은 폴더 `index.ts` 배열 끝에 넣는다. 적용 기록 `schema_migrations`에 SQL 해시를 남기므로 머지된 파일은 고치지 않는다. 테이블은 `STRICT`, 연결은 WAL · `foreign_keys` ON · `synchronous` FULL
+- 규칙 · 제안 · 승인 기록 (M1-09, ADR-050): 마이그레이션 `project/0003_rules_proposals_approval_log`. 승인 기록 해시 = SHA-256(`bive-approval-log-v1\n` + 정규 JSON(`hash`를 뺀 필드, 키 사전순)), 첫 `prevHash`는 0 64자. 계산 · 검증 `store/src/approval-chain.ts`. 제안 등록은 내부 API `ProposalService.submit`(`orchestrator/src/proposals/proposal-service.ts`)뿐이고 파이프 RPC가 없다
+- 마이그레이션 (M0-04): `packages/store/src/migrations/<project|registry>/<NNNN>_<snake_name>.ts` (`export const migration`)를 다음 번호로 추가하고 같은 폴더 `index.ts` 배열 끝에 넣는다. 적용 기록 `schema_migrations`에 SQL 해시를 남기므로 머지된 파일은 고치지 않는다. 테이블은 `STRICT`, 연결은 WAL · `foreign_keys` ON · `synchronous` FULL · `recursive_triggers` ON(ADR-050)
 
 ## 4. 실행 파이프라인 상태 기계
 
@@ -234,10 +236,12 @@ stateDiagram-v2
 | `requirement.markUnrulable` | `{id, reason}` | NRM-08 | M2 |
 | `rule.list` · `rule.get` | `{projectId, filter?}` / `{id}` → 규칙 · 최신 판정 · 실행 링크 | NRM-02, JDG-02 | M1 |
 | `contract.list` · `contract.get` | 계약 | NRM-03 | M2 |
-| `proposal.list` · `proposal.get` | `{projectId, state?}` / `{id}` → 제안 · diff · 근거 | TODO-01 | M1 |
-| `proposal.approve` | `{id, editedPayload?}` → 반영된 규범 (수정 후 승인 포함) | NRM-04 | M1 |
-| `proposal.reject` | `{id, reason}` (빈 사유 거부) | NRM-04 | M1 |
-| `proposal.markRead` | `{id}` | SCR-17 | M1 |
+| `proposal.list` · `proposal.get` | `{projectId, state?, kind?}` → `{proposals}` (표시 ID 순) / `{projectId, id}` → `{proposal}` | TODO-01, ADR-050 | M1 |
+| `proposal.count` | `{projectId}` → `{pending, pendingByKind}` (할 일 배지 · 툴팁, 모든 종류 키) | SCR-17, ADR-050 | M1 |
+| `proposal.approve` · `proposal.amend` | `{projectId, id, author, edited?}` (amend는 `edited` 필수) → `{proposal, applied, approvalLog}` (사람만, 수정 후 승인 포함) | NRM-04, ADR-050 | M1 |
+| `proposal.reject` | `{projectId, id, author, reason}` → `{proposal, approvalLog}` (빈 사유 `-32001` `REJECT_REASON_REQUIRED`) | NRM-04, ADR-050 | M1 |
+| `proposal.markRead` | `{projectId, id}` → `{proposal}` (처음 읽은 시각만) | SCR-17 | M1 |
+| `approvalLog.list` | `{projectId, targetRef?}` → `{entries, chain: {valid, brokenAtSeq}}` (체인 검증은 전체 기록 기준) | NFR-01, ADR-027, ADR-050 | M1 |
 | `verification.summary` | `{projectId}` → 판정 기준 커밋 · 준수(통과/판정 가능) · 분모 목록 | JDG-03, SCR-05 | M1 |
 | `run.create` | `{projectId, ruleIds}` → 실행 (실행 시작 확인) | RUN-01 | M1 |
 | `run.list` · `run.get` | 실행 · 단계 · 세션 수치 | RUN-01, SCR-05 | M1 |
@@ -342,7 +346,7 @@ stateDiagram-v2
 | 규칙 | 강제 위치 | 시험 |
 |---|---|---|
 | 에이전트는 승인 · 잠정 승인 불가 (NFR-01) | `orchestrator/src/tools/registry.ts`: 승인 · 규범 쓰기 도구 없음. 제안 생성 도구만 (`proposal` 상태 `pending` 고정) | 승인 도구 부재 · 제안 상태 고정 단위 테스트 |
-| 승인은 파이프 경로로만 (PRD 5.1) | `orchestrator/src/ipc/server.ts`: `proposal.approve` · `reject` · `run.create`는 토큰 인증 연결만, ApprovalLog 기록 | 토큰 없는 연결 거부 테스트 |
+| 승인은 파이프 경로로만 (PRD 5.1) | `orchestrator/src/ipc/server.ts`: 인증 전 연결은 `system.hello` 외 전부 -32020. `orchestrator/src/ipc/proposal-handlers.ts`: `proposal.approve` · `amend` · `reject`(사람 주체만) · `run.create`, ApprovalLog 기록. 제안 등록 · 규칙 · 계약 쓰기 RPC 없음 | `proposal-guard.test.ts`: 토큰 없는 연결 거부, `rule.update` · `contract.update` -32601 |
 | 잠정 승인은 도구 정책만 (NRM-05) | `orchestrator/src/norms/provisional-policy.ts`, 기본 `off` (ADR-012) | 정책 off 시 provisional 미발생 |
 | 규범 저장소 직접 접근 불가 (NFR-01) | `orchestrator/src/tools/path-guard.ts`: 세션 루트 밖 · `BIVE_HOME/projects` · `BIVE_HOME/run` 거부, 심볼릭 링크 실경로 확인 | 금지 경로 시나리오 |
 | 셸 도구 없음 (NFR-02) | `orchestrator/src/agents/claude-sdk-adapter.ts`: `tools: []` (내장 도구 전부 끔), `mcpServers: { bive }`만, `strictMcpConfig: true` | 옵션 조립 스냅샷 테스트 |

@@ -2,6 +2,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  APPROVAL_LOG_GENESIS_HASH,
+  ApprovalLogEntry,
   Author,
   CommitSha,
   EntityName,
@@ -9,6 +11,7 @@ import {
   Project,
   ProjectFile,
   Proposal,
+  PROPOSAL_PAYLOAD_SCHEMAS,
   Requirement,
   RESERVED_ENTITY_NAMES,
   Rule,
@@ -16,6 +19,7 @@ import {
   Session,
   Settings,
   Step,
+  SupportedProposalKind,
   Timestamp,
 } from '../src/index.js';
 
@@ -55,6 +59,7 @@ const rule = {
   kind: 'business',
   checkKinds: ['test'],
   parentRequirementId: ID.req,
+  parentDetachedAt: null,
   builtin: false,
   targetBlockIds: [],
   risk: null,
@@ -175,7 +180,7 @@ const settings = {
 };
 
 describe('공통 값', () => {
-  it('엔터티 이름: M0 · M1 스키마 9개 + 예약 13개', () => {
+  it('엔터티 이름: M0 · M1 스키마 10개 + 예약 12개', () => {
     expect(EntityName.options).toHaveLength(22);
     for (const name of RESERVED_ENTITY_NAMES) expect(EntityName.options).toContain(name);
   });
@@ -267,30 +272,112 @@ describe('규범', () => {
     ).toBe(true);
   });
 
+  it('규칙: 부모 요구사항이 삭제되면 부모 없이 해제 시각만 남는다 (ADR-050)', () => {
+    const detached = { ...rule, parentRequirementId: null, parentDetachedAt: AT };
+    expect(Rule.parse(detached)).toEqual(detached);
+    expect(Rule.safeParse({ ...rule, parentDetachedAt: AT }).success).toBe(false);
+  });
+
   it('제안: 대기 중이면 처리 기록 없음', () => {
     expect(Proposal.parse(proposal)).toEqual(proposal);
-    expect(Proposal.safeParse({ ...proposal, decision: { at: AT } }).success).toBe(false);
+    expect(Proposal.safeParse({ ...proposal, decision: { at: AT, by: human } }).success).toBe(
+      false,
+    );
     expect(Proposal.safeParse({ ...proposal, author: human }).success).toBe(false);
   });
 
-  it('제안: 거절은 사유 필수, 승인은 사유 금지', () => {
+  it('제안: 거절은 사유 필수, 승인은 사유 금지 · 반영 규범 필수, 처리 주체는 사람', () => {
+    const by = human;
+    const appliedRef = { entity: 'Rule', id: ID.rule };
     const rejected = { ...proposal, state: 'rejected' };
-    expect(Proposal.safeParse({ ...rejected, decision: { at: AT } }).success).toBe(false);
+    expect(Proposal.safeParse({ ...rejected, decision: { at: AT, by } }).success).toBe(false);
     expect(
-      Proposal.safeParse({ ...rejected, decision: { at: AT, rejectReason: '' } }).success,
+      Proposal.safeParse({ ...rejected, decision: { at: AT, by, rejectReason: '' } }).success,
     ).toBe(false);
     expect(
-      Proposal.safeParse({ ...rejected, decision: { at: AT, rejectReason: '범위 밖' } }).success,
-    ).toBe(true);
-    const approved = { ...proposal, state: 'approved' };
-    expect(Proposal.safeParse({ ...approved, decision: null }).success).toBe(false);
-    expect(
-      Proposal.safeParse({ ...approved, decision: { at: AT, editedPayload: { title: 'x' } } })
+      Proposal.safeParse({ ...rejected, decision: { at: AT, by, rejectReason: '범위 밖' } })
         .success,
     ).toBe(true);
     expect(
-      Proposal.safeParse({ ...approved, decision: { at: AT, rejectReason: 'x' } }).success,
+      Proposal.safeParse({
+        ...rejected,
+        decision: { at: AT, by, rejectReason: '범위 밖', appliedRef },
+      }).success,
     ).toBe(false);
+    const approved = { ...proposal, state: 'approved' };
+    expect(Proposal.safeParse({ ...approved, decision: null }).success).toBe(false);
+    expect(
+      Proposal.safeParse({
+        ...approved,
+        decision: { at: AT, by, appliedRef, editedPayload: { title: 'x' } },
+      }).success,
+    ).toBe(true);
+    expect(Proposal.safeParse({ ...approved, decision: { at: AT, by } }).success).toBe(false);
+    expect(Proposal.safeParse({ ...approved, decision: { at: AT, appliedRef } }).success).toBe(
+      false,
+    );
+    expect(
+      Proposal.safeParse({ ...approved, decision: { at: AT, by: testWriter, appliedRef } }).success,
+    ).toBe(false);
+    expect(
+      Proposal.safeParse({ ...approved, decision: { at: AT, by, appliedRef, rejectReason: 'x' } })
+        .success,
+    ).toBe(false);
+  });
+
+  it('제안 본문: 종류별 스키마 (요구사항 신규 · 규칙 신규)', () => {
+    expect(PROPOSAL_PAYLOAD_SCHEMAS.requirement_new.safeParse({ text: '본문' }).success).toBe(true);
+    expect(PROPOSAL_PAYLOAD_SCHEMAS.requirement_new.safeParse({ text: '  ' }).success).toBe(false);
+    const rulePayload = {
+      title: '중복 이메일 가입 거부',
+      statement: 'WHEN 이미 가입된 이메일로 가입 요청 THE SYSTEM SHALL 가입 거부',
+      kind: 'business',
+      checkKinds: ['test'],
+      parentRequirementId: ID.req,
+    };
+    expect(PROPOSAL_PAYLOAD_SCHEMAS.rule_new.parse(rulePayload)).toEqual(rulePayload);
+    expect(
+      PROPOSAL_PAYLOAD_SCHEMAS.rule_new.safeParse({ ...rulePayload, checkKinds: [] }).success,
+    ).toBe(false);
+    expect(
+      PROPOSAL_PAYLOAD_SCHEMAS.rule_new.safeParse({ ...rulePayload, checkKinds: ['test', 'test'] })
+        .success,
+    ).toBe(false);
+    expect(
+      PROPOSAL_PAYLOAD_SCHEMAS.rule_new.safeParse({ ...rulePayload, parentRequirementId: null })
+        .success,
+    ).toBe(false);
+    expect(Object.keys(PROPOSAL_PAYLOAD_SCHEMAS)).toEqual(SupportedProposalKind.options);
+  });
+
+  it('승인 기록: 행동별 상세 (수정 diff · 거절 사유), 주체는 사람', () => {
+    const entry = {
+      seq: 1,
+      at: AT,
+      action: 'approve',
+      actor: human,
+      targetRef: { entity: 'Proposal', id: ID.proposal },
+      clientId: 'pipe-1',
+      detail: { appliedRef: { entity: 'Rule', id: ID.rule } },
+      prevHash: APPROVAL_LOG_GENESIS_HASH,
+      hash: 'f'.repeat(64),
+    };
+    expect(ApprovalLogEntry.parse(entry)).toEqual(entry);
+    const diff = { before: { text: 'a' }, after: { text: 'b' } };
+    expect(ApprovalLogEntry.safeParse({ ...entry, action: 'approve_edited' }).success).toBe(false);
+    expect(
+      ApprovalLogEntry.safeParse({ ...entry, action: 'approve_edited', detail: { diff } }).success,
+    ).toBe(true);
+    expect(ApprovalLogEntry.safeParse({ ...entry, detail: { diff } }).success).toBe(false);
+    expect(ApprovalLogEntry.safeParse({ ...entry, action: 'reject', detail: {} }).success).toBe(
+      false,
+    );
+    expect(
+      ApprovalLogEntry.safeParse({ ...entry, action: 'reject', detail: { reason: '범위 밖' } })
+        .success,
+    ).toBe(true);
+    expect(ApprovalLogEntry.safeParse({ ...entry, actor: testWriter }).success).toBe(false);
+    expect(ApprovalLogEntry.safeParse({ ...entry, prevHash: 'x' }).success).toBe(false);
   });
 });
 

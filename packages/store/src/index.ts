@@ -3,6 +3,7 @@
 /** 패키지 식별자. */
 export const PACKAGE_NAME = '@bive/store';
 
+export * from './approval-chain.js';
 export * from './database.js';
 export * from './errors.js';
 export * from './migrate.js';
@@ -11,7 +12,10 @@ export { REGISTRY_MIGRATIONS } from './migrations/registry/index.js';
 export * from './paths.js';
 export * from './project-store.js';
 export * from './registry.js';
+export * from './repositories/approval-log-repository.js';
 export * from './repositories/display-id-sequences.js';
 export * from './repositories/project-repository.js';
+export * from './repositories/proposal-repository.js';
 export * from './repositories/registry-repository.js';
 export * from './repositories/requirement-repository.js';
+export * from './repositories/rule-repository.js';
