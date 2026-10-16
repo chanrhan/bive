@@ -77,7 +77,7 @@ interface AgentSession {
 - 실행 엔진은 `AgentEvent`만 소비. 에이전트 텍스트는 이벤트 로그로만 저장, 상태 전이 입력 아님 (JDG-01)
 
 패키지 간 import 해석 (M0-03)
-- `@bive/shared`의 `exports` 맨 앞에 사용자 정의 조건 `@bive/source` → `./src/index.ts`를 두고, 그 뒤 `types` · `default`는 `dist`를 가리킨다. store · parser가 import 대상이 되면 같은 조건을 추가한다
+- `@bive/shared`의 `exports` 맨 앞에 사용자 정의 조건 `@bive/source` → `./src/index.ts`를 두고, 그 뒤 `types` · `default`는 `dist`를 가리킨다. store · parser가 import 대상이 되면 같은 조건을 추가한다 (store는 M0-04에서 추가)
 - 타입 검사: `tsconfig.base.json`의 `customConditions: ["@bive/source"]`로 src를 읽는다. 단위 테스트: 각 패키지 `vitest.config.ts`의 `ssr.resolve.conditions`에 같은 조건을 넣는다. 따라서 `pnpm typecheck` · `pnpm test`는 빌드 없이 통과한다
 - 빌드: 각 `tsconfig.build.json`이 `customConditions: []`로 덮어써 `dist`의 선언 파일을 쓴다 (`pnpm -r build`가 의존 순서대로 빌드). Node · Electron 런타임은 이 조건을 모르므로 항상 `dist`를 읽는다
 - 증명: `packages/store/test/shared-import.test.ts`
@@ -151,6 +151,10 @@ interface AgentSession {
 | `~/.bive/projects/<projectId>/judge/<runId>/` | vitest JSON 원본 · BIVE 러너 설정 | 불가 |
 | `~/.bive/work/<projectId>/worktrees/<runId>/` | 실행 워크트리 (RUN-08) | 역할별 경로 가드 안에서만 |
 | `~/.bive/work/<projectId>/sessions/<sessionId>/` | 역할 작업 디렉터리 (허용 목록 파일만 배치) | 해당 세션만 |
+| `~/.bive/registry.db` | 프로젝트 등록부 (등록된 프로젝트 ID · 등록 시각만) | 불가 |
+
+- 등록부 (M0-04, ADR-040): 프로젝트별 DB와 분리한 SQLite 파일 `registry.db`. 프로젝트 내용(이름 · 경로 · 기준 브랜치)의 원본은 프로젝트별 `bive.db`의 `projects` 행이고, 등록부는 ID만 가진다. 등록은 프로젝트별 DB 생성 → 등록부 추가 순서라 등록부에 있는 ID = 등록이 끝난 프로젝트. 등록 해제는 등록부 항목만 지운다
+- 마이그레이션 (M0-04): `packages/store/src/migrations/<project|registry>/<NNNN>_<snake_name>.ts` (`export const migration`)를 다음 번호로 추가하고 같은 폴더 `index.ts` 배열 끝에 넣는다. 적용 기록 `schema_migrations`에 SQL 해시를 남기므로 머지된 파일은 고치지 않는다. 테이블은 `STRICT`, 연결은 WAL · `foreign_keys` ON · `synchronous` FULL
 
 ## 4. 실행 파이프라인 상태 기계
 
