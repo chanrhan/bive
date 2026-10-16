@@ -1,6 +1,8 @@
 // 오케스트레이터 실행 진입점: `pnpm --filter @bive/orchestrator start` (개발) · `node dist/cli.js` (빌드 후).
-// 환경 변수: BIVE_HOME (기본 ~/.bive), BIVE_IDLE_SHUTDOWN_MS (기본 300000).
-// 종료 코드: 0 = 정상 종료 또는 이미 실행 중, 1 = 기동 · 실행 오류, 2 = 환경 변수 오류.
+// 환경 변수: BIVE_HOME (기본 ~/.bive), BIVE_IDLE_SHUTDOWN_MS (기본 300000),
+// BIVE_AGENT (`scripted` | `claude`, 기본 claude), BIVE_SCENARIO (scripted일 때, 기본 happy-path).
+// 종료 코드: 0 = 정상 종료 또는 이미 실행 중, 1 = 기동 · 실행 오류, 2 = 환경 변수 · 시나리오 오류.
+import { AgentConfigError, type AgentSelection, selectAgent } from './agent/select.js';
 import { parseIdleShutdownMs } from './lifecycle.js';
 import { startOrchestrator } from './orchestrator.js';
 import { resolveBiveHome } from './run-paths.js';
@@ -17,7 +19,16 @@ const main = async (): Promise<number> => {
     );
     return EXIT_BAD_ENV;
   }
-  const result = await startOrchestrator({ biveHome: resolveBiveHome(), idleShutdownMs });
+  const biveHome = resolveBiveHome();
+  let agent: AgentSelection;
+  try {
+    agent = selectAgent(process.env, { biveHome });
+  } catch (error) {
+    if (!(error instanceof AgentConfigError)) throw error;
+    console.error(error.message);
+    return EXIT_BAD_ENV;
+  }
+  const result = await startOrchestrator({ biveHome, idleShutdownMs, agent });
   if (result.status === 'already-running') {
     console.log(`오케스트레이터 이미 실행 중 (pid ${result.pid})`);
     return EXIT_OK;
@@ -27,7 +38,8 @@ const main = async (): Promise<number> => {
   process.once('SIGTERM', onSignal);
   process.once('SIGINT', onSignal);
   console.log(
-    `오케스트레이터 기동 (pid ${process.pid}, 버전 ${orchestrator.version}, ${orchestrator.paths.pipe})`,
+    `오케스트레이터 기동 (pid ${process.pid}, 버전 ${orchestrator.version}, ${orchestrator.paths.pipe}, ` +
+      `에이전트 ${agent.kind}${agent.scenario === null ? '' : ` · 시나리오 ${agent.scenario}`})`,
   );
   const reason = await orchestrator.closed;
   process.off('SIGTERM', onSignal);

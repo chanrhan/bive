@@ -67,7 +67,9 @@ const track = (child: ChildProcess): Spawned => {
 const childEnv = (env: Record<string, string>): NodeJS.ProcessEnv => {
   const merged: NodeJS.ProcessEnv = { ...process.env, ...env };
   // 부모 테스트 환경의 값이 새지 않게, 넘기지 않은 BIVE 변수는 지운다
-  if (env.BIVE_IDLE_SHUTDOWN_MS === undefined) delete merged.BIVE_IDLE_SHUTDOWN_MS;
+  for (const name of ['BIVE_IDLE_SHUTDOWN_MS', 'BIVE_AGENT', 'BIVE_SCENARIO']) {
+    if (env[name] === undefined) delete merged[name];
+  }
   return merged;
 };
 
