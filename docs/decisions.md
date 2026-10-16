@@ -274,6 +274,13 @@
 - 결정: 타입 검사 · 빌드(`tsc`)는 각 패키지 devDependency `typescript@7.0.2`로 한다. 루트 devDependency에는 ESLint 파서 전용으로 `typescript@6.0.3`(peer 범위 안의 최신)을 둔다. pnpm은 루트의 `typescript-eslint` peer를 루트 `typescript`로, 패키지 스크립트의 `tsc`는 패키지의 `node_modules/.bin`으로 해석한다. 타입 정보가 필요한 lint 규칙(type-aware)은 쓰지 않는다.
 - 결과: M0-01. `typescript-eslint`가 TypeScript 7을 지원하면 루트 `typescript`를 7로 올리고 이 ADR을 닫는다. 그 전까지 TypeScript 7에만 있는 문법은 lint 파싱 오류가 날 수 있다. 루트 `node_modules/.bin/tsc` · tsserver는 6.0.3이라 편집기 진단이나 루트 `npx tsc`는 CI(7.0.2)와 다를 수 있다.
 
+## ADR-038 픽스처 헬스 체크 응답 · 자체 테스트 위치
+
+- 상태: 제안 (에이전트) · 2026-10-16
+- 맥락: M0-08은 `fixtures/sample-next-app`의 `GET /api/health` HTTP 테스트 1개만 요구하고 응답 형태 · 테스트 위치는 정하지 않았다. M1 · M3 완료 기준 흐름이 헬스 응답에 필드를 추가하는 규칙(서버 시각 · 버전 · 호스트 이름 등)을 새로 실행하고 그 규칙은 Red 확인(구현 전 실패, RUN-03 · ADR-026)을 거친다. 픽스처가 처음부터 그런 필드를 돌려주면 해당 규칙의 인수 테스트가 구현 전에 통과해 Red 확인이 끝나지 않는다. ADR-026은 BIVE 인수 테스트를 `bive-acceptance/<RULE-ID>/*.acc.ts`에 두고 판정 러너가 그 아래 전부를 실행한다.
+- 결정: 픽스처의 `/api/health`는 데이터베이스를 한 번 읽고(`Item` 개수) `{ ok: true }`만 돌려준다(시각 · 버전 없음). 픽스처 자체 HTTP 테스트는 프로젝트 테스트 경로 `tests/http/*.test.ts`에 두고 `bive-acceptance/`는 비워 둔다(규칙에 매핑되지 않는 인수 테스트를 판정 러너가 줍지 않도록). 프로젝트 vitest 설정은 `bive-acceptance/**`를 명시적으로 제외한다. 서버 기동은 ADR-026과 같은 순서(임시 SQLite `DATABASE_URL`에 `prisma migrate deploy` → `next build` → `next start` 127.0.0.1 빈 포트)를 `tests/support/server.ts`(vitest globalSetup)가 한다.
+- 결과: M0-08. M1 · M3 흐름의 헬스 응답 필드 추가 규칙이 Red 확인을 정상으로 거친다. 사람이 응답에 시각을 처음부터 넣기로 하면 M1 흐름의 요구사항 문장을 함께 바꾼다.
+
 ## ADR-039 IPC 오류 코드 판단 순서 · 패키지 간 import 해석
 
 - 상태: 제안 (에이전트) · 2026-10-16

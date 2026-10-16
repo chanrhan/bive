@@ -1,0 +1,9 @@
+# 이 픽스처는 BIVE 저장소의 pnpm 워크스페이스에 속하지 않는 독립 프로젝트다.
+# 이 파일이 있어야 저장소 안에서도 pnpm이 상위(루트) 워크스페이스를 찾지 않고 여기를 루트로 쓴다.
+packages: []
+
+# pnpm 10은 의존성의 설치 스크립트를 기본 차단한다. 아래만 허용한다.
+onlyBuiltDependencies:
+  - '@prisma/engines'
+  - better-sqlite3
+  - prisma
