@@ -92,16 +92,27 @@ export const spawnPnpmStart = (env: Record<string, string>): Spawned =>
     }),
   );
 
-/** 조건이 참이 될 때까지 기다린다. */
+/**
+ * 조건이 참이 될 때까지 기다린다. 조건이 던진 예외(예: 파일이 잠깐 없어 ENOENT)는 거짓으로 보고 계속 기다리며,
+ * 시간이 다 되면 마지막 예외를 메시지에 붙인다.
+ */
 export const waitFor = async (
   condition: () => boolean | Promise<boolean>,
   timeoutMs: number,
   what: string,
 ): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = null;
   for (;;) {
-    if (await condition()) return;
-    if (Date.now() > deadline) throw new Error(`시간 초과: ${what}`);
+    try {
+      if (await condition()) return;
+    } catch (error) {
+      lastError = error;
+    }
+    if (Date.now() > deadline) {
+      const detail = lastError instanceof Error ? ` (마지막 오류: ${lastError.message})` : '';
+      throw new Error(`시간 초과: ${what}${detail}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 };

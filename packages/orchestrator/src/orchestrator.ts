@@ -1,5 +1,5 @@
 // 오케스트레이터 기동 · 종료: 단일 인스턴스 잠금 → 토큰 → 파이프 서버 → 수명 감시 (PRD 5.1, ADR-027 · ADR-041).
-import { chmodSync, mkdirSync, unlinkSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 
 import { createHandlers } from './ipc/handlers.js';
@@ -44,12 +44,38 @@ export interface Orchestrator {
 export type StartResult =
   { status: 'started'; orchestrator: Orchestrator } | { status: 'already-running'; pid: number };
 
+const isEnoent = (error: unknown): boolean =>
+  (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+
 const unlinkIfExists = (file: string): void => {
   try {
     unlinkSync(file);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (!isEnoent(error)) throw error;
   }
+};
+
+/** 파일 식별자(장치 · inode). 없으면 null. 같은 경로에 다른 프로세스가 새로 만든 파일을 가린다. */
+const fileIdentity = (file: string): string | null => {
+  try {
+    const stat = lstatSync(file);
+    return `${stat.dev}:${stat.ino}`;
+  } catch (error) {
+    if (isEnoent(error)) return null;
+    throw error;
+  }
+};
+
+/** 토큰 파일이 아직 이 인스턴스의 토큰일 때만 지운다. */
+const unlinkTokenIfOurs = (tokenPath: string, token: string): void => {
+  let current: string;
+  try {
+    current = readFileSync(tokenPath, 'utf8');
+  } catch (error) {
+    if (isEnoent(error)) return;
+    throw error;
+  }
+  if (current === token) unlinkIfExists(tokenPath);
 };
 
 /**
@@ -72,10 +98,38 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
   const { lock } = locked;
 
   let server: PipeServer | null = null;
+  let token: string | null = null;
+  /** 이 인스턴스가 bind한 소켓 파일의 식별자. bind 전이면 null */
+  let boundSocket: string | null = null;
+
+  /**
+   * 소켓 · 토큰은 이 인스턴스의 것일 때만 지운다 (같은 죽은 잠금을 동시에 인수한 경합의 진 쪽이
+   * 이긴 쪽 파일을 지우지 않게, ADR-041). Node는 서버를 닫을 때 소켓 경로를 지우므로,
+   * 그 경로에 다른 인스턴스의 소켓이 있으면 닫는 동안 잠시 옆으로 옮겨 둔다.
+   */
+  const closeAndCleanup = async (): Promise<void> => {
+    const current = unixSocket ? fileIdentity(paths.pipe) : null;
+    const foreign = boundSocket !== null && current !== null && current !== boundSocket;
+    const aside = `${paths.pipe}.${process.pid}.keep`;
+    if (foreign) renameSync(paths.pipe, aside);
+    try {
+      await server?.close();
+    } finally {
+      if (foreign) {
+        renameSync(aside, paths.pipe);
+      } else if (boundSocket !== null && fileIdentity(paths.pipe) === boundSocket) {
+        unlinkIfExists(paths.pipe);
+      }
+      if (token !== null) unlinkTokenIfOurs(paths.token, token);
+      lock.release();
+    }
+  };
+
   try {
     // 잠금을 잡았으므로 남아 있는 소켓 파일은 죽은 인스턴스의 것이다
     if (unixSocket) unlinkIfExists(paths.pipe);
-    const token = writeTokenFile(paths.token);
+    const ownToken = writeTokenFile(paths.token);
+    token = ownToken;
 
     let stopping: Promise<void> | null = null;
     let resolveClosed!: (reason: ShutdownReason) => void;
@@ -87,11 +141,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       stopping ??= (async () => {
         lifecycle.stop();
         try {
-          await server?.close();
+          await closeAndCleanup();
         } finally {
-          if (unixSocket) unlinkIfExists(paths.pipe);
-          unlinkIfExists(paths.token);
-          lock.release();
           resolveClosed(reason);
         }
       })();
@@ -105,7 +156,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
     server = new PipeServer({
       transport: options.transport ?? new NetPipeTransport({ platform }),
       path: paths.pipe,
-      token,
+      token: ownToken,
       orchestratorVersion: version,
       handlers: createHandlers({ orchestratorVersion: version }),
       ...(options.helloTimeoutMs === undefined ? {} : { helloTimeoutMs: options.helloTimeoutMs }),
@@ -113,6 +164,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       onConnectionClosed: () => lifecycle.connectionClosed(),
     });
     await server.listen();
+    if (unixSocket) boundSocket = fileIdentity(paths.pipe);
     lifecycle.start();
 
     const listening = server;
@@ -120,7 +172,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       status: 'started',
       orchestrator: {
         paths,
-        token,
+        token: ownToken,
         version,
         staleLockTakenOver: locked.staleTakenOver,
         runs: lifecycle,
@@ -132,10 +184,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       },
     };
   } catch (error) {
-    await server?.close().catch(() => undefined);
-    if (unixSocket) unlinkIfExists(paths.pipe);
-    unlinkIfExists(paths.token);
-    lock.release();
+    await closeAndCleanup().catch(() => undefined);
     throw error;
   }
 };

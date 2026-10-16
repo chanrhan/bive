@@ -128,7 +128,13 @@ describe('pnpm --filter @bive/orchestrator start', () => {
       await waitFor(
         () => {
           const pid = readPidFile(paths.pid);
-          return pid !== null && pid !== stale && statSync(paths.pipe).isSocket();
+          // 잠금을 잡은 뒤 남은 소켓을 지우고 bind하기 전 틈에는 소켓 파일이 없다
+          return (
+            pid !== null &&
+            pid !== stale &&
+            existsSync(paths.pipe) &&
+            statSync(paths.pipe).isSocket()
+          );
         },
         15_000,
         '잠금 인수 · 기동',

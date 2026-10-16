@@ -1,5 +1,6 @@
 // 파이프 서버 실연결: Unix 소켓 · system.hello 토큰 · ping · 오류 코드 (M0-05 수용 기준 1, ADR-027 · ADR-039).
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 
 import { ErrorCode, PROTOCOL_VERSION } from '@bive/shared';
@@ -309,4 +310,33 @@ describe('토큰 파일 · 종료 정리', () => {
       });
     },
   );
+
+  unixOnly('종료 때 다른 인스턴스가 새로 만든 소켓 · 토큰은 지우지 않는다', async () => {
+    const orchestrator = await start();
+    const { pipe, token: tokenPath, pid: pidPath } = orchestrator.paths;
+    // 경합에서 다른 인스턴스가 같은 경로에 새 소켓을 bind하고 토큰을 다시 쓴 상황
+    unlinkSync(pipe);
+    const other = net.createServer((socket) => socket.end('other\n'));
+    await new Promise<void>((resolve) => other.listen(pipe, resolve));
+    writeFileSync(tokenPath, 'other-token', { mode: 0o600 });
+    writeFileSync(pidPath, '999999\n');
+    try {
+      await orchestrator.stop();
+      expect(statSync(pipe).isSocket()).toBe(true);
+      expect(readFileSync(tokenPath, 'utf8')).toBe('other-token');
+      expect(readFileSync(pidPath, 'utf8')).toBe('999999\n');
+      // 옮겨 두었다 되돌린 소켓은 여전히 다른 인스턴스로 연결된다
+      const reply = await new Promise<string>((resolve, reject) => {
+        const socket = net.createConnection(pipe);
+        let data = '';
+        socket.setEncoding('utf8');
+        socket.on('data', (chunk: string) => (data += chunk));
+        socket.on('end', () => resolve(data));
+        socket.on('error', reject);
+      });
+      expect(reply).toBe('other\n');
+    } finally {
+      await new Promise<void>((resolve) => other.close(() => resolve()));
+    }
+  });
 });
