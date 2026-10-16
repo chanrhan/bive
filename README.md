@@ -219,7 +219,7 @@ export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
 | `BIVE_ORCHESTRATOR_MODE` | 앱이 오케스트레이터를 띄우는 방식. `source`(개발, `tsx`) · `dist`(패키징). 기본은 패키징 여부로 결정 |
 | `BIVE_NODE_PATH` | `source` 방식에서 쓸 Node 실행 파일. 기본 PATH의 `node` |
 | `BIVE_NO_SANDBOX` | `1`이면 Electron에 `--no-sandbox`를 붙인다 (개발 · 테스트 한정, root는 자동) |
-| `BIVE_E2E_PORT` | 화면 e2e의 Vite 서버 포트. 기본 5179 |
+| `BIVE_E2E_PORT` | 화면 e2e의 Vite 서버 포트. 기본은 worktree 경로 해시로 자동 결정(5179 + hash % 500) |
 | `BIVE_AGENT` | 에이전트 어댑터 선택(`scripted` · `claude`). M1에서 추가 예정이라 아직 동작하지 않는다 |
 
 ## 7. 테스트
@@ -232,12 +232,12 @@ export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
 | 단위 테스트 | `pnpm test` | 패키지별 vitest |
 | 빌드 | `pnpm build` | `packages/*/dist`, 앱은 electron-vite 출력 |
 | 화면 e2e | `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=<chrome 경로> pnpm e2e` | Playwright로 Vite 개발 서버의 렌더러를 열어 화면 체크리스트 검사 · 스크린샷(`artifacts/screens`). 경로를 주지 않으면 Playwright 기본 브라우저를 쓴다 |
-| Electron 스모크 | `xvfb-run -a pnpm smoke` | 앱을 빌드해 띄우고 preload 노출 · 오케스트레이터 연결 · 종료 뒤 유휴 종료를 확인 |
+| Electron 스모크 | `xvfb-run -a pnpm smoke` | 앱을 빌드해 띄우고 preload 노출 · 레이아웃 · 사이드바 하단 연결 상태("연결됨") · 종료 뒤 유휴 종료를 확인 |
 | 픽스처 | `pnpm -C fixtures/sample-next-app test` | 임시 SQLite 마이그레이션 → `next build` → `next start` → HTTP 확인 |
 | 픽스처 초기화 | `scripts/reset-fixture.sh <dir> [--verify]` | 픽스처의 추적 파일을 `<dir>`로 복사해 설치하고 git 저장소(커밋 1개)로 만든다. `--verify`는 끝에 픽스처 테스트까지 실행한다 |
 | 초기화 스크립트 검사 | `scripts/test-reset-fixture.sh` | 지우면 안 되는 경로를 거부하는지 검사 |
 
-이 VM(Chromium 1194만 설치)에서의 e2e 실행 방법과 각 명령의 실측 결과는 [`CLAUDE.md`](CLAUDE.md) 6장에 있다. 같은 VM의 worktree 여러 개에서 e2e를 동시에 돌릴 때는 `BIVE_E2E_PORT`를 서로 다르게 준다.
+이 VM(Chromium 1194만 설치)에서의 e2e 실행 방법과 각 명령의 실측 결과는 [`CLAUDE.md`](CLAUDE.md) 6장에 있다. 같은 VM의 worktree 여러 개에서 e2e를 동시에 돌려도 기본 포트가 worktree 경로 해시로 정해져 보통 겹치지 않는다. 겹치면 `BIVE_E2E_PORT`로 지정한다.
 
 ## 8. 개발 규칙
 
