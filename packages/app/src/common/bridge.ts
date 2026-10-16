@@ -1,6 +1,12 @@
 // main ↔ preload ↔ renderer 사이의 브리지 계약 (architecture.md 5장 "렌더러 경로").
 // preload 번들에 들어가므로 런타임 값은 문자열 상수만 두고, shared는 타입만 가져온다.
-import type { JsonRpcErrorObject, MethodName, MethodParams, MethodResult } from '@bive/shared';
+import type {
+  JsonRpcErrorObject,
+  MethodName,
+  MethodParams,
+  MethodResult,
+  SystemStatusResult,
+} from '@bive/shared';
 
 /** renderer → main 요청 채널 (`ipcRenderer.invoke`). 값: {@link RpcRequestPayload} → {@link RpcOutcome} */
 export const RPC_CHANNEL = 'bive:rpc';
@@ -27,6 +33,16 @@ export interface BridgeEvent {
   event: string;
   params: unknown;
 }
+
+/**
+ * main이 만드는 알림(파이프 알림 아님): 오케스트레이터 연결 상태 (ADR-045).
+ * main이 1초마다 `system.status`를 부른 결과와, 연결이 끊긴 순간에 보낸다.
+ */
+export const CONNECTION_EVENT = 'system.connection';
+
+/** {@link CONNECTION_EVENT}의 값. 연결됨이면 마지막 `system.status` 결과를 함께 싣는다. */
+export type ConnectionEventParams =
+  { state: 'connected'; status: SystemStatusResult } | { state: 'disconnected' };
 
 type InvokeParams<M extends RendererMethodName> =
   undefined extends MethodParams<M> ? [params?: MethodParams<M>] : [params: MethodParams<M>];

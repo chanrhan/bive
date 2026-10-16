@@ -279,9 +279,59 @@ describe('처리기 오류 · 결과 검증 (PipeServer 직접)', () => {
   });
 
   it('기본 처리기의 ping은 주어진 버전을 돌려준다', async () => {
-    const { client, close } = await serve(createHandlers({ orchestratorVersion: '9.9.9' }));
+    const status = { startedAt: 0, connectionCount: 0, activeRunCount: 0 };
+    const { client, close } = await serve(createHandlers({ orchestratorVersion: '9.9.9', status }));
     await expect(client.call('ping')).resolves.toEqual({ pong: true, version: '9.9.9' });
     await close();
+  });
+
+  it('system.status는 버전 · 가동 시간 · 연결 수 · 진행 중 실행 수를 돌려준다', async () => {
+    let now = 1_000;
+    const status = { startedAt: 1_000, connectionCount: 3, activeRunCount: 2 };
+    const handlers = createHandlers({ orchestratorVersion: '9.9.9', status, now: () => now });
+    const { client, close } = await serve(handlers);
+    now = 3_500;
+    await expect(client.call('system.status')).resolves.toEqual({
+      version: '9.9.9',
+      uptimeMs: 2_500,
+      connections: 3,
+      runsInProgress: 2,
+    });
+    // 시계가 기동 시각보다 앞이어도 음수를 내보내지 않는다
+    now = 500;
+    await expect(client.call('system.status')).resolves.toMatchObject({ uptimeMs: 0 });
+    await close();
+  });
+});
+
+describe('system.status (실제 오케스트레이터)', () => {
+  it('열린 연결 수 · 진행 중 실행 수 · 가동 시간을 센다', async () => {
+    const orchestrator = await start();
+    const first = await connect(orchestrator.paths.pipe, orchestrator.token);
+    clients.push(first);
+    const before = await first.call('system.status');
+    expect(before).toMatchObject({
+      version: ORCHESTRATOR_VERSION,
+      connections: 1,
+      runsInProgress: 0,
+    });
+    expect(Number.isInteger(before.uptimeMs) && before.uptimeMs >= 0).toBe(true);
+
+    const second = await connect(orchestrator.paths.pipe, orchestrator.token);
+    clients.push(second);
+    const run = orchestrator.runs.beginRun();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const during = await first.call('system.status');
+    expect(during).toMatchObject({ connections: 2, runsInProgress: 1 });
+    expect(during.uptimeMs).toBeGreaterThan(before.uptimeMs);
+
+    run.end();
+    await second.close();
+    await waitFor(() => orchestrator.connectionCount === 1, 5_000, '두 번째 연결 닫힘');
+    await expect(first.call('system.status')).resolves.toMatchObject({
+      connections: 1,
+      runsInProgress: 0,
+    });
   });
 });
 

@@ -4,21 +4,21 @@
 // 사용법:
 //   const bive = await mockBive(page, {
 //     responses: {
-//       ping: { result: { pong: true, version: '0.0.0' } },        // 기본 상태
-//       // ping: { result: ..., delayMs: 300 },                     // 지연 뒤 응답
-//       // ping: { pending: true },                                  // 영원히 대기 (로딩 상태)
-//       // ping: { error: { code: -32603, message: '내부 오류' } },  // JSON-RPC 오류 (에러 상태)
+//       'system.status': { result: { version: '0.0.0', uptimeMs: 0, connections: 1, runsInProgress: 0 } },
+//       // 'system.status': { result: ..., delayMs: 300 },                     // 지연 뒤 응답
+//       // 'system.status': { pending: true },                                  // 영원히 대기 (로딩 상태)
+//       // 'system.status': { error: { code: -32603, message: '내부 오류' } },  // JSON-RPC 오류 (에러 상태)
 //     },
 //     events: [{ event: 'run.updated', params: {...}, delayMs: 100 }], // 첫 구독 뒤 자동 발행
 //   });
 //   await page.goto('/');
 //   await bive.emit('run.updated', {...});          // 테스트 도중 알림 발행
-//   await bive.setResponse('ping', { error: ... });  // 응답 바꾸기 (다음 호출부터)
-//   expect(await bive.calls()).toEqual([{ method: 'ping', params: undefined }]);
+//   await bive.setResponse('system.status', { error: ... });  // 응답 바꾸기 (다음 호출부터)
+//   expect(await bive.calls()).toEqual([{ method: 'system.status', params: undefined }]);
 //
 // 계약은 실제 브리지(src/common/bridge.ts, ADR-042)와 같다: 키는 invoke · on 두 개, invoke는 결과로 풀리거나
-// `{ code, message, data? }`로 거부, on은 해제 함수를 돌려준다. 응답 표에 없는 메서드는 -32601,
-// main 전용 메서드(system.hello)는 -32020으로 거부한다.
+// `{ code, message, data? }`로 거부, on은 해제 함수를 돌려준다(구독마다 독립). 응답 표에 없는 메서드는 -32601,
+// main 전용 메서드(system.hello)는 -32020으로 거부한다. 한 페이지에 한 번만 부른다.
 import type { JsonRpcErrorObject, MethodResult } from '@bive/shared';
 import type { Page } from '@playwright/test';
 
@@ -89,7 +89,8 @@ interface MockControl {
  */
 const installMock = (state: MockState): void => {
   const responses = new Map<string, MockResponse>(Object.entries(state.responses));
-  const listeners = new Map<string, Set<(params: unknown) => void>>();
+  // 구독 1건 = 항목 1개. 같은 함수를 두 번 구독하면 두 항목이고, 해제는 자기 항목만 지운다 (preload와 같음)
+  const listeners = new Map<string, Set<{ listener: (params: unknown) => void }>>();
   const pendingEvents = [...state.events];
   const calls: MockCall[] = [];
 
@@ -97,7 +98,7 @@ const installMock = (state: MockState): void => {
   const clone = <T>(value: T): T => (value === undefined ? value : structuredClone(value));
 
   const deliver = (event: string, params: unknown): void => {
-    for (const listener of [...(listeners.get(event) ?? [])]) listener(clone(params));
+    for (const entry of [...(listeners.get(event) ?? [])]) entry.listener(clone(params));
   };
 
   const invoke = (method: unknown, params?: unknown): Promise<unknown> => {
@@ -127,7 +128,8 @@ const installMock = (state: MockState): void => {
       set = new Set();
       listeners.set(event, set);
     }
-    set.add(listener);
+    const entry = { listener };
+    set.add(entry);
     // 자동 발행 알림은 그 이름의 첫 구독 때 한 번만 예약한다
     for (let i = pendingEvents.length - 1; i >= 0; i -= 1) {
       const item = pendingEvents[i];
@@ -136,7 +138,7 @@ const installMock = (state: MockState): void => {
       setTimeout(() => deliver(item.event, item.params), item.delayMs ?? 0);
     }
     return () => {
-      set.delete(listener);
+      set.delete(entry);
     };
   };
 
@@ -158,11 +160,19 @@ const installMock = (state: MockState): void => {
   Object.defineProperty(window, state.globalName, { value: control });
 };
 
+/** 이미 가짜 브리지를 주입한 페이지. 두 번째 주입은 window.bive 재정의 오류로 조용히 깨지므로 미리 막는다. */
+const mockedPages = new WeakSet<Page>();
+
 /**
- * 다음 탐색부터 window.bive를 가짜로 바꾼다. `page.goto` 전에 부른다.
+ * 다음 탐색부터 window.bive를 가짜로 바꾼다. `page.goto` 전에 부른다. 페이지마다 한 번만 부른다
+ * (응답을 바꾸려면 `setResponse`, 두 번 부르면 오류).
  * 응답 · 자동 알림 표는 탐색마다 처음 값으로 초기화되고, `setResponse`로 바꾼 값은 현재 문서에만 적용된다.
  */
 export const mockBive = async (page: Page, options: MockBiveOptions = {}): Promise<BiveMock> => {
+  if (mockedPages.has(page)) {
+    throw new Error('이 페이지에는 이미 mockBive를 불렀음. 응답은 setResponse로 바꾼다');
+  }
+  mockedPages.add(page);
   const state: MockState = {
     responses: { ...(options.responses ?? {}) } as Record<string, MockResponse>,
     events: options.events ?? [],

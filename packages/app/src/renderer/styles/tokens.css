@@ -1,0 +1,68 @@
+/*
+ * 디자인 토큰 (docs/prototype-map.md 3장 표, screens.md 1.1).
+ * 이름은 표와 하나도 빠짐없이 같다 (test/tokens.test.ts가 표를 읽어 이름 · 값을 대조한다).
+ * 값: '근거 있음'은 표 그대로, '제안'은 표의 제안값. 프로토타입이 오면 값만 바꾼다.
+ * 다크 모드 우선 (1.1). 라이트 모드는 후순위로 [data-theme="light"]에서 같은 이름을 재정의한다.
+ */
+:root {
+  /* 테마 · 색 */
+  --color-scheme: dark;
+  --color-bg: #0e1424;
+  --color-surface: #151c30;
+  --color-surface-raised: #1c2540;
+  --color-border: #2a3452;
+  --color-text: #e6e9f2;
+  --color-text-muted: #8a93ad;
+  --color-accent: #4c8dff;
+  --color-danger: #f0616d;
+  --color-warning: #e5b454;
+  --color-success: #3fb68b;
+  --color-pending: #4a536b;
+
+  /* 상태 배지 (1.4): 정상은 글자 없이 흐린 점, 예외만 글자 + 색. 값은 표시 방식 이름 */
+  --status-normal: dot;
+  --status-normal-dot-color: color-mix(in srgb, var(--color-text-muted) 50%, transparent);
+  --status-exception: label;
+  --opacity-dimmed: 0.4;
+
+  /* 아이콘 (1.1): 표준 세트 1종, 글자 옆은 글자보다 약간 작게 · 글자와 같은 색. 이모지 금지 */
+  --icon-set: lucide;
+  --icon-color-inline: currentColor;
+  --icon-size-inline: 0.875em;
+
+  /* 크기 · 배치 */
+  --chat-width: 360px;
+  --chat-collapsed-width: 44px;
+  /* 미디어 쿼리 안에서는 변수를 못 쓰므로 렌더러가 이 값을 읽어 matchMedia에 쓴다 */
+  --bp-chat-collapse: 1100px;
+  --modal-width: 820px;
+  --modal-height: 600px;
+  --stepper-cell-min: 52px;
+  --stepper-label-lines: 2;
+  --card-lines: 2;
+  --chat-instruct-border: var(--color-accent);
+
+  /* 글꼴 */
+  --font-sans: 'Pretendard', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --font-size-1: 12px;
+  --font-size-2: 13px;
+  --font-size-3: 14px;
+  --font-size-4: 16px;
+  --line-height: 1.5;
+
+  /* 간격 · 모서리 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --radius-1: 4px;
+  --radius-2: 8px;
+
+  /* 레이아웃 */
+  --sidebar-width: 232px;
+  --list-pane-width: 400px;
+  --focus-ring: 0 0 0 2px var(--color-accent);
+}

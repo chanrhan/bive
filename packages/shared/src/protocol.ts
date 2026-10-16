@@ -134,12 +134,27 @@ export const SystemHelloResult = z.strictObject({
 export type SystemHelloResult = z.infer<typeof SystemHelloResult>;
 
 /**
+ * `system.status`: 파라미터 없음 → 오케스트레이터 상태 (사이드바 연결 상태, screens.md 1.2, ADR-045).
+ * - `connections`: 열린 파이프 연결 수 (인증 여부 무관, 유휴 종료 기준과 같음 · ADR-041)
+ * - `runsInProgress`: 진행 중 실행 수 (실행 엔진은 M1, 그 전에는 0)
+ */
+export const SystemStatusParams = z.undefined();
+export const SystemStatusResult = z.strictObject({
+  version: z.string().min(1),
+  uptimeMs: z.number().int().nonnegative(),
+  connections: z.number().int().nonnegative(),
+  runsInProgress: z.number().int().nonnegative(),
+});
+export type SystemStatusResult = z.infer<typeof SystemStatusResult>;
+
+/**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
  */
 export const METHODS = {
   ping: { params: PingParams, result: PingResult },
   'system.hello': { params: SystemHelloParams, result: SystemHelloResult },
+  'system.status': { params: SystemStatusParams, result: SystemStatusResult },
 } as const satisfies Record<string, MethodSpec>;
 
 export type MethodName = keyof typeof METHODS;

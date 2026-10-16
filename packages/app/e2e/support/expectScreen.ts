@@ -58,6 +58,8 @@ const locate = (page: Page, check: ElementCheck): Locator => {
   if (check.role !== undefined) {
     const byRole = page.getByRole(check.role, {
       ...(check.name !== undefined && { name: check.name, exact: typeof check.name === 'string' }),
+      // getByRole은 기본으로 숨김 요소를 빼므로, 미노출(DOM에 없음) 검사에서는 숨김 요소도 센다
+      ...(check.absent && { includeHidden: true }),
     });
     locator = locator === null ? byRole : locator.and(byRole);
   }
@@ -75,7 +77,8 @@ const checkElement = async (page: Page, check: ElementCheck, timeout?: number): 
   const opts = timeout === undefined ? {} : { timeout };
   const locator = locate(page, check);
   if (check.absent) {
-    await expect(locator, `${what} 미노출`).toHaveCount(0, opts);
+    // 미노출 = DOM에 없음 (숨김 요소도 실패, types.ts absent)
+    await expect(locator, `${what} DOM에 없음`).toHaveCount(0, opts);
     return;
   }
   if (check.count !== undefined) {

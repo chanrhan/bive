@@ -87,6 +87,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
   const paths = runPaths(options.biveHome, platform, options.username ?? os.userInfo().username);
   const version = options.version ?? ORCHESTRATOR_VERSION;
   const idleShutdownMs = options.idleShutdownMs ?? DEFAULT_IDLE_SHUTDOWN_MS;
+  const startedAt = Date.now();
   const unixSocket = platform !== 'win32';
   if (unixSocket) assertSocketPathLength(paths.pipe, platform);
 
@@ -158,7 +159,18 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       path: paths.pipe,
       token: ownToken,
       orchestratorVersion: version,
-      handlers: createHandlers({ orchestratorVersion: version }),
+      handlers: createHandlers({
+        orchestratorVersion: version,
+        status: {
+          startedAt,
+          get connectionCount() {
+            return lifecycle.connectionCount;
+          },
+          get activeRunCount() {
+            return lifecycle.activeRunCount;
+          },
+        },
+      }),
       ...(options.helloTimeoutMs === undefined ? {} : { helloTimeoutMs: options.helloTimeoutMs }),
       onConnectionOpened: () => lifecycle.connectionOpened(),
       onConnectionClosed: () => lifecycle.connectionClosed(),
