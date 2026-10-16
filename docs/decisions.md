@@ -428,3 +428,32 @@
   - `Rule`에 `parentDetachedAt`을 더한다. `requirement.delete`는 같은 트랜잭션에서 살아 있는 자식 규칙의 `parentRequirementId`를 `null`로, `parentDetachedAt` · `updatedAt`을 삭제 시각으로 바꾼다. 규칙은 지우지 않는다. 내장 규칙이 아니면 부모 또는 해제 시각 중 하나가 있어야 한다. 부모 없는 규칙의 추적성 결함 표시는 M3-11.
   - 승인 기록 `ApprovalLogEntry {seq, at, action, actor(사람), targetRef, clientId, detail {diff?, reason?, appliedRef?}, prevHash, hash}`. `clientId`는 요청이 들어온 파이프 연결 번호(`pipe-N`, 증거용). `hash = SHA-256("bive-approval-log-v1\n" + 정규 JSON(hash를 뺀 필드))`, 정규 JSON은 객체 키 사전순 · 공백 없음 · `undefined` 키 제외. 첫 `prevHash`는 0 64자. `approval_log` · `proposals`의 수정 · 삭제(제안은 본문 수정 · 처리된 제안의 재처리 · 삭제)는 DB 트리거로 막는다. `INSERT OR REPLACE`는 `recursive_triggers`가 꺼진 연결에서 DELETE · UPDATE 트리거를 건너뛰므로, 두 테이블에 같은 키(`seq` · `hash`, `id` · `display_id`)가 이미 있으면 거부하는 BEFORE INSERT 트리거를 두고 연결도 `recursive_triggers = ON`으로 연다(이중 방어). `requirements` · `rules`에는 불변 트리거가 없어 `REPLACE`가 `UPDATE` 이상의 우회가 되지 않으므로 따로 막지 않는다. 트리거를 지운 변조는 검증이 드러낸다: 체인(`seq_gap` · `prev_hash_mismatch` · `hash_mismatch` · `malformed`, 처음 어긋난 순번)과 대조(처리된 제안마다 상태에 맞는 승인 기록이 있어야 함, 없으면 `decision_without_log`). `approvalLog.list`는 형식이 깨진 기록을 `entries`에서 빼고 `chain`으로 알린다(오류로 응답하지 않는다). 한계: 기준점(외부에 둔 마지막 해시)이 없는 체인이라 끝 기록을 잘라 낸 것은 체인만으로 검출할 수 없고, 처리된 제안과의 대조로 그 제안의 기록이 사라진 경우만 잡는다(`run_start` 등 제안이 아닌 기록의 잘라내기는 못 잡는다).
 - 결과: M1-09. 마이그레이션 `project/0003_rules_proposals_approval_log`. #21(M1-08)은 `ProposalService.submit`(또는 열린 저장소용 `submitProposal`)으로 `rule_new`를 등록하고, #23(M1-10)은 `proposal.count` · `proposal.markRead`, #40(M1-27)은 `proposal.list` · `proposal.approve` · `proposal.amend` · `proposal.reject` · `approvalLog.list`, #24(M1-11)는 `ProjectStore.rules`, #25(M1-12)는 `ProjectStore.approvalLog.append`(`run_start`)를 쓴다. `provisional_grant` 기록의 주체 형태(정책은 사람이 아님)는 M3-17에서 정한다(지금 `actor`는 사람만). 기각하면 `amend`를 빼고(approve의 `edited`로 충분) `parentDetachedAt` 대신 규칙 삭제나 부모 유지로 바꾼다.
+
+## ADR-054 프로젝트 열기 RPC · `.bive.json` 처리 · 재등록
+
+- 상태: 제안 (에이전트) · 2026-10-16
+- 맥락: M1-01(#14)은 `project.open {path}`가 미연결 폴더에 `.bive.json`을 만들어 등록하고 연결된 폴더는 다시 쓰지 않는 것만 정한다. architecture.md 5장 표는 `project.open` → `{project, created}` · `project.list`만 적었고, 경로 검사 · 오류 코드, 형식이 틀린 설정 파일, 등록부에 없는 설정 파일(ADR-040 등록 해제 · 다른 `BIVE_HOME`), 복사한 폴더(같은 `projectId`가 두 폴더), 프로젝트 이름 · 기준 브랜치의 출처, 마지막으로 연 프로젝트를 어디에 두는지는 문서에 없다.
+- 결정:
+  - RPC: `project.open {path}` → `{ project, created, empty }`. `created` = 이번 호출이 `.bive.json`을 만들었는지, `empty` = `.bive.json` 말고는 항목이 없는 폴더(M4-01에서 빈 폴더와 기존 프로젝트를 가를 때 쓴다, ADR-036). `project.current` (파라미터 없음) → `{ project | null }`, `project.list` (파라미터 없음) → `{ projects }`(등록 시각 순, 등록부 파일이 없으면 빈 목록이고 파일을 만들지 않음).
+  - 경로: shared 스키마가 절대 경로(`/…` · `C:\…` · `\\…`)만 받는다(상대 · 빈 값 · NUL `-32602`, main이 접속 전에 거부). 오케스트레이터는 실경로(심볼릭 링크 해석)로 바꿔 저장 · 비교한다. 없는 경로 `-32004`, 폴더가 아니거나 접근할 수 없으면 `-32001`.
+  - 이름 · 기준 브랜치: 이름은 실경로의 폴더 이름. 기준 브랜치는 `.git/HEAD`(워크트리는 `.git` 파일의 `gitdir:`)가 가리키는 `refs/heads/<이름>`, git이 아니거나 분리된 HEAD면 `main`. git을 실행하지 않고 파일만 읽는다.
+  - 설정 파일이 없으면: 새 ULID로 `registerProject`(ADR-040 순서) → `.bive.json`을 `wx`(이미 있으면 실패)로 쓴다. 내용은 `projectId` · `schemaVersion` 두 키, 2칸 들여쓰기, 끝 개행. 파일을 못 쓰면 등록부 항목을 지우고(빈 프로젝트별 DB는 남음, ADR-040) 그 사이에 생긴 파일이면 `-32009`, 그 밖은 `-32001`.
+  - 설정 파일이 있으면: 파일은 읽기만 한다(수정 시각 유지). 일반 파일이 아니거나(폴더 · 심볼릭 링크) JSON · 스키마(strict)가 틀리거나 `schemaVersion`이 코드보다 새로우면 `-32001`이고 고치거나 덮어쓰지 않는다. 등록부에 있으면 그 프로젝트로 진입한다(등록부에 있는데 행이 없으면 `-32004`, 저장소 손상을 숨기지 않음). 등록부에 없고 프로젝트별 DB에 행이 있으면 그 행 그대로 다시 등록하고(규범 · 기록 보존), 행도 없으면(다른 `BIVE_HOME`에서 만든 파일) 그 ID로 새로 등록한다.
+  - 같은 ID가 다른 실경로에 등록돼 있으면 `-32009`(복사한 폴더가 같은 저장소를 쓰지 않게, NFR-01). 폴더를 옮긴 경우의 경로 갱신은 하지 않는다.
+  - `project.current`: 오케스트레이터 메모리에 마지막으로 연 프로젝트 ID만 두고, 응답할 때 등록부 · 프로젝트별 DB에서 다시 읽는다(그 사이 등록 해제됐으면 `null`). 디스크에 남기지 않으므로 오케스트레이터가 다시 뜨면 `null`이다.
+  - 처리기는 전부 동기 호출이다. 오케스트레이터는 한 스레드라 같은 폴더를 두 요청이 동시에 열어도 검사와 쓰기 사이에 끼어들지 않는다(다른 프로세스와의 경합은 `wx`가 막는다).
+- 결과: M1-01. 거부 쪽(형식 오류 · 경로 불일치)은 사람이 파일을 지우거나 고치면 풀리고, 받는 쪽으로 넓히기는 쉽다. 폴더 이동 지원이 필요하면 사람이 정하고 별도 이슈로 연다. `empty`는 지금 화면에서 쓰지 않는다(빈 폴더 · 미연결 폴더 모두 SCR-02, ADR-036).
+
+## ADR-055 앱의 프로젝트 열기 경로 · 시작 화면 · 사용자 데이터 위치
+
+- 상태: 제안 (에이전트) · 2026-10-16
+- 맥락: SCR-01은 [폴더 열기] → 폴더 선택만 정하고, 앱 시작 화면, 기동 인자, OS 대화상자를 렌더러에서 여는 경로(architecture.md 5장 "main 전용 `app.pickFolder`"), 프로젝트가 열렸음을 창에 알리는 방법, 정의되지 않은 에러 상태는 문서에 없다. ADR-044는 아무것도 고르지 않은 중앙을 "선택 항목 없음"으로 뒀다. 또 Electron 사용자 데이터가 기본값 `~/.config/@bive/app`이라 `BIVE_HOME`을 바꿔도 공유됐다(#13 리뷰 이월 지적).
+- 결정:
+  - 시작 화면: 경로 `start`(이름 "프로젝트 시작", 메뉴 밖)를 더하고 앱의 첫 경로로 둔다. 프로젝트가 없어도 사이드바 메뉴는 그대로 동작한다("<화면 이름> 준비 중"). 열린 프로젝트 ID가 바뀌면(처음 열림 포함) `requirements`로 이동한다. 사이드바 상단에 프로젝트 이름(폴더 이름)을 보인다.
+  - 렌더러 계약: `ProjectProvider` · `useProject()` → `{ project: Project | null, loading, open(path) }`(`src/renderer/src/project/ProjectContext.tsx`). 처음 한 번 `project.current`를 부르고 이후 `project.opened` 알림을 따른다. 알림이 먼저 오면 늦게 온 첫 조회 결과로 덮지 않는다. 조회 실패는 프로젝트 없음으로 둔다.
+  - main 메서드 `app.pickFolder`(파라미터 없음 → `{ path: string | null }`, 취소 `null`): main이 `dialog.showOpenDialog`(폴더만)를 띄우고 경로만 돌려준다. 열기는 렌더러가 `project.open`으로 한다. 파이프로 보내지 않고 shared `METHODS`에 넣지 않는다(브리지 계약 `src/common/bridge.ts`의 `AppMethods`). 검증 순서는 ADR-042 그대로이고 main 메서드는 등록 여부 확인 전에 처리한다(파라미터를 넣으면 `-32602`, 처리기 예외는 `-32603`).
+  - `project.opened`: main이 만드는 렌더러 알림(파이프 알림 아님, ADR-045의 `system.connection`과 같은 방식). main을 거친 `project.open`이 성공할 때마다(기동 인자 · 렌더러 요청) 모든 창에 결과 그대로 보낸다. 창이 늦게 뜨면 `project.current`로 따라잡는다.
+  - 기동 인자: `--open <path>` 또는 `--open=<path>`, 여러 번이면 처음 것. 다른 인자와 섞여도 된다(`--remote-debugging-port=9222`). 상대 경로는 `INIT_CWD`(pnpm이 남긴 원래 위치, 없으면 현재 폴더) 기준으로 절대 경로로 바꾼다. 값이 없거나 열기에 실패하면 main 로그에만 남기고 화면은 시작 화면에 머문다. 대화상자는 열지 않는다.
+  - SCR-01 상태: 기본(제목 · [폴더 열기]), 에러("폴더 열기 실패" 한 줄, 원인은 표시하지 않음). 폴더를 고르거나 여는 동안 [폴더 열기]는 비활성. [BIVE 동기화] · [요구사항 자동 생성]은 렌더링하지 않는다(ADR-035 · ADR-036).
+  - 사용자 데이터: main 시작 때(창 생성 전) `app.setPath('userData', $BIVE_HOME/app-data)`. 캐시 · 로컬 저장소가 `BIVE_HOME`별로 나뉘어 테스트 · 흐름 사이에 섞이지 않고, `BIVE_HOME`을 지우면 함께 지워진다.
+- 결과: M1-01. ADR-044의 "선택 항목 없음"은 `start` 경로가 첫 경로가 되면서 보이지 않는다(경로 `null`일 때만). SCR-00 체크리스트의 중앙 확인은 `data-route="start"`로 바뀐다. M4-01은 `project.opened`의 `created` · `empty`로 [BIVE 동기화] 노출을 정한다(ADR-036).

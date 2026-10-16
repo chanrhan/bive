@@ -31,8 +31,11 @@ export type MenuRouteId =
   | 'adr' // SCR-15 ADR
   | 'runs'; // SCR-16 실행 추적
 
-/** 사이드바 메뉴 밖에서 들어가는 경로: 할 일(알림 아이콘, SCR-17~19) · 설정(톱니, SCR-21). */
-export type ExtraRouteId = 'todo' | 'settings';
+/**
+ * 사이드바 메뉴 밖에서 들어가는 경로: 프로젝트 시작(최상위, SCR-01 · 앱 시작 화면) ·
+ * 할 일(알림 아이콘, SCR-17~19) · 설정(톱니, SCR-21).
+ */
+export type ExtraRouteId = 'start' | 'todo' | 'settings';
 
 export type RouteId = MenuRouteId | ExtraRouteId;
 
@@ -80,6 +83,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
 ];
 
 const EXTRA_LABELS: Record<ExtraRouteId, string> = {
+  start: '프로젝트 시작',
   todo: '할 일',
   settings: '설정',
 };

@@ -5,6 +5,7 @@ import type {
   MethodName,
   MethodParams,
   MethodResult,
+  ProjectOpenResult,
   SystemStatusResult,
 } from '@bive/shared';
 
@@ -20,7 +21,35 @@ export const BRIDGE_KEYS = ['invoke', 'on'] as const;
 /** 렌더러가 부를 수 없는 메서드: 파이프 인증은 main이 맡는다. */
 export const MAIN_ONLY_METHODS = ['system.hello'] as const satisfies readonly MethodName[];
 
-export type RendererMethodName = Exclude<MethodName, (typeof MAIN_ONLY_METHODS)[number]>;
+/**
+ * main이 직접 처리하는 메서드 (파이프 아님, architecture.md 5장 "main 전용"). 파라미터 없음.
+ * - `app.pickFolder`: OS 폴더 선택 대화상자 → `{ path }` (취소하면 `null`). 프로젝트를 열지는 않는다
+ */
+export const PICK_FOLDER_METHOD = 'app.pickFolder';
+
+export interface AppMethods {
+  [PICK_FOLDER_METHOD]: { params: undefined; result: { path: string | null } };
+}
+
+export type AppMethodName = keyof AppMethods;
+
+export const APP_METHOD_NAMES = [PICK_FOLDER_METHOD] as const satisfies readonly AppMethodName[];
+
+/** 렌더러가 `invoke`로 부를 수 있는 메서드: 파이프 메서드(main 전용 제외) + main 메서드. */
+export type RendererMethodName =
+  Exclude<MethodName, (typeof MAIN_ONLY_METHODS)[number]> | AppMethodName;
+
+export type RendererMethodParams<M extends RendererMethodName> = M extends AppMethodName
+  ? AppMethods[M]['params']
+  : M extends MethodName
+    ? MethodParams<M>
+    : never;
+
+export type RendererMethodResult<M extends RendererMethodName> = M extends AppMethodName
+  ? AppMethods[M]['result']
+  : M extends MethodName
+    ? MethodResult<M>
+    : never;
 
 export interface RpcRequestPayload {
   method: string;
@@ -44,8 +73,18 @@ export const CONNECTION_EVENT = 'system.connection';
 export type ConnectionEventParams =
   { state: 'connected'; status: SystemStatusResult } | { state: 'disconnected' };
 
+/**
+ * main이 만드는 알림: 프로젝트가 열림 (M1-01). main을 거친 `project.open`이 성공할 때마다
+ * (기동 인자 `--open`, 렌더러 요청 모두) 모든 창에 보낸다. 값은 `project.open` 결과 그대로다.
+ */
+export const PROJECT_OPENED_EVENT = 'project.opened';
+
+export type ProjectOpenedEventParams = ProjectOpenResult;
+
 type InvokeParams<M extends RendererMethodName> =
-  undefined extends MethodParams<M> ? [params?: MethodParams<M>] : [params: MethodParams<M>];
+  undefined extends RendererMethodParams<M>
+    ? [params?: RendererMethodParams<M>]
+    : [params: RendererMethodParams<M>];
 
 /**
  * 렌더러의 `window.bive`.
@@ -56,6 +95,6 @@ export interface BiveBridge {
   invoke<M extends RendererMethodName>(
     method: M,
     ...params: InvokeParams<M>
-  ): Promise<MethodResult<M>>;
+  ): Promise<RendererMethodResult<M>>;
   on(event: string, listener: (params: unknown) => void): () => void;
 }

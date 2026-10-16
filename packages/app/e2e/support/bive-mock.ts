@@ -19,10 +19,10 @@
 // 계약은 실제 브리지(src/common/bridge.ts, ADR-042)와 같다: 키는 invoke · on 두 개, invoke는 결과로 풀리거나
 // `{ code, message, data? }`로 거부, on은 해제 함수를 돌려준다(구독마다 독립). 응답 표에 없는 메서드는 -32601,
 // main 전용 메서드(system.hello)는 -32020으로 거부한다. 한 페이지에 한 번만 부른다.
-import type { JsonRpcErrorObject, MethodResult } from '@bive/shared';
+import type { JsonRpcErrorObject } from '@bive/shared';
 import type { Page } from '@playwright/test';
 
-import type { RendererMethodName } from '../../src/common/bridge.js';
+import type { RendererMethodName, RendererMethodResult } from '../../src/common/bridge.js';
 
 /** 메서드 하나의 가짜 응답. 값은 브라우저로 직렬화되므로 JSON으로 표현 가능한 값만 쓴다. */
 export type MockResponse<R = unknown> =
@@ -31,7 +31,7 @@ export type MockResponse<R = unknown> =
   | { pending: true };
 
 /** 메서드 이름 → 가짜 응답. 결과 타입은 shared 메서드 레지스트리를 따른다. */
-export type MockResponses = { [M in RendererMethodName]?: MockResponse<MethodResult<M>> };
+export type MockResponses = { [M in RendererMethodName]?: MockResponse<RendererMethodResult<M>> };
 
 /** 첫 구독 뒤 `delayMs`(기본 0) 지나 자동으로 발행할 알림. */
 export interface MockEvent {
@@ -59,7 +59,7 @@ export interface BiveMock {
   /** 메서드 응답을 바꾼다. 이미 대기 중인 호출에는 영향이 없다. */
   setResponse<M extends RendererMethodName>(
     method: M,
-    response: MockResponse<MethodResult<M>>,
+    response: MockResponse<RendererMethodResult<M>>,
   ): Promise<void>;
   /** 이벤트별 현재 구독자 수. */
   listenerCounts(): Promise<Record<string, number>>;
