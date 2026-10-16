@@ -16,6 +16,7 @@ export const REPO_ROOT = path.resolve(APP_DIR, '../..');
 
 const homes: string[] = [];
 const servers = new Set<net.Server>();
+const fakeSockets = new Set<net.Socket>();
 const children = new Set<ChildProcess>();
 
 /** 짧은 임시 BIVE_HOME. Unix 소켓 경로 제한을 넘지 않도록 `/tmp` 바로 아래. */
@@ -59,6 +60,7 @@ export const spawnOrchestratorDirectly = (biveHome: string, idleMs = 60_000): Ch
 
 export interface FakeOrchestrator {
   readonly connections: number;
+  /** 듣기를 멈추고 열린 연결을 모두 끊는다 (오케스트레이터가 죽은 것처럼). */
   close(): Promise<void>;
 }
 
@@ -67,7 +69,7 @@ const send = (socket: net.Socket, message: unknown): void => {
 };
 
 /**
- * 가짜 오케스트레이터: 앱 경로 규칙의 소켓에서 듣고, 지정 토큰의 `system.hello`와 `ping`에만 답한다.
+ * 가짜 오케스트레이터: 앱 경로 규칙의 소켓에서 듣고, 지정 토큰의 `system.hello`와 `ping` · `system.status`에만 답한다.
  * 잠금 파일 · 토큰 파일은 테스트가 따로 쓴다.
  */
 export const listenFakeOrchestrator = (
@@ -77,8 +79,16 @@ export const listenFakeOrchestrator = (
   const paths = appRunPaths(biveHome);
   mkdirSync(paths.dir, { recursive: true, mode: 0o700 });
   let connections = 0;
+  const sockets = new Set<net.Socket>();
+  const startedAt = Date.now();
   const server = net.createServer((socket) => {
     connections += 1;
+    sockets.add(socket);
+    fakeSockets.add(socket);
+    socket.once('close', () => {
+      sockets.delete(socket);
+      fakeSockets.delete(socket);
+    });
     socket.setEncoding('utf8');
     let buffer = '';
     socket.on('error', () => undefined);
@@ -104,6 +114,17 @@ export const listenFakeOrchestrator = (
           }
         } else if (req.method === 'ping') {
           send(socket, { jsonrpc: '2.0', id: req.id, result: { pong: true, version: 'fake' } });
+        } else if (req.method === 'system.status') {
+          send(socket, {
+            jsonrpc: '2.0',
+            id: req.id,
+            result: {
+              version: 'fake',
+              uptimeMs: Date.now() - startedAt,
+              connections: sockets.size,
+              runsInProgress: 0,
+            },
+          });
         }
       }
     });
@@ -120,6 +141,7 @@ export const listenFakeOrchestrator = (
           new Promise<void>((done) => {
             servers.delete(server);
             server.close(() => done());
+            for (const socket of sockets) socket.destroy();
           }),
       });
     });
@@ -136,6 +158,9 @@ export const writeRunFiles = (biveHome: string, files: { pid?: number; token?: s
 
 /** 남은 서버 · 자식 · 잠금 파일이 가리키는 오케스트레이터를 정리하고 임시 폴더를 지운다. */
 export const cleanup = async (): Promise<void> => {
+  // 열린 연결이 남아 있으면 server.close가 끝나지 않으므로 먼저 끊는다
+  for (const socket of fakeSockets) socket.destroy();
+  fakeSockets.clear();
   await Promise.all([...servers].map((s) => new Promise<void>((done) => s.close(() => done()))));
   servers.clear();
   for (const home of homes) {

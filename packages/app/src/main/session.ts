@@ -41,27 +41,53 @@ const defaultLog = (message: string): void => {
   console.error(message);
 };
 
+/** 접속 함수. `launch`가 false면 띄우지 않고 실행 중인 인스턴스에만 붙는다. */
+export type LinkConnect = (options: { launch: boolean }) => Promise<EnsureResult>;
+
 /**
- * 오케스트레이터 연결 1개를 유지한다. 요청 때 연결이 없거나 끊겼으면 다시 접속(필요하면 기동)한다.
+ * 오케스트레이터 연결 1개를 유지한다. 요청 때 연결이 없거나 끊겼으면 다시 접속한다.
+ * 기동은 첫 접속 시도 한 번만 허용한다(성공 · 실패와 무관). 그 뒤의 접속(첫 기동 실패 뒤의 재시도,
+ * 끊긴 뒤의 재접속)은 다시 띄우지 않고 실행 중인 인스턴스에 붙기만 한다 (ADR-045).
  * 동시에 들어온 요청은 같은 접속 시도를 기다린다.
  */
 export class OrchestratorLink {
-  readonly #connect: () => Promise<EnsureResult>;
+  readonly #connect: LinkConnect;
   readonly #log: (message: string) => void;
   readonly #notificationListeners = new Set<(notification: PipeNotification) => void>();
+  readonly #stateListeners = new Set<(state: ConnectionState) => void>();
   #current: EnsureResult | null = null;
   #connecting: Promise<EnsureResult> | null = null;
   #state: ConnectionState = 'disconnected';
   #closed = false;
+  /** 기동을 허용한 접속을 이미 시도했는지. 그 뒤로는 기동하지 않는다 */
+  #launchAttempted = false;
+  #lastFailureLog: string | null = null;
 
   /** `log`: main 프로세스 로그 (기본 표준 오류). 렌더러로 가지 않는 상세를 남긴다 */
-  constructor(connect: () => Promise<EnsureResult>, log: (message: string) => void = defaultLog) {
+  constructor(connect: LinkConnect, log: (message: string) => void = defaultLog) {
     this.#connect = connect;
     this.#log = log;
   }
 
   get state(): ConnectionState {
     return this.#state;
+  }
+
+  /** 다음 접속이 기동을 허용하는지. 첫 접속 시도 전에만 참이다. */
+  get launchAllowed(): boolean {
+    return !this.#launchAttempted;
+  }
+
+  /** 연결 상태가 바뀔 때마다 부른다. 돌려준 함수를 부르면 끊는다. */
+  onStateChange(listener: (state: ConnectionState) => void): () => void {
+    this.#stateListeners.add(listener);
+    return () => this.#stateListeners.delete(listener);
+  }
+
+  #setState(state: ConnectionState): void {
+    if (this.#state === state) return;
+    this.#state = state;
+    for (const listener of [...this.#stateListeners]) listener(state);
   }
 
   /** 접속한다. 이미 연결돼 있으면 그 연결을 쓴다. */
@@ -71,9 +97,11 @@ export class OrchestratorLink {
       return Promise.resolve(this.#current);
     }
     this.#connecting ??= (async () => {
-      this.#state = 'connecting';
+      this.#setState('connecting');
       try {
-        const result = await this.#connect();
+        const launch = this.launchAllowed;
+        this.#launchAttempted = true;
+        const result = await this.#connect({ launch });
         if (this.#closed) {
           result.client.destroy();
           throw new Error('연결 관리자가 닫힘');
@@ -81,7 +109,7 @@ export class OrchestratorLink {
         this.#attach(result);
         return result;
       } catch (error) {
-        this.#state = 'disconnected';
+        this.#setState('disconnected');
         throw error;
       } finally {
         this.#connecting = null;
@@ -93,14 +121,15 @@ export class OrchestratorLink {
   #attach(result: EnsureResult): void {
     const { client } = result;
     this.#current = result;
-    this.#state = 'connected';
+    this.#lastFailureLog = null;
+    this.#setState('connected');
     client.onNotification((n) => {
       for (const listener of this.#notificationListeners) listener(n);
     });
     client.onClose(() => {
       if (this.#current === result) {
         this.#current = null;
-        this.#state = 'disconnected';
+        this.#setState('disconnected');
       }
     });
   }
@@ -119,12 +148,21 @@ export class OrchestratorLink {
     try {
       client = (await this.connect()).client;
     } catch (error) {
-      this.#log(
-        `오케스트레이터 연결 실패: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      const line = `오케스트레이터 연결 실패: ${error instanceof Error ? error.message : String(error)}`;
+      // 1초 간격 재접속(ADR-045) 동안 같은 실패를 매번 남기지 않는다. 다시 붙으면 초기화한다
+      if (line !== this.#lastFailureLog) this.#log(line);
+      this.#lastFailureLog = line;
       throw new PipeRpcError(rpcError(ErrorCode.InternalError, CONNECT_FAILED_MESSAGE));
     }
     return client.request(method, params);
+  }
+
+  /**
+   * 지금 연결만 끊는다(응답 없는 연결을 버릴 때). 다음 요청 때 다시 붙는다(기동 없음).
+   * 대기 중인 요청은 연결 끊김 오류로 끝나므로 쌓이지 않는다.
+   */
+  dropConnection(): void {
+    this.#current?.client.destroy();
   }
 
   /** 연결을 닫는다. 오케스트레이터 프로세스는 건드리지 않는다. */
@@ -132,11 +170,11 @@ export class OrchestratorLink {
     this.#closed = true;
     this.#current?.client.destroy();
     this.#current = null;
-    this.#state = 'disconnected';
+    this.#setState('disconnected');
   }
 }
 
-export interface MainSessionOptions extends Omit<EnsureOptions, 'biveHome'> {
+export interface MainSessionOptions extends Omit<EnsureOptions, 'biveHome' | 'launch'> {
   biveHome: string;
   /** 기록할 앱 main pid (기본 현재 프로세스) */
   appPid?: number;
@@ -157,7 +195,7 @@ export const startMainSession = (options: MainSessionOptions): MainSession => {
   const { appPid = process.pid, log, ...ensure } = options;
   const paths = appRunPaths(options.biveHome, options.platform, options.username);
   writeAppPid(paths, appPid);
-  const link = new OrchestratorLink(() => ensureOrchestrator(ensure), log);
+  const link = new OrchestratorLink(({ launch }) => ensureOrchestrator({ ...ensure, launch }), log);
   let disposed = false;
   return {
     paths,

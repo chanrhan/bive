@@ -14,6 +14,9 @@ import { connectPipe, type PipeClient, type PipeNet, PipeRpcError } from './pipe
 export const CONNECT_RETRY_INTERVAL_MS = 100;
 export const CONNECT_TIMEOUT_MS = 5000;
 
+/** `launch: false`인데 실행 중인 오케스트레이터가 없음 (main 로그용). */
+export const NOT_RUNNING_MESSAGE = '실행 중인 오케스트레이터 없음, 다시 띄우지 않음';
+
 /**
  * 오케스트레이터 실행 방식.
  * - `source`: 빌드 없이 tsx로 `src/cli.ts` (`pnpm --filter @bive/orchestrator start`와 같은 방식)
@@ -86,6 +89,11 @@ export type SpawnFn = (command: string, args: string[], options: SpawnOptions) =
 export interface EnsureOptions {
   biveHome: string;
   command: OrchestratorCommand;
+  /**
+   * false면 띄우지 않고 실행 중인 인스턴스에만 붙는다(끊긴 뒤 재접속, ADR-045).
+   * 잠금 pid가 살아 있지 않으면 바로 실패한다. 기본 true.
+   */
+  launch?: boolean;
   spawn?: SpawnFn;
   net?: PipeNet;
   isAlive?: (pid: number) => boolean;
@@ -160,6 +168,7 @@ export const spawnDetached = (spawn: SpawnFn, command: OrchestratorCommand): Chi
  * 오케스트레이터에 접속한다. 잠금 파일의 pid가 살아 있지 않으면 분리 프로세스로 띄운다.
  * 접속은 {@link CONNECT_RETRY_INTERVAL_MS} 간격으로 {@link CONNECT_TIMEOUT_MS}까지 재시도한다.
  * 기다리는 동안 붙으려던 인스턴스가 사라지면(유휴 종료 직전 등) 그때 띄운다.
+ * `launch: false`면 어느 경우에도 띄우지 않는다.
  */
 export const ensureOrchestrator = async (options: EnsureOptions): Promise<EnsureResult> => {
   const paths = appRunPaths(options.biveHome, options.platform, options.username);
@@ -180,6 +189,9 @@ export const ensureOrchestrator = async (options: EnsureOptions): Promise<Ensure
 
   for (;;) {
     if (!launched && runningPid() === null) {
+      if (options.launch === false) {
+        throw new Error(`${NOT_RUNNING_MESSAGE} (${paths.orchestratorPid})`);
+      }
       const child = spawnDetached(spawn, options.command);
       child.once('error', (error) => {
         launchFailure ??= `실행 불가 (${error.message})`;

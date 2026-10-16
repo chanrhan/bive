@@ -1,0 +1,296 @@
+/* 기본 스타일 · 레이아웃 (screens.md 1.1 · 1.2). 색 · 반경 · 글꼴 크기는 tokens.css의 변수만 쓴다 (ADR-044). */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: var(--color-scheme);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-3);
+  line-height: var(--line-height);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+h2 {
+  margin: 0;
+}
+
+/* 아이콘: 글자 옆은 글자보다 약간 작게 · 같은 색 (1.1). 아이콘만 있는 버튼은 고정 크기 */
+.inline-icon {
+  width: var(--icon-size-inline);
+  height: var(--icon-size-inline);
+  color: var(--icon-color-inline);
+  flex: none;
+}
+
+.button-icon {
+  width: var(--font-size-4);
+  height: var(--font-size-4);
+  flex: none;
+}
+
+.icon-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.icon-button:hover,
+.icon-button[aria-pressed='true'] {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+/* ── 레이아웃: 사이드바 · 중앙 · 채팅 ───────────────────── */
+
+.app-layout {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--chat-width);
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-layout[data-chat='collapsed'] {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--chat-collapsed-width);
+}
+
+/* ── 사이드바 ────────────────────────────────────────── */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+}
+
+.sidebar-top,
+.sidebar-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+}
+
+.sidebar-top {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.sidebar-bottom {
+  border-top: 1px solid var(--color-border);
+}
+
+.sidebar-project {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-4);
+  font-weight: 600;
+}
+
+.sidebar-project[data-state='none'] {
+  color: var(--color-text-muted);
+  font-weight: 400;
+  font-size: var(--font-size-3);
+}
+
+.todo-badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-2);
+  background: var(--color-accent);
+  color: var(--color-bg);
+  font-size: var(--font-size-1);
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  transform: translate(35%, -35%);
+}
+
+.sidebar-nav {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-2);
+}
+
+.nav-group + .nav-group {
+  margin-top: var(--space-4);
+}
+
+.nav-group-label {
+  padding: 0 var(--space-2) var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  font-weight: 600;
+}
+
+.nav-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3);
+  text-align: left;
+  cursor: pointer;
+}
+
+.nav-item:hover {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+.nav-item[aria-current='page'] {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+/* 연결 상태: 정상(연결됨 · 확인 중)은 점도 글자와 같은 흐린 색, 예외(끊김)만 색으로 강조 (1.1) */
+.connection-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+}
+
+.connection-dot {
+  fill: currentColor;
+}
+
+.connection-status[data-state='disconnected'] {
+  color: var(--color-danger);
+}
+
+/* ── 중앙 영역 ──────────────────────────────────────── */
+
+.main-area {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.empty-state {
+  margin: auto;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3);
+}
+
+/* ── 채팅 ──────────────────────────────────────────── */
+
+.chat {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--color-surface);
+  border-left: 1px solid var(--color-border);
+}
+
+.chat-strip {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: var(--space-3) 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.chat-strip:hover,
+.chat-strip[aria-expanded='true'] {
+  color: var(--color-text);
+}
+
+.chat-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 접힘 상태에서 연 채팅: 띠 자리를 지키고 본문 위에 겹친다 */
+.chat[data-mode='overlay'] .chat-body {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  width: var(--chat-width);
+  background: var(--color-surface-raised);
+  border-left: 1px solid var(--color-border);
+  box-shadow: -8px 0 24px color-mix(in srgb, var(--color-bg) 60%, transparent);
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 53px;
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.chat-title {
+  font-size: var(--font-size-3);
+  font-weight: 600;
+}

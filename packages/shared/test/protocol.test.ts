@@ -188,6 +188,36 @@ describe('메서드 레지스트리', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe(-32602);
   });
+
+  it('system.status: 파라미터 없음 → 버전 · 가동 시간 · 연결 수 · 진행 중 실행 수', () => {
+    expect(isMethodName('system.status')).toBe(true);
+    const request = createRequest(3, 'system.status');
+    expect(request).toEqual({ jsonrpc: '2.0', id: 3, method: 'system.status' });
+    const status = { version: '0.0.0', uptimeMs: 1200, connections: 1, runsInProgress: 0 };
+    const response = createSuccessResponse(3, 'system.status', status);
+    expect(parseResponse('system.status', throughFrame(response))).toEqual({
+      ok: true,
+      id: 3,
+      result: status,
+    });
+  });
+
+  it('system.status에 params를 넣으면 -32602', () => {
+    const result = parseRequest({ jsonrpc: '2.0', id: 4, method: 'system.status', params: {} });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe(-32602);
+  });
+
+  it.each([
+    ['버전 누락', { uptimeMs: 0, connections: 0, runsInProgress: 0 }],
+    ['음수 가동 시간', { version: '1', uptimeMs: -1, connections: 0, runsInProgress: 0 }],
+    ['소수 연결 수', { version: '1', uptimeMs: 0, connections: 0.5, runsInProgress: 0 }],
+    ['모르는 필드', { version: '1', uptimeMs: 0, connections: 0, runsInProgress: 0, extra: 1 }],
+  ])('system.status 결과 %s → 받는 쪽 -32602', (_, result) => {
+    const parsed = parseResponse('system.status', { jsonrpc: '2.0', id: 5, result });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error.code).toBe(-32602);
+  });
 });
 
 describe('ping 왕복', () => {

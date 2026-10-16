@@ -1,10 +1,17 @@
-// Electron main 진입점: app.pid 기록 → 오케스트레이터 접속(없으면 분리 기동) → 창 · IPC 핸들러.
+// Electron main 진입점: app.pid 기록 → 오케스트레이터 접속(없으면 분리 기동) → 창 · IPC 핸들러 · 연결 감시.
+// 연결이 끊기면 다시 띄우지 않고 1초 간격으로 붙기만 한다 (ADR-045).
 // 앱이 끝나면 연결만 닫고 app.pid를 지운다. 오케스트레이터는 유휴 종료에 맡긴다 (NFR-06).
 import path from 'node:path';
 
 import { app, BrowserWindow, ipcMain } from 'electron';
 
-import { type BridgeEvent, EVENT_CHANNEL, RPC_CHANNEL } from '../common/bridge.js';
+import {
+  type BridgeEvent,
+  CONNECTION_EVENT,
+  EVENT_CHANNEL,
+  RPC_CHANNEL,
+} from '../common/bridge.js';
+import { ConnectionMonitor } from './connection-monitor.js';
 import { orchestratorCommand, resolveOrchestratorMode } from './orchestrator-launch.js';
 import { handleRendererRpc } from './rpc-bridge.js';
 import { resolveBiveHome } from './run-paths.js';
@@ -29,17 +36,24 @@ const command = orchestratorCommand({
 
 const session = startMainSession({ biveHome, command });
 
-session.link.onNotification((notification) => {
-  const message: BridgeEvent = { event: notification.event, params: notification.params };
+const broadcast = (message: BridgeEvent): void => {
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send(EVENT_CHANNEL, message);
   }
+};
+
+session.link.onNotification((notification) => {
+  broadcast({ event: notification.event, params: notification.params });
 });
 
 ipcMain.handle(RPC_CHANNEL, (_event, payload: unknown) => handleRendererRpc(session.link, payload));
 
-// 창을 띄우는 동안 미리 접속(필요하면 기동)한다. 실패하면 다음 요청 때 다시 시도한다
-session.link.connect().catch(() => undefined);
+// 창을 띄우는 동안 미리 접속(필요하면 기동)하고, 이후 1초마다 상태를 확인해 렌더러에 알린다
+const monitor = new ConnectionMonitor({
+  target: session.link,
+  emit: (params) => broadcast({ event: CONNECTION_EVENT, params }),
+});
+monitor.start();
 
 void app.whenReady().then(() => {
   createMainWindow(baseDir);
@@ -52,4 +66,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('will-quit', () => session.dispose());
+app.on('will-quit', () => {
+  monitor.stop();
+  session.dispose();
+});

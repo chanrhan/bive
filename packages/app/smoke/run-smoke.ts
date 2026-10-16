@@ -1,9 +1,11 @@
 // Electron 스모크 (`xvfb-run -a pnpm smoke`, architecture.md 8장 · 10장).
 // 빌드된 앱을 임시 BIVE_HOME으로 띄워 다음을 확인하고, 하나라도 어긋나면 종료 코드 1.
 //   창 제목 "BIVE" · window.bive 키가 invoke · on 두 개뿐 · 렌더러에 require 없음 ·
-//   오케스트레이터 연결 표시 · app.pid 기록 · 앱 종료 코드 0 · 앱 종료 뒤 app.pid 삭제 ·
+//   레이아웃(사이드바 · 중앙 영역 · 채팅) · 사이드바 하단 "연결됨"(system.status, ADR-045) ·
+//   app.pid 기록 · 앱 종료 코드 0 · 앱 종료 뒤 app.pid 삭제 ·
 //   앱 종료 직후 오케스트레이터 생존(NFR-06) · 유휴 종료로 오케스트레이터 정리
 import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,6 +20,8 @@ import { appRunPaths } from '../src/main/run-paths.js';
 const APP_DIR = fileURLToPath(new URL('..', import.meta.url));
 const electronPath = createRequire(import.meta.url)('electron') as string;
 const IDLE_SHUTDOWN_MS = 1500;
+/** 저장소 루트의 `artifacts/smoke` (CI가 artifacts/를 올린다). */
+const SCREENSHOT_DIR = fileURLToPath(new URL('../../../artifacts/smoke/', import.meta.url));
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -87,9 +91,17 @@ const main = async (): Promise<void> => {
     const requireType = await page.evaluate<string>('typeof window.require');
     check(requireType === 'undefined', "typeof window.require === 'undefined'", requireType);
 
+    for (const testId of ['sidebar', 'main-area', 'chat-panel']) {
+      await page.getByTestId(testId).waitFor({ timeout: 15_000 });
+    }
+    check(true, '레이아웃: 사이드바 · 중앙 영역 · 채팅 자리');
+
     const status = page.getByTestId('connection-status');
     await status.and(page.locator('[data-state="connected"]')).waitFor({ timeout: 15_000 });
-    check(true, `연결 표시 "${await status.textContent()}"`);
+    const statusText = (await status.textContent())?.trim();
+    check(statusText === '연결됨', `사이드바 하단 연결 상태 "${statusText}"`, statusText);
+    await mkdir(SCREENSHOT_DIR, { recursive: true });
+    await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'electron-layout.png') });
 
     const appPid = child.pid;
     check(

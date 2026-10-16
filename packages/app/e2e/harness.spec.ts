@@ -9,6 +9,7 @@ import { MOCK_GLOBAL, mockBive } from './support/bive-mock.js';
 import { SCREENSHOT_DIR, expectScreen } from './support/expectScreen.js';
 
 const PONG = { pong: true, version: '0.0.0-e2e' } as const;
+const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
 /** 화면에 문구를 덧붙인다 (위반 예제용). hidden이면 보이지 않게 넣는다. */
 const inject = (page: Page, html: string): Promise<void> =>
@@ -21,10 +22,10 @@ const inject = (page: Page, html: string): Promise<void> =>
 
 test.describe('가짜 브리지', () => {
   test('렌더러가 뜨고 window.bive가 invoke · on 두 키의 가짜다', async ({ page }) => {
-    const bive = await mockBive(page, { responses: { ping: { result: PONG } } });
+    const bive = await mockBive(page, { responses: { 'system.status': { result: STATUS } } });
     await page.goto('/');
 
-    await expect(page.getByTestId('connection-status')).toHaveText('오케스트레이터 연결됨');
+    await expect(page.getByTestId('connection-status')).toHaveText('연결됨');
     expect(await page.evaluate(() => Object.keys(window.bive))).toEqual(['invoke', 'on']);
     expect(
       await page.evaluate(() => [
@@ -33,14 +34,16 @@ test.describe('가짜 브리지', () => {
         Object.isFrozen(window.bive),
       ]),
     ).toEqual(['function', 'function', true]);
-    // 가짜임: 조작 객체가 있고 렌더러의 ping 호출이 기록된다
+    // 가짜임: 조작 객체가 있고 렌더러의 system.status 호출이 기록된다
     expect(await page.evaluate((name) => name in window, MOCK_GLOBAL)).toBe(true);
-    expect(await bive.calls()).toContainEqual({ method: 'ping', params: undefined });
+    expect(await bive.calls()).toContainEqual({ method: 'system.status', params: undefined });
   });
 
   test('오류 응답은 { code, message, data? }로 거부되고 연결 끊김으로 보인다', async ({ page }) => {
     await mockBive(page, {
-      responses: { ping: { error: { code: -32603, message: '오케스트레이터 연결 실패' } } },
+      responses: {
+        'system.status': { error: { code: -32603, message: '오케스트레이터 연결 실패' } },
+      },
     });
     await page.goto('/');
     await expect(page.getByTestId('connection-status')).toHaveAttribute(
@@ -48,7 +51,7 @@ test.describe('가짜 브리지', () => {
       'disconnected',
     );
     const rejected = await page.evaluate(() =>
-      window.bive.invoke('ping').then(
+      window.bive.invoke('system.status').then(
         () => null,
         (error: unknown) => error,
       ),
@@ -57,7 +60,7 @@ test.describe('가짜 브리지', () => {
   });
 
   test('표에 없는 메서드는 -32601, main 전용 메서드는 -32020', async ({ page }) => {
-    await mockBive(page, { responses: { ping: { result: PONG } } });
+    await mockBive(page, { responses: { 'system.status': { result: STATUS } } });
     await page.goto('/');
     const codes = await page.evaluate(async () => {
       const codeOf = (p: Promise<unknown>): Promise<unknown> =>
@@ -66,13 +69,13 @@ test.describe('가짜 브리지', () => {
           (error: { code: number }) => error.code,
         );
       const invoke = window.bive.invoke as (method: string, params?: unknown) => Promise<unknown>;
-      return [await codeOf(invoke('project.list')), await codeOf(invoke('system.hello', {}))];
+      return [await codeOf(invoke('ping')), await codeOf(invoke('system.hello', {}))];
     });
     expect(codes).toEqual([-32601, -32020]);
   });
 
   test('대기 응답(로딩) · 지연 응답 · setResponse', async ({ page }) => {
-    const bive = await mockBive(page, { responses: { ping: { pending: true } } });
+    const bive = await mockBive(page, { responses: { 'system.status': { pending: true } } });
     await page.goto('/');
     await expectScreen(page, 'SCR-00', '로딩');
 
@@ -84,7 +87,7 @@ test.describe('가짜 브리지', () => {
 
   test('알림 발행 · 자동 발행 · 구독 해제', async ({ page }) => {
     const bive = await mockBive(page, {
-      responses: { ping: { result: PONG } },
+      responses: { 'system.status': { result: STATUS } },
       events: [{ event: 'auto.event', params: { n: 1 }, delayMs: 10 }],
     });
     await page.goto('/');
@@ -99,13 +102,49 @@ test.describe('가짜 브리지', () => {
       .toEqual([{ n: 1 }]);
 
     await bive.emit('test.event', { n: 2 });
-    expect(await bive.listenerCounts()).toEqual({ 'test.event': 1, 'auto.event': 1 });
+    expect(await bive.listenerCounts()).toMatchObject({ 'test.event': 1, 'auto.event': 1 });
     await page.evaluate(() => (window as unknown as { off: () => void }).off());
     await bive.emit('test.event', { n: 3 });
     expect(
       await page.evaluate(() => (window as unknown as { received: unknown[] }).received),
     ).toEqual([{ n: 1 }, { n: 2 }]);
-    expect(await bive.listenerCounts()).toEqual({ 'test.event': 0, 'auto.event': 1 });
+    expect(await bive.listenerCounts()).toMatchObject({ 'test.event': 0, 'auto.event': 1 });
+  });
+
+  test('같은 함수를 두 번 구독하면 두 번 받고, 해제는 자기 구독만 끊는다 (preload와 같음)', async ({
+    page,
+  }) => {
+    const bive = await mockBive(page, { responses: { 'system.status': { result: STATUS } } });
+    await page.goto('/');
+    await page.evaluate(() => {
+      const box = window as unknown as { hits: unknown[]; offs: (() => void)[] };
+      box.hits = [];
+      const listener = (params: unknown): void => {
+        box.hits.push(params);
+      };
+      box.offs = [window.bive.on('dup.event', listener), window.bive.on('dup.event', listener)];
+    });
+    const hits = (): Promise<unknown[]> =>
+      page.evaluate(() => (window as unknown as { hits: unknown[] }).hits);
+
+    await bive.emit('dup.event', 1);
+    expect(await hits()).toEqual([1, 1]);
+    expect((await bive.listenerCounts())['dup.event']).toBe(2);
+
+    // 첫 구독만 해제 (두 번 불러도 한 번만)
+    await page.evaluate(() => {
+      const box = window as unknown as { offs: (() => void)[] };
+      box.offs[0]?.();
+      box.offs[0]?.();
+    });
+    await bive.emit('dup.event', 2);
+    expect(await hits()).toEqual([1, 1, 2]);
+    expect((await bive.listenerCounts())['dup.event']).toBe(1);
+  });
+
+  test('같은 페이지에 mockBive를 두 번 부르면 오류', async ({ page }) => {
+    await mockBive(page, { responses: { 'system.status': { result: STATUS } } });
+    await expect(mockBive(page, {})).rejects.toThrow(/이미 mockBive를 불렀음/);
   });
 });
 
@@ -113,7 +152,7 @@ test.describe('expectScreen', () => {
   test('정상 체크리스트를 통과하고 스크린샷을 저장한다', async ({ page }) => {
     const shot = path.join(SCREENSHOT_DIR, 'SCR-00', '기본.png');
     await rm(shot, { force: true });
-    await mockBive(page, { responses: { ping: { result: PONG } } });
+    await mockBive(page, { responses: { 'system.status': { result: STATUS } } });
     await page.goto('/');
     await expectScreen(page, 'SCR-00', '기본');
     expect(existsSync(shot)).toBe(true);
@@ -121,22 +160,22 @@ test.describe('expectScreen', () => {
 
   test('에러 상태 체크리스트를 통과한다', async ({ page }) => {
     await mockBive(page, {
-      responses: { ping: { error: { code: -32603, message: '내부 오류' } } },
+      responses: { 'system.status': { error: { code: -32603, message: '내부 오류' } } },
     });
     await page.goto('/');
     await expectScreen(page, 'SCR-00', '에러');
   });
 
   test('필수 요소가 없으면 실패한다', async ({ page }) => {
-    await mockBive(page, { responses: { ping: { pending: true } } });
+    await mockBive(page, { responses: { 'system.status': { pending: true } } });
     await page.goto('/');
     await expect(
       expectScreen(page, 'SCR-00', '기본', { screenshot: false, timeout: 500 }),
-    ).rejects.toThrow(/연결 상태 문구/);
+    ).rejects.toThrow(/연결 상태/);
   });
 
   test('정의되지 않은 상태 · 등록되지 않은 화면은 실패한다', async ({ page }) => {
-    await mockBive(page, { responses: { ping: { result: PONG } } });
+    await mockBive(page, { responses: { 'system.status': { result: STATUS } } });
     await page.goto('/');
     await expect(expectScreen(page, 'SCR-00', '빈', { screenshot: false })).rejects.toThrow(
       /상태 "빈" 없음/,
@@ -148,9 +187,9 @@ test.describe('expectScreen', () => {
 
   test.describe('화면 문구 위반 예제', () => {
     test.beforeEach(async ({ page }) => {
-      await mockBive(page, { responses: { ping: { result: PONG } } });
+      await mockBive(page, { responses: { 'system.status': { result: STATUS } } });
       await page.goto('/');
-      await expect(page.getByTestId('connection-status')).toHaveText('오케스트레이터 연결됨');
+      await expect(page.getByTestId('connection-status')).toHaveText('연결됨');
     });
 
     const cases: { name: string; html: string; error: RegExp }[] = [

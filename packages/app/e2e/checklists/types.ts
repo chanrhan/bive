@@ -31,7 +31,10 @@ export interface ElementCheck {
   attributes?: Record<string, string | RegExp>;
   /** 일치하는 요소 수. 생략하면 1개 이상이고 첫 요소가 보여야 한다. */
   count?: number;
-  /** true면 이 요소가 보이지 않아야 한다 (미노출 검사, ADR-035). */
+  /**
+   * true면 이 요소가 DOM에 없어야 한다 (`toHaveCount(0)`, 미노출 검사 · ADR-035).
+   * 숨김(display:none 등)으로 DOM에 남아 있으면 실패한다. 미노출은 렌더링하지 않는 것으로 구현한다.
+   */
   absent?: true;
 }
 
