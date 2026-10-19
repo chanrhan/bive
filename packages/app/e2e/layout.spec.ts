@@ -124,7 +124,9 @@ test.describe('기본 배치 (1440px)', () => {
     page,
   }) => {
     const empty = page.getByTestId('main-area').getByTestId('empty-state');
-    await expect(empty).toHaveText('선택 항목 없음');
+    // 프로젝트가 없으면 시작 화면이 먼저 보인다 (M1-01)
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'start');
+    await expect(page.getByTestId('project-start')).toBeVisible();
 
     const rules = page.getByRole('button', { name: '규칙', exact: true });
     await rules.click();
