@@ -445,5 +445,5 @@
   - 읽음: 카드를 고를 때 `readAt`이 없는 제안만 `proposal.markRead`를 1회 부르고 응답의 제안으로 점을 지운다. 같은 제안을 다시 골라도 부르지 않고, 실패하면 점을 두고 다음 선택 때 다시 부른다. 배지(대기 건수)는 읽음과 무관하다.
   - 탭: M1은 [승인 대기] 하나만 렌더한다(검토 대기열 · 계약 변경 승인 탭은 DOM에 없음, ADR-035). 마지막 탭은 렌더러 메모리에만 기억한다(ADR-034).
   - 상태 문구: 빈 상태는 ADR-029의 "대기 항목 없음". 프로젝트를 열기 전 할 일 화면은 "프로젝트 없음", 목록 조회 중은 빈 영역, 조회 실패는 "목록 불러오기 실패". 오른쪽 상세 자리는 "선택 항목" 틀만 두고(고른 항목이 없으면 "선택 항목 없음") 내용 · 처리 버튼은 #40. 머리줄 "대기 n / 상한 40"은 #58 전까지 미노출.
-  - 현재 프로젝트: `src/project/ProjectContext.tsx`의 최소 `useProject()`(`project: {id, name} | null`)를 두고 #14의 정식 제공자로 바꾼다. 화면 e2e는 프로젝트가 열린 앱 셸을 플레이그라운드 `e2e/playground/app.html?projectId=…`로 띄운다(ADR-048과 같은 방식, 제품 빌드에 없음).
+  - 현재 프로젝트: `useProject()`는 #14(PR #120)의 정식 계약 `{ project, loading, open }`과 같고 프로젝트 열림 알림은 `bridge.ts`의 `PROJECT_OPENED_EVENT`다. #14 머지 전에는 그 알림만 따르는 최소 제공자를 두고 머지되면 그쪽 구현으로 바꾼다. 화면 e2e는 가짜 브리지가 그 알림을 보내 프로젝트를 연다.
 - 결과: M1-10. #40은 `screens/todo/ProposalDetail.tsx`에 상세 · 처리 버튼을 채우고 처리 뒤 목록 `refresh()` · `useProposalCount().refresh()`를 부른다. M3(SCR-18 · 19)는 `TODO_TABS`에 탭을 더하고 배지 합계에 검토 대기열을 더한다. 사람이 태그 · 예외 · 툴팁 순서를 바꾸면 `proposalCard.ts` · `proposals/labels.ts`와 해당 테스트만 고친다.

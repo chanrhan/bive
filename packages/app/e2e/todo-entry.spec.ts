@@ -1,6 +1,6 @@
 // 할 일 진입 (이슈 #23 수용 기준 1~3, screens.md 6장 할 일 · SCR-17, TODO-01, ADR-035 · ADR-056).
-// 프로젝트 열기(#14) 전이라 프로젝트가 열린 앱 셸을 플레이그라운드(e2e/playground/app.html)로 띄우고,
-// 제안 데이터는 가짜 브리지로 준다 (proposal.count · proposal.list · proposal.markRead).
+// 앱을 열고 가짜 브리지가 main의 프로젝트 열림 알림(project.opened)을 보내 프로젝트를 연 상태로 만든다.
+// 제안 데이터도 가짜 브리지로 준다 (proposal.count · proposal.list · proposal.markRead).
 // 데이터: 대기 3건(PRP-001 규칙 신규 · 안 읽음, PRP-002 규칙 신규 · 구현 중 · 안 읽음,
 //         PRP-003 요구사항 신규 · 읽음) + 거절 1건(PRP-004 규칙 신규).
 import type { Proposal, ProposalCountResult, ProposalKind } from '@bive/shared';
@@ -11,7 +11,18 @@ import { type BiveMock, mockBive } from './support/bive-mock.js';
 import { expectScreen } from './support/expectScreen.js';
 
 const PROJECT_ID = '01JBVE0000000000000000000P';
-const URL = `/playground/app.html?projectId=${PROJECT_ID}&projectName=sample-next-app`;
+/** project.opened 알림 값 (project.open 결과와 같은 모양). */
+const OPENED = {
+  project: {
+    id: PROJECT_ID,
+    name: 'sample-next-app',
+    rootPath: '/tmp/sample-next-app',
+    baseBranch: 'main',
+    createdAt: '2026-10-16T00:00:00.000Z',
+  },
+  created: false,
+  empty: false,
+} as const;
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
 const ID = {
@@ -118,8 +129,10 @@ const setup = async (page: Page, proposals: readonly Proposal[] = PROPOSALS): Pr
         result: { proposal: { ...P1, readAt: '2026-10-16T05:00:00.000Z' } },
       },
     },
+    events: [{ event: 'project.opened', params: OPENED }],
   });
-  await page.goto(URL);
+  await page.goto('/');
+  await expect(page.getByTestId('sidebar-project')).toHaveText(OPENED.project.name);
   return bive;
 };
 
@@ -173,7 +186,7 @@ test.describe('알림 배지 · 툴팁 (수용 기준 1)', () => {
 
   test('프로젝트가 없으면 proposal.count를 부르지 않고 배지 없음', async ({ page }) => {
     const bive = await mockBive(page, { responses: { 'system.status': { result: STATUS } } });
-    await page.goto('/playground/app.html');
+    await page.goto('/');
     await expect(page.getByTestId('connection-status')).toHaveAttribute('data-state', 'connected');
     await todoButton(page).click();
     await expect(page.getByTestId('main-area').getByTestId('empty-state')).toHaveText(

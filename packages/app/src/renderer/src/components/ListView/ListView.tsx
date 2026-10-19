@@ -151,7 +151,7 @@ export const ListView = <T,>({
         </div>
       </div>
 
-      {active && (
+      {active && items.length > 0 && (
         <p className="list-result" data-testid="list-result">
           <span data-testid="list-result-count">
             {items.length}개 중 {visible.length}개

@@ -44,6 +44,12 @@ export const CONNECTION_EVENT = 'system.connection';
 export type ConnectionEventParams =
   { state: 'connected'; status: SystemStatusResult } | { state: 'disconnected' };
 
+/**
+ * main이 만드는 알림: 프로젝트가 열림 (M1-01). main을 거친 `project.open`이 성공할 때마다
+ * (기동 인자 `--open`, 렌더러 요청 모두) 모든 창에 보낸다. 값은 `project.open` 결과 그대로다.
+ */
+export const PROJECT_OPENED_EVENT = 'project.opened';
+
 type InvokeParams<M extends RendererMethodName> =
   undefined extends MethodParams<M> ? [params?: MethodParams<M>] : [params: MethodParams<M>];
 

@@ -80,6 +80,7 @@ const empty: StateChecklist = {
     ...common,
     { label: '빈 상태', testId: 'empty-state', text: APPROVAL_EMPTY_TEXT },
     { label: '카드 없음', testId: 'card', count: 0 },
+    { label: '결과 줄 없음', testId: 'list-result', absent: true },
   ],
 };
 
