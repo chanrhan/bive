@@ -92,7 +92,6 @@ export const FilterChips = ({
               type="button"
               className="filter-chip-button"
               data-testid="filter-chip-button"
-              aria-haspopup="true"
               aria-expanded={open}
               aria-controls={open ? menuId : undefined}
               disabled={disabled}

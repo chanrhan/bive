@@ -158,6 +158,29 @@ export const toggleValue = (
   return { ...state, selected: { ...state.selected, [criterionId]: next } };
 };
 
+/**
+ * 지금 기준 · 값 목록에 없는 선택(사라진 기준 · 사라진 값)을 지운다. 지울 것이 없으면 같은 객체를 돌려준다.
+ * 보이지 않는 선택이 결과를 거르거나 결과 줄을 띄우지 않게 한다. 값 목록이 데이터에서 나오는 화면은
+ * 데이터를 받은 뒤 목록을 그려야 다른 화면이 지정해 둔 필터(ADR-034)가 지워지지 않는다.
+ */
+export const pruneSelection = <T>(
+  state: FilterState,
+  criteria: readonly FilterCriterion<T>[],
+): FilterState => {
+  const known = new Map(
+    criteria.map((criterion) => [criterion.id, new Set(criterion.options.map((o) => o.value))]),
+  );
+  let changed = false;
+  const next: Record<string, readonly string[]> = {};
+  for (const [id, values] of Object.entries(state.selected)) {
+    const options = known.get(id);
+    const kept = options === undefined ? [] : values.filter((value) => options.has(value));
+    if (kept.length !== values.length) changed = true;
+    if (kept.length > 0) next[id] = kept;
+  }
+  return changed ? { ...state, selected: next } : state;
+};
+
 /** 기준 하나의 고른 값을 모두 지운다 (칩의 ×). */
 export const clearCriterion = (state: FilterState, criterionId: string): FilterState => {
   if (!(criterionId in state.selected)) return state;
