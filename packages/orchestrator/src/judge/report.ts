@@ -89,8 +89,39 @@ const parseCase = (raw: unknown, file: string, index: number): JudgmentCase => {
   };
 };
 
+/** 메시지 없이 실패한 파일(스위트 훅 실패 등)의 원인 안내 앞부분. */
+export const SUITE_FAILURE_MESSAGE = '스위트 훅 실패 등 파일 수준 오류 (stderr.log 참고)';
+
+/**
+ * vitest 기본 reporter 출력에서 `file`의 첫 실패 줄을 찾는다.
+ * ` FAIL  <file>[:줄] > <스위트>` 머리줄 다음의 첫 비어 있지 않은 줄(오류 요약)을 돌려준다. 없으면 `null`.
+ */
+export const firstErrorLineFor = (output: string, file: string): string | null => {
+  const lines = stripAnsi(output).split(/\r?\n/);
+  const header = new RegExp(
+    `^\\s*FAIL\\s+${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[:\\s]|$)`,
+  );
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!header.test(lines[i] ?? '')) continue;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = (lines[j] ?? '').trim();
+      if (line.length > 0) return line;
+    }
+  }
+  return null;
+};
+
+export interface ParseOptions {
+  /** 같은 실행의 reporter 출력(stderr). 메시지 없는 파일 실패의 원인 줄을 찾는 데 쓴다 */
+  output?: string;
+}
+
 /** vitest JSON reporter 본문을 해석한다. */
-export const parseVitestReport = (json: string, worktreeDir: string): ParsedReport => {
+export const parseVitestReport = (
+  json: string,
+  worktreeDir: string,
+  options: ParseOptions = {},
+): ParsedReport => {
   let data: unknown;
   try {
     data = JSON.parse(json);
@@ -115,12 +146,21 @@ export const parseVitestReport = (json: string, worktreeDir: string): ParsedRepo
     const fileMessage =
       typeof rawFile.message === 'string' ? stripAnsi(rawFile.message).trim() : '';
 
+    const fileCases = assertions.map((raw, index) => parseCase(raw, file, index));
+    cases.push(...fileCases);
+
     // 파일 수준 오류(import 실패 · 문법 오류 · 최상위 예외 · 스위트 훅 실패)는 케이스 실패와 섞지 않는다
     if (fileMessage.length > 0) collectProblems.push({ file, message: fileMessage });
     else if (assertions.length === 0) {
       collectProblems.push({ file, message: '수집된 테스트 0개' });
+    } else if (rawFile.status === 'failed' && !fileCases.some((c) => c.status === 'failed')) {
+      // describe 안 beforeAll · afterAll 실패는 JSON에 메시지 없이 파일 실패로만 남고 케이스는 건너뜀이 된다
+      const detail = options.output === undefined ? null : firstErrorLineFor(options.output, file);
+      collectProblems.push({
+        file,
+        message: detail === null ? SUITE_FAILURE_MESSAGE : `${SUITE_FAILURE_MESSAGE}: ${detail}`,
+      });
     }
-    assertions.forEach((raw, index) => cases.push(parseCase(raw, file, index)));
   }
 
   if (cases.length === 0 && collectProblems.length === 0) {

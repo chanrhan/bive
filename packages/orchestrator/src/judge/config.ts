@@ -40,10 +40,13 @@ export const COLLECT_PLACEHOLDER_BASE_URL = 'http://127.0.0.1:9';
 /** 어떤 케이스 이름과도 맞지 않는 패턴. 수집 단계에서 모든 케이스를 건너뛰게 한다(훅도 실행되지 않음). */
 const MATCH_NOTHING = '(?!)';
 
-/** `include` 패턴. 규칙을 지정하면 그 규칙 디렉터리만. */
+/**
+ * `include` 패턴. 규칙을 지정하면 그 규칙 디렉터리만. 지정하지 않아도 규칙 폴더 안 파일만 줍는다
+ * (`bive-acceptance/` 바로 아래 파일은 규칙에 매핑되지 않으므로 실행하지 않는다, ADR-026).
+ */
 export const includePatterns = (ruleIds: readonly string[] | null): string[] =>
   ruleIds === null
-    ? [`${ACCEPTANCE_DIR}/**/*${ACCEPTANCE_SUFFIX}`]
+    ? [`${ACCEPTANCE_DIR}/*/**/*${ACCEPTANCE_SUFFIX}`]
     : ruleIds.map((id) => `${ACCEPTANCE_DIR}/${id}/**/*${ACCEPTANCE_SUFFIX}`);
 
 export interface JudgeConfigInput {

@@ -9,6 +9,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -62,6 +63,8 @@ describe('판정 서버', () => {
   it.skip('건너뛴 케이스', () => {});
 });
 `;
+
+const STRAY_ACC = "throw new Error('규칙 폴더 밖 파일이 실행됨');\n";
 
 /** 임시 DB 폴더 목록 (프로필이 os.tmpdir() 아래에 만든다). */
 const tempDbDirs = (): string[] =>
@@ -123,6 +126,8 @@ beforeAll(() => {
     "throw new Error('프로젝트 vitest 설정이 로드됨');\nexport default {};\n",
   );
   write('bive-acceptance/RULE-001/health.acc.ts', HEALTH_ACC);
+  // 규칙 폴더 밖 파일은 규칙에 매핑되지 않으므로 줍지 않는다 (줍히면 파일 로드 오류로 collect_error가 된다)
+  write('bive-acceptance/stray.acc.ts', STRAY_ACC);
   runner = new JudgeRunner({ biveHome });
 }, 180_000);
 
@@ -155,7 +160,7 @@ describe('JudgeRunner · next-prisma-sqlite', () => {
       expect(result.paths.config).toBe(path.join(judgeDir, 'vitest.config.mjs'));
       const config = readFileSync(result.paths.config, 'utf8');
       expect(config).toContain(`"root": ${JSON.stringify(fixtureDir)}`);
-      expect(config).toContain('"bive-acceptance/**/*.acc.ts"');
+      expect(config).toContain('"bive-acceptance/*/**/*.acc.ts"');
       expect(config).toContain(JSON.stringify(path.join(judgeDir, 'global-setup.mjs')));
       expect(config).toContain(JSON.stringify(path.join(judgeDir, 'result.json')));
       expect(config).not.toContain('tests/support');
@@ -218,7 +223,64 @@ describe('JudgeRunner · next-prisma-sqlite', () => {
       expect(raw.testResults.map((r) => r.name)).toEqual([path.join(fixtureDir, file)]);
       expect(existsSync(result.paths.stdout)).toBe(true);
       expect(existsSync(result.paths.stderr)).toBe(true);
+      // 판정 폴더 0700 · 바로 아래 파일(실행기가 만든 결과 JSON · 로그 포함) 0600 (ADR-051)
+      expect(statSync(judgeDir).mode & 0o777).toBe(0o700);
+      const modes = readdirSync(judgeDir, { withFileTypes: true })
+        .filter((e) => e.isFile())
+        .map((e) => [e.name, statSync(path.join(judgeDir, e.name)).mode & 0o777]);
+      expect(modes.length).toBeGreaterThanOrEqual(10);
+      expect(modes.filter(([, mode]) => mode !== 0o600)).toEqual([]);
 
+      await expectNoLeftovers(result, dbDirsBefore);
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'describe 안 beforeAll 훅 실패는 케이스 실패가 아니라 파일 이름과 원인을 담은 collect_error',
+    async () => {
+      write(
+        'bive-acceptance/RULE-010/hook.acc.ts',
+        `import { beforeAll, describe, expect, inject, it } from 'vitest';
+
+describe('훅', () => {
+  beforeAll(async () => {
+    const res = await fetch(new URL('/api/items', inject('baseUrl')), { method: 'POST' });
+    expect(res.status).toBe(201);
+  });
+  it('a', () => expect(1).toBe(1));
+  it('b', () => expect(1).toBe(1));
+});
+`,
+      );
+      const dbDirsBefore = tempDbDirs();
+      const result = await runner.run({
+        projectId,
+        runId,
+        worktreeDir: fixtureDir,
+        profile: 'next-prisma-sqlite',
+        ruleIds: ['RULE-010'],
+        timeoutMs: JUDGE_TIMEOUT_MS,
+      });
+      rmSync(path.join(fixtureDir, 'bive-acceptance', 'RULE-010'), {
+        recursive: true,
+        force: true,
+      });
+
+      expect(result.status).toBe('collect_error');
+      expect(result.problems).toHaveLength(1);
+      const problem = result.problems[0]!;
+      expect(problem.file).toBe('bive-acceptance/RULE-010/hook.acc.ts');
+      expect(problem.message).toMatch(
+        /^스위트 훅 실패 등 파일 수준 오류 \(stderr\.log 참고\): AssertionError: expected \d+ to be 201/,
+      );
+      expect(result.message).toContain('bive-acceptance/RULE-010/hook.acc.ts: ');
+      // 훅이 막아 실행되지 않은 케이스는 건너뜀으로 남는다 (실패 케이스와 섞지 않음)
+      expect(result.cases.map((c) => [c.name, c.status])).toEqual([
+        ['훅 > a', 'skipped'],
+        ['훅 > b', 'skipped'],
+      ]);
+      expect(result.server).not.toBeNull();
       await expectNoLeftovers(result, dbDirsBefore);
     },
     BUILD_TEST_TIMEOUT_MS,
@@ -287,7 +349,9 @@ describe('JudgeRunner · next-prisma-sqlite', () => {
     ]);
     expect(forRule.server).toBeNull();
 
+    // 규칙 폴더 밖 파일만 남으면 0개 수집과 같다
     rmSync(path.join(fixtureDir, 'bive-acceptance'), { recursive: true, force: true });
+    write('bive-acceptance/stray.acc.ts', STRAY_ACC);
     const all = await runner.run({
       projectId,
       runId,
@@ -303,7 +367,7 @@ describe('JudgeRunner · next-prisma-sqlite', () => {
     expect(all.exitCode).toBeNull();
     // 같은 실행의 판정마다 폴더가 따로 생겨 이전 원본을 덮어쓰지 않는다
     expect(all.judgeId).not.toBe(forRule.judgeId);
-    expect(readdirSync(path.join(biveHome, 'projects', projectId, 'judge', runId))).toHaveLength(4);
+    expect(readdirSync(path.join(biveHome, 'projects', projectId, 'judge', runId))).toHaveLength(5);
     write('bive-acceptance/RULE-001/health.acc.ts', HEALTH_ACC);
   });
 

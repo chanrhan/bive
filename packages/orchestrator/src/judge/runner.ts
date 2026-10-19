@@ -7,7 +7,7 @@
 // 수집 단계를 서버 빌드 앞에 두는 이유: 프로젝트 tsconfig가 인수 테스트를 포함하면 next build의 타입 검사가
 // 문법 오류 파일에서 먼저 실패해 collect_error가 runner_error로 바뀌기 때문이다 (ADR-051).
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { createUlidGenerator, type JudgmentCase, Ulid } from '@bive/shared';
@@ -37,6 +37,7 @@ import {
   type JudgeProblem,
   type JudgeSummary,
   parseVitestReport,
+  ruleIdOfAcceptanceFile,
   ReportFormatError,
   toRelativePath,
 } from './report.js';
@@ -174,11 +175,23 @@ const listAcceptanceFiles = async (worktreeDir: string, dir: string): Promise<st
   } catch {
     return [];
   }
-  return entries
-    .filter((e) => e.isFile() && e.name.endsWith(ACCEPTANCE_SUFFIX))
-    .map((e) => toRelativePath(worktreeDir, path.join(e.parentPath, e.name)))
-    .filter((file) => !file.split('/').includes('node_modules'))
-    .sort();
+  return (
+    entries
+      .filter((e) => e.isFile() && e.name.endsWith(ACCEPTANCE_SUFFIX))
+      .map((e) => toRelativePath(worktreeDir, path.join(e.parentPath, e.name)))
+      .filter((file) => !file.split('/').includes('node_modules'))
+      // 규칙 폴더 밖(`bive-acceptance/` 바로 아래) 파일은 include에 걸리지 않으므로 세지 않는다
+      .filter((file) => ruleIdOfAcceptanceFile(file) !== null)
+      .sort()
+  );
+};
+
+/** 판정 폴더 바로 아래 파일(실행기가 만든 결과 JSON 포함)을 0600으로 맞춘다 (ADR-051). */
+const restrictFiles = async (dir: string): Promise<void> => {
+  const entries = await readdir(dir, { withFileTypes: true });
+  await Promise.all(
+    entries.filter((e) => e.isFile()).map((e) => chmod(path.join(dir, e.name), 0o600)),
+  );
 };
 
 const describeError = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -250,6 +263,7 @@ export class JudgeRunner {
       partial: Pick<JudgeRunResult, 'status' | 'cases' | 'summary' | 'problems'>,
     ): Promise<JudgeRunResult> => {
       if (server !== undefined) await server.stop();
+      await restrictFiles(dir);
       const endedMs = Date.now();
       timings.total = endedMs - startedMs;
       return {
@@ -295,7 +309,7 @@ export class JudgeRunner {
           return await collectError([
             {
               file: null,
-              message: `인수 테스트 파일 없음 (${ACCEPTANCE_DIR}/**/*${ACCEPTANCE_SUFFIX})`,
+              message: `인수 테스트 파일 없음 (${ACCEPTANCE_DIR}/<RULE-ID>/**/*${ACCEPTANCE_SUFFIX})`,
             },
           ]);
         }
@@ -331,7 +345,13 @@ export class JudgeRunner {
       if (!existsSync(paths.collectResult)) {
         return await runnerError(`vitest 수집 ${describeExit(collectExit)}, 결과 파일 없음`);
       }
-      const collected = parseVitestReport(await readFile(paths.collectResult, 'utf8'), worktreeDir);
+      const collected = parseVitestReport(
+        await readFile(paths.collectResult, 'utf8'),
+        worktreeDir,
+        {
+          output: await readFile(paths.collectLog, 'utf8'),
+        },
+      );
       // 수집 단계에서는 어떤 케이스도 실행되지 않아야 한다. 실패로 표시된 케이스(`.only` 등)는 수집 문제다
       const collectProblems = [
         ...collected.collectProblems,
@@ -371,7 +391,9 @@ export class JudgeRunner {
         return await runnerError(`vitest ${describeExit(exit)}, 결과 파일 없음`);
       }
 
-      const report = parseVitestReport(await readFile(paths.result, 'utf8'), worktreeDir);
+      const report = parseVitestReport(await readFile(paths.result, 'utf8'), worktreeDir, {
+        output: await readFile(paths.stderr, 'utf8'),
+      });
       if (report.collectProblems.length > 0) {
         return await finish({
           status: 'collect_error',

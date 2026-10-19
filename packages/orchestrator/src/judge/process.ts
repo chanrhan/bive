@@ -78,12 +78,13 @@ export interface StartOptions {
 
 /** 로그 파일에 명령 머리줄을 남기고 프로세스를 띄운다. */
 export const startProcess = (cmd: string, args: string[], options: StartOptions): ChildProcess => {
-  appendFileSync(options.stdoutFile, `\n$ ${[cmd, ...args].join(' ')}\n`);
-  const out = openSync(options.stdoutFile, 'a');
+  // 판정 폴더의 로그는 0600 (ADR-051)
+  appendFileSync(options.stdoutFile, `\n$ ${[cmd, ...args].join(' ')}\n`, { mode: 0o600 });
+  const out = openSync(options.stdoutFile, 'a', 0o600);
   const err =
     options.stderrFile === undefined || options.stderrFile === options.stdoutFile
       ? out
-      : openSync(options.stderrFile, 'a');
+      : openSync(options.stderrFile, 'a', 0o600);
   try {
     return spawn(cmd, args, {
       cwd: options.cwd,
