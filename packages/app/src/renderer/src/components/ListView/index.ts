@@ -11,6 +11,7 @@ export {
   matchesQuery,
   type OptionCounts,
   parseTime,
+  pruneSelection,
   sortProblemsFirst,
   toggleValue,
 } from './filter.js';

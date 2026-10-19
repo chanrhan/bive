@@ -35,7 +35,7 @@ export interface ExpectScreenOptions {
 }
 
 /** 화면에 보이는 문구 한 조각과 그 출처. */
-interface VisibleText {
+export interface VisibleText {
   source: string;
   text: string;
 }
@@ -97,8 +97,8 @@ const checkElement = async (page: Page, check: ElementCheck, timeout?: number): 
   }
 };
 
-/** 브라우저 문맥: 보이는 요소의 텍스트와 사람이 읽는 속성을 모은다. */
-const collectVisibleText = (page: Page): Promise<VisibleText[]> =>
+/** 브라우저 문맥: 보이는 요소의 텍스트와 사람이 읽는 속성을 모은다. 화면 spec이 메뉴 · 입력 줄을 연 상태에서도 쓴다. */
+export const collectVisibleText = (page: Page): Promise<VisibleText[]> =>
   page.evaluate(() => {
     const out: { source: string; text: string }[] = [
       { source: '문서 제목', text: document.title },
