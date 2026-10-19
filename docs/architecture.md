@@ -95,9 +95,9 @@ interface AgentSession {
 |---|---|---|
 | **Project** | `id`, `name`, `rootPath`, `baseBranch`, `createdAt` | PRJ-01 |
 | | 프로젝트 폴더 설정 파일 `.bive.json` = `{ projectId, schemaVersion }`만 | PRJ-01, ADR-005 |
-| **Settings** | `projectId`, `budget.runTotalUsd`, `budget.perRole{testWriter, implementer}` (필수, 미설정 시 실행 거부) | COST-01, NFR-07 |
-| | `models.perRole` (필수), `maxTurns.perRole` | NFR-07, 기획서 4.5 |
-| | `approvalQueueLimit` (기본 40), `provisionalPolicy` (`off` 기본), `autoMode` (`false`), `installAllowlist` (빈 목록) | TODO-04, ADR-012, RUN-05, NFR-02 |
+| **Settings** | `projectId`, `run{maxBudgetUsd, maxTurns}` (실행 전체 한도, 미설정 시 실행 거부) | COST-01, NFR-07, 기획서 4.5, ADR-057 |
+| | `roles{<역할>: {model, maxBudgetUsd, maxTurns}}` (모든 역할 키, 값 `null` = 미설정. 실행 전 검사 역할은 `settings.validateForRun`이 정함) | NFR-07, ADR-024, ADR-057 |
+| | `approvalQueueLimit` (기본 40), `provisionalPolicy` (`off` 기본), `autoMode` (`false`), `installAllowlist` (빈 목록), `updatedAt` · `updatedBy` (사람, 저장 전 `null`) | TODO-04, ADR-012, RUN-05, NFR-02 |
 | | `writingRules` (P2), `updatedAt`, `updatedBy` | NRM-10 |
 | **Requirement** | `id`, `displayId`, `text`, `author`, `normState`, `createdAt`, `updatedAt`, `updatedBy` (마지막 수정 · 삭제 주체), `deletedAt` | NRM-01, ADR-047 |
 | | `unrulable: { reason } \| null` | NRM-08 |
@@ -247,7 +247,8 @@ stateDiagram-v2
 | `run.create` | `{projectId, ruleIds}` → 실행 (실행 시작 확인) | RUN-01 | M1 |
 | `run.list` · `run.get` | 실행 · 단계 · 세션 수치 | RUN-01, SCR-05 | M1 |
 | `run.resume` | `{id}` → 실행 (`interrupted`만) | PRD 5.1, ADR-011 | M1 |
-| `settings.get` · `settings.update` | `{projectId}` / `{projectId, patch}` → 설정 (예산 · 모델 필수 검증) | COST-01, NFR-07, ADR-010 | M1 |
+| `settings.get` · `settings.update` | `{projectId}` / `{projectId, patch, author}` → `{settings}` (사람만, 미설정 저장 허용) | COST-01, NFR-07, ADR-010, ADR-057 | M1 |
+| `settings.validateForRun` | `{projectId, roles?}` → `{ok: true}` 또는 `{ok: false, code: -32010, reason: 'SETTINGS_INCOMPLETE', message, missing[]}` | NFR-07, ADR-057 | M1 |
 | `codeOpen.record` | `{reason, sourceScreen, itemRef, file, line}` | MET-01 | M1 직후 |
 | `chat.ask` · `chat.instruct` | `{refs[], text}` → 답변 / 제안 | DSN-07, DSN-08 | M2 |
 | `events.subscribe` | `{projectId}` → 알림 구독 | — | M1 |
