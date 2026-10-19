@@ -140,8 +140,10 @@ test.describe('기본 배치 (1440px)', () => {
 
     await page.getByRole('button', { name: '할 일', exact: true }).click();
     await expect(empty).toHaveText('할 일 준비 중');
+    // 설정은 화면이 아니라 현재 화면 위에 겹치는 모달이다 (SCR-21, e2e/scr-21.spec.ts)
     await page.getByRole('button', { name: '설정', exact: true }).click();
-    await expect(empty).toHaveText('설정 준비 중');
+    await expect(page.getByRole('dialog', { name: '설정' })).toBeVisible();
+    await expect(empty).toHaveText('할 일 준비 중');
   });
 });
 

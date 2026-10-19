@@ -2,12 +2,16 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  AgentRole,
   APPROVAL_LOG_GENESIS_HASH,
   ApprovalLogEntry,
   Author,
   CommitSha,
+  defaultSettings,
   EntityName,
+  findMissingSettings,
   JudgmentResult,
+  MissingSettingPath,
   Project,
   ProjectFile,
   Proposal,
@@ -166,17 +170,23 @@ const judgment = {
   quarantineReason: null,
 };
 
+const emptyRole = { model: null, maxBudgetUsd: null, maxTurns: null };
 const settings = {
   projectId: ID.project,
-  budget: { runTotalUsd: null, perRole: { testWriter: null, implementer: null } },
-  models: { perRole: {} },
-  maxTurns: { perRole: {} },
+  run: { maxBudgetUsd: null, maxTurns: null },
+  roles: {
+    'rule-writer': emptyRole,
+    planner: emptyRole,
+    'test-writer': emptyRole,
+    implementer: emptyRole,
+    chat: emptyRole,
+  },
   approvalQueueLimit: 40,
   provisionalPolicy: 'off',
   autoMode: false,
   installAllowlist: [],
-  updatedAt: AT,
-  updatedBy: human,
+  updatedAt: null,
+  updatedBy: null,
 };
 
 describe('공통 값', () => {
@@ -227,22 +237,79 @@ describe('프로젝트 · 설정', () => {
     ).toBe(false);
   });
 
-  it('설정은 예산 · 모델 미설정을 저장할 수 있다', () => {
+  it('설정은 예산 · 모델 미설정을 저장할 수 있고 기본값과 같다', () => {
     expect(Settings.parse(settings)).toEqual(settings);
+    expect(defaultSettings(ID.project)).toEqual(settings);
     const filled = {
       ...settings,
-      budget: { runTotalUsd: 5, perRole: { testWriter: 1, implementer: 3 } },
-      models: { perRole: { implementer: 'model-b' } },
-      maxTurns: { perRole: { implementer: 30 } },
+      run: { maxBudgetUsd: 5, maxTurns: 200 },
+      roles: {
+        ...settings.roles,
+        implementer: { model: 'model-b', maxBudgetUsd: 2, maxTurns: 30 },
+      },
+      updatedAt: AT,
+      updatedBy: human,
     };
     expect(Settings.safeParse(filled).success).toBe(true);
     expect(Settings.safeParse({ ...settings, provisionalPolicy: 'two_axis' }).success).toBe(false);
+  });
+
+  it('설정 한도는 0보다 크고 턴은 정수, 모델은 공백만이면 안 되며 역할 키는 전부 있어야 한다', () => {
+    const run = (value: object) => Settings.safeParse({ ...settings, run: value }).success;
+    expect(run({ maxBudgetUsd: 0, maxTurns: null })).toBe(false);
+    expect(run({ maxBudgetUsd: -1, maxTurns: null })).toBe(false);
+    expect(run({ maxBudgetUsd: 0.01, maxTurns: 1.5 })).toBe(false);
+    expect(run({ maxBudgetUsd: 0.01, maxTurns: 0 })).toBe(false);
+    expect(run({ maxBudgetUsd: 0.01, maxTurns: 1 })).toBe(true);
+    const role = (value: object) =>
+      Settings.safeParse({ ...settings, roles: { ...settings.roles, chat: value } }).success;
+    expect(role({ ...emptyRole, model: '  ' })).toBe(false);
+    expect(role({ ...emptyRole, model: 'm'.repeat(201) })).toBe(false);
+    expect(role({ ...emptyRole, model: 'model-a' })).toBe(true);
     expect(
-      Settings.safeParse({ ...settings, budget: { ...settings.budget, runTotalUsd: -1 } }).success,
+      Settings.safeParse({ ...settings, roles: { ...settings.roles, reviewer: emptyRole } })
+        .success,
     ).toBe(false);
+    const withoutChat = Object.fromEntries(
+      Object.entries(settings.roles).filter(([role]) => role !== 'chat'),
+    );
+    expect(Settings.safeParse({ ...settings, roles: withoutChat }).success).toBe(false);
+    // 변경 주체는 사람뿐
     expect(
-      Settings.safeParse({ ...settings, models: { perRole: { reviewer: 'm' } } }).success,
+      Settings.safeParse({ ...settings, updatedAt: AT, updatedBy: { kind: 'agent', role: 'chat' } })
+        .success,
     ).toBe(false);
+  });
+
+  it('실행 전 검사는 실행 전체 한도와 고른 역할의 빈 항목을 순서대로 돌려준다 (NFR-07)', () => {
+    expect(findMissingSettings(settings)).toEqual([
+      'run.maxBudgetUsd',
+      'run.maxTurns',
+      'roles.rule-writer.model',
+      'roles.rule-writer.maxBudgetUsd',
+      'roles.rule-writer.maxTurns',
+      'roles.test-writer.model',
+      'roles.test-writer.maxBudgetUsd',
+      'roles.test-writer.maxTurns',
+      'roles.implementer.model',
+      'roles.implementer.maxBudgetUsd',
+      'roles.implementer.maxTurns',
+    ]);
+    const full = { model: 'model-a', maxBudgetUsd: 1, maxTurns: 10 };
+    const ready = {
+      run: { maxBudgetUsd: 5, maxTurns: 200 },
+      roles: { ...settings.roles, 'rule-writer': full, 'test-writer': full, implementer: full },
+    };
+    expect(findMissingSettings(ready)).toEqual([]);
+    expect(findMissingSettings(ready, ['chat'])).toEqual([
+      'roles.chat.model',
+      'roles.chat.maxBudgetUsd',
+      'roles.chat.maxTurns',
+    ]);
+    for (const path of findMissingSettings(settings, AgentRole.options)) {
+      expect(MissingSettingPath.safeParse(path).success).toBe(true);
+    }
+    expect(MissingSettingPath.safeParse('roles.reviewer.model').success).toBe(false);
   });
 });
 

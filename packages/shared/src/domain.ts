@@ -134,30 +134,132 @@ const perRole = <T extends z.ZodType>(value: T) => z.partialRecord(AgentRole, va
 /** 승인 대기열 유입 상한 기본값 (TODO-04). */
 export const DEFAULT_APPROVAL_QUEUE_LIMIT = 40;
 
+/** 예산 한도 (USD). 0보다 커야 한다 (NFR-07: 예산 한도 없는 실행 금지). `null` = 미설정. */
+export const BudgetLimitUsd = z.number().positive().nullable();
+/** 턴 한도 (plan.md 4.5 `maxTurns`). 1 이상 정수. `null` = 미설정. */
+export const TurnLimit = z.int().positive().nullable();
+/** 모델 ID. 사용자가 입력한 문자열 그대로 저장한다 (공백만 있는 값 금지, 200자 이하). `null` = 미설정. */
+export const ModelId = z
+  .string()
+  .max(200)
+  .refine((text) => text.trim().length > 0, '모델 ID가 비어 있습니다');
+
+/** 실행 전체 한도 (COST-01, plan.md 4.5 `maxBudgetUsd` · `maxTurns`). */
+export const RunLimits = z.strictObject({
+  maxBudgetUsd: BudgetLimitUsd,
+  maxTurns: TurnLimit,
+});
+export type RunLimits = z.infer<typeof RunLimits>;
+
+/** 역할 하나의 모델 · 한도 (COST-01, NFR-07, ADR-024). */
+export const RoleSettings = z.strictObject({
+  model: ModelId.nullable(),
+  maxBudgetUsd: BudgetLimitUsd,
+  maxTurns: TurnLimit,
+});
+export type RoleSettings = z.infer<typeof RoleSettings>;
+
 /**
- * 프로젝트 설정 (COST-01, NFR-07, TODO-04, ADR-012, RUN-05, NFR-02).
- * 예산 · 모델은 실행에 필수지만 저장은 미설정(`null` · 빈 맵)을 허용한다.
+ * 역할별 설정. 모든 역할 키가 있다(값이 없으면 각 필드 `null`). 어느 역할을 실행 전에 검사하는지는
+ * `settings.validateForRun`이 정한다 (M1 필수: rule-writer · test-writer · implementer, ADR-057).
+ */
+export const RoleSettingsMap = z.record(AgentRole, RoleSettings);
+export type RoleSettingsMap = z.infer<typeof RoleSettingsMap>;
+
+/**
+ * 프로젝트 설정 (COST-01, NFR-07, TODO-04, ADR-012, RUN-05, NFR-02, ADR-057).
+ * 예산 · 모델은 실행에 필수지만 저장은 미설정(`null`)을 허용한다 (일부 역할만 먼저 저장하는 흐름, roadmap M1 흐름 2).
  * 미설정이면 실행 생성이 `-32010`으로 거부된다 (architecture.md 5장).
+ * 한 번도 저장하지 않은 프로젝트는 기본값이고 `updatedAt` · `updatedBy`가 `null`이다.
+ * 변경 주체는 사람뿐이다 (에이전트 주체의 `settings.update`는 -32020).
  */
 export const Settings = z.strictObject({
   projectId: Ulid,
-  budget: z.strictObject({
-    runTotalUsd: UsdOrNull,
-    perRole: z.strictObject({
-      testWriter: UsdOrNull,
-      implementer: UsdOrNull,
-    }),
-  }),
-  models: z.strictObject({ perRole: perRole(NonEmptyString) }),
-  maxTurns: z.strictObject({ perRole: perRole(z.int().positive()) }),
+  run: RunLimits,
+  roles: RoleSettingsMap,
+  /** 승인 대기 유입 상한 (TODO-04, 기본 40). 화면 표시 · 변경은 M3-13 */
   approvalQueueLimit: z.int().positive(),
+  /** 잠정 승인 정책 (ADR-012 기본 '사용 안 함'). 화면 · 변경은 해당 이슈 */
   provisionalPolicy: ProvisionalPolicy,
+  /** 자동 모드 (RUN-05). 화면 · 변경은 해당 이슈 */
   autoMode: z.boolean(),
+  /** 에이전트 패키지 설치 허용 목록 (ADR-024 기본 비어 있음) */
   installAllowlist: z.array(NonEmptyString),
-  updatedAt: Timestamp,
-  updatedBy: Author,
+  updatedAt: Timestamp.nullable(),
+  updatedBy: HumanAuthor.nullable(),
 });
 export type Settings = z.infer<typeof Settings>;
+
+/** 역할 설정 기본값: 전부 미설정. */
+export const emptyRoleSettings = (): RoleSettings => ({
+  model: null,
+  maxBudgetUsd: null,
+  maxTurns: null,
+});
+
+/** 한 번도 저장하지 않은 프로젝트의 설정. 예산 · 모델은 전부 미설정이다. */
+export const defaultSettings = (projectId: Ulid): Settings => ({
+  projectId,
+  run: { maxBudgetUsd: null, maxTurns: null },
+  roles: Object.fromEntries(
+    AgentRole.options.map((role) => [role, emptyRoleSettings()]),
+  ) as RoleSettingsMap,
+  approvalQueueLimit: DEFAULT_APPROVAL_QUEUE_LIMIT,
+  provisionalPolicy: 'off',
+  autoMode: false,
+  installAllowlist: [],
+  updatedAt: null,
+  updatedBy: null,
+});
+
+/**
+ * 실행 전에 반드시 채워야 하는 역할 (M1, ADR-057). planner · chat 등은 그 역할을 쓰는 이슈가
+ * `settings.validateForRun`의 `roles`로 넘겨 검사한다 (M4-01 · M5-01).
+ */
+export const RUN_REQUIRED_ROLES = [
+  'rule-writer',
+  'test-writer',
+  'implementer',
+] as const satisfies readonly AgentRole[];
+
+/** 비어 있는 설정 항목의 경로: `run.<필드>` 또는 `roles.<역할>.<필드>`. */
+export type MissingSetting = `run.${keyof RunLimits}` | `roles.${AgentRole}.${keyof RoleSettings}`;
+
+const RUN_FIELDS = ['maxBudgetUsd', 'maxTurns'] as const satisfies readonly (keyof RunLimits)[];
+const ROLE_FIELDS = [
+  'model',
+  'maxBudgetUsd',
+  'maxTurns',
+] as const satisfies readonly (keyof RoleSettings)[];
+
+/** `MissingSetting` 형식의 경로 (`run.maxTurns`, `roles.test-writer.model` 등). */
+export const MissingSettingPath = z.union([
+  z.enum(RUN_FIELDS.map((field) => `run.${field}` as const)),
+  z.templateLiteral(['roles.', AgentRole, '.', z.enum(ROLE_FIELDS)]),
+]);
+
+/**
+ * 실행 전 설정 검사 (NFR-07): 실행 전체 한도 2개와 `roles`의 모델 · 한도(USD · 턴) 중 비어 있는 항목을
+ * 정해진 순서(실행 전체 → 역할 순서 → 필드 순서)로 돌려준다. 빈 배열이면 실행할 수 있다.
+ */
+export const findMissingSettings = (
+  settings: Pick<Settings, 'run' | 'roles'>,
+  roles: readonly AgentRole[] = RUN_REQUIRED_ROLES,
+): MissingSetting[] => {
+  const missing: MissingSetting[] = [];
+  for (const field of RUN_FIELDS) {
+    if (settings.run[field] === null) missing.push(`run.${field}`);
+  }
+  const wanted = new Set(roles);
+  for (const role of AgentRole.options) {
+    if (!wanted.has(role)) continue;
+    const values = settings.roles[role];
+    for (const field of ROLE_FIELDS) {
+      if (values[field] === null) missing.push(`roles.${role}.${field}`);
+    }
+  }
+  return missing;
+};
 
 // ── 규범 ─────────────────────────────────────────────────
 
