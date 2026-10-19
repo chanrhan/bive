@@ -95,9 +95,9 @@ interface AgentSession {
 |---|---|---|
 | **Project** | `id`, `name`, `rootPath`, `baseBranch`, `createdAt` | PRJ-01 |
 | | 프로젝트 폴더 설정 파일 `.bive.json` = `{ projectId, schemaVersion }`만 | PRJ-01, ADR-005 |
-| **Settings** | `projectId`, `budget.runTotalUsd`, `budget.perRole{testWriter, implementer}` (필수, 미설정 시 실행 거부) | COST-01, NFR-07 |
-| | `models.perRole` (필수), `maxTurns.perRole` | NFR-07, 기획서 4.5 |
-| | `approvalQueueLimit` (기본 40), `provisionalPolicy` (`off` 기본), `autoMode` (`false`), `installAllowlist` (빈 목록) | TODO-04, ADR-012, RUN-05, NFR-02 |
+| **Settings** | `projectId`, `run{maxBudgetUsd, maxTurns}` (실행 전체 한도, 미설정 시 실행 거부) | COST-01, NFR-07, 기획서 4.5, ADR-057 |
+| | `roles{<역할>: {model, maxBudgetUsd, maxTurns}}` (모든 역할 키, 값 `null` = 미설정. 실행 전 검사 역할은 `settings.validateForRun`이 정함) | NFR-07, ADR-024, ADR-057 |
+| | `approvalQueueLimit` (기본 40), `provisionalPolicy` (`off` 기본), `autoMode` (`false`), `installAllowlist` (빈 목록), `updatedAt` · `updatedBy` (사람, 저장 전 `null`) | TODO-04, ADR-012, RUN-05, NFR-02 |
 | | `writingRules` (P2), `updatedAt`, `updatedBy` | NRM-10 |
 | **Requirement** | `id`, `displayId`, `text`, `author`, `normState`, `createdAt`, `updatedAt`, `updatedBy` (마지막 수정 · 삭제 주체), `deletedAt` | NRM-01, ADR-047 |
 | | `unrulable: { reason } \| null` | NRM-08 |
@@ -149,7 +149,7 @@ interface AgentSession {
 |---|---|---|
 | `~/.bive/run/` | 파이프 경로 · 접속 토큰 · pid 잠금 (권한 0700/0600) | 불가 |
 | `~/.bive/projects/<projectId>/bive.db` | 규범 · 실행 · 판정 · 승인 기록 | 불가 (NFR-01) |
-| `~/.bive/projects/<projectId>/judge/<runId>/` | vitest JSON 원본 · BIVE 러너 설정 | 불가 |
+| `~/.bive/projects/<projectId>/judge/<runId>/<judgeId>/` | 판정 1회마다 하위 폴더 (ADR-051): BIVE 러너 설정(`vitest.config.mjs` · `collect.config.mjs` · `global-setup.mjs`) · vitest JSON 원본(`result.json`) · 로그 | 불가 |
 | `~/.bive/work/<projectId>/worktrees/<runId>/` | 실행 워크트리 (RUN-08) | 역할별 경로 가드 안에서만 |
 | `~/.bive/work/<projectId>/sessions/<sessionId>/` | 역할 작업 디렉터리 (허용 목록 파일만 배치) | 해당 세션만 |
 | `~/.bive/registry.db` | 프로젝트 등록부 (등록된 프로젝트 ID · 등록 시각만) | 불가 |
@@ -247,7 +247,8 @@ stateDiagram-v2
 | `run.create` | `{projectId, ruleIds}` → 실행 (실행 시작 확인) | RUN-01 | M1 |
 | `run.list` · `run.get` | 실행 · 단계 · 세션 수치 | RUN-01, SCR-05 | M1 |
 | `run.resume` | `{id}` → 실행 (`interrupted`만) | PRD 5.1, ADR-011 | M1 |
-| `settings.get` · `settings.update` | `{projectId}` / `{projectId, patch}` → 설정 (예산 · 모델 필수 검증) | COST-01, NFR-07, ADR-010 | M1 |
+| `settings.get` · `settings.update` | `{projectId}` / `{projectId, patch, author}` → `{settings}` (사람만, 미설정 저장 허용) | COST-01, NFR-07, ADR-010, ADR-057 | M1 |
+| `settings.validateForRun` | `{projectId, roles?}` → `{ok: true}` 또는 `{ok: false, code: -32010, reason: 'SETTINGS_INCOMPLETE', message, missing[]}` | NFR-07, ADR-057 | M1 |
 | `codeOpen.record` | `{reason, sourceScreen, itemRef, file, line}` | MET-01 | M1 직후 |
 | `chat.ask` · `chat.instruct` | `{refs[], text}` → 답변 / 제안 | DSN-07, DSN-08 | M2 |
 | `events.subscribe` | `{projectId}` → 알림 구독 | — | M1 |
@@ -356,7 +357,7 @@ stateDiagram-v2
 | 계정 MCP 차단 · 도구 기록 (NFR-02) | `orchestrator/src/tools/session-guard.ts`(ADR-052): init 메시지의 `tools` · `mcp_servers`가 역할 허용 목록과 다르면 세션 중단 → 실행 `failed`. Run.toolManifest 기록 | 추가 MCP 시나리오 |
 | 명령은 고정 도구로만 (NFR-02) | `orchestrator/src/tools/commands.ts`: 허용 argv 템플릿 (`run_tests` · `prisma_generate` · `prisma_migrate` · `install_package`=허용 목록) · 셸 없는 실행(`spawn`, 프로세스 그룹 정리, ADR-052) · 타임아웃 · 환경 변수 정리 | 임의 인자 거부 테스트 |
 | 커밋 · 병합은 오케스트레이터만 (RUN-08) | `orchestrator/src/git/*`. 에이전트 도구에 git 없음, 워크트리 `.git` 쓰기 경로 가드 거부 | `.git` 쓰기 거부 테스트 |
-| 판정 근거는 실행기 결과만 (JDG-01) | `orchestrator/src/judge/runner.ts`: BIVE 전용 vitest 설정(`judge/<runId>/vitest.config.mjs`)으로 직접 실행, 프로젝트 설정 미사용. Run · Rule 상태 변경 함수는 `judge`만 호출 | "통과" 보고 시나리오 |
+| 판정 근거는 실행기 결과만 (JDG-01) | `orchestrator/src/judge/runner.ts`: BIVE 전용 vitest 설정(`judge/<runId>/<judgeId>/vitest.config.mjs`, ADR-051)으로 직접 실행, 프로젝트 설정 미사용. Run · Rule 상태 변경 함수는 `judge`만 호출 | "통과" 보고 시나리오 |
 | 인수 테스트는 HTTP로만 (JDG-01) | `orchestrator/src/judge/acceptance-lint.ts`: 테스트 파일 import 허용 목록 (vitest · BIVE HTTP 도우미 · Node 내장) 위반 시 테스트 작성 단계 미종료 | 소스 import 테스트 거부 |
 | 인수 테스트 변조 방지 | implementer 경로 가드에서 인수 테스트 디렉터리 쓰기 거부 + 해시 대조 (4장) | 해시 불일치 시나리오 |
 | 렌더러 격리 | `app/src/main/window.ts`: `contextIsolation: true` · `sandbox: true` · `nodeIntegration: false`, CSP는 `renderer/index.html`. preload는 `invoke` · `on`만 노출, 메서드 허용 목록 · 스키마 검증은 `app/src/main/rpc-bridge.ts` (ADR-042) | Electron 스모크에서 `window.bive` 키 · `require` 부재 확인 |

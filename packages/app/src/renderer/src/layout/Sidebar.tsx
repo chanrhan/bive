@@ -5,6 +5,8 @@ import { Bell, Circle, Settings } from 'lucide-react';
 import type { ConnectionView } from '../connection/useConnection.js';
 import { useNavigation } from '../navigation/NavigationContext.js';
 import { NAV_GROUPS } from '../navigation/routes.js';
+import { SettingsModalHost } from '../screens/settings-modal/SettingsModal.js';
+import { openSettings, useSettingsOpen } from '../screens/settings-modal/settingsModalStore.js';
 
 /** 연결 상태 문구 (1.2 · 1.1 명사형). */
 export const CONNECTION_TEXT: Readonly<Record<ConnectionView, string>> = {
@@ -31,6 +33,7 @@ export const Sidebar = ({
 }: SidebarProps): React.JSX.Element => {
   const { route, navigate } = useNavigation();
   const showBadge = todoCount !== null && todoCount > 0;
+  const settingsOpen = useSettingsOpen();
   return (
     <aside className="sidebar" data-testid="sidebar" aria-label="사이드바">
       <header className="sidebar-top">
@@ -109,11 +112,12 @@ export const Sidebar = ({
           data-testid="settings-button"
           aria-label="설정"
           title="설정"
-          aria-pressed={route === 'settings'}
-          onClick={() => navigate('settings')}
+          aria-pressed={settingsOpen}
+          onClick={openSettings}
         >
           <Settings className="button-icon" aria-hidden="true" />
         </button>
+        <SettingsModalHost />
       </footer>
     </aside>
   );

@@ -1,0 +1,208 @@
+/* 설정 모달 (SCR-21). 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.settings-nav {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 200px;
+  padding: var(--space-4) var(--space-3);
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+
+.settings-title {
+  padding: 0 var(--space-2);
+  font-size: var(--font-size-4);
+  font-weight: 600;
+}
+
+.settings-nav-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-nav-item {
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3);
+}
+
+.settings-nav-item[aria-current='page'] {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+.settings-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  padding: var(--space-4) var(--space-5);
+  overflow-y: auto;
+}
+
+.settings-section-title {
+  margin: 0 0 var(--space-4);
+  /* × 버튼 자리 */
+  padding-right: var(--space-6);
+  font-size: var(--font-size-4);
+  font-weight: 600;
+}
+
+.settings-message {
+  margin: auto;
+  color: var(--color-text-muted);
+}
+
+.settings-section {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-height: 0;
+}
+
+.settings-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.settings-group-title {
+  margin-bottom: var(--space-2);
+  padding: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+}
+
+.settings-run-fields {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.settings-run-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 160px;
+}
+
+.settings-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+}
+
+.settings-roles {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.settings-roles th {
+  padding: var(--space-1) var(--space-2) var(--space-1) 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  font-weight: 400;
+  text-align: left;
+}
+
+.settings-roles th:first-child {
+  width: 120px;
+}
+
+.settings-roles thead th:nth-child(3),
+.settings-roles thead th:nth-child(4) {
+  width: 110px;
+}
+
+.settings-roles td {
+  padding: var(--space-1) var(--space-2) var(--space-1) 0;
+}
+
+.settings-roles .settings-role-name {
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2);
+}
+
+.settings-input {
+  width: 100%;
+  height: 30px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-2);
+}
+
+.settings-input:focus-visible {
+  border-color: var(--color-accent);
+}
+
+/* 예외만 강조 (1.1): 비어 있는 필수 칸은 경고, 형식이 틀린 칸은 위험 색 */
+.settings-input[data-state='missing'] {
+  border-color: var(--color-warning);
+}
+
+.settings-input[data-state='invalid'] {
+  border-color: var(--color-danger);
+}
+
+.settings-input:disabled {
+  opacity: var(--opacity-dimmed);
+}
+
+.settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.settings-status {
+  display: flex;
+  gap: var(--space-3);
+  margin: 0;
+  font-size: var(--font-size-2);
+}
+
+.settings-validation[data-state='complete'],
+.settings-save-status[data-state='saving'],
+.settings-save-status[data-state='saved'] {
+  color: var(--color-text-muted);
+}
+
+.settings-validation[data-state='incomplete'] {
+  color: var(--color-warning);
+}
+
+.settings-save-status[data-state='failed'],
+.settings-save-status[data-state='invalid'] {
+  color: var(--color-danger);
+}
+
+.settings-save {
+  height: 30px;
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-1);
+  background: var(--color-accent);
+  color: var(--color-bg);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings-save:disabled {
+  opacity: var(--opacity-dimmed);
+  cursor: default;
+}
