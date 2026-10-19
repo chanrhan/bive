@@ -1,17 +1,22 @@
 // SCR-21 설정 (이슈 #18 수용 기준 3, screens.md 7장 X-02, ADR-010 · ADR-035 · ADR-057):
 // 사이드바 하단 톱니 → 모달 820 × 600, 바깥 클릭 · Esc · ×로 닫기, 초점 가두기, 예산 · 모델 섹션만 노출,
 // [저장] → settings.update(사람 주체) → 검증 상태 다시 읽기.
-// 열린 프로젝트가 필요하므로 e2e 전용 플레이그라운드(`/playground/app.html`, 앱 전체 + 프로젝트)에서 연다.
-import type { Settings, SettingsValidateResult } from '@bive/shared';
+// 열린 프로젝트는 가짜 `project.current` 응답으로 준다(현재 프로젝트 계약은 M1-01 `ProjectContext`).
+import type { Project, Settings, SettingsValidateResult } from '@bive/shared';
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import { FIELD_NAMES, HIDDEN_SECTIONS, SETTINGS_TEXT } from './checklists/scr-21.js';
 import { type BiveMock, mockBive, type MockResponses } from './support/bive-mock.js';
 import { expectScreen, findForbiddenText } from './support/expectScreen.js';
 
-const URL = '/playground/app.html';
-/** e2e/playground/app-playground.tsx의 프로젝트 ID. */
 const PROJECT_ID = '01JA00000000000000000000P1';
+const PROJECT: Project = {
+  id: PROJECT_ID,
+  name: '샘플 앱',
+  rootPath: '/work/sample-next-app',
+  baseBranch: 'main',
+  createdAt: '2026-10-16T09:00:00.000Z',
+};
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 const EMPTY_ROLE = { model: null, maxBudgetUsd: null, maxTurns: null };
@@ -68,8 +73,13 @@ const ALL_MISSING = [
   ]),
 ];
 
-const responses = (settings: Settings, validation: SettingsValidateResult): MockResponses => ({
+const responses = (
+  settings: Settings,
+  validation: SettingsValidateResult,
+  project: Project | null = PROJECT,
+): MockResponses => ({
   'system.status': { result: STATUS },
+  'project.current': { result: { project } },
   'settings.get': { result: { settings } },
   'settings.validateForRun': { result: validation },
 });
@@ -79,14 +89,14 @@ const dialog = (page: Page): Locator => page.getByRole('dialog', { name: SETTING
 const field = (page: Page, name: string): Locator =>
   dialog(page).getByRole('textbox', { name, exact: true });
 
-/** 플레이그라운드를 열고 톱니로 모달을 연 뒤 설정이 그려질 때까지 기다린다. */
+/** 앱을 열고(열린 프로젝트 있음) 톱니로 모달을 연 뒤 설정이 그려질 때까지 기다린다. */
 const openModal = async (
   page: Page,
   settings: Settings = FILLED,
   validation: SettingsValidateResult = OK,
 ): Promise<BiveMock> => {
   const bive = await mockBive(page, { responses: responses(settings, validation) });
-  await page.goto(URL);
+  await page.goto('/');
   await gear(page).click();
   await expect(dialog(page)).toBeVisible();
   await expect(page.getByTestId('settings-budget-model')).toHaveAttribute('data-state', 'ready');
@@ -207,8 +217,11 @@ test.describe('모달 열기 · 닫기', () => {
   });
 
   test('열린 프로젝트가 없으면 "프로젝트 없음"만 보이고 설정을 읽지 않는다', async ({ page }) => {
-    const bive = await mockBive(page, { responses: responses(EMPTY, OK) });
+    const bive = await mockBive(page, { responses: responses(EMPTY, OK, null) });
     await page.goto('/');
+    await expect
+      .poll(async () => (await bive.calls()).map((call) => call.method))
+      .toContain('project.current');
     await gear(page).click();
     await expect(dialog(page)).toBeVisible();
     await expect(page.getByTestId('settings-no-project')).toHaveText(SETTINGS_TEXT.noProject);
@@ -223,7 +236,7 @@ test.describe('모달 열기 · 닫기', () => {
         'settings.get': { error: { code: -32603, message: '오케스트레이터 연결 실패' } },
       },
     });
-    await page.goto(URL);
+    await page.goto('/');
     await gear(page).click();
     await expect(page.getByTestId('settings-load-error')).toHaveText('설정 불러오기 실패');
     await expect(dialog(page).getByRole('textbox')).toHaveCount(0);

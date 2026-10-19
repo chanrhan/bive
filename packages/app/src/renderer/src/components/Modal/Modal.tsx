@@ -47,6 +47,8 @@ export const Modal = ({
 
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
+        // 한글 등 입력기 조합 중의 Esc는 조합 취소이므로 모달을 닫지 않는다
+        if (event.isComposing) return;
         // 모달 아래 화면(채팅 겹침 등)의 Esc 처리로 번지지 않게 여기서 멈춘다
         event.preventDefault();
         event.stopPropagation();

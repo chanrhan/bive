@@ -60,6 +60,8 @@ export const toFormValues = (settings: Pick<Settings, 'run' | 'roles'>): FormVal
 const parseUsd = (raw: string): number | null | undefined => {
   const trimmed = raw.trim();
   if (trimmed === '') return null;
+  // 소수 표기만 받는다 (`Number`가 받는 16진수 · 지수 표기 `0x10` · `1e2`는 입력 오류)
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return undefined;
   const value = Number(trimmed);
   return Number.isFinite(value) && value > 0 ? value : undefined;
 };

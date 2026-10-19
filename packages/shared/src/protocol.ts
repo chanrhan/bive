@@ -9,6 +9,7 @@ import {
   Author,
   EntityRef,
   MissingSettingPath,
+  Project,
   Proposal,
   ProposalPayload,
   Requirement,
@@ -327,6 +328,43 @@ export const ApprovalLogListResult = z.strictObject({
 });
 export type ApprovalLogListResult = z.infer<typeof ApprovalLogListResult>;
 
+// ── 프로젝트 (PRJ-01, M1-01, ADR-025 · ADR-036 · ADR-040 · ADR-054) ─────────
+// - `project.open`: 폴더를 연다. 루트 `.bive.json`이 없으면 새 프로젝트 ID로 등록하고 파일을 만든다
+//   (`created: true`). 있으면 그 ID로 진입하고 파일은 다시 쓰지 않는다. `empty`는 `.bive.json` 외 항목이 없는 폴더
+// - 경로가 절대 경로가 아니면 -32602, 없는 경로는 -32004, 폴더가 아니거나 설정 파일 형식이 틀리면 -32001,
+//   다른 경로에 등록된 프로젝트 ID면 -32009
+// - `project.current`: 이 오케스트레이터가 마지막으로 연 프로젝트(없으면 null). `project.list`: 등록된 프로젝트 전부
+
+/** OS와 무관한 절대 경로 판별 (`/…`, `C:\…`, `\\서버\…`). 렌더러 · main · 오케스트레이터가 같은 기준을 쓴다. */
+const ABSOLUTE_PATH = /^(?:\/|[A-Za-z]:[\\/]|\\\\)/;
+
+/** 프로젝트 폴더 경로. 절대 경로만 받는다(상대 경로의 기준 폴더는 프로세스마다 다르다). */
+export const ProjectPath = z
+  .string()
+  .min(1)
+  .refine((value) => ABSOLUTE_PATH.test(value), '절대 경로가 아닙니다')
+  .refine((value) => !value.includes('\0'), '경로에 NUL 문자가 있습니다');
+
+export const ProjectOpenParams = z.strictObject({ path: ProjectPath });
+export type ProjectOpenParams = z.infer<typeof ProjectOpenParams>;
+
+export const ProjectOpenResult = z.strictObject({
+  project: Project,
+  /** 이번 호출이 `.bive.json`을 만들었는지 (미연결 폴더) */
+  created: z.boolean(),
+  /** `.bive.json` 말고는 아무 항목도 없는 폴더인지 (빈 폴더, SCR-01 · ADR-036) */
+  empty: z.boolean(),
+});
+export type ProjectOpenResult = z.infer<typeof ProjectOpenResult>;
+
+export const ProjectCurrentParams = z.undefined();
+export const ProjectCurrentResult = z.strictObject({ project: Project.nullable() });
+export type ProjectCurrentResult = z.infer<typeof ProjectCurrentResult>;
+
+export const ProjectListParams = z.undefined();
+export const ProjectListResult = z.strictObject({ projects: z.array(Project) });
+export type ProjectListResult = z.infer<typeof ProjectListResult>;
+
 // ── 설정 (COST-01, NFR-07, SCR-21, M1-05, ADR-057) ───────────
 // - 모든 요청에 `projectId`가 필수다. 등록되지 않은 프로젝트는 -32004
 // - `settings.update`는 주체 `author`를 싣고 사람(`human`)만 받는다. 에이전트 주체는 -32020
@@ -419,6 +457,9 @@ export const METHODS = {
   'proposal.amend': { params: ProposalAmendParams, result: ProposalApproveResult },
   'proposal.reject': { params: ProposalRejectParams, result: ProposalRejectResult },
   'approvalLog.list': { params: ApprovalLogListParams, result: ApprovalLogListResult },
+  'project.open': { params: ProjectOpenParams, result: ProjectOpenResult },
+  'project.current': { params: ProjectCurrentParams, result: ProjectCurrentResult },
+  'project.list': { params: ProjectListParams, result: ProjectListResult },
   'settings.get': { params: SettingsGetParams, result: SettingsResult },
   'settings.update': { params: SettingsUpdateParams, result: SettingsResult },
   'settings.validateForRun': { params: SettingsValidateParams, result: SettingsValidateResult },
