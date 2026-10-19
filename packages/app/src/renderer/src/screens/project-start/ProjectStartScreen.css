@@ -1,0 +1,41 @@
+/* 프로젝트 시작 (SCR-01). 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.project-start {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  margin: auto;
+}
+
+.project-start-title {
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--font-size-4);
+  font-weight: 600;
+}
+
+.primary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  border-radius: var(--radius-2);
+  background: var(--color-accent);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-3);
+  cursor: pointer;
+}
+
+.primary-button:disabled {
+  opacity: var(--opacity-dimmed);
+  cursor: default;
+}
+
+.project-start-error {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--font-size-2);
+}

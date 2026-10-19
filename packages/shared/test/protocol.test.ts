@@ -405,6 +405,62 @@ describe('proposal.* · approvalLog.list (M1-09, ADR-050)', () => {
   });
 });
 
+describe('project.* (M1-01, ADR-054)', () => {
+  const project = {
+    id: '01JB2C3D4E5F6G7H8J9KAMBNCP',
+    name: 'sample-next-app',
+    rootPath: '/work/sample-next-app',
+    baseBranch: 'main',
+    createdAt: '2026-10-16T09:00:00.000Z',
+  };
+  const open = (params: unknown) =>
+    parseRequest({ jsonrpc: '2.0', id: 1, method: 'project.open', params });
+
+  it('project.open은 절대 경로만 받는다 (POSIX · Windows 드라이브 · UNC)', () => {
+    for (const path of ['/tmp/fx', 'C:\\work\\app', 'd:/work/app', '\\\\server\\share\\app']) {
+      expect(open({ path })).toMatchObject({ ok: true });
+    }
+    for (const params of [
+      { path: 'relative/app' },
+      { path: './app' },
+      { path: '' },
+      { path: '/a\0b' },
+      { path: 1 },
+      {},
+      { path: '/a', extra: true },
+    ]) {
+      expect(open(params)).toMatchObject({ ok: false, error: { code: -32602 } });
+    }
+  });
+
+  it('결과: project.open { project, created, empty } · current { project | null } · list { projects }', () => {
+    const response = (
+      method: 'project.open' | 'project.current' | 'project.list',
+      result: unknown,
+    ) => parseResponse(method, { jsonrpc: '2.0', id: 1, result });
+    expect(response('project.open', { project, created: true, empty: false })).toMatchObject({
+      ok: true,
+    });
+    expect(response('project.open', { project, created: true })).toMatchObject({ ok: false });
+    expect(response('project.current', { project: null })).toMatchObject({ ok: true });
+    expect(response('project.current', { project })).toMatchObject({ ok: true });
+    expect(response('project.list', { projects: [project] })).toMatchObject({ ok: true });
+    expect(response('project.list', { projects: [{ ...project, extra: 1 }] })).toMatchObject({
+      ok: false,
+    });
+  });
+
+  it('current · list는 파라미터가 없다', () => {
+    for (const method of ['project.current', 'project.list']) {
+      expect(parseRequest({ jsonrpc: '2.0', id: 1, method })).toMatchObject({ ok: true });
+      expect(parseRequest({ jsonrpc: '2.0', id: 1, method, params: {} })).toMatchObject({
+        ok: false,
+        error: { code: -32602 },
+      });
+    }
+  });
+});
+
 describe('ping 왕복', () => {
   it('요청 → 서버 검증 → 응답 → 클라이언트 검증', () => {
     // 클라이언트: 파라미터 없는 요청

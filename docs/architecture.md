@@ -219,15 +219,16 @@ stateDiagram-v2
 - 연결 수립: `system.hello { protocolVersion, token }`. 토큰 = `~/.bive/run/token` (0600, 기동마다 갱신). 불일치 시 연결 종료
 - 인증 전 메시지 처리 · 프레임 상한(1 MiB) · 유휴 종료(`BIVE_IDLE_SHUTDOWN_MS`) · 단일 인스턴스 잠금(`run/orchestrator.pid`)은 ADR-041. 구현 `orchestrator/src/ipc/{transport,server}.ts` · `lifecycle.ts` · `lock.ts`
 - 렌더러 경로: renderer `window.bive.invoke(method, params)` → preload(그대로 전달) → `ipcRenderer.invoke('bive:rpc')` → main(허용 목록 확인 · zod 검증, 접속 전) → 파이프. 알림은 main → `webContents.send('bive:event')` → `window.bive.on(event, cb)`. 샌드박스 preload는 electron 외 모듈을 불러올 수 없어 검증은 main이 맡는다 (ADR-042)
-- main 전용 (파이프 아님): `app.pickFolder` (OS 대화상자), `app.openInIde` (MET-01, P1)
-- main이 만드는 알림 (파이프 아님): `system.connection` `{state: 'connected', status}` · `{state: 'disconnected'}`. main이 1초마다 `system.status`를 부른 결과와 연결이 끊긴 순간에 보낸다. 끊기면 오케스트레이터를 다시 띄우지 않고 1초 간격으로 붙기만 한다 (ADR-045)
+- main 전용 (파이프 아님): `app.pickFolder` (OS 대화상자 → `{path \| null}`, ADR-055), `app.openInIde` (MET-01, P1)
+- main이 만드는 알림 (파이프 아님): `system.connection` `{state: 'connected', status}` · `{state: 'disconnected'}`. main이 1초마다 `system.status`를 부른 결과와 연결이 끊긴 순간에 보낸다. 끊기면 오케스트레이터를 다시 띄우지 않고 1초 간격으로 붙기만 한다 (ADR-045). `project.opened`는 main을 거친 `project.open`의 성공 결과다 (기동 인자 · 렌더러 요청, ADR-055)
 
 | 메서드 | 파라미터 → 결과 | 출처 | 단계 |
 |---|---|---|---|
 | `system.hello` | `{protocolVersion, token}` → `{orchestratorVersion}` | PRD 5.1, ADR-041 | M0 |
 | `system.status` | — → `{version, uptimeMs, connections, runsInProgress}` (사이드바 연결 상태, main이 1초마다 호출) | 화면 1.2, ADR-045 | M0 |
-| `project.open` | `{path}` → `{project, created}` (설정 파일 생성 여부) | PRJ-01 | M1 |
-| `project.list` · `project.get` | — / `{projectId}` → 프로젝트 | PRJ-01 | M1 |
+| `project.open` | `{path}`(절대 경로) → `{project, created, empty}` (설정 파일 생성 여부 · 빈 폴더). 연결된 폴더는 파일을 다시 쓰지 않음 | PRJ-01, ADR-054 | M1 |
+| `project.current` · `project.list` | — → `{project \| null}`(마지막으로 연 프로젝트) / `{projects}` | PRJ-01, ADR-054 | M1 |
+| `project.get` | `{projectId}` → 프로젝트 | PRJ-01 | 필요한 이슈에서 |
 | `project.sync` | `{projectId}` → 블록 선언 제안 | PRJ-02 | M2 |
 | `requirement.list` | `{projectId}` → `{requirements}` (삭제 제외, 표시 ID 순). 필터는 화면 이슈에서 | NRM-01, SCR-02, ADR-047 | M1 |
 | `requirement.get` | `{projectId, id}` → `{requirement}` (삭제된 것도). 자식 규칙 · 이력은 해당 이슈에서 | SCR-06, ADR-047 | M1 |

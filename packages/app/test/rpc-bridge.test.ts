@@ -75,6 +75,55 @@ describe('handleRendererRpc', () => {
     });
     expect(t.calls).toEqual([]);
   });
+
+  it('main 메서드: 처리기 없으면 -32601, 파라미터를 넣으면 -32602, 처리기 예외는 -32603 (파이프로 보내지 않음)', async () => {
+    const t = target(() => Promise.resolve(null));
+    const logs: string[] = [];
+    const log = (message: string): void => {
+      logs.push(message);
+    };
+    await expect(handleRendererRpc(t, { method: 'app.pickFolder' }, { log })).resolves.toEqual({
+      ok: false,
+      error: { code: ErrorCode.MethodNotFound, message: '없는 메서드: app.pickFolder' },
+    });
+    const appMethods = { 'app.pickFolder': () => Promise.resolve({ path: '/x' }) };
+    await expect(
+      handleRendererRpc(t, { method: 'app.pickFolder', params: {} }, { appMethods, log }),
+    ).resolves.toMatchObject({ ok: false, error: { code: ErrorCode.InvalidParams } });
+    const failing = { 'app.pickFolder': () => Promise.reject(new Error('/secret/path 실패')) };
+    await expect(
+      handleRendererRpc(t, { method: 'app.pickFolder' }, { appMethods: failing, log }),
+    ).resolves.toEqual({
+      ok: false,
+      error: { code: ErrorCode.InternalError, message: '내부 오류' },
+    });
+    expect(logs).toEqual(['app.pickFolder 실패: /secret/path 실패']);
+    expect(t.calls).toEqual([]);
+  });
+
+  it('onResult는 파이프 성공 뒤에만 부르고, 그 예외는 응답을 바꾸지 않는다', async () => {
+    const seen: unknown[][] = [];
+    const logs: string[] = [];
+    const ok = target(() => Promise.resolve({ pong: true, version: '1' }));
+    const outcome = await handleRendererRpc(
+      ok,
+      { method: 'ping' },
+      {
+        onResult: (method, result) => {
+          seen.push([method, result]);
+          throw new Error('후처리 오류');
+        },
+        log: (message) => logs.push(message),
+      },
+    );
+    expect(outcome).toEqual({ ok: true, result: { pong: true, version: '1' } });
+    expect(seen).toEqual([['ping', { pong: true, version: '1' }]]);
+    expect(logs).toEqual(['ping 후처리 실패: 후처리 오류']);
+
+    const failed = target(() => Promise.reject(new PipeRpcError(rpcError(ErrorCode.NotFound))));
+    await handleRendererRpc(failed, { method: 'ping' }, { onResult: (m, r) => seen.push([m, r]) });
+    expect(seen).toHaveLength(1);
+  });
 });
 
 describe('handleRendererRpc + main 세션 (오케스트레이터 없음)', () => {

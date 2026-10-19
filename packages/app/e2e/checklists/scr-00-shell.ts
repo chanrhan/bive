@@ -1,7 +1,7 @@
 // SCR-00 앱 셸 = 레이아웃 (ADR-043, screens.md 1.2): 사이드바 · 중앙 영역 · 오른쪽 채팅 자리.
 // 상태는 사이드바 하단 오케스트레이터 연결 상태로 나눈다: 기본(연결됨) · 로딩(확인 중) · 에러(연결 끊김).
-// 화면이 없는 지금은 중앙이 빈 상태("선택 항목 없음", ADR-029)이고, 프로젝트 · 할 일 건수는 근거 값이 없어
-// 프로젝트명 자리는 "프로젝트 없음", 배지는 DOM에 없다 (NFR-03).
+// 열린 프로젝트가 없으면 중앙은 시작 화면(프로젝트 시작, M1-01)이고 프로젝트명 자리는 "프로젝트 없음",
+// 할 일 건수는 근거 값이 없어 배지가 DOM에 없다 (NFR-03).
 import type { ElementCheck, ScreenChecklist, StateChecklist } from './types.js';
 
 /** 사이드바 메뉴 (1.2 그대로, 순서 포함). layout.spec.ts도 이 표를 쓴다. */
@@ -50,7 +50,11 @@ const layout = (connection: keyof typeof CONNECTION_TEXT): StateChecklist => {
     },
     { label: '설정 아이콘', testId: 'settings-button', role: 'button', name: '설정' },
     { label: '중앙 영역', testId: 'main-area', role: 'main' },
-    { label: '중앙 빈 상태', testId: 'empty-state', text: '선택 항목 없음' },
+    {
+      label: '중앙 시작 화면 (프로젝트 없음)',
+      testId: 'main-area',
+      attributes: { 'data-route': 'start' },
+    },
     {
       label: '오른쪽 채팅 자리',
       testId: 'chat-panel',
