@@ -49,11 +49,30 @@ const errnoCode = (error: unknown): string | undefined =>
 
 const validation = (message: string): RpcError => new RpcError(ErrorCode.ValidationFailed, message);
 
+const realpathOrResolved = (target: string): string => {
+  try {
+    return realpathSync(target);
+  } catch {
+    return path.resolve(target);
+  }
+};
+
+/** `child`가 `parent`와 같거나 그 아래인지 (둘 다 절대 경로). */
+const isSameOrInside = (parent: string, child: string): boolean => {
+  const relative = path.relative(parent, child);
+  // `..이름` 같은 하위 폴더 이름은 상위로 보지 않는다
+  const outside = relative === '..' || relative.startsWith(`..${path.sep}`);
+  return !outside && !path.isAbsolute(relative);
+};
+
 /**
  * 경로를 검사해 실경로(심볼릭 링크 해석)를 돌려준다.
  * 절대 경로 아님 -32602 · 없음 -32004 · 폴더 아님 · 접근 불가 -32001.
+ * `$BIVE_HOME`과 같거나 그 아래 · 그 상위인 폴더도 -32001이다. 저장소가 프로젝트 폴더 안에 들어가거나
+ * 저장소 안에 설정 파일이 생기면 "프로젝트 폴더 밖 저장소" 전제가 깨진다 (ADR-005 · ADR-025 · NFR-01).
+ * 오류 메시지에는 경로를 싣지 않는다.
  */
-export const resolveProjectRoot = (input: string): string => {
+export const resolveProjectRoot = (input: string, biveHome: string): string => {
   // 프로토콜 스키마가 이미 막지만, 처리기를 직접 부르는 경로도 같은 기준을 지키게 한다
   if (!path.isAbsolute(input)) {
     throw new RpcError(ErrorCode.InvalidParams, '절대 경로가 아닙니다');
@@ -69,6 +88,10 @@ export const resolveProjectRoot = (input: string): string => {
     throw validation('폴더에 접근할 수 없습니다');
   }
   if (!statSync(root).isDirectory()) throw validation('폴더가 아닙니다');
+  const home = realpathOrResolved(biveHome);
+  if (isSameOrInside(home, root) || isSameOrInside(root, home)) {
+    throw validation('저장소와 겹치는 폴더');
+  }
   return root;
 };
 
@@ -242,7 +265,7 @@ const linkNewFolder = (root: string, deps: OpenProjectDeps): Project => {
  * 폴더를 연다. 오류는 `RpcError` 또는 저장소 오류로 던진다(처리기가 IPC 오류로 바꾼다).
  */
 export const openProjectFolder = (input: string, deps: OpenProjectDeps): ProjectOpenResult => {
-  const root = resolveProjectRoot(input);
+  const root = resolveProjectRoot(input, deps.biveHome);
   const file = readProjectFile(root);
   const empty = isEmptyFolder(root);
   if (file !== null) {

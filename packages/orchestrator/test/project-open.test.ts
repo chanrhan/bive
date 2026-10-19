@@ -1,6 +1,7 @@
 // 프로젝트 열기 RPC (M1-01 수용 기준 1, PRJ-01 · ADR-025 · ADR-036 · ADR-040 · ADR-054).
 // 실제 Unix 소켓 · 임시 BIVE_HOME · 실제 SQLite 저장소 · 실제 폴더.
 import {
+  existsSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -277,6 +278,37 @@ describe('project.open: 오류', () => {
     const missing = path.join(makeFolder('parent'), 'no-such-dir');
     await expectRpcError(h.client.call('project.open', { path: missing }), ErrorCode.NotFound);
     expect(listRegisteredProjects({ home: h.biveHome })).toEqual([]);
+  });
+
+  it('저장소와 겹치는 폴더($BIVE_HOME 자체 · 그 아래 · 그 상위)는 -32001이고 설정 파일 · 등록이 생기지 않는다 (NFR-01)', async () => {
+    const outer = makeFolder('outer');
+    const home = path.join(outer, 'home');
+    mkdirSync(home);
+    const h = await harness(home);
+    const { project } = await h.client.call('project.open', { path: makeExistingApp() });
+    const projectDir = bivePaths(home).projectDir(project.id);
+    const homeAlias = path.join(makeFolder('links'), 'home-alias');
+    symlinkSync(home, homeAlias);
+
+    for (const target of [home, projectDir, outer, homeAlias]) {
+      const error = await h.client.call('project.open', { path: target }).then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error, target).toBeInstanceOf(RpcCallError);
+      expect((error as RpcCallError).code, target).toBe(ErrorCode.ValidationFailed);
+      // 메시지에 경로를 싣지 않는다
+      expect((error as RpcCallError).message).not.toContain('/');
+      expect(existsSync(path.join(realpathSync(target), PROJECT_FILE_NAME)), target).toBe(false);
+    }
+    expect(listRegisteredProjects({ home })).toEqual([project]);
+
+    // 저장소 옆(같은 상위 아래의 다른 폴더)은 열 수 있다
+    const sibling = path.join(outer, 'sibling-app');
+    mkdirSync(sibling);
+    await expect(h.client.call('project.open', { path: sibling })).resolves.toMatchObject({
+      created: true,
+    });
   });
 
   it('폴더가 아닌 파일 경로는 -32001이고 아무것도 만들지 않는다', async () => {
