@@ -4,8 +4,10 @@
 import type { ComponentType } from 'react';
 
 import type { RouteId } from '../navigation/routes.js';
+import { ProjectStartScreen } from './project-start/ProjectStartScreen.js';
 import { RequirementsScreen } from './requirements/RequirementsScreen.js';
 
 export const SCREENS: Partial<Record<RouteId, ComponentType>> = {
+  start: ProjectStartScreen,
   requirements: RequirementsScreen,
 };

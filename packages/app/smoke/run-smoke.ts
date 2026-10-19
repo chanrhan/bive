@@ -2,9 +2,11 @@
 // 빌드된 앱을 임시 BIVE_HOME으로 띄워 다음을 확인하고, 하나라도 어긋나면 종료 코드 1.
 //   창 제목 "BIVE" · window.bive 키가 invoke · on 두 개뿐 · 렌더러에 require 없음 ·
 //   레이아웃(사이드바 · 중앙 영역 · 채팅) · 사이드바 하단 "연결됨"(system.status, ADR-045) ·
+//   기동 인자 `--open <dir>`로 연 프로젝트(.bive.json 두 키 · 사이드바 프로젝트명 · 요구사항 화면, M1-01) ·
+//   Electron 사용자 데이터가 $BIVE_HOME/app-data에 생김(ADR-055) ·
 //   app.pid 기록 · 앱 종료 코드 0 · 앱 종료 뒤 app.pid 삭제 ·
 //   앱 종료 직후 오케스트레이터 생존(NFR-06) · 유휴 종료로 오케스트레이터 정리
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -48,6 +50,11 @@ const main = async (): Promise<void> => {
   const base = process.platform === 'win32' ? os.tmpdir() : '/tmp';
   const biveHome = mkdtempSync(path.join(base, 'bive-smoke-'));
   const paths = appRunPaths(biveHome);
+  // --open으로 열 비어 있지 않은 미연결 폴더 (BIVE_HOME 밖)
+  const fixtureParent = mkdtempSync(path.join(base, 'bive-smoke-fx-'));
+  const fixture = path.join(fixtureParent, 'smoke-app');
+  mkdirSync(fixture);
+  writeFileSync(path.join(fixture, 'package.json'), '{"name":"smoke-app"}\n');
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
   env.BIVE_HOME = biveHome;
@@ -55,7 +62,12 @@ const main = async (): Promise<void> => {
 
   let app: ElectronApplication | null = null;
   try {
-    const args = electronArgs({ appDir: APP_DIR, userArgs: [], uid: process.getuid?.(), env });
+    const args = electronArgs({
+      appDir: APP_DIR,
+      userArgs: ['--open', fixture],
+      uid: process.getuid?.(),
+      env,
+    });
     console.log(`Electron 실행: ${electronPath} ${args.join(' ')}`);
     app = await _electron.launch({
       executablePath: electronPath,
@@ -100,6 +112,31 @@ const main = async (): Promise<void> => {
     await status.and(page.locator('[data-state="connected"]')).waitFor({ timeout: 15_000 });
     const statusText = (await status.textContent())?.trim();
     check(statusText === '연결됨', `사이드바 하단 연결 상태 "${statusText}"`, statusText);
+
+    // 기동 인자 --open: 대화상자 없이 열고 요구사항 화면으로 들어간다 (M1-01)
+    const project = page.getByTestId('sidebar-project');
+    await project.and(page.locator('[data-state="open"]')).waitFor({ timeout: 15_000 });
+    const projectName = (await project.textContent())?.trim();
+    check(projectName === 'smoke-app', `사이드바 프로젝트명 "${projectName}"`, projectName);
+    await page
+      .getByTestId('main-area')
+      .and(page.locator('[data-route="requirements"]'))
+      .waitFor({ timeout: 15_000 });
+    check(true, '--open 뒤 요구사항 화면');
+    const projectFile = JSON.parse(
+      readFileSync(path.join(fixture, '.bive.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    const fileKeys = Object.keys(projectFile).sort();
+    check(
+      JSON.stringify(fileKeys) === JSON.stringify(['projectId', 'schemaVersion']),
+      '.bive.json 키 = projectId · schemaVersion',
+      fileKeys,
+    );
+    check(
+      existsSync(path.join(biveHome, 'app-data')),
+      'Electron 사용자 데이터 = $BIVE_HOME/app-data',
+    );
+
     await mkdir(SCREENSHOT_DIR, { recursive: true });
     await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'electron-layout.png') });
 
@@ -154,6 +191,7 @@ const main = async (): Promise<void> => {
       }
     }
     rmSync(biveHome, { recursive: true, force: true });
+    rmSync(fixtureParent, { recursive: true, force: true });
   }
 };
 
