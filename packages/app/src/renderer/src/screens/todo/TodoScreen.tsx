@@ -9,7 +9,7 @@ import { ApprovalTab } from './ApprovalTab.js';
 import { TODO_TABS, useTodoTab } from './tabStore.js';
 
 export const TodoScreen = (): React.JSX.Element => {
-  const { project } = useProject();
+  const { project, loading } = useProject();
   const [tab, setTab] = useTodoTab();
   const panelId = `todo-panel-${tab}`;
   return (
@@ -33,7 +33,8 @@ export const TodoScreen = (): React.JSX.Element => {
       </div>
       <div className="todo-panel" role="tabpanel" id={panelId} aria-labelledby={`todo-tab-${tab}`}>
         {project === null ? (
-          <EmptyState text="프로젝트 없음" />
+          // 프로젝트 조회 중에는 문구 없이 비운다 (ADR-053과 같음)
+          !loading && <EmptyState text="프로젝트 없음" />
         ) : (
           // 프로젝트가 바뀌면 선택 · 읽음 요청 기록을 새로 시작한다
           <ApprovalTab key={project.id} projectId={project.id} />

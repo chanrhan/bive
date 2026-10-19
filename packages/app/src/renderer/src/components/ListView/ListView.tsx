@@ -1,12 +1,12 @@
 // 공통 목록 (screens.md 1.4 목록 · 카드, ADR-029 · ADR-034 · ADR-048).
 // 검색(`/` 키로 이동) · 기준별 필터 칩 · [문제만] 토글(기본 꺼짐) · 필터 사용 중 결과 줄("n개 중 m개 · 초기화") ·
-// 문제 항목 우선 정렬 · 2줄 카드 · 빈 상태("<대상> 없음").
+// 문제 항목 우선 정렬 · 2줄 카드 · 빈 상태("<대상> 없음"). 화면 동작(새 항목 버튼 · 입력 줄)은 actions · leading으로 넣는다.
 // 데이터와 필터 기준은 화면이 props로 넘긴다(파서 · 실행 결과만, NFR-03). 필터 상태는 목록 ID별로
 // 앱 실행 동안 유지된다 (filterStore.ts).
 import './ListView.css';
 
 import { Search } from 'lucide-react';
-import { useEffect, useMemo, useRef } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef } from 'react';
 
 import { EmptyState } from '../../layout/EmptyState.js';
 import { Card2Line, type CardData, cardExceptions } from '../Card2Line/Card2Line.js';
@@ -20,13 +20,17 @@ import {
   isFilterActive,
   type ListEntry,
   parseTime,
+  pruneSelection,
   sortProblemsFirst,
   toggleValue,
 } from './filter.js';
 import { useListFilter } from './filterStore.js';
 
 export interface ListViewProps<T> {
-  /** 필터 상태를 나누는 목록 ID (예: 'rules'). 같은 ID의 목록은 필터 상태를 함께 쓴다 */
+  /**
+   * 필터 상태를 나누는 목록 ID (예: 'rules'). 같은 ID의 목록은 필터 상태를 함께 쓰므로 기준(criteria)도 같아야 한다
+   * (기준에 없는 선택은 지운다)
+   */
   listId: string;
   /** 목록 이름 (접근 가능한 이름, 예: '규칙 목록') */
   label: string;
@@ -45,6 +49,10 @@ export interface ListViewProps<T> {
   selectedKey?: string | null;
   /** 있으면 카드를 눌러 고른다 */
   onSelect?: (item: T) => void;
+  /** 검색 입력 옆에 두는 화면 동작 (예: 새 항목 버튼) */
+  actions?: ReactNode;
+  /** 목록 맨 위(카드 · 빈 상태 앞)에 두는 요소 (예: 새 항목 입력 줄) */
+  leading?: ReactNode;
 }
 
 const NO_CRITERIA: readonly never[] = [];
@@ -68,8 +76,15 @@ export const ListView = <T,>({
   emptyText,
   selectedKey = null,
   onSelect,
+  actions,
+  leading,
 }: ListViewProps<T>): React.JSX.Element => {
-  const [filter, setFilter] = useListFilter(listId);
+  const [stored, setFilter] = useListFilter(listId);
+  // 지금 기준 · 값 목록에 없는 선택은 보이지 않으므로 쓰지 않고, 저장소에서도 지운다
+  const filter = useMemo(() => pruneSelection(stored, criteria), [stored, criteria]);
+  useEffect(() => {
+    if (filter !== stored) setFilter(filter);
+  }, [filter, stored, setFilter]);
   const searchRef = useRef<HTMLInputElement>(null);
 
   // `/` 키: 검색 입력으로 이동 (1.4)
@@ -116,21 +131,24 @@ export const ListView = <T,>({
   return (
     <section className="list-view" data-testid="list-view" data-list-id={listId} aria-label={label}>
       <div className="list-toolbar">
-        <label className="list-search">
-          <Search className="inline-icon" aria-hidden="true" />
-          <input
-            ref={searchRef}
-            type="search"
-            data-testid="list-search"
-            aria-label="검색"
-            placeholder="검색"
-            value={filter.query}
-            onChange={(event) => {
-              const query = event.target.value;
-              setFilter((prev) => ({ ...prev, query }));
-            }}
-          />
-        </label>
+        <div className="list-toolbar-row">
+          <label className="list-search">
+            <Search className="inline-icon" aria-hidden="true" />
+            <input
+              ref={searchRef}
+              type="search"
+              data-testid="list-search"
+              aria-label="검색"
+              placeholder="검색"
+              value={filter.query}
+              onChange={(event) => {
+                const query = event.target.value;
+                setFilter((prev) => ({ ...prev, query }));
+              }}
+            />
+          </label>
+          {actions}
+        </div>
         <div className="list-filters">
           <FilterChips
             criteria={criteria}
@@ -151,6 +169,7 @@ export const ListView = <T,>({
         </div>
       </div>
 
+      {/* 항목이 0건이면 결과 줄 없이 빈 상태만 (ADR-029) */}
       {active && items.length > 0 && (
         <p className="list-result" data-testid="list-result">
           <span data-testid="list-result-count">
@@ -167,6 +186,8 @@ export const ListView = <T,>({
           </button>
         </p>
       )}
+
+      {leading}
 
       {items.length === 0 ? (
         <EmptyState text={emptyText} />

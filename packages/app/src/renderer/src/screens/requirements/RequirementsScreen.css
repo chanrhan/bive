@@ -1,0 +1,89 @@
+/* 요구사항 화면 (SCR-02): 중앙 목록 + 상세 2단. 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.requirements-screen {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.requirements-screen[data-state='no-project'] {
+  flex-direction: column;
+}
+
+.requirements-list-pane {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: var(--list-pane-width);
+  min-height: 0;
+  border-right: 1px solid var(--color-border);
+}
+
+.requirements-loading {
+  flex: 1;
+}
+
+.requirements-detail {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 목록 도구 줄의 화면 동작 버튼 (검색 입력 옆) */
+.list-action {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  height: 32px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2);
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--font-size-2);
+  cursor: pointer;
+}
+
+.list-action:hover,
+.list-action[aria-expanded='true'] {
+  background: var(--color-surface-raised);
+}
+
+/* 새 요구사항 입력 줄 (목록 맨 위) */
+.new-requirement {
+  padding: var(--space-2) var(--space-3) 0;
+}
+
+.new-requirement-input {
+  display: block;
+  width: 100%;
+  min-height: 64px;
+  padding: var(--space-2);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-2);
+  outline: none;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-3);
+  resize: vertical;
+}
+
+.new-requirement-hint,
+.new-requirement-error {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-1);
+}
+
+.new-requirement-hint {
+  color: var(--color-text-muted);
+}
+
+.new-requirement-error {
+  color: var(--color-danger);
+}

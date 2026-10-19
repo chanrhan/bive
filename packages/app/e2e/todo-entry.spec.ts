@@ -1,5 +1,5 @@
 // 할 일 진입 (이슈 #23 수용 기준 1~3, screens.md 6장 할 일 · SCR-17, TODO-01, ADR-035 · ADR-056).
-// 앱을 열고 가짜 브리지가 main의 프로젝트 열림 알림(project.opened)을 보내 프로젝트를 연 상태로 만든다.
+// 앱을 열면 가짜 브리지의 project.current 응답으로 프로젝트가 열린 상태가 된다.
 // 제안 데이터도 가짜 브리지로 준다 (proposal.count · proposal.list · proposal.markRead).
 // 데이터: 대기 3건(PRP-001 규칙 신규 · 안 읽음, PRP-002 규칙 신규 · 구현 중 · 안 읽음,
 //         PRP-003 요구사항 신규 · 읽음) + 거절 1건(PRP-004 규칙 신규).
@@ -11,17 +11,13 @@ import { type BiveMock, mockBive } from './support/bive-mock.js';
 import { expectScreen } from './support/expectScreen.js';
 
 const PROJECT_ID = '01JBVE0000000000000000000P';
-/** project.opened 알림 값 (project.open 결과와 같은 모양). */
-const OPENED = {
-  project: {
-    id: PROJECT_ID,
-    name: 'sample-next-app',
-    rootPath: '/tmp/sample-next-app',
-    baseBranch: 'main',
-    createdAt: '2026-10-16T00:00:00.000Z',
-  },
-  created: false,
-  empty: false,
+/** project.current가 돌려주는 열린 프로젝트. */
+const PROJECT = {
+  id: PROJECT_ID,
+  name: 'sample-next-app',
+  rootPath: '/tmp/sample-next-app',
+  baseBranch: 'main',
+  createdAt: '2026-10-16T00:00:00.000Z',
 } as const;
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
@@ -123,16 +119,16 @@ const setup = async (page: Page, proposals: readonly Proposal[] = PROPOSALS): Pr
   const bive = await mockBive(page, {
     responses: {
       'system.status': { result: STATUS },
+      'project.current': { result: { project: PROJECT } },
       'proposal.count': { result: countOf(proposals) },
       'proposal.list': { result: { proposals: [...proposals] } },
       'proposal.markRead': {
         result: { proposal: { ...P1, readAt: '2026-10-16T05:00:00.000Z' } },
       },
     },
-    events: [{ event: 'project.opened', params: OPENED }],
   });
   await page.goto('/');
-  await expect(page.getByTestId('sidebar-project')).toHaveText(OPENED.project.name);
+  await expect(page.getByTestId('sidebar-project')).toHaveText(PROJECT.name);
   return bive;
 };
 
@@ -185,7 +181,12 @@ test.describe('알림 배지 · 툴팁 (수용 기준 1)', () => {
   });
 
   test('프로젝트가 없으면 proposal.count를 부르지 않고 배지 없음', async ({ page }) => {
-    const bive = await mockBive(page, { responses: { 'system.status': { result: STATUS } } });
+    const bive = await mockBive(page, {
+      responses: {
+        'system.status': { result: STATUS },
+        'project.current': { result: { project: null } },
+      },
+    });
     await page.goto('/');
     await expect(page.getByTestId('connection-status')).toHaveAttribute('data-state', 'connected');
     await todoButton(page).click();

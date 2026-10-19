@@ -1,19 +1,28 @@
-// 현재 프로젝트. 계약은 프로젝트 열기(#14 M1-01)의 정식 제공자와 같다: useProject() → { project, loading, open }.
-// #14가 머지되면 이 파일은 그쪽 구현(첫 `project.current` 조회 + `project.opened` 알림 + `project.open`)으로 바뀐다.
-// 그 전까지는 RPC가 없으므로 main의 `project.opened` 알림만 따르고, `open`은 메서드 없음(-32601)으로 거부한다.
+// 현재 프로젝트 (M1-01, PRJ-01). 화면은 useProject()로 열린 프로젝트(ID · 이름 · 경로)를 읽는다.
+// - 처음 한 번 `project.current`를 부르고(오케스트레이터가 마지막으로 연 프로젝트), 이후는 main이 보내는
+//   `project.opened` 알림을 따른다. 알림이 먼저 오면 늦게 온 첫 조회 결과로 덮지 않는다
+// - `open(path)`는 `project.open`을 부르고 결과의 프로젝트로 바꾼다. 실패하면 JSON-RPC 오류 객체로 거부된다
 // 화면 데이터는 오케스트레이터 응답에서만 만든다 (NFR-03).
-import type { JsonRpcErrorObject, Project } from '@bive/shared';
-import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from 'react';
+import type { Project, ProjectOpenResult } from '@bive/shared';
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 
 import { PROJECT_OPENED_EVENT } from '../../../common/bridge.js';
 
 export interface ProjectState {
-  /** 열린 프로젝트. 없으면 null */
+  /** 열린 프로젝트. 없으면 null (프로젝트 시작 화면) */
   project: Project | null;
-  /** 첫 조회 또는 `open` 진행 중 */
+  /** 첫 조회(`project.current`) 또는 `open` 진행 중 */
   loading: boolean;
   /** 폴더를 연다 (`project.open`). 성공하면 `project`가 바뀐다 */
-  open(path: string): Promise<{ project: Project }>;
+  open(path: string): Promise<ProjectOpenResult>;
 }
 
 const ProjectContext = createContext<ProjectState | null>(null);
@@ -24,31 +33,57 @@ const isProject = (value: unknown): value is Project => {
   return typeof id === 'string' && typeof name === 'string' && typeof rootPath === 'string';
 };
 
-const isOpenedEvent = (value: unknown): value is { project: Project } =>
+const isOpenedEvent = (value: unknown): value is ProjectOpenResult =>
   typeof value === 'object' &&
   value !== null &&
   isProject((value as { project?: unknown }).project);
 
-const METHOD_NOT_FOUND: JsonRpcErrorObject = { code: -32601, message: '메서드 없음' };
-
-/** `project.open` RPC가 생기기 전(#14)의 열기: 실제 브리지가 모르는 메서드에 주는 오류와 같게 거부한다. */
-const open: ProjectState['open'] = () => Promise.reject(METHOD_NOT_FOUND);
-
 export const ProjectProvider = ({ children }: { children: ReactNode }): React.JSX.Element => {
   const [project, setProject] = useState<Project | null>(null);
+  /** 진행 중인 조회 · 열기 수 (첫 조회 1건으로 시작) */
+  const [pending, setPending] = useState(1);
 
   useEffect(() => {
     let active = true;
+    let heard = false;
     const off = window.bive.on(PROJECT_OPENED_EVENT, (params) => {
-      if (active && isOpenedEvent(params)) setProject(params.project);
+      if (!active || !isOpenedEvent(params)) return;
+      heard = true;
+      setProject(params.project);
     });
+    window.bive
+      .invoke('project.current')
+      .then(
+        (result) => {
+          if (active && !heard) setProject(result.project);
+        },
+        // 조회 실패(연결 끊김 등)는 프로젝트 없음으로 둔다. 연결 상태는 사이드바 하단이 보여 준다
+        () => undefined,
+      )
+      .finally(() => {
+        if (active) setPending((n) => n - 1);
+      });
     return () => {
       active = false;
       off();
     };
   }, []);
 
-  const value = useMemo<ProjectState>(() => ({ project, loading: false, open }), [project]);
+  const open = useCallback(async (path: string): Promise<ProjectOpenResult> => {
+    setPending((n) => n + 1);
+    try {
+      const result = await window.bive.invoke('project.open', { path });
+      setProject(result.project);
+      return result;
+    } finally {
+      setPending((n) => n - 1);
+    }
+  }, []);
+
+  const value = useMemo<ProjectState>(
+    () => ({ project, loading: pending > 0, open }),
+    [project, pending, open],
+  );
   return <ProjectContext.Provider value={value}>{children}</ProjectContext.Provider>;
 };
 
