@@ -12,6 +12,7 @@ import {
   type ListEntry,
   matchesQuery,
   parseTime,
+  pruneSelection,
   sortProblemsFirst,
   toggleValue,
 } from '../src/renderer/src/components/ListView/filter.js';
@@ -225,5 +226,24 @@ describe('필터 상태 변경', () => {
     expect(parseTime('')).toBeNull();
     expect(parseTime('어제')).toBeNull();
     expect(parseTime('2026-10-01T00:00:00Z')).toBe(Date.UTC(2026, 9, 1));
+  });
+
+  it('사라진 기준 · 사라진 값의 선택을 지우고, 지울 것이 없으면 같은 객체를 돌려준다', () => {
+    const kept = withSelected({ status: ['fail'], tag: ['auth', 'order'] });
+    expect(pruneSelection(kept, CRITERIA)).toBe(kept);
+    expect(pruneSelection(EMPTY_FILTER, CRITERIA)).toBe(EMPTY_FILTER);
+
+    const stale = {
+      ...withSelected({ status: ['fail', 'gone'], old: ['x'], tag: [] }),
+      query: '주문',
+    };
+    const pruned = pruneSelection(stale, CRITERIA);
+    expect(pruned.selected).toEqual({ status: ['fail'] });
+    expect(pruned.query).toBe('주문');
+
+    // 값이 전부 사라지면 기준째 지워져 필터 사용 중이 아니게 된다 (결과 줄 숨김)
+    const gone = pruneSelection(withSelected({ status: ['gone'] }), CRITERIA);
+    expect(gone.selected).toEqual({});
+    expect(isFilterActive(gone)).toBe(false);
   });
 });
