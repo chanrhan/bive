@@ -1,5 +1,6 @@
-// 세션 가드 (NFR-02 · ADR-024 · ADR-052). 세션 init의 도구 목록 · MCP 서버를 역할 허용 목록과 대조해,
-// 다르면(계정 MCP · 내장 도구 · 빠진 도구) 세션을 중단한다. 도구 목록 · MCP 수는 위반 여부와 상관없이 기록한다.
+// 세션 가드 (NFR-02 · ADR-024 · ADR-052 · ADR-059). 세션 init의 도구 목록 · MCP 서버를 역할 허용 목록과 대조하고
+// 플러그인 · 권한 모드(보고하는 어댑터만)를 확인해, 다르면(계정 MCP · 내장 도구 · 빠진 도구 · 플러그인 · 다른 권한 모드)
+// 세션을 중단한다. 도구 목록 · MCP 수는 위반 여부와 상관없이 기록한다.
 import type { AgentRole, ToolManifestEntry } from '@bive/shared';
 
 import type { SessionEvent, SessionInitEvent } from '../agent/adapter.js';
@@ -8,7 +9,15 @@ import { BIVE_MCP_SERVER, roleToolNames } from './definitions.js';
 /** SDK가 MCP 도구에 붙이는 이름 접두 (`mcp__<서버>__<도구>`). BIVE 서버 도구만 접두를 떼고 비교한다. */
 export const BIVE_TOOL_PREFIX = `mcp__${BIVE_MCP_SERVER}__`;
 
-export type SessionGuardViolationKind = 'init_missing' | 'tools_mismatch' | 'mcp_mismatch';
+/** 에이전트 세션의 권한 모드: 미리 허용하지 않은 도구는 묻지 않고 거부 (ADR-059). */
+export const REQUIRED_PERMISSION_MODE = 'dontAsk';
+
+export type SessionGuardViolationKind =
+  | 'init_missing'
+  | 'tools_mismatch'
+  | 'mcp_mismatch'
+  | 'plugins_loaded'
+  | 'permission_mode_mismatch';
 
 export interface SessionGuardViolation {
   kind: SessionGuardViolationKind;
@@ -18,6 +27,10 @@ export interface SessionGuardViolation {
   missingTools: string[];
   unexpectedMcpServers: string[];
   missingMcpServers: string[];
+  /** init에 보고된 플러그인 (하나라도 있으면 위반) */
+  unexpectedPlugins: string[];
+  /** 기대와 다른 권한 모드 (같거나 보고가 없으면 `null`, 빈 문자열은 형식이 틀린 보고) */
+  unexpectedPermissionMode: string | null;
 }
 
 /** 가드 위반으로 세션을 멈출 때의 중단 사유. 세션 종료 사유 `guard_violation`에 대응한다. */
@@ -40,6 +53,8 @@ export interface SessionGuardExpectation {
   tools?: readonly string[];
   /** 허용 MCP 서버 (기본 `['bive']`) */
   mcpServers?: readonly string[];
+  /** 기대 권한 모드 (기본 `dontAsk`). init이 권한 모드를 보고할 때만 검사한다 */
+  permissionMode?: string;
 }
 
 export interface SessionInitCheck {
@@ -55,7 +70,10 @@ export const normalizeToolName = (name: string): string =>
 const difference = (left: Iterable<string>, right: ReadonlySet<string>): string[] =>
   [...new Set(left)].filter((item) => !right.has(item)).sort();
 
-/** init 이벤트를 허용 목록과 대조한다. 순서는 무시하고 집합으로 비교한다. */
+/**
+ * init 이벤트를 허용 목록과 대조한다. 순서는 무시하고 집합으로 비교한다. 플러그인은 하나라도 보고되면,
+ * 권한 모드는 보고된 값이 기대와 다르면 위반이다(보고하지 않는 어댑터는 두 항목을 검사하지 않음).
+ */
 export const checkSessionInit = (
   init: SessionInitEvent,
   expectation: SessionGuardExpectation,
@@ -78,15 +96,29 @@ export const checkSessionInit = (
   const toolsBad = unexpectedTools.length > 0 || missingTools.length > 0 || duplicatedTools;
   const serversBad =
     unexpectedMcpServers.length > 0 || missingMcpServers.length > 0 || duplicatedServers;
-  if (!toolsBad && !serversBad) return { manifest, violation: null };
+  const unexpectedPlugins = [...(init.plugins ?? [])].sort();
+  const expectedMode = expectation.permissionMode ?? REQUIRED_PERMISSION_MODE;
+  const unexpectedPermissionMode =
+    init.permissionMode !== undefined && init.permissionMode !== expectedMode
+      ? init.permissionMode
+      : null;
+  const pluginsBad = unexpectedPlugins.length > 0;
+  const modeBad = unexpectedPermissionMode !== null;
+  if (!toolsBad && !serversBad && !pluginsBad && !modeBad) return { manifest, violation: null };
+  let kind: SessionGuardViolationKind = 'permission_mode_mismatch';
+  if (serversBad) kind = 'mcp_mismatch';
+  else if (toolsBad) kind = 'tools_mismatch';
+  else if (pluginsBad) kind = 'plugins_loaded';
   return {
     manifest,
     violation: {
-      kind: serversBad ? 'mcp_mismatch' : 'tools_mismatch',
+      kind,
       unexpectedTools,
       missingTools,
       unexpectedMcpServers,
       missingMcpServers,
+      unexpectedPlugins,
+      unexpectedPermissionMode,
     },
   };
 };
@@ -105,6 +137,12 @@ export const describeViolation = (violation: SessionGuardViolation): string => {
   }
   if (violation.missingTools.length > 0) {
     parts.push(`빠진 도구 ${violation.missingTools.join(', ')}`);
+  }
+  if (violation.unexpectedPlugins.length > 0) {
+    parts.push(`허용되지 않은 플러그인 ${violation.unexpectedPlugins.join(', ')}`);
+  }
+  if (violation.unexpectedPermissionMode !== null) {
+    parts.push(`허용되지 않은 권한 모드 ${violation.unexpectedPermissionMode || '(보고 없음)'}`);
   }
   if (parts.length === 0) parts.push('도구 또는 MCP 서버 중복 보고');
   return `세션 가드: ${parts.join(' · ')}`;
@@ -149,6 +187,8 @@ export async function* guardSession(
           missingTools: [],
           unexpectedMcpServers: [],
           missingMcpServers: [],
+          unexpectedPlugins: [],
+          unexpectedPermissionMode: null,
         },
         null,
       );

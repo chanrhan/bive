@@ -1,25 +1,36 @@
 // 실제 Claude Agent SDK 어댑터 (ADR-016 · ADR-024 · ADR-049 · ADR-059).
 // 세션 1개 = `query()` 1회(기획서 3.2). 옵션은 `buildQueryOptions`가 SessionSpec에서만 조립하고(순수 함수),
-// 내장 도구 · 파일 설정 · 세션 저장 · 서브 에이전트 · 추가 MCP · 모델 API 외 목적지를 모두 끈다(NFR-02 · NFR-04 · ADR-007).
-// 도구는 인프로세스 MCP 서버 `bive` 하나로만 노출하고 실행은 세션에 주입된 ToolExecutor(고정 도구 · 가드)에 넘긴다.
+// 내장 도구 · 파일 설정 · 세션 저장 · 서브 에이전트 · 추가 MCP · 모델 API 외 목적지 · 프롬프트의 파일 참조 펼침 ·
+// 슬래시 명령을 모두 끈다(NFR-02 · NFR-04 · ADR-007). 도구는 인프로세스 MCP 서버 `bive` 하나로만 노출하고
+// 실행은 세션에 주입된 ToolExecutor(고정 도구 · 가드)에 넘긴다.
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 
 import {
   type CanUseTool,
   createSdkMcpServer,
+  type McpSdkServerConfigWithInstance,
   type Options,
   query as sdkQuery,
   type SDKMessage,
-  tool,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentRole } from '@bive/shared';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolRequestSchema,
+  type CallToolResult,
+  ListToolsRequestSchema,
+  type Tool,
+} from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 
 import { settingsIncompleteError } from '../settings/settings-service.js';
 import { COMMAND_ENV_ALLOWLIST } from '../tools/commands.js';
-import { BIVE_MCP_SERVER, toolDefinitions } from '../tools/definitions.js';
-import { BIVE_TOOL_PREFIX, normalizeToolName } from '../tools/session-guard.js';
+import { BIVE_MCP_SERVER, type ToolDefinition, toolDefinitions } from '../tools/definitions.js';
+import {
+  BIVE_TOOL_PREFIX,
+  normalizeToolName,
+  REQUIRED_PERMISSION_MODE,
+} from '../tools/session-guard.js';
 import { ORCHESTRATOR_VERSION } from '../version.js';
 import {
   type AgentAdapter,
@@ -57,6 +68,7 @@ export const QUERY_OPTION_KEYS = [
   'strictMcpConfig',
   'systemPrompt',
   'tools',
+  'verbatimPrompts',
 ] as const satisfies readonly (keyof Options)[];
 
 /** 모델 제공자 인증 변수. 이것만 인증으로 받는다(API 키 방식, ADR-059). */
@@ -97,12 +109,18 @@ export class AgentNotConfiguredError extends Error {
 /** SDK가 MCP 도구 호출 요청의 `_meta`에 싣는 tool_use ID 키. */
 const TOOL_USE_ID_META = 'claudecode/toolUseId';
 
+/**
+ * 실행기를 거치지 않고 오류로 끝난 tool_result의 사유 (ADR-059). SDK가 실행 전에 거부한 호출(권한 모드 ·
+ * `canUseTool` · SDK 쪽 입력 검사 등)이라 결과 상태는 `denied`다. `bive` 서버에 닿은 호출은 언제나 실행기 결과가 있다.
+ */
+export const SDK_DENIED_REASON = 'sdk_denied';
+
 /** 도구 이름을 SDK가 보고하는 이름으로: `read_file` → `mcp__bive__read_file`. */
 export const sdkToolName = (name: string): string => `${BIVE_TOOL_PREFIX}${name}`;
 
-const toolUseIdOf = (extra: unknown): string | undefined => {
-  if (typeof extra !== 'object' || extra === null) return undefined;
-  const meta = (extra as { _meta?: unknown })._meta;
+const toolUseIdOf = (params: unknown): string | undefined => {
+  if (typeof params !== 'object' || params === null) return undefined;
+  const meta = (params as { _meta?: unknown })._meta;
   if (typeof meta !== 'object' || meta === null) return undefined;
   const id = (meta as Record<string, unknown>)[TOOL_USE_ID_META];
   return typeof id === 'string' && id.length > 0 ? id : undefined;
@@ -121,30 +139,58 @@ export type ToolResultListener = (
 ) => void;
 
 /**
- * 역할의 고정 도구 정의(`toolDefinitions(role)`)를 SDK MCP 도구로 감싼다. 입력 스키마는 같은 zod 모양이고,
- * 실행은 주입된 실행기에 넘긴다(실행기가 strict 스키마로 다시 검증 · 기록한다). 실행기 예외는 `error` 결과.
+ * 도구 정의의 strict zod 스키마 → MCP `tools/list`의 입력 JSON 스키마. 모르는 인자를 받지 않는다는 것
+ * (`additionalProperties: false`)까지 모델에게 그대로 알린다. 방언 표시(`$schema`)는 싣지 않는다.
  */
-export const buildBiveMcpTools = (
+export const toolInputJsonSchema = (definition: ToolDefinition): Tool['inputSchema'] => {
+  const schema: Record<string, unknown> = {
+    ...z.toJSONSchema(definition.inputSchema, { target: 'draft-7', io: 'input' }),
+  };
+  delete schema.$schema;
+  if (schema.type !== 'object' || schema.additionalProperties !== false) {
+    throw new Error(`도구 입력 스키마가 엄격한 객체가 아님: ${definition.name}`);
+  }
+  return { ...schema, type: 'object' };
+};
+
+/** 역할의 `tools/list` 응답 도구 목록 (`toolDefinitions(role)` 순서). */
+export const biveMcpToolList = (role: AgentRole): Tool[] =>
+  toolDefinitions(role).map((definition) => ({
+    name: definition.name,
+    description: definition.description,
+    inputSchema: toolInputJsonSchema(definition),
+  }));
+
+/**
+ * 역할의 고정 도구를 노출하는 인프로세스 MCP 서버 `bive` (ADR-052 · ADR-059).
+ * SDK의 `tool()` 등록은 zod 모양을 느슨한 객체로 다시 감싸, 모르는 인자를 조용히 지우고 형식이 틀린 인자를
+ * 실행기 전에 MCP 오류로 끝낸다(기록 없음). 그래서 도구는 등록하지 않고(`tools: []`는 도구 기능 선언만)
+ * 저수준 MCP 서버에 처리기를 직접 단다.
+ * - `tools/list`: strict 정의에서 만든 JSON 스키마(`toolInputJsonSchema`)
+ * - `tools/call`: 이름 · 인자를 검사하거나 바꾸지 않고 그대로 실행기에 넘긴다. 실행기가 역할 목록 · strict 스키마로
+ *   검사하고 거부 · 오류를 포함한 모든 호출을 기록한다. 인자가 없으면 빈 객체. 실행기 예외는 `executor_error` 결과
+ */
+export const createBiveMcpServer = (
   role: AgentRole,
   executor: ToolExecutor,
   onResult?: ToolResultListener,
-): ReturnType<typeof tool>[] =>
-  toolDefinitions(role).map((definition) =>
-    tool(
-      definition.name,
-      definition.description,
-      definition.inputSchema.shape,
-      async (args, extra) => {
-        const result = await executeTool(
-          executor,
-          definition.name,
-          args as Record<string, unknown>,
-        );
-        onResult?.(toolUseIdOf(extra), definition.name, result);
-        return toCallToolResult(result);
-      },
-    ),
-  );
+): McpSdkServerConfigWithInstance => {
+  const config = createSdkMcpServer({
+    name: BIVE_MCP_SERVER,
+    version: ORCHESTRATOR_VERSION,
+    tools: [],
+  });
+  const tools = biveMcpToolList(role);
+  const { server } = config.instance;
+  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args = {} } = request.params;
+    const result = await executeTool(executor, name, args);
+    onResult?.(toolUseIdOf(request.params), name, result);
+    return toCallToolResult(result);
+  });
+  return config;
+};
 
 /** `buildQueryOptions`의 SessionSpec 밖 입력. */
 export interface QueryOptionsDeps {
@@ -191,7 +237,10 @@ const assertRunnable = (spec: SessionSpec): void => {
  * SessionSpec → `query()` 옵션 (순수 함수, ADR-059). 키는 `QUERY_OPTION_KEYS`뿐이다.
  * - 내장 도구 전부 끔(`tools: []`), MCP는 인프로세스 `bive` 하나 + `strictMcpConfig`(계정 · 프로젝트 MCP 무시)
  * - 파일 설정 비로드(`settingSources: []`), 세션 저장 안 함(`persistSession: false`), `agents` 없음(ADR-007)
- * - 권한: 역할 도구만 미리 허용하고 나머지는 묻지 않고 거부(`dontAsk` + `canUseTool`)
+ * - 권한: 역할 도구만 미리 허용하고 나머지는 묻지 않고 거부(`dontAsk`). `canUseTool`은 권한 모드가 바뀔 때의 대비
+ * - 프롬프트는 원문 그대로(`verbatimPrompts`): `@경로` 파일 펼침 · `/` 슬래시 명령 실행이 없다. 프롬프트에는
+ *   요구사항 · 규칙 · 이전 역할 산출물처럼 사람이 직접 치지 않은 글이 들어가므로, 고정 도구 · 경로 가드를 거치지 않는
+ *   파일 읽기를 막는다
  * - 시스템 프롬프트는 호출자가 준 문자열 그대로(기본 프리셋 없음), 작업 폴더는 세션 루트
  * @throws {RpcError} -32010 모델 · 한도가 비어 있거나 잘못됨
  */
@@ -205,23 +254,20 @@ export const buildQueryOptions = (spec: SessionSpec, deps: QueryOptionsDeps): Op
         ? { behavior: 'allow', updatedInput: input }
         : { behavior: 'deny', message: `허용되지 않은 도구: ${toolName}` },
     );
-  const bive = createSdkMcpServer({
-    name: BIVE_MCP_SERVER,
-    version: ORCHESTRATOR_VERSION,
-    tools: buildBiveMcpTools(spec.role, spec.tools, deps.onToolResult),
-  });
+  const bive = createBiveMcpServer(spec.role, spec.tools, deps.onToolResult);
   return {
     model: spec.model,
     systemPrompt: spec.systemPrompt,
     cwd: spec.workDir,
     tools: [],
     allowedTools,
-    permissionMode: 'dontAsk',
+    permissionMode: REQUIRED_PERMISSION_MODE,
     canUseTool,
     mcpServers: { [BIVE_MCP_SERVER]: bive },
     strictMcpConfig: true,
     settingSources: [],
     persistSession: false,
+    verbatimPrompts: true,
     maxTurns: spec.budget.maxTurns,
     maxBudgetUsd: spec.budget.maxBudgetUsd,
     env: agentEnv(deps.env, deps.configDir),
@@ -293,11 +339,21 @@ interface TranslateState {
   results: Map<string, ToolResult>;
 }
 
+/** init의 플러그인 항목 → 이름 (없으면 경로). 무엇이든 하나로 센다(세션 가드는 비어 있어야 통과). */
+const pluginLabel = (plugin: unknown): string => {
+  if (isRecord(plugin)) {
+    if (typeof plugin.name === 'string' && plugin.name.length > 0) return plugin.name;
+    if (typeof plugin.path === 'string' && plugin.path.length > 0) return plugin.path;
+  }
+  return '(이름 없는 플러그인)';
+};
+
 /**
  * SDK 메시지 하나를 이벤트로 옮긴다 (ADR-049 · ADR-059). 최상위(서브 에이전트가 아닌) 메시지만 본다.
- * - `system/init` → `init`(MCP 서버는 이름만)
+ * - `system/init` → `init`(MCP 서버 · 플러그인은 이름만, 권한 모드). 보고가 없으면 빈 목록 · 빈 문자열
  * - `assistant`: 메시지 ID가 바뀔 때 `turn_start`, 텍스트 → `message`, tool_use → `tool_call`(이름은 `mcp__bive__` 접두를 뗀다)
- * - `user`의 tool_result → `tool_result`(실행기 결과가 있으면 그것, 없으면 SDK가 실행 전에 거부한 것이라 `error`)
+ * - `user`의 tool_result → `tool_result`(실행기 결과가 있으면 그것, 없이 오류면 SDK가 실행 전에 거부한 것이라
+ *   `denied`(`sdk_denied`))
  * - `result` → 결과 이벤트. 그 밖의 메시지는 버린다
  */
 const translate = (message: SDKMessage, state: TranslateState): SessionEvent[] => {
@@ -318,6 +374,8 @@ const translate = (message: SDKMessage, state: TranslateState): SessionEvent[] =
           mcpServers: servers
             .map((server) => (isRecord(server) ? server.name : undefined))
             .filter((name): name is string => typeof name === 'string'),
+          plugins: Array.isArray(raw.plugins) ? raw.plugins.map(pluginLabel) : [],
+          permissionMode: typeof raw.permissionMode === 'string' ? raw.permissionMode : '',
         },
       ];
     }
@@ -358,11 +416,12 @@ const translate = (message: SDKMessage, state: TranslateState): SessionEvent[] =
         const call = state.calls.get(callId);
         const executed = state.results.get(callId);
         state.results.delete(callId);
-        const result: ToolResult = executed ?? {
-          status: block.is_error === true ? 'error' : 'ok',
-          content: toolResultText(block.content),
-          ...(block.is_error === true ? { reason: 'tool_failed' } : {}),
-        };
+        const content = toolResultText(block.content);
+        const result: ToolResult =
+          executed ??
+          (block.is_error === true
+            ? { status: 'denied', content, reason: SDK_DENIED_REASON }
+            : { status: 'ok', content });
         events.push({
           type: 'tool_result',
           turn: call?.turn ?? state.turn,

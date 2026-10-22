@@ -90,6 +90,10 @@ export interface SessionInitEvent {
   model: string;
   tools: string[];
   mcpServers: string[];
+  /** 로드된 플러그인 이름. 보고하는 어댑터(ClaudeSdkAdapter)만 채우고, 세션 가드는 비어 있어야 통과시킨다 */
+  plugins?: string[];
+  /** 권한 모드. 보고하는 어댑터만 채우고, 세션 가드는 `dontAsk`여야 통과시킨다 (ADR-059) */
+  permissionMode?: string;
 }
 
 export type SessionEvent =

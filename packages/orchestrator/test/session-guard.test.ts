@@ -291,6 +291,29 @@ describe('checkSessionInit', () => {
     ).toBe('tools_mismatch');
   });
 
+  it('플러그인 · 권한 모드는 보고될 때만 검사한다 (플러그인 0개 · dontAsk만 통과)', () => {
+    const tools = [...ROLE_TOOL_NAMES['rule-writer']];
+    const base = init(tools, ['bive']);
+    const check = (patch: Partial<SessionInitEvent>) =>
+      checkSessionInit({ ...base, ...patch }, { role: 'rule-writer' }).violation;
+    expect(check({})).toBeNull();
+    expect(check({ plugins: [], permissionMode: 'dontAsk' })).toBeNull();
+    expect(check({ plugins: ['b-plugin', 'a-plugin'] })).toMatchObject({
+      kind: 'plugins_loaded',
+      unexpectedPlugins: ['a-plugin', 'b-plugin'],
+      unexpectedPermissionMode: null,
+    });
+    const mode = check({ plugins: [], permissionMode: 'acceptEdits' });
+    expect(mode).toMatchObject({
+      kind: 'permission_mode_mismatch',
+      unexpectedPlugins: [],
+      unexpectedPermissionMode: 'acceptEdits',
+    });
+    expect(new SessionGuardError(mode!, null).message).toContain('권한 모드 acceptEdits');
+    // 도구 · MCP 위반이 함께 있으면 그쪽 종류가 먼저다
+    expect(check({ mcpServers: [], plugins: ['a-plugin'] })?.kind).toBe('mcp_mismatch');
+  });
+
   it('도구가 없는 역할(chat)은 기대 MCP 서버를 지정해 검사할 수 있다', () => {
     expect(checkSessionInit(init([], []), { role: 'chat', mcpServers: [] }).violation).toBeNull();
     expect(

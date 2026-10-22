@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { McpServerConfig, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { type AgentRole, defaultSettings, ErrorCode, type Settings } from '@bive/shared';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -15,12 +15,14 @@ import {
   AGENT_FIXED_ENV,
   AgentNotConfiguredError,
   agentEnv,
-  buildBiveMcpTools,
+  biveMcpToolList,
   buildQueryOptions,
   ClaudeSdkAdapter,
+  createBiveMcpServer,
   QUERY_OPTION_KEYS,
   type QueryFn,
   type QueryOptionsDeps,
+  SDK_DENIED_REASON,
   translateSdkMessages,
 } from '../src/agent/claude-sdk-adapter.js';
 import { RpcError } from '../src/ipc/server.js';
@@ -155,6 +157,7 @@ describe('buildQueryOptions 스냅샷 (수용 기준 1 · 2)', () => {
       strictMcpConfig: true,
       settingSources: [],
       persistSession: false,
+      verbatimPrompts: true,
       maxTurns: 120,
       maxBudgetUsd: 3,
       env: {
@@ -192,6 +195,8 @@ describe('buildQueryOptions 스냅샷 (수용 기준 1 · 2)', () => {
       expect(options.settingSources).toEqual([]);
       expect(options.strictMcpConfig).toBe(true);
       expect(options.persistSession).toBe(false);
+      // 프롬프트의 `@경로` 펼침 · 슬래시 명령 실행 없음 (경로 가드를 거치지 않는 파일 읽기 차단)
+      expect(options.verbatimPrompts).toBe(true);
       expect(Object.keys(options.mcpServers ?? {})).toEqual(['bive']);
     },
   );
@@ -347,64 +352,149 @@ describe('설정 → SessionSpec · 미설정 거부', () => {
   );
 });
 
-describe('bive MCP 도구 (고정 도구 실행기에 위임)', () => {
-  it('역할 도구 정의를 그대로 감싸고 핸들러는 실행기에 넘긴다', async () => {
-    const calls: [string, Record<string, unknown>][] = [];
-    const executor: ToolExecutor = {
-      toolNames: roleToolNames('test-writer'),
-      execute: (name, args) => {
-        calls.push([name, args]);
-        return Promise.resolve(
-          name === 'read_file'
-            ? { status: 'ok', content: '본문' }
-            : { status: 'denied', content: '거부됨: 경로', reason: 'path_denied' },
-        );
-      },
-    };
-    const notified: [string | undefined, string, ToolResult][] = [];
-    const tools = buildBiveMcpTools('test-writer', executor, (...args) => notified.push(args));
-    expect(tools.map((item) => item.name)).toEqual([...roleToolNames('test-writer')]);
+/** bive 서버에 MCP 클라이언트로 붙는다 (SDK가 하는 일과 같은 경로: `tools/list` · `tools/call`). */
+const connectBive = async (config: McpServerConfig | undefined): Promise<Client> => {
+  if (config === undefined || config.type !== 'sdk' || !('instance' in config)) {
+    throw new Error('bive 서버 없음');
+  }
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await config.instance.connect(serverSide);
+  const client = new Client({ name: 'test', version: '0' });
+  await client.connect(clientSide);
+  return client;
+};
 
-    const read = tools.find((item) => item.name === 'read_file');
-    const write = tools.find((item) => item.name === 'write_file');
-    if (read === undefined || write === undefined) throw new Error('도구 없음');
-    await expect(
-      read.handler({ path: 'a.txt' }, { _meta: { 'claudecode/toolUseId': 'tu-1' } }),
-    ).resolves.toEqual({ content: [{ type: 'text', text: '본문' }], isError: false });
-    await expect(write.handler({ path: '../x', content: '' }, {})).resolves.toEqual({
-      content: [{ type: 'text', text: '거부됨: 경로' }],
-      isError: true,
-    });
-    expect(calls).toEqual([
-      ['read_file', { path: 'a.txt' }],
-      ['write_file', { path: '../x', content: '' }],
-    ]);
-    expect(notified).toEqual([
-      ['tu-1', 'read_file', { status: 'ok', content: '본문' }],
-      [
-        undefined,
-        'write_file',
-        { status: 'denied', content: '거부됨: 경로', reason: 'path_denied' },
-      ],
-    ]);
+/** 실제 고정 도구 실행기 (임시 세션 루트에 `a.txt` 하나). */
+const realTools = (role: 'test-writer' | 'implementer') => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'bive-mcp-'));
+  tempDirs.push(root);
+  const sessionRoot = path.join(root, 'work');
+  mkdirSync(sessionRoot, { recursive: true });
+  writeFileSync(path.join(sessionRoot, 'a.txt'), '파일 내용');
+  return createRoleTools({ role, sessionRoot, biveHome: path.join(root, 'home') });
+};
+
+describe('bive MCP 서버 (MCP 클라이언트 경유, 고정 도구 실행기에 위임)', () => {
+  it('tools/list: 역할 도구만, 입력 스키마는 strict 정의에서 만든 JSON 스키마 (additionalProperties: false)', async () => {
+    const client = await connectBive(createBiveMcpServer('test-writer', noTools('test-writer')));
+    try {
+      const { tools } = await client.listTools();
+      expect(tools.map((item) => item.name)).toEqual([...roleToolNames('test-writer')]);
+      expect(tools.find((item) => item.name === 'read_file')?.inputSchema).toEqual({
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 4096,
+            description: '세션 루트 기준 상대 경로',
+          },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      });
+    } finally {
+      await client.close();
+    }
   });
 
-  it('실행기 예외는 오류 결과(executor_error)로 바꾼다', async () => {
+  it.each(['rule-writer', 'planner', 'test-writer', 'implementer', 'chat'] as const)(
+    '%s: 모든 도구의 입력 스키마가 모르는 인자를 받지 않고 방언 표시($schema)가 없다',
+    (role) => {
+      const tools = biveMcpToolList(role);
+      expect(tools.map((item) => item.name)).toEqual([...roleToolNames(role)]);
+      for (const item of tools) {
+        expect(item.inputSchema, item.name).toMatchObject({
+          type: 'object',
+          additionalProperties: false,
+        });
+        expect(item.inputSchema, item.name).not.toHaveProperty('$schema');
+      }
+    },
+  );
+
+  it('tools/call: 인자를 그대로 실행기에 넘겨 모르는 인자 · 빈 경로 · 빈 객체도 거부하고 호출마다 기록 1건', async () => {
+    const tools = realTools('test-writer');
+    const notified: [string | undefined, string, ToolResult][] = [];
+    const client = await connectBive(
+      createBiveMcpServer('test-writer', tools, (...args) => notified.push(args)),
+    );
+    const cases: [string, Record<string, unknown> | undefined, ToolResult['status'], string?][] = [
+      ['read_file', { path: 'a.txt', extra: 1 }, 'denied', 'invalid_args'],
+      ['read_file', { path: '' }, 'denied', 'invalid_args'],
+      ['read_file', {}, 'denied', 'invalid_args'],
+      // arguments 없이 부르면 빈 객체
+      ['read_file', undefined, 'denied', 'invalid_args'],
+      // 다른 역할 도구 · 없는 도구도 실행기가 거부 · 기록한다
+      ['prisma_migrate', {}, 'denied', 'unknown_tool'],
+      ['Bash', { command: 'ls' }, 'denied', 'unknown_tool'],
+      ['read_file', { path: 'a.txt' }, 'ok'],
+    ];
+    const texts: string[] = [];
+    try {
+      for (const [index, [name, args, status, reason]] of cases.entries()) {
+        const label = `${name} ${JSON.stringify(args)}`;
+        const response = await client.callTool({
+          name,
+          ...(args === undefined ? {} : { arguments: args }),
+          _meta: { 'claudecode/toolUseId': `tu-${index}` },
+        });
+        expect(response.isError, label).toBe(status !== 'ok');
+        const [block] = response.content as { type: string; text: string }[];
+        texts.push(block?.text ?? '');
+        // 실행기 기록이 정확히 1건 늘었다 (거부 포함, ADR-052)
+        expect(tools.records, label).toHaveLength(index + 1);
+        expect(tools.records[index], label).toMatchObject({
+          name,
+          status,
+          ...(reason === undefined ? {} : { reason }),
+        });
+        expect(notified[index], label).toEqual([
+          `tu-${index}`,
+          name,
+          expect.objectContaining({ status, ...(reason === undefined ? {} : { reason }) }),
+        ]);
+      }
+    } finally {
+      await client.close();
+    }
+    expect(texts[0]).toContain('거부됨: read_file 인자 오류');
+    expect(texts.at(-1)).toBe('파일 내용');
+    expect(notified).toHaveLength(cases.length);
+  });
+
+  it('tools/call: 실행기 예외는 오류 결과(executor_error)로 바꾼다', async () => {
     const executor: ToolExecutor = {
       toolNames: roleToolNames('rule-writer'),
       execute: () => Promise.reject(new Error('폭발')),
     };
-    const [propose] = buildBiveMcpTools('rule-writer', executor);
-    if (propose === undefined) throw new Error('도구 없음');
-    await expect(propose.handler({}, {})).resolves.toEqual({
-      content: [{ type: 'text', text: '폭발' }],
-      isError: true,
-    });
+    const notified: [string | undefined, string, ToolResult][] = [];
+    const client = await connectBive(
+      createBiveMcpServer('rule-writer', executor, (...args) => notified.push(args)),
+    );
+    try {
+      await expect(client.callTool({ name: 'propose_rule', arguments: {} })).resolves.toMatchObject(
+        {
+          content: [{ type: 'text', text: '폭발' }],
+          isError: true,
+        },
+      );
+    } finally {
+      await client.close();
+    }
+    expect(notified).toEqual([
+      [undefined, 'propose_rule', { status: 'error', content: '폭발', reason: 'executor_error' }],
+    ]);
   });
 
-  it('도구가 없는 역할은 빈 도구 목록 (bive 서버는 그대로 하나)', () => {
-    expect(buildBiveMcpTools('planner', noTools('planner'))).toEqual([]);
-    expect(buildBiveMcpTools('chat', noTools('chat'))).toEqual([]);
+  it('도구가 없는 역할은 빈 도구 목록 (bive 서버는 그대로 하나)', async () => {
+    expect(biveMcpToolList('planner')).toEqual([]);
+    const client = await connectBive(createBiveMcpServer('chat', noTools('chat')));
+    try {
+      await expect(client.listTools()).resolves.toMatchObject({ tools: [] });
+    } finally {
+      await client.close();
+    }
   });
 });
 
@@ -412,7 +502,11 @@ describe('bive MCP 도구 (고정 도구 실행기에 위임)', () => {
 
 const msg = (value: Record<string, unknown>): SDKMessage => value as unknown as SDKMessage;
 
-const initMessage = (options: Options, extraServers: string[] = []): SDKMessage =>
+const initMessage = (
+  options: Options,
+  overrides: Record<string, unknown> = {},
+  extraServers: string[] = [],
+): SDKMessage =>
   msg({
     type: 'system',
     subtype: 'init',
@@ -423,7 +517,10 @@ const initMessage = (options: Options, extraServers: string[] = []): SDKMessage 
       name,
       status: 'connected',
     })),
+    permissionMode: options.permissionMode,
+    plugins: [],
     parent_tool_use_id: undefined,
+    ...overrides,
   });
 
 const resultMessage = (overrides: Record<string, unknown> = {}): SDKMessage =>
@@ -461,14 +558,7 @@ const callBiveTool = async (
   args: Record<string, unknown>,
   toolUseId: string,
 ): Promise<void> => {
-  const config = options.mcpServers?.bive;
-  if (config === undefined || config.type !== 'sdk' || !('instance' in config)) {
-    throw new Error('bive 서버 없음');
-  }
-  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  await config.instance.connect(serverSide);
-  const client = new Client({ name: 'test', version: '0' });
-  await client.connect(clientSide);
+  const client = await connectBive(options.mcpServers?.bive);
   try {
     await client.callTool({
       name,
@@ -562,6 +652,8 @@ describe('ClaudeSdkAdapter (가짜 query)', () => {
         model: 'test-model-impl',
         tools: roleToolNames('implementer').map((name) => `mcp__bive__${name}`),
         mcpServers: ['bive'],
+        plugins: [],
+        permissionMode: 'dontAsk',
       },
       { type: 'turn_start', turn: 1 },
       { type: 'message', turn: 1, text: '파일을 읽는다' },
@@ -603,15 +695,23 @@ describe('ClaudeSdkAdapter (가짜 query)', () => {
     ]);
   });
 
-  it('세션 가드와 함께 쓰면 추가 MCP 서버가 보고된 세션을 멈춘다', async () => {
+  /** 테스트마다 지우는 SDK 설정 폴더. */
+  const tempConfigDir = (): string => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-cfg-'));
+    tempDirs.push(dir);
+    return dir;
+  };
+
+  /** init 메시지 하나와 결과를 내는 가짜 query로 세션 가드를 돌린다. */
+  const guardedRun = async (init: (options: Options) => SDKMessage): Promise<unknown> => {
     const query: QueryFn = async function* ({ options }) {
-      yield initMessage(options, ['account-connector']);
+      yield init(options);
       yield resultMessage();
     };
     const adapter = new ClaudeSdkAdapter({
       biveHome: '/tmp/bive-home',
       env: { ANTHROPIC_API_KEY: 'test-key' },
-      configDir: mkdtempSync(path.join(os.tmpdir(), 'bive-cfg-')),
+      configDir: tempConfigDir(),
       query,
     });
     const controller = new AbortController();
@@ -619,8 +719,40 @@ describe('ClaudeSdkAdapter (가짜 query)', () => {
       adapter.startSession(specFor('test-writer', { signal: controller.signal })),
       { role: 'test-writer', controller },
     );
-    await expect(collect(events)).rejects.toBeInstanceOf(SessionGuardError);
-    expect(controller.signal.aborted).toBe(true);
+    let caught: unknown = null;
+    try {
+      await collect(events);
+    } catch (error) {
+      caught = error;
+    }
+    expect(controller.signal.aborted).toBe(caught !== null);
+    return caught;
+  };
+
+  it('세션 가드와 함께 쓰면 추가 MCP 서버가 보고된 세션을 멈춘다', async () => {
+    const error = await guardedRun((options) => initMessage(options, {}, ['account-connector']));
+    expect(error).toBeInstanceOf(SessionGuardError);
+    expect((error as SessionGuardError).violation.kind).toBe('mcp_mismatch');
+  });
+
+  it('세션 가드는 플러그인 · 권한 모드가 보고대로가 아니면 멈추고, 맞으면 통과시킨다', async () => {
+    await expect(guardedRun((options) => initMessage(options))).resolves.toBeNull();
+    const cases = [
+      [{ plugins: [{ name: 'evil-plugin', path: '/x/evil' }] }, 'plugins_loaded'],
+      [{ plugins: [{ path: '/x/unnamed' }] }, 'plugins_loaded'],
+      [{ permissionMode: 'default' }, 'permission_mode_mismatch'],
+      [{ permissionMode: 'bypassPermissions' }, 'permission_mode_mismatch'],
+      // 권한 모드 보고가 없으면 확인할 수 없으므로 위반 (보수적)
+      [{ permissionMode: undefined }, 'permission_mode_mismatch'],
+    ] as const;
+    for (const [overrides, kind] of cases) {
+      const error = await guardedRun((options) => initMessage(options, overrides));
+      expect(error, JSON.stringify(overrides)).toBeInstanceOf(SessionGuardError);
+      expect(error, JSON.stringify(overrides)).toMatchObject({
+        code: 'guard_violation',
+        violation: { kind },
+      });
+    }
   });
 
   it('중단 신호는 SDK abortController로 이어지고 순회는 signal.reason으로 끝난다', async () => {
@@ -634,7 +766,7 @@ describe('ClaudeSdkAdapter (가짜 query)', () => {
     const adapter = new ClaudeSdkAdapter({
       biveHome: '/tmp/bive-home',
       env: { ANTHROPIC_API_KEY: 'test-key' },
-      configDir: mkdtempSync(path.join(os.tmpdir(), 'bive-cfg-')),
+      configDir: tempConfigDir(),
       query,
     });
     const controller = new AbortController();
@@ -693,7 +825,7 @@ describe('translateSdkMessages', () => {
     });
   });
 
-  it('실행기를 거치지 않은 오류 tool_result는 error 결과', async () => {
+  it('실행기를 거치지 않은 오류 tool_result(SDK 권한 거부 등)는 denied(sdk_denied)', async () => {
     const events = await run([
       msg({
         type: 'assistant',
@@ -725,8 +857,9 @@ describe('translateSdkMessages', () => {
       turn: 1,
       callId: 'tu-9',
       name: 'read_file',
-      result: { status: 'error', content: '권한 거부', reason: 'tool_failed' },
+      result: { status: 'denied', content: '권한 거부', reason: SDK_DENIED_REASON },
     });
+    expect(SDK_DENIED_REASON).toBe('sdk_denied');
   });
 
   it('결과 없이 끝나면 오류', async () => {
