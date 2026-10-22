@@ -1,5 +1,5 @@
 // 프로젝트별 저장소 (`$BIVE_HOME/projects/<projectId>/bive.db`, ADR-005 · ADR-025 · NFR-01).
-// 실행 · 판정 등은 이후 이슈가 마이그레이션과 리포지토리를 이 저장소에 추가한다.
+// 판정 등은 이후 이슈가 마이그레이션과 리포지토리를 이 저장소에 추가한다.
 import type { Project, Ulid } from '@bive/shared';
 
 import { openDatabase, withTransaction, type SqliteDatabase } from './database.js';
@@ -12,6 +12,7 @@ import { ProjectRepository } from './repositories/project-repository.js';
 import { ProposalRepository } from './repositories/proposal-repository.js';
 import { RequirementRepository } from './repositories/requirement-repository.js';
 import { RuleRepository } from './repositories/rule-repository.js';
+import { RunRepository } from './repositories/run-repository.js';
 import { SettingsRepository } from './repositories/settings-repository.js';
 
 export interface OpenStoreOptions extends MigrateOptions {
@@ -34,6 +35,8 @@ export class ProjectStore {
   readonly approvalLog: ApprovalLogRepository;
   /** 프로젝트 설정 1행 (예산 · 모델 등, COST-01 · NFR-07). */
   readonly settings: SettingsRepository;
+  /** 실행 · 대상 규칙 · 단계 시도 (RUN-01, RUN-02). 상태 저장은 `runs.transition` 1회 = 트랜잭션 1회. */
+  readonly runs: RunRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -48,6 +51,7 @@ export class ProjectStore {
     this.proposals = new ProposalRepository(db, this.sequences);
     this.approvalLog = new ApprovalLogRepository(db);
     this.settings = new SettingsRepository(db, projectId);
+    this.runs = new RunRepository(db, projectId, this.sequences);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

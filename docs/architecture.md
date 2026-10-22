@@ -112,13 +112,13 @@ interface AgentSession {
 | | `parentRequirementId?` (0~1), `author`, `normState` | 기획서 3.1 |
 | **Block** (P1) | `id`, `name`, `kind` (`domain` · `shared`), `include[]`, `public[]`, `dependsOn[]`, `risk`, `author` | 기획서 3.3, ADR-005 |
 | | 원본은 폴더 밖 저장소. 미분류 파일은 엔터티 아님 (파서 계산) | ADR-005, DSN-02 |
-| **Run** | `id`, `displayId`, `projectId`, `type` (`A` · `B` · `C` · `D`, M1은 A만), `targetRuleIds[]` | RUN-01, RUN-07 |
-| | `status` (4장), `currentStep`, `lastCompletedStep`, `regressionCount` (상한 2), `failureReason?` | RUN-01, RUN-02, PRD 5.1 |
-| | `branch`, `worktreePath`, `baseBranch`, `baseCommit`, `headCommit?`, `mergeCommit?` | RUN-08 |
-| | `budgetSnapshot`, `modelSnapshot` (시작 시 설정 복사), `costUsd?`, `turns?` | COST-01, NFR-07, COST-02 |
+| **Run** | `id`, `displayId`, `projectId`, `type` (`A` · `B` · `C` · `D`, M1은 A만), `targetRuleIds[]` (요청 순서, 중복 없음) | RUN-01, RUN-07, ADR-061 |
+| | `status` (4장), `currentStep` (진행 · 승인 대기 중인 단계, 모두 끝나면 `null`), `lastCompletedStep`, `regressionCount` (상한 2), `failureReason?` | RUN-01, RUN-02, PRD 5.1 |
+| | `branch?`, `worktreePath?`, `baseCommit?` (워크트리 생성 때 채움, 그 전 `null`), `baseBranch` (생성 때 프로젝트 값 복사), `headCommit?`, `mergeCommit?` | RUN-08, ADR-061 |
+| | `budgetSnapshot {run: {maxBudgetUsd, maxTurns}, roles: {<역할>: {maxBudgetUsd, maxTurns}}}`, `modelSnapshot {<역할>: 모델}` (시작 시 설정 복사, 실행이 쓰는 역할만), `costUsd?`, `turns?` | COST-01, NFR-07, COST-02, ADR-061 |
 | | `toolManifest` (세션별 도구 목록 · MCP 수) | NFR-02 |
-| | `startedBy` (실행 시작 확인 주체 = 사람), `createdAt`, `startedAt`, `endedAt` | RUN-02, NFR-01 |
-| **Step** | `id`, `runId`, `kind` (`approval` · `test_writing` · `red_check` · `green_check` · `implementation` · `check` · `mutation` · `merge` · `screen_update`), `attempt` | RUN-02, RUN-07 |
+| | `startedBy` (실행 시작 확인 주체 = 사람), `createdAt`, `startedAt` (승인 단계가 끝나 `running`이 된 시각), `endedAt` | RUN-02, NFR-01, ADR-061 |
+| **Step** | `id`, `runId`, `kind` (`approval` · `test_writing` · `red_check` · `green_check` · `implementation` · `check` · `mutation` · `merge` · `screen_update`), `attempt` (시도 1회 = 행 1개, 회귀 · 재시도는 새 행) | RUN-02, RUN-07, ADR-061 |
 | | `status` (`pending` · `running` · `passed` · `failed` · `skipped`), `role?`, `exitDetail` (JSON), `commit?` | RUN-02, SCR-16 |
 | | `costUsd?`, `turns?`, `startedAt`, `endedAt` | COST-02 |
 | **Session** | `id`, `stepId`, `role`, `model`, `sdkSessionId`, `workDir` | 기획서 3.2, RUN-04 |
@@ -134,7 +134,7 @@ interface AgentSession {
 | | `state` (`pending` · `approved` · `rejected` · `provisional`), `decision: { at, by (사람), editedPayload?, rejectReason?, appliedRef? }` (거절 사유 필수, 승인은 반영 규범 필수) | NRM-04, NRM-05, ADR-050 |
 | | 본문 스키마: `requirement_new` `{text}` · `rule_new` `{title, statement, kind, checkKinds, parentRequirementId}` (M1은 이 두 종류만 등록 · 승인) | ADR-050 |
 | | `adrId?`, `runId?` (승인 후 생성 실행) | DSN-07 |
-| **ApprovalLog** | `seq`, `at`, `action` (`approve` · `approve_edited` · `reject` · `run_start` · `provisional_grant`(M3-17, 주체 형태는 그때 결정)), `actor` (사람), `targetRef`, `clientId`, `detail` (`diff?` 수정 전후 · `reason?` 거절 사유 · `appliedRef?` 반영 규범), `prevHash`, `hash` (추가만, 수정 · 삭제 · `REPLACE` 덮어쓰기 없음 · DB 트리거로 차단) | NFR-01, PRD 5.1, ADR-050 |
+| **ApprovalLog** | `seq`, `at`, `action` (`approve` · `approve_edited` · `reject` · `run_start` · `provisional_grant`(M3-17, 주체 형태는 그때 결정)), `actor` (사람), `targetRef`, `clientId`, `detail` (`diff?` 수정 전후 · `reason?` 거절 사유 · `appliedRef?` 반영 규범 · `ruleIds?` 실행 시작의 대상 규칙, ADR-061), `prevHash`, `hash` (추가만, 수정 · 삭제 · `REPLACE` 덮어쓰기 없음 · DB 트리거로 차단) | NFR-01, PRD 5.1, ADR-050 |
 | **Adr** (P1) | `id`, `number`, `title`, `status` (`proposed` · `accepted`), `context`, `decision`, `consequences`, `author`, 연결 규범 · 실행 · 제안 | SCR-15, DSN-07 |
 | **NormChange** | `id`, `entityType`, `entityId`, `before`, `after`, `at`, `author`, `runId?`, `proposalId?` | NRM-07, NRM-04 |
 | **CodeChange** (P1) | `id`, `runId`, `commit`, `files[]`, `summary`, `reason` (author agent), `adrId?`, `flags` (명세 외 · 범위 밖 · Breaking · ADR 없음) | DSN-06, SCR-14, ADR-008 |
@@ -157,6 +157,7 @@ interface AgentSession {
 - 등록부 (M0-04, ADR-040): 프로젝트별 DB와 분리한 SQLite 파일 `registry.db`. 프로젝트 내용(이름 · 경로 · 기준 브랜치)의 원본은 프로젝트별 `bive.db`의 `projects` 행이고, 등록부는 ID만 가진다. 등록은 프로젝트별 DB 생성 → 등록부 추가 순서라 등록부에 있는 ID = 등록이 끝난 프로젝트. 등록 해제는 등록부 항목만 지운다
 - 표시 ID 순번 (M1-02, ADR-047): 프로젝트별 DB `display_id_sequences`(접두 → 마지막 순번). 생성 트랜잭션 안에서 올리고 삭제된 번호도 다시 쓰지 않는다. DB 파일 권한은 0600
 - 규칙 · 제안 · 승인 기록 (M1-09, ADR-050): 마이그레이션 `project/0003_rules_proposals_approval_log`. 승인 기록 해시 = SHA-256(`bive-approval-log-v1\n` + 정규 JSON(`hash`를 뺀 필드, 키 사전순)), 첫 `prevHash`는 0 64자. 계산 · 검증 `store/src/approval-chain.ts`. 제안 등록은 내부 API `ProposalService.submit`(`orchestrator/src/proposals/proposal-service.ts`)뿐이고 파이프 RPC가 없다
+- 실행 · 단계 (M1-12, ADR-061): 마이그레이션 `project/0005_runs`(`runs` · `run_target_rules` · `steps`). 생성 = 실행 · 대상 규칙 · 단계 시도 · 승인 기록 `run_start`를 트랜잭션 1개로(`orchestrator/src/runs/run-service.ts` `createRun`). 상태 저장 단위는 `ProjectStore.runs.transition` 1회 = 트랜잭션 1회이고 상태 기계(`RUN_STATUS_TRANSITIONS`) 밖 전이 · 종료된 실행 · 끝난 단계 시도의 변경은 거부한다. 순서대로 다음 단계로 가는 저장은 `completeStep`, 승인 단계 판정은 `evaluateApprovalStep`(엔진용 창구 `RunService`). 실행 · 단계 · 대상 규칙의 삭제, 생성 정보 · 끝난 기록의 변경, 덮어쓰기는 DB 트리거로 막는다
 - 마이그레이션 (M0-04): `packages/store/src/migrations/<project|registry>/<NNNN>_<snake_name>.ts` (`export const migration`)를 다음 번호로 추가하고 같은 폴더 `index.ts` 배열 끝에 넣는다. 적용 기록 `schema_migrations`에 SQL 해시를 남기므로 머지된 파일은 고치지 않는다. 테이블은 `STRICT`, 연결은 WAL · `foreign_keys` ON · `synchronous` FULL · `recursive_triggers` ON(ADR-050)
 
 ## 4. 실행 파이프라인 상태 기계
@@ -177,7 +178,8 @@ stateDiagram-v2
   budget_exceeded --> [*]
 ```
 
-- 상태 저장 시점: 단계 종료마다 트랜잭션 1회 (RUN-01). 단계 중간 진행은 이벤트 로그만
+- 상태 저장 시점: 단계 종료마다 트랜잭션 1회 (RUN-01, `ProjectStore.runs.transition`, ADR-061). 단계 중간 진행은 이벤트 로그만
+- 생성 직후: `waiting_approval` · 현재 단계 승인(진행 중). 승인 단계는 대상 규칙이 전부 승인 상태(삭제 안 됨 · `normState = approved`)일 때만 끝나고, 아니면 아무것도 저장하지 않고 머문다 (ADR-061)
 - `failed` · `budget_exceeded`: 브랜치 · 워크트리 보존, 병합 없음 (RUN-08, COST-01)
 - 검토 대기열 등록은 P1부터 (COST-01, TODO-02)
 
@@ -244,8 +246,8 @@ stateDiagram-v2
 | `proposal.markRead` | `{projectId, id}` → `{proposal}` (처음 읽은 시각만) | SCR-17 | M1 |
 | `approvalLog.list` | `{projectId, targetRef?}` → `{entries, chain: {valid, brokenAtSeq}}` (체인 검증은 전체 기록 기준) | NFR-01, ADR-027, ADR-050 | M1 |
 | `verification.summary` | `{projectId}` → 판정 기준 커밋 · 준수(통과/판정 가능) · 분모 목록 | JDG-03, SCR-05 | M1 |
-| `run.create` | `{projectId, ruleIds}` → 실행 (실행 시작 확인) | RUN-01 | M1 |
-| `run.list` · `run.get` | 실행 · 단계 · 세션 수치 | RUN-01, SCR-05 | M1 |
+| `run.create` | `{projectId, ruleIds, author}` → `{run, steps, approvalLog}` (실행 시작 확인, 사람만, 유형 A · `waiting_approval` · 승인 기록 `run_start`. 설정 미비 `-32010` · 없는 규칙 `-32004` · 삭제된 규칙 `-32009`이면 아무것도 만들지 않음) | RUN-01, RUN-02, NFR-07, ADR-061 | M1 |
+| `run.list` · `run.get` | `{projectId, status?}` → `{runs}` (표시 ID 순) / `{projectId, id}`(ULID 또는 `EXE-NNN`) → `{run, steps}`. 세션 수치는 해당 이슈에서 | RUN-01, SCR-05, ADR-061 | M1 |
 | `run.resume` | `{id}` → 실행 (`interrupted`만) | PRD 5.1, ADR-011 | M1 |
 | `settings.get` · `settings.update` | `{projectId}` / `{projectId, patch, author}` → `{settings}` (사람만, 미설정 저장 허용) | COST-01, NFR-07, ADR-010, ADR-057 | M1 |
 | `settings.validateForRun` | `{projectId, roles?}` → `{ok: true}` 또는 `{ok: false, code: -32010, reason: 'SETTINGS_INCOMPLETE', message, missing[]}` | NFR-07, ADR-057 | M1 |

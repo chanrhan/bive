@@ -48,6 +48,27 @@ export const TERMINAL_RUN_STATUSES = [
   'budget_exceeded',
 ] as const satisfies readonly RunStatus[];
 
+/**
+ * 실행 상태 전이 (architecture.md 4장 상태 기계, ADR-061). 키 상태에서 갈 수 있는 상태 목록이고,
+ * 종료 상태는 빈 목록이다. 생성 직후 상태는 항상 `waiting_approval`(실행 시작 확인 → 승인 단계).
+ */
+export const RUN_STATUS_TRANSITIONS = {
+  waiting_approval: ['running'],
+  running: ['merged', 'failed', 'budget_exceeded', 'interrupted'],
+  interrupted: ['running'],
+  merged: [],
+  failed: [],
+  budget_exceeded: [],
+} as const satisfies Record<RunStatus, readonly RunStatus[]>;
+
+/** 종료 상태인지 (`merged` · `failed` · `budget_exceeded`). */
+export const isTerminalRunStatus = (status: RunStatus): boolean =>
+  (TERMINAL_RUN_STATUSES as readonly RunStatus[]).includes(status);
+
+/** `from` → `to` 전이가 상태 기계에 있는지. 같은 상태는 전이가 아니므로 `false`. */
+export const canTransitionRun = (from: RunStatus, to: RunStatus): boolean =>
+  (RUN_STATUS_TRANSITIONS[from] as readonly RunStatus[]).includes(to);
+
 /** 실행 유형 A~D (RUN-07). M1은 A만. */
 export const RunType = z.enum(['A', 'B', 'C', 'D']);
 export type RunType = z.infer<typeof RunType>;
@@ -105,6 +126,17 @@ export const STEP_KIND_LABELS = {
 /** 단계 상태 (RUN-02, SCR-16). */
 export const StepStatus = z.enum(['pending', 'running', 'passed', 'failed', 'skipped']);
 export type StepStatus = z.infer<typeof StepStatus>;
+
+/** 끝난 단계 상태. 끝난 단계 행은 다시 바뀌지 않고, 다시 하면 새 시도(`attempt`) 행을 만든다 (ADR-061). */
+export const FINAL_STEP_STATUSES = [
+  'passed',
+  'failed',
+  'skipped',
+] as const satisfies readonly StepStatus[];
+
+/** 끝난 단계 상태인지. */
+export const isFinalStepStatus = (status: StepStatus): boolean =>
+  (FINAL_STEP_STATUSES as readonly StepStatus[]).includes(status);
 export const STEP_STATUS_LABELS = {
   pending: '대기',
   running: '진행 중',

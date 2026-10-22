@@ -396,6 +396,55 @@ describe('settings.* (M1-05, ADR-057)', () => {
   });
 });
 
+describe('run.* (M1-12, ADR-061)', () => {
+  const PROJECT = '01JA0000000000000000000001';
+  const RULE_A = '01JA0000000000000000000002';
+  const RULE_B = '01JA0000000000000000000003';
+  const human = { kind: 'human' } as const;
+  const request = (method: string, params: unknown) =>
+    parseRequest({ jsonrpc: '2.0', id: 1, method, params });
+  const code = (result: ReturnType<typeof parseRequest>): number | null =>
+    result.ok ? null : result.error.code;
+
+  it('실행 메서드 3개가 등록돼 있다 (run.resume은 M1-14)', () => {
+    for (const name of ['run.create', 'run.get', 'run.list']) expect(isMethodName(name)).toBe(true);
+    expect(isMethodName('run.resume')).toBe(false);
+  });
+
+  it.each([
+    ['run.create', { projectId: PROJECT, ruleIds: [RULE_A], author: human }],
+    ['run.create', { projectId: PROJECT, ruleIds: [RULE_B, RULE_A], author: human }],
+    // 에이전트 주체는 스키마는 통과하고 처리기가 -32020으로 거부한다
+    [
+      'run.create',
+      { projectId: PROJECT, ruleIds: [RULE_A], author: { kind: 'agent', role: 'implementer' } },
+    ],
+    ['run.get', { projectId: PROJECT, id: RULE_A }],
+    ['run.get', { projectId: PROJECT, id: 'EXE-001' }],
+    ['run.list', { projectId: PROJECT }],
+    ['run.list', { projectId: PROJECT, status: 'waiting_approval' }],
+  ])('%s 파라미터 통과', (method, params) => {
+    expect(request(method, params).ok).toBe(true);
+  });
+
+  it.each([
+    ['빈 규칙 목록', 'run.create', { projectId: PROJECT, ruleIds: [], author: human }],
+    ['중복 규칙', 'run.create', { projectId: PROJECT, ruleIds: [RULE_A, RULE_A], author: human }],
+    ['주체 누락', 'run.create', { projectId: PROJECT, ruleIds: [RULE_A] }],
+    [
+      '유형 지정 (M1은 A만)',
+      'run.create',
+      { projectId: PROJECT, ruleIds: [RULE_A], author: human, type: 'B' },
+    ],
+    ['projectId 누락', 'run.list', {}],
+    ['다른 접두 표시 ID', 'run.get', { projectId: PROJECT, id: 'REQ-001' }],
+    ['비정규 표시 ID', 'run.get', { projectId: PROJECT, id: 'EXE-1' }],
+    ['모르는 상태', 'run.list', { projectId: PROJECT, status: 'done' }],
+  ])('%s → -32602', (_, method, params) => {
+    expect(code(request(method, params))).toBe(-32602);
+  });
+});
+
 describe('proposal.* · approvalLog.list (M1-09, ADR-050)', () => {
   const PROJECT = '01JA0000000000000000000001';
   const PRP = '01JA0000000000000000000003';
