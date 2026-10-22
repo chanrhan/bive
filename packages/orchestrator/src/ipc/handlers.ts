@@ -1,4 +1,5 @@
 // 인증된 연결이 부를 수 있는 메서드 처리기. 메서드는 각 이슈에서 여기에 더한다.
+import type { RuleWriterLauncher } from '../rule-writer/rule-writer-service.js';
 import { createProjectHandlers } from './project-handlers.js';
 import { createProposalHandlers } from './proposal-handlers.js';
 import { createRequirementHandlers } from './requirement-handlers.js';
@@ -22,6 +23,8 @@ export interface HandlerDeps {
   biveHome: string;
   /** 시계 (기본 `Date.now`) */
   now?: () => number;
+  /** `requirement.create` 뒤 규칙 자동 생성 세션 창구 (M1-08). 생략하면 세션을 띄우지 않는다 */
+  ruleWriter?: RuleWriterLauncher;
 }
 
 export const createHandlers = ({
@@ -29,6 +32,7 @@ export const createHandlers = ({
   status,
   biveHome,
   now = Date.now,
+  ruleWriter,
 }: HandlerDeps): MethodHandlers => ({
   ping: () => ({ pong: true, version: orchestratorVersion }),
   'system.status': () => ({
@@ -39,7 +43,11 @@ export const createHandlers = ({
     runsInProgress: status.activeRunCount,
   }),
   ...createProjectHandlers({ biveHome, now }),
-  ...createRequirementHandlers({ biveHome, now }),
+  ...createRequirementHandlers({
+    biveHome,
+    now,
+    ...(ruleWriter === undefined ? {} : { ruleWriter }),
+  }),
   ...createProposalHandlers({ biveHome, now }),
   ...createSettingsHandlers({ biveHome, now }),
 });

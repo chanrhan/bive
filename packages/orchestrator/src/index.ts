@@ -17,6 +17,8 @@ export * from './lock.js';
 export * from './orchestrator.js';
 export * from './pipe-path.js';
 export * from './proposals/proposal-service.js';
+export * from './rule-writer/prompts.js';
+export * from './rule-writer/rule-writer-service.js';
 export * from './run-paths.js';
 export * from './token.js';
 export * from './tools/index.js';

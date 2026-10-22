@@ -179,6 +179,50 @@ describe('propose_rule', () => {
     expect(called).toBe(0);
   });
 
+  it('콜백이 돌려준 거부 · 오류 결과는 그대로 모델에게 간다 (ADR-062)', async () => {
+    const tools = createRoleTools({
+      role: 'rule-writer',
+      sessionRoot: session,
+      biveHome: home,
+      hooks: {
+        proposeRule: () => ({
+          status: 'error',
+          content: '부모 요구사항이 삭제됨',
+          reason: 'state_conflict',
+        }),
+      },
+    });
+    expect(await tools.execute('propose_rule', proposal)).toEqual({
+      status: 'error',
+      content: '부모 요구사항이 삭제됨',
+      reason: 'state_conflict',
+    });
+    expect(tools.records[0]).toMatchObject({ status: 'error', reason: 'state_conflict' });
+  });
+
+  it('진술이 EARS 형식이 아니거나 제목 · 근거가 비면 콜백을 부르지 않고 denied(invalid_args)', async () => {
+    let called = 0;
+    const tools = createRoleTools({
+      role: 'rule-writer',
+      sessionRoot: session,
+      biveHome: home,
+      hooks: { proposeRule: () => String(++called) },
+    });
+    for (const args of [
+      { ...proposal, statement: '헬스 체크 응답에 time을 담는다' },
+      { ...proposal, statement: 'when 요청하면 the system shall 응답한다' },
+      { ...proposal, title: ' ' },
+      { ...proposal, rationale: '\n' },
+      { ...proposal, checkKinds: ['test', 'test'] },
+    ]) {
+      expect(await tools.execute('propose_rule', args)).toMatchObject({
+        status: 'denied',
+        reason: 'invalid_args',
+      });
+    }
+    expect(called).toBe(0);
+  });
+
   it('콜백이 없으면 error(not_configured), 콜백 예외는 error(tool_failed)', async () => {
     const bare = createRoleTools({ role: 'rule-writer', sessionRoot: session, biveHome: home });
     expect(await bare.execute('propose_rule', proposal)).toMatchObject({

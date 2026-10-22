@@ -37,7 +37,7 @@ flowchart LR
   G --> PRJ["프로젝트 폴더 (기준 브랜치)"]
 ```
 
-- 오케스트레이터 수명 (PRD 5.1): 앱 실행 또는 실행 시작 시 기동. 진행 중 실행 없음 + 연결된 앱 없음이면 자동 종료. 사용자당 1개, 여러 프로젝트 관리
+- 오케스트레이터 수명 (PRD 5.1): 앱 실행 또는 실행 시작 시 기동. 진행 중 실행 없음 + 연결된 앱 없음이면 자동 종료(실행 밖 rule-writer 세션이 대기 · 진행 중이어도 미룸, ADR-062). 사용자당 1개, 여러 프로젝트 관리
 - 끊김 복구 (PRD 5.1): 재기동 시 `running` 실행을 `interrupted`로 표시. 자동 재개 없음
 - 꺼져 있던 동안의 코드 변경: 다음 기동 시 감시자가 마지막 판정 커밋과 기준 브랜치 HEAD 비교 → 영향 규칙 `재검증 필요` (PRD 5.1, JDG-02)
 
@@ -75,6 +75,7 @@ interface AgentSession {
 - `ClaudeSdkAdapter`: SDK `query()` 1회 = 세션 1개 (기획서 3.2). 세션 옵션은 10장
 - `ScriptedAdapter`: 시나리오 파일의 도구 호출 · 파일 변경 · 비용 메시지를 순서대로 재생. 도구 호출은 실제 고정 도구 · 경로 가드를 통과 (가드도 함께 검증). 모든 자동 테스트가 사용 (Claude 인증 없음)
 - 실행 엔진은 `AgentEvent`만 소비. 에이전트 텍스트는 이벤트 로그로만 저장, 상태 전이 입력 아님 (JDG-01)
+- 규칙 자동 생성 (M1-08, ADR-062): `orchestrator/src/rule-writer/`의 `RuleWriterService`. `requirement.create`가 요구사항을 저장한 같은 저장소 열림에서 `start`를 부르고, 중복 · 설정 검사(`requireRunnableSettings(store, ['rule-writer'])`) 뒤 세션을 대기열(동시 1개)에서 비동기로 돌린다. 설정 미비면 세션 없이 생략 기록 · 로그만 남기고 요구사항 저장은 성공. 세션은 선택된 어댑터 · 설정의 rule-writer 모델 · 한도 · 도구 `propose_rule` 하나 · 세션 가드로 돌고, 제안은 `ProposalService.submit`으로 `pending`만 등록한다. 기록(도구 호출 · 매니페스트 · 결과)은 메모리 `Orchestrator.ruleWriter.records`와 표준 출력 로그뿐이고 저장은 M1-14
 
 패키지 간 import 해석 (M0-03)
 - `@bive/shared`의 `exports` 맨 앞에 사용자 정의 조건 `@bive/source` → `./src/index.ts`를 두고, 그 뒤 `types` · `default`는 `dist`를 가리킨다. store · parser가 import 대상이 되면 같은 조건을 추가한다 (store는 M0-04에서 추가)
@@ -151,7 +152,7 @@ interface AgentSession {
 | `~/.bive/projects/<projectId>/bive.db` | 규범 · 실행 · 판정 · 승인 기록 | 불가 (NFR-01) |
 | `~/.bive/projects/<projectId>/judge/<runId>/<judgeId>/` | 판정 1회마다 하위 폴더 (ADR-051): BIVE 러너 설정(`vitest.config.mjs` · `collect.config.mjs` · `global-setup.mjs`) · vitest JSON 원본(`result.json`) · 로그 | 불가 |
 | `~/.bive/work/<projectId>/worktrees/<runId>/` | 실행 워크트리 (RUN-08) | 역할별 경로 가드 안에서만 |
-| `~/.bive/work/<projectId>/sessions/<sessionId>/` | 역할 작업 디렉터리 (허용 목록 파일만 배치) | 해당 세션만 |
+| `~/.bive/work/<projectId>/sessions/<sessionId>/` | 역할 작업 디렉터리 (허용 목록 파일만 배치). rule-writer는 빈 폴더이고 세션이 끝나면 지운다 (ADR-062) | 해당 세션만 |
 | `~/.bive/registry.db` | 프로젝트 등록부 (등록된 프로젝트 ID · 등록 시각만) | 불가 |
 
 - 등록부 (M0-04, ADR-040): 프로젝트별 DB와 분리한 SQLite 파일 `registry.db`. 프로젝트 내용(이름 · 경로 · 기준 브랜치)의 원본은 프로젝트별 `bive.db`의 `projects` 행이고, 등록부는 ID만 가진다. 등록은 프로젝트별 DB 생성 → 등록부 추가 순서라 등록부에 있는 ID = 등록이 끝난 프로젝트. 등록 해제는 등록부 항목만 지운다
@@ -232,7 +233,7 @@ stateDiagram-v2
 | `project.sync` | `{projectId}` → 블록 선언 제안 | PRJ-02 | M2 |
 | `requirement.list` | `{projectId}` → `{requirements}` (삭제 제외, 표시 ID 순). 필터는 화면 이슈에서 | NRM-01, SCR-02, ADR-047 | M1 |
 | `requirement.get` | `{projectId, id}` → `{requirement}` (삭제된 것도). 자식 규칙 · 이력은 해당 이슈에서 | SCR-06, ADR-047 | M1 |
-| `requirement.create` | `{projectId, text, author}` → `{requirement}` (사람 작성만, 승인 불필요). 규칙 생성 시작은 M1-08 | NRM-01, NRM-02, ADR-047 | M1 |
+| `requirement.create` | `{projectId, text, author}` → `{requirement}` (사람 작성만, 승인 불필요). 저장 뒤 rule-writer 세션을 비동기로 시작하고 응답은 기다리지 않는다. 설정 미비면 세션만 생략(기록 · 로그), 응답은 그대로 | NRM-01, NRM-02, ADR-047, ADR-062 | M1 |
 | `requirement.update` · `requirement.delete` | `{projectId, id, text, author}` / `{projectId, id, author}` → `{requirement}` (사람만, 삭제는 소프트) | NRM-01, ADR-047 | M1 |
 | `requirement.markUnrulable` | `{id, reason}` | NRM-08 | M2 |
 | `rule.list` · `rule.get` | `{projectId, filter?}` / `{id}` → 규칙 · 최신 판정 · 실행 링크 | NRM-02, JDG-02 | M1 |
@@ -354,6 +355,7 @@ stateDiagram-v2
 | 셸 도구 없음 (NFR-02) | `orchestrator/src/agents/claude-sdk-adapter.ts`: `tools: []` (내장 도구 전부 끔), `mcpServers: { bive }`만, `strictMcpConfig: true` | 옵션 조립 스냅샷 테스트 |
 | 사용자 · 프로젝트 설정 비로드, 자동 메모리 비활성 (PRD 5.1) | 같은 파일: `settingSources: []`, `persistSession: false`, 자동 메모리 끔 (설정 키는 M0 확인) | 옵션 스냅샷 |
 | 서브 에이전트 금지 (ADR-007) | 같은 파일: `agents` 미지정 + 내장 도구 없음 → 생성 경로 없음 | init 도구 목록 검사 |
+| rule-writer는 자기 요구사항의 규칙 제안만 (NRM-02, NRM-04) | `orchestrator/src/rule-writer/rule-writer-service.ts`(ADR-062): 도구 `propose_rule` 하나, 입력은 제목 한 줄 · EARS `WHEN … THE SYSTEM SHALL …`(`tools/ears.ts`) · 검사 종류 1개 이상 검증, 부모가 세션의 요구사항이 아니면 `invalid_args` · 삭제됐으면 `state_conflict`. 제안은 `pending`만, 규칙 테이블 쓰기 없음 | `rule-writer.test.ts` |
 | 계정 MCP 차단 · 도구 기록 (NFR-02) | `orchestrator/src/tools/session-guard.ts`(ADR-052): init 메시지의 `tools` · `mcp_servers`가 역할 허용 목록과 다르면 세션 중단 → 실행 `failed`. Run.toolManifest 기록 | 추가 MCP 시나리오 |
 | 명령은 고정 도구로만 (NFR-02) | `orchestrator/src/tools/commands.ts`: 허용 argv 템플릿 (`run_tests` · `prisma_generate` · `prisma_migrate` · `install_package`=허용 목록) · 셸 없는 실행(`spawn`, 프로세스 그룹 정리, ADR-052) · 타임아웃 · 환경 변수 정리 | 임의 인자 거부 테스트 |
 | 커밋 · 병합은 오케스트레이터만 (RUN-08) | `orchestrator/src/git/*`. 에이전트 도구에 git 없음, 워크트리 `.git` 쓰기 경로 가드 거부 | `.git` 쓰기 거부 테스트 |
