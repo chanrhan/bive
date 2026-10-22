@@ -59,6 +59,13 @@ button.card:hover {
   font-family: var(--font-mono);
 }
 
+.card-note {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .card-time {
   flex: none;
   margin-left: auto;

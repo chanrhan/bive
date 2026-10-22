@@ -83,8 +83,8 @@ test.describe('기본 상태', () => {
   }) => {
     const bive = await start(page);
     await expect(mainArea(page)).toHaveAttribute('data-route', 'start');
-    await page.getByRole('button', { name: '규칙', exact: true }).click();
-    await expect(mainArea(page).getByTestId('empty-state')).toHaveText('규칙 준비 중');
+    await page.getByRole('button', { name: '계약', exact: true }).click();
+    await expect(mainArea(page).getByTestId('empty-state')).toHaveText('계약 준비 중');
     await expect(page.getByTestId('sidebar-project')).toHaveText('프로젝트 없음');
     // 폴더 선택 · 열기는 누르기 전에 부르지 않는다
     const methods = (await bive.calls()).map((call) => call.method);
