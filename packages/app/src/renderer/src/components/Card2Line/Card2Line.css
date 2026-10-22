@@ -70,3 +70,26 @@ button.card:hover {
   flex: none;
   margin-left: auto;
 }
+
+.card-tag {
+  flex: none;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  line-height: 18px;
+}
+
+.card-unread {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.card-time + .card-unread {
+  margin-left: 0;
+}

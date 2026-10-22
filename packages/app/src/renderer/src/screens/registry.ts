@@ -7,9 +7,11 @@ import type { RouteId } from '../navigation/routes.js';
 import { ProjectStartScreen } from './project-start/ProjectStartScreen.js';
 import { RequirementsScreen } from './requirements/RequirementsScreen.js';
 import { RulesScreen } from './rules/RulesScreen.js';
+import { TodoScreen } from './todo/TodoScreen.js';
 
 export const SCREENS: Partial<Record<RouteId, ComponentType>> = {
   start: ProjectStartScreen,
   requirements: RequirementsScreen,
   rules: RulesScreen,
+  todo: TodoScreen,
 };

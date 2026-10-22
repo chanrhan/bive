@@ -20,15 +20,19 @@ export interface SidebarProps {
   projectName: string | null;
   /** 할 일 배지 건수. 모르거나 0이면 배지를 보이지 않는다 (NFR-03: 근거 없는 값 미표시) */
   todoCount: number | null;
+  /** 알림 아이콘 툴팁의 종류별 건수 ("규칙 신규 2 · 요구사항 신규 1"). 비면 툴팁은 "할 일" */
+  todoBreakdown?: string;
   connection: ConnectionView;
 }
 
 export const Sidebar = ({
   projectName,
   todoCount,
+  todoBreakdown = '',
   connection,
 }: SidebarProps): React.JSX.Element => {
   const { route, navigate } = useNavigation();
+  const showBadge = todoCount !== null && todoCount > 0;
   const settingsOpen = useSettingsOpen();
   return (
     <aside className="sidebar" data-testid="sidebar" aria-label="사이드바">
@@ -46,12 +50,13 @@ export const Sidebar = ({
           className="icon-button"
           data-testid="todo-button"
           aria-label="할 일"
-          title="할 일"
+          // 툴팁: 대기가 있으면 종류별 건수, 없으면 이름 (screens.md 6장 할 일)
+          title={showBadge && todoBreakdown !== '' ? todoBreakdown : '할 일'}
           aria-pressed={route === 'todo'}
           onClick={() => navigate('todo')}
         >
           <Bell className="button-icon" aria-hidden="true" />
-          {todoCount !== null && todoCount > 0 && (
+          {showBadge && (
             <span className="todo-badge" data-testid="todo-badge">
               {todoCount}
             </span>
