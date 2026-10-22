@@ -3,8 +3,11 @@
 // - 에이전트 주체의 생성 · 수정 · 삭제는 파이프로 받지 않는다(-32020). 에이전트 경로는 제안 승인뿐이다 (NRM-04)
 // - 삭제는 소프트 삭제다 (NRM-07). 자식 규칙은 지우지 않고 부모만 해제한다(같은 트랜잭션, ADR-050).
 //   부모 없는 규칙의 추적성 결함 표시는 M3-11
+// - 생성 뒤 같은 저장소 열림에서 rule-writer 세션 시작을 맡긴다 (NRM-02, M1-08, ADR-062). 세션은 비동기로 돌고
+//   응답을 붙잡지 않으며, 설정이 비어 세션을 띄우지 못해도 요구사항 저장은 성공한다
 import { type Author, createUlidGenerator, ErrorCode } from '@bive/shared';
 
+import type { RuleWriterLauncher } from '../rule-writer/rule-writer-service.js';
 import { withProjectStore } from './project-store-access.js';
 import { RpcError, type MethodHandlers } from './server.js';
 
@@ -13,6 +16,11 @@ export interface RequirementHandlerDeps {
   biveHome: string;
   /** 시계 (ms). 생성 · 수정 · 삭제 시각과 ULID에 쓴다 */
   now: () => number;
+  /**
+   * 요구사항 생성 뒤 규칙 자동 생성 세션을 띄우는 창구. 오케스트레이터는 항상 넘긴다.
+   * 생략하면 세션을 띄우지 않는다(처리기만 시험할 때).
+   */
+  ruleWriter?: RuleWriterLauncher;
 }
 
 type RequirementMethods = Pick<
@@ -37,6 +45,7 @@ const assertHuman = (author: Author): void => {
 export const createRequirementHandlers = ({
   biveHome,
   now,
+  ruleWriter,
 }: RequirementHandlerDeps): RequirementMethods => {
   const newId = createUlidGenerator(now);
   const timestamp = (): string => new Date(now()).toISOString();
@@ -44,16 +53,19 @@ export const createRequirementHandlers = ({
   return {
     'requirement.create': ({ projectId, text, author }) => {
       assertHuman(author);
-      return withProjectStore(biveHome, projectId, (store) => ({
-        requirement: store.requirements.create({
+      return withProjectStore(biveHome, projectId, (store) => {
+        const requirement = store.requirements.create({
           id: newId(),
           text,
           author,
           // 사람이 직접 쓴 요구사항은 승인 없이 규범이 된다 (NRM-01)
           normState: 'approved',
           createdAt: timestamp(),
-        }),
-      }));
+        });
+        // 세션은 대기열에서 비동기로 돈다. start는 던지지 않고 결과(생략 사유 포함)는 서비스가 기록한다
+        ruleWriter?.start(store, { projectId, requirement });
+        return { requirement };
+      });
     },
     'requirement.update': ({ projectId, id, text, author }) => {
       assertHuman(author);

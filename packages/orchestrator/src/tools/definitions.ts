@@ -4,6 +4,8 @@
 import { type AgentRole, CheckKind, RuleKind } from '@bive/shared';
 import { z } from 'zod';
 
+import { CONTROL_CHARACTERS, EARS_FORMAT, earsStatementProblem } from './ears.js';
+
 /** 고정 도구 MCP 서버 이름. 세션의 MCP 서버는 이것 하나뿐이다(ADR-024). */
 export const BIVE_MCP_SERVER = 'bive';
 
@@ -94,13 +96,39 @@ export const InstallPackageInput = z.strictObject({
   name: z.string().min(1).max(214).describe('설치할 패키지 (허용 목록에 있는 이름만)'),
 });
 
+/** 공백만 있는 문자열은 받지 않는다. */
+const NonBlank = (schema: z.ZodString) =>
+  schema.refine((value) => value.trim().length > 0, '비어 있음');
+
+/**
+ * 규칙 제안 입력 (NRM-02, ADR-062). 제목(한 줄) · EARS 진술 · 종류 · 검사 종류(1개 이상, 중복 없음) ·
+ * 부모 요구사항 · 근거. 부모 요구사항이 세션의 요구사항인지 · 살아 있는지는 등록 콜백이 확인한다.
+ */
 export const ProposeRuleInput = z.strictObject({
-  parentRequirementId: z.string().min(1).max(64).describe('부모 요구사항 ID'),
-  title: z.string().min(1).max(200),
-  statement: z.string().min(1).max(4000).describe('EARS 형식 규칙 문장'),
-  kind: RuleKind,
-  checkKinds: z.array(CheckKind).min(1),
-  rationale: z.string().min(1).max(4000),
+  parentRequirementId: z
+    .string()
+    .min(1)
+    .max(64)
+    .describe('부모 요구사항 ID (작업 지시에 적힌 요구사항 ID 그대로)'),
+  title: NonBlank(z.string().min(1).max(200))
+    .refine((value) => !CONTROL_CHARACTERS.test(value), '한 줄이어야 함 (줄바꿈 · 제어 문자 불가)')
+    .describe('사람이 읽는 한 줄 요약'),
+  statement: z
+    .string()
+    .min(1)
+    .max(4000)
+    .superRefine((value, ctx) => {
+      const problem = earsStatementProblem(value);
+      if (problem !== null) ctx.addIssue({ code: 'custom', message: problem });
+    })
+    .describe(`EARS 진술 한 줄: ${EARS_FORMAT}`),
+  kind: RuleKind.describe('규칙 종류'),
+  checkKinds: z
+    .array(CheckKind)
+    .min(1)
+    .refine((kinds) => new Set(kinds).size === kinds.length, '검사 종류가 중복됨')
+    .describe('검사 종류 1개 이상 (중복 없이)'),
+  rationale: NonBlank(z.string().min(1).max(4000)).describe('요구사항의 어느 부분을 옮겼는지'),
 });
 export type ProposeRuleInput = z.infer<typeof ProposeRuleInput>;
 
@@ -155,8 +183,7 @@ const DEFINITIONS: Record<FixedToolName, ToolDefinition> = {
   },
   propose_rule: {
     name: 'propose_rule',
-    description:
-      '요구사항에서 도출한 규칙을 제안으로 등록한다. 제안은 사람이 승인해야 규칙이 된다.',
+    description: `요구사항에서 도출한 규칙을 제안으로 등록한다. 제안은 사람이 승인해야 규칙이 된다. 진술은 ${EARS_FORMAT} 형식 한 줄.`,
     inputSchema: ProposeRuleInput,
   },
 };

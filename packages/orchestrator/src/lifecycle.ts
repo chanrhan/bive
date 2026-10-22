@@ -1,5 +1,6 @@
 // 백그라운드 수명 (PRD 5.1): 진행 중 실행이 없고 앱이 닫혀 있으면 자동 종료.
-// 앱이 닫혀 있음 = 파이프 연결 0개. 두 수가 모두 0인 상태가 유휴 시간 동안 이어지면 onIdle을 부른다.
+// 앱이 닫혀 있음 = 파이프 연결 0개. 연결 · 진행 중 실행 · 진행 중 작업(실행 밖 에이전트 세션, 예: 규칙 작성 세션
+// ADR-062)이 모두 0인 상태가 유휴 시간 동안 이어지면 onIdle을 부른다.
 
 /** `BIVE_IDLE_SHUTDOWN_MS` 기본값: 5분. */
 export const DEFAULT_IDLE_SHUTDOWN_MS = 300_000;
@@ -24,16 +25,26 @@ export interface RunTracker {
   readonly activeRunCount: number;
 }
 
+/**
+ * 실행이 아닌 백그라운드 작업(규칙 작성 세션 등)의 시작 · 끝을 알리는 자리. 유휴 종료만 미루고
+ * `system.status`의 진행 중 실행 수에는 들어가지 않는다 (ADR-062).
+ */
+export interface TaskTracker {
+  beginTask(): RunHandle;
+  readonly activeTaskCount: number;
+}
+
 export interface LifecycleOptions {
   idleShutdownMs: number;
   onIdle: () => void;
 }
 
-export class Lifecycle implements RunTracker {
+export class Lifecycle implements RunTracker, TaskTracker {
   readonly #idleShutdownMs: number;
   readonly #onIdle: () => void;
   #connections = 0;
   #runs = 0;
+  #tasks = 0;
   #timer: NodeJS.Timeout | null = null;
   #started = false;
   #stopped = false;
@@ -52,6 +63,10 @@ export class Lifecycle implements RunTracker {
 
   get activeRunCount(): number {
     return this.#runs;
+  }
+
+  get activeTaskCount(): number {
+    return this.#tasks;
   }
 
   /** 유휴 종료 타이머가 돌고 있는지. */
@@ -96,9 +111,23 @@ export class Lifecycle implements RunTracker {
     };
   }
 
+  beginTask(): RunHandle {
+    this.#tasks += 1;
+    this.#evaluate();
+    let ended = false;
+    return {
+      end: () => {
+        if (ended) return;
+        ended = true;
+        this.#tasks -= 1;
+        this.#evaluate();
+      },
+    };
+  }
+
   #evaluate(): void {
     if (!this.#started || this.#stopped) return;
-    if (this.#connections === 0 && this.#runs === 0) {
+    if (this.#connections === 0 && this.#runs === 0 && this.#tasks === 0) {
       this.#timer ??= setTimeout(() => {
         this.#timer = null;
         if (this.#stopped) return;

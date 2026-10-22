@@ -84,6 +84,23 @@ describe('Lifecycle (가짜 시계)', () => {
     expect(onIdle).toHaveBeenCalledTimes(1);
   });
 
+  it('진행 중 작업(규칙 작성 세션)이 있어도 종료하지 않고, 실행 수에는 세지 않는다 (ADR-062)', () => {
+    const { lifecycle, onIdle } = make();
+    lifecycle.start();
+    const task = lifecycle.beginTask();
+    expect(lifecycle.activeTaskCount).toBe(1);
+    expect(lifecycle.activeRunCount).toBe(0);
+    vi.advanceTimersByTime(10_000);
+    expect(onIdle).not.toHaveBeenCalled();
+    task.end();
+    task.end();
+    expect(lifecycle.activeTaskCount).toBe(0);
+    vi.advanceTimersByTime(999);
+    expect(onIdle).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(onIdle).toHaveBeenCalledTimes(1);
+  });
+
   it('stop 뒤에는 부르지 않는다 · 잘못된 값은 거부', () => {
     const { lifecycle, onIdle } = make();
     lifecycle.start();
