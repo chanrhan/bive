@@ -90,6 +90,10 @@ export interface SessionInitEvent {
   model: string;
   tools: string[];
   mcpServers: string[];
+  /** 로드된 플러그인 이름. 보고하는 어댑터(ClaudeSdkAdapter)만 채우고, 세션 가드는 비어 있어야 통과시킨다 */
+  plugins?: string[];
+  /** 권한 모드. 보고하는 어댑터만 채우고, 세션 가드는 `dontAsk`여야 통과시킨다 (ADR-059) */
+  permissionMode?: string;
 }
 
 export type SessionEvent =
@@ -106,8 +110,25 @@ export type SessionEvent =
   | { type: 'message'; turn: number; text: string }
   | SessionResultEvent;
 
+/** 실행기 예외는 SDK의 MCP 도구 오류처럼 `error` 결과(`executor_error`)로 바꿔 세션을 이어간다 (ADR-049). */
+export const executeTool = async (
+  tools: ToolExecutor,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<ToolResult> => {
+  try {
+    return await tools.execute(name, args);
+  } catch (error) {
+    return {
+      status: 'error',
+      content: error instanceof Error ? error.message : String(error),
+      reason: 'executor_error',
+    };
+  }
+};
+
 /**
- * 에이전트 어댑터. `startSession`은 바로 반환하고, 오류(시나리오 없음 · 미구현 등)는 순회 중에 던진다.
+ * 에이전트 어댑터. `startSession`은 바로 반환하고, 오류(시나리오 없음 · 인증 미설정 등)는 순회 중에 던진다.
  * `signal`이 중단되면 순회가 `signal.reason`(기본 `AbortError`)으로 끝난다.
  */
 export interface AgentAdapter {
