@@ -59,32 +59,46 @@ export const complianceGroup = ({ rule, judgment }: RuleWithJudgment): Complianc
   return 'judgeable';
 };
 
-const WHEN = /\bwhen\b/i;
-const SHALL = /\bshall\b/i;
-const THE = /\bthe\b/gi;
+/** 낱말 키워드: 앞이 문장 처음이나 공백이고 뒤가 공백(또는 끝)인 것만. 괄호 주석 `(WHEN)` 등은 키워드가 아니다. */
+const SHALL = /(?:^|\s)(shall)(?=\s|$)/i;
+const WHEN = /(?:^|\s)(when)(?=\s)/gi;
+/** 대문자 표기(`… THE SYSTEM SHALL`)의 응답 주어 시작: 대문자 `THE`만 (조건 안의 소문자 the와 섞이지 않게). */
+const UPPER_SUBJECT = /(?:^|[\s,，])(THE)(?=\s)/g;
+/** 소문자 표기(`When …, the system shall`)의 응답 주어 시작: 쉼표 + 공백 뒤의 `the`만 (EARS 영어 문형). */
+const LOWER_SUBJECT = /[,，]\s*(the)(?=\s)/gi;
+/** 응답 주어(`THE` 다음부터 `SHALL` 앞까지)는 낱말과 공백만이다. 문장 부호가 섞이면 주어로 보지 않는다. */
+const SUBJECT_BODY = /^\s+[\p{L}\p{N}_-]+(?:\s+[\p{L}\p{N}_-]+)*\s*$/u;
 
 /**
- * 진술(EARS)의 WHEN 조건 (ADR-060): 첫 `WHEN`부터 그 뒤 첫 `SHALL` 앞까지에서, 쉼표가 있으면 쉼표 앞까지,
- * 없으면 마지막 `THE`(응답 주어 "THE SYSTEM") 앞까지. 진술 문구를 그대로 잘라 쓰고 고쳐 쓰지 않는다(NFR-03).
- * `WHEN`이 없거나 그 뒤에 `SHALL`이 없으면(이벤트 조건이 없는 진술) `null`.
+ * 진술(EARS)의 WHEN 조건 (ADR-060). 확신할 수 있을 때만 진술 문구를 그대로 잘라 돌려주고(고쳐 쓰지 않음, NFR-03),
+ * 아니면 `null`(표시하지 않음):
+ * 1. 첫 낱말 `SHALL`을 찾고, 그 앞에 낱말 `WHEN`이 정확히 하나 있어야 한다 (`SHALL` 뒤의 when은 조건이 아니다)
+ * 2. 조건의 끝 = 응답 주어 바로 앞. `SHALL`이 대문자면 `WHEN`과 `SHALL` 사이 마지막 대문자 `THE`,
+ *    아니면 마지막 "쉼표 + `the`". 주어(`THE` ~ `SHALL`)에 문장 부호가 있으면 경계를 확신할 수 없어 `null`
+ * 3. 조건 = `WHEN`부터 주어 앞까지(끝 공백 · 쉼표 제거). 조건 안의 쉼표(숫자 `1,000` · 삽입구)는 그대로 둔다
  */
 export const whenCondition = (statement: string): string | null => {
-  const when = WHEN.exec(statement);
-  if (when === null) return null;
-  const afterWhen = when.index + when[0].length;
-  const shall = SHALL.exec(statement.slice(afterWhen));
+  const shall = SHALL.exec(statement);
   if (shall === null) return null;
-  let clause = statement.slice(afterWhen, afterWhen + shall.index);
-  const comma = clause.search(/[,，]/);
-  if (comma >= 0) {
-    clause = clause.slice(0, comma);
-  } else {
-    const subjects = [...clause.matchAll(THE)];
-    const last = subjects.at(-1);
-    if (last !== undefined) clause = clause.slice(0, last.index);
-  }
-  const condition = clause.trim();
-  return condition === '' ? null : `${when[0]} ${condition}`;
+  const shallStart = shall.index + shall[0].length - (shall[1] ?? '').length;
+  const head = statement.slice(0, shallStart);
+
+  const whens = [...head.matchAll(WHEN)];
+  const when = whens[0];
+  if (when === undefined || whens.length !== 1) return null;
+  const whenStart = when.index + when[0].length - (when[1] ?? '').length;
+  const afterWhen = whenStart + (when[1] ?? '').length;
+
+  const upper = shall[1] === 'SHALL';
+  const clause = head.slice(afterWhen);
+  const subject = [...clause.matchAll(upper ? UPPER_SUBJECT : LOWER_SUBJECT)].at(-1);
+  if (subject === undefined) return null;
+  const subjectWord = subject[1] ?? '';
+  const subjectStart = subject.index + subject[0].length - subjectWord.length;
+  if (!SUBJECT_BODY.test(clause.slice(subjectStart + subjectWord.length))) return null;
+
+  const condition = statement.slice(whenStart, afterWhen + subjectStart).replace(/[\s,，]+$/u, '');
+  return condition.length > (when[1] ?? '').length ? condition : null;
 };
 
 const PROVISIONAL_MARK: ExceptionMark = { key: 'provisional', label: '잠정', tone: 'info' };

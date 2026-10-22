@@ -237,6 +237,20 @@ describe('최신 판정 결합 지점', () => {
     expect(h.read((store) => storedLatestJudgments(store)(rule.id))).toBeNull();
   });
 
+  it('가드: 프로젝트 DB에 판정 기록 테이블이 아직 없다 (생기면 storedLatestJudgments를 그 테이블에 연결하고 이 테스트를 고친다)', () => {
+    // 결합 지점은 지금 늘 기록 없음을 돌려준다. 판정 테이블(#29)이 생겼는데 결합 지점을 고치지 않으면
+    // 모든 규칙이 조용히 미판정으로 보이므로, 테이블이 생기는 순간 여기서 실패하게 한다
+    const tables = h.read(
+      (store) =>
+        store.db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND (name LIKE '%judg%' OR name LIKE '%verdict%')",
+          )
+          .all() as { name: string }[],
+    );
+    expect(tables).toEqual([]);
+  });
+
   it('기록이 없으면 미판정, 있으면 기록의 상태와 기록(커밋 · 시각 · 실행 링크)을 싣는다', () => {
     const fail = record(newId(), 'fail');
     expect(toRuleJudgment(null)).toEqual(UNJUDGED);

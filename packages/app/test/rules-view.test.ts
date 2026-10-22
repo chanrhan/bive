@@ -112,6 +112,42 @@ describe('WHEN 조건 (진술에서 그대로 자른다)', () => {
       'WHEN 결제 후 7일 초과 환불 요청 THE SYSTEM SHALL 요청 거절',
       'WHEN 결제 후 7일 초과 환불 요청',
     ],
+    // 숫자 · 삽입구의 쉼표는 경계가 아니다 (리뷰 재현 사례)
+    [
+      '숫자 사이 쉼표',
+      'WHEN 금액이 1,000원 이상이면 THE SYSTEM SHALL 확인을 요구한다',
+      'WHEN 금액이 1,000원 이상이면',
+    ],
+    [
+      '조건 안 쉼표 + 주어 앞 쉼표는 끝 쉼표만 뗀다',
+      'WHEN 사용자가 로그인하고, 세션이 만료되었으면, THE SYSTEM SHALL 다시 로그인을 요구한다',
+      'WHEN 사용자가 로그인하고, 세션이 만료되었으면',
+    ],
+    [
+      '영어 삽입구',
+      'WHEN the user, who is an admin, deletes a project THE SYSTEM SHALL archive it',
+      'WHEN the user, who is an admin, deletes a project',
+    ],
+    [
+      '대문자 조건 안의 THE는 마지막 것(응답 주어)만 경계',
+      'WHEN THE USER LOGS IN THE SYSTEM SHALL CREATE A SESSION',
+      'WHEN THE USER LOGS IN',
+    ],
+    [
+      '대소문자 혼합 (When + THE SYSTEM SHALL)',
+      'When 결제를 요청하면 THE SYSTEM SHALL 거부한다',
+      'When 결제를 요청하면',
+    ],
+    [
+      '영어 소문자 문형의 삽입구 · 조건 안 the',
+      'When the user, who is an admin, deletes the project, the system shall archive it',
+      'When the user, who is an admin, deletes the project',
+    ],
+    [
+      '여러 낱말 주어',
+      'WHEN 주문이 취소되면 THE ORDER SERVICE SHALL 재고를 되돌린다',
+      'WHEN 주문이 취소되면',
+    ],
   ])('%s', (_, statement, expected) => {
     expect(whenCondition(statement)).toBe(expected);
   });
@@ -122,6 +158,19 @@ describe('WHEN 조건 (진술에서 그대로 자른다)', () => {
     ['SHALL 뒤에만 WHEN', 'THE SYSTEM SHALL 요청 시각을 기록한다 when possible'],
     ['조건이 비었음', 'WHEN THE SYSTEM SHALL 거부한다'],
     ['단어 안의 when은 키워드가 아님', 'Whenever THE SYSTEM SHALL 거부한다'],
+    // 리뷰 재현 사례
+    ['괄호 주석의 WHEN · SHALL', '시스템은 사용자가 로그인할 때(WHEN) 세션을 만들어야 한다(SHALL)'],
+    [
+      'SHALL 뒤의 when (사전 조건 아님)',
+      'The system shall log out the user when idle, and shall notify the admin',
+    ],
+    // 확신할 수 없으면 표시하지 않는다
+    ['SHALL 앞에 WHEN이 둘', 'WHEN 결제하고 WHEN 환불하면 THE SYSTEM SHALL 거부한다'],
+    ['주어가 THE로 시작하지 않음 (대문자)', 'WHEN 결제를 요청하면 SYSTEM SHALL 거부한다'],
+    ['주어가 THE로 시작하지 않음 (소문자)', 'When the user opens the page, it shall load fast'],
+    ['소문자 문형에 쉼표 + the 경계 없음', 'When the user opens the page the system shall load'],
+    ['주어 자리에 문장 부호', 'WHEN 결제하면 THE SYSTEM, 단 점검 중이면, SHALL 거부한다'],
+    ['대문자 SHALL인데 대문자 THE 주어 없음', 'WHEN 결제하면 the system SHALL 거부한다'],
   ])('%s → 없음', (_, statement) => {
     expect(whenCondition(statement)).toBeNull();
   });
