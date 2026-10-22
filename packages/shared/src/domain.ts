@@ -470,11 +470,15 @@ export type ApprovalLogBreakReason = z.infer<typeof ApprovalLogBreakReason>;
 /** 첫 승인 기록의 `prevHash`. */
 export const APPROVAL_LOG_GENESIS_HASH = '0'.repeat(64);
 
-/** 승인 기록의 행동별 상세. 수정 후 승인은 `diff`, 거절은 `reason`, 승인은 `appliedRef`. */
+/**
+ * 승인 기록의 행동별 상세. 수정 후 승인은 `diff`, 거절은 `reason`, 승인은 `appliedRef`,
+ * 실행 시작은 `ruleIds`(사람이 확인한 대상 규칙, 요청 순서 그대로, ADR-061).
+ */
 export const ApprovalLogDetail = z.strictObject({
   diff: z.strictObject({ before: z.unknown(), after: z.unknown() }).optional(),
   reason: NonEmptyString.optional(),
   appliedRef: EntityRef.optional(),
+  ruleIds: z.array(Ulid).min(1).optional(),
 });
 export type ApprovalLogDetail = z.infer<typeof ApprovalLogDetail>;
 
@@ -518,6 +522,13 @@ export const ApprovalLogEntry = z
         path: ['detail', 'reason'],
       });
     }
+    if ((action === 'run_start') !== (detail.ruleIds !== undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '실행 시작에만 대상 규칙이 있고, 실행 시작에는 대상 규칙이 필수입니다 (RUN-01)',
+        path: ['detail', 'ruleIds'],
+      });
+    }
   });
 export type ApprovalLogEntry = z.infer<typeof ApprovalLogEntry>;
 
@@ -526,13 +537,73 @@ export type ApprovalLogEntry = z.infer<typeof ApprovalLogEntry>;
 /** 검사 실패 → 구현 회귀 상한 (RUN-02 확정). 초과하면 실행 `failed`. */
 export const MAX_REGRESSION_COUNT = 2;
 
-/** 실행 시작 시 복사한 예산 (COST-01). 실행은 예산이 모두 설정돼야 생성되므로 `null`이 없다. */
+/**
+ * 실행 유형별 단계 순서 (RUN-02, architecture.md 4장, ADR-061). M1은 유형 A만 만든다.
+ * 변이 주입은 P1(JDG-04)이라 M1 엔진이 `skipped`로 기록한다(roadmap M1-14). B · C · D는 RUN-07(M3)이 더한다.
+ */
+export const RUN_STEP_PLANS = {
+  A: [
+    'approval',
+    'test_writing',
+    'red_check',
+    'implementation',
+    'check',
+    'mutation',
+    'merge',
+    'screen_update',
+  ],
+} as const satisfies Partial<Record<RunType, readonly StepKind[]>>;
+
+/** M1에서 만드는 실행 유형 (ADR-020: B · C · D는 enum만). */
+export const M1_RUN_TYPE = 'A' as const satisfies RunType;
+
+/** 단계를 수행하는 에이전트 역할. 사람 · 판정기 · 오케스트레이터 단계는 `null` (architecture.md 4장 단계표). */
+export const STEP_ROLES = {
+  approval: null,
+  test_writing: 'test-writer',
+  red_check: null,
+  green_check: null,
+  implementation: 'implementer',
+  check: null,
+  mutation: null,
+  merge: null,
+  screen_update: null,
+} as const satisfies Record<StepKind, AgentRole | null>;
+
+/** 단계 목록의 역할(중복 없이, 단계 순서대로). 실행의 예산 · 모델 스냅샷 대상이다. */
+export const stepRoles = (plan: readonly StepKind[]): AgentRole[] => {
+  const roles: AgentRole[] = [];
+  for (const kind of plan) {
+    const role = STEP_ROLES[kind];
+    if (role !== null && !roles.includes(role)) roles.push(role);
+  }
+  return roles;
+};
+
+/**
+ * 단계 정렬: 파이프라인 순서(`StepKind` 정의 순서 = 모든 유형의 공통 순서) → 시도 번호.
+ * `Array.prototype.sort`용. 회귀로 생긴 새 시도는 같은 단계의 이전 시도 바로 뒤에 온다.
+ */
+export const compareSteps = (
+  a: { kind: StepKind; attempt: number },
+  b: { kind: StepKind; attempt: number },
+): number =>
+  StepKind.options.indexOf(a.kind) - StepKind.options.indexOf(b.kind) || a.attempt - b.attempt;
+
+/** 실행 시작 시 복사한 한도 1개 (USD · 턴). 실행은 설정이 모두 채워져야 생성되므로 `null`이 없다. */
+export const BudgetLimits = z.strictObject({
+  maxBudgetUsd: z.number().positive(),
+  maxTurns: z.int().positive(),
+});
+export type BudgetLimits = z.infer<typeof BudgetLimits>;
+
+/**
+ * 실행 시작 시 복사한 예산 (COST-01, NFR-07, ADR-057 · ADR-061): 실행 전체 한도와 실행이 쓰는 역할(유형 A는
+ * test-writer · implementer)의 한도. 시작 뒤 설정을 바꿔도 이 실행에는 반영되지 않는다.
+ */
 export const BudgetSnapshot = z.strictObject({
-  runTotalUsd: z.number().nonnegative(),
-  perRole: z.strictObject({
-    testWriter: z.number().nonnegative(),
-    implementer: z.number().nonnegative(),
-  }),
+  run: BudgetLimits,
+  roles: perRole(BudgetLimits),
 });
 export type BudgetSnapshot = z.infer<typeof BudgetSnapshot>;
 
@@ -544,26 +615,35 @@ export const ToolManifestEntry = z.strictObject({
 });
 export type ToolManifestEntry = z.infer<typeof ToolManifestEntry>;
 
-/** 실행 (RUN-01, RUN-02, RUN-07, RUN-08, COST-01, NFR-07). */
+/**
+ * 실행 (RUN-01, RUN-02, RUN-07, RUN-08, COST-01, NFR-07, ADR-061).
+ * - `targetRuleIds`: 요청 순서 그대로, 중복 없음
+ * - `currentStep`: 진행 중(또는 승인 대기 중)인 단계. 모든 단계가 끝나면 `null`
+ * - `branch` · `worktreePath` · `baseCommit`: 워크트리를 만들 때(M1-13) 채운다. 그 전에는 `null`
+ * - `startedAt`: 승인 단계가 끝나 `running`이 된 시각. 승인 대기 중에는 `null`
+ */
 export const Run = z.strictObject({
   id: Ulid,
   displayId: displayIdSchema('EXE'),
   projectId: Ulid,
   type: RunType,
-  targetRuleIds: z.array(Ulid).min(1),
+  targetRuleIds: z
+    .array(Ulid)
+    .min(1)
+    .refine((ids) => new Set(ids).size === ids.length, '대상 규칙이 중복됐습니다'),
   status: RunStatus,
   currentStep: StepKind.nullable(),
   lastCompletedStep: StepKind.nullable(),
   regressionCount: NonNegativeInt,
   failureReason: NonEmptyString.nullable(),
-  branch: NonEmptyString,
-  worktreePath: NonEmptyString,
+  branch: NonEmptyString.nullable(),
+  worktreePath: NonEmptyString.nullable(),
   baseBranch: NonEmptyString,
-  baseCommit: CommitSha,
+  baseCommit: CommitSha.nullable(),
   headCommit: CommitSha.nullable(),
   mergeCommit: CommitSha.nullable(),
   budgetSnapshot: BudgetSnapshot,
-  modelSnapshot: perRole(NonEmptyString),
+  modelSnapshot: perRole(ModelId),
   costUsd: UsdOrNull,
   turns: NonNegativeInt.nullable(),
   toolManifest: z.array(ToolManifestEntry),
