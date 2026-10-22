@@ -702,6 +702,69 @@ describe('merge(run)', () => {
     expect(result.status).toBe('merged');
     expect(worktreeCount(repo)).toBe(2);
   });
+
+  it('같은 저장소의 병합 5개를 동시에 불러도 차례로 처리해 프로젝트 폴더 색인 · 작업 트리가 깨끗하다', async () => {
+    const runs: RunGitRef[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const run = await createRun(`EXE-00${String(i + 1)}`);
+      await agentChange(
+        run,
+        `src/lib/f${String(i)}.ts`,
+        `export const v${String(i)} = ${String(i)};\n`,
+      );
+      runs.push(run);
+    }
+    const check = vi.fn(passCheck);
+    // 관리자 인스턴스가 달라도 같은 대기열을 쓴다
+    const managers = [manager, createWorktreeManager({ biveHome })];
+
+    const results = await Promise.all(
+      runs.map((run, i) => (managers[i % 2] ?? manager).merge(run, { check })),
+    );
+
+    // 첫 병합 뒤 나머지는 기준 브랜치가 바뀐 경로(ADR-017 재검사)로 병합된다
+    expect(results.map((r) => r.status)).toEqual(Array(5).fill('merged'));
+    expect(results.filter((r) => r.status === 'merged' && r.rechecked)).toHaveLength(4);
+    expect(check).toHaveBeenCalledTimes(4);
+    expect(userGit(repo, 'status', '--porcelain', '--untracked-files=all')).toBe('');
+    const inTip = userGit(repo, 'ls-tree', '-r', '--name-only', 'main', 'src/lib').split('\n');
+    for (let i = 0; i < 5; i += 1) {
+      const file = `src/lib/f${String(i)}.ts`;
+      expect(inTip).toContain(file);
+      expect(read(repo, file)).toBe(`export const v${String(i)} = ${String(i)};\n`);
+    }
+    expect(worktreeCount(repo)).toBe(6);
+  });
+
+  it('HEAD 확인과 fast-forward 사이에 브랜치가 바뀌면 옮겨진 브랜치와 이전 커밋을 결과에 담는다', async () => {
+    const run = await createRun();
+    await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
+    const real = createGitRunner();
+    let fired = false;
+    // 확인 뒤 · fast-forward 직전에 사용자가 다른 브랜치로 옮기는 순간을 결정적으로 만든다
+    const racing: GitRunner = (args, options) => {
+      if (!fired && args[0] === 'merge' && args.includes('--ff-only')) {
+        fired = true;
+        userGit(repo, 'checkout', '-q', '-b', 'feature/other');
+      }
+      return real(args, options);
+    };
+
+    const result = await createWorktreeManager({ biveHome, git: racing }).merge(run, {
+      check: passCheck,
+    });
+
+    expect(result).toMatchObject({ status: 'failed', reason: 'base_update_failed' });
+    if (result.status !== 'failed') throw new Error('failed가 아님');
+    const moved = tip(repo, 'feature/other');
+    expect(result.movedRef).toEqual({
+      ref: 'refs/heads/feature/other',
+      previousCommit: run.baseCommit,
+      commit: moved,
+    });
+    expect(result.message).toContain('refs/heads/feature/other');
+    expect(tip(repo)).toBe(run.baseCommit);
+  });
 });
 
 describe('preserve(run)', () => {
@@ -762,5 +825,56 @@ describe('preserve(run)', () => {
     expect(runBranches(repo)).toEqual(['bive/run-EXE-001']);
     userGit(repo, 'checkout', '-q', run.branch);
     expect(read(repo, 'src/lib/added.ts')).toBe('export const added = 1;\n');
+  });
+
+  it('$BIVE_HOME이 심볼릭 링크여도 실경로로 다뤄 폴더가 지워진 뒤 등록을 지운다', async () => {
+    const link = path.join(tempDir('ln.'), 'bive-home-link');
+    fs.symlinkSync(biveHome, link);
+    manager = createWorktreeManager({ biveHome: link });
+    const run = await createRun();
+    // git이 기록하는 실경로와 같다
+    expect(run.worktreePath).toBe(
+      path.join(fs.realpathSync(biveHome), 'work', projectId, 'worktrees', 'EXE-001'),
+    );
+    await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
+    // 링크 경로로 적은 참조도 받는다
+    const viaLink = {
+      ...run,
+      worktreePath: path.join(link, 'work', projectId, 'worktrees', 'EXE-001'),
+    };
+    await manager.preserve(viaLink);
+    fs.rmSync(path.join(biveHome, 'work'), { recursive: true, force: true });
+
+    await manager.removeWorktree(viaLink);
+
+    expect(worktreeCount(repo)).toBe(1);
+    userGit(repo, 'checkout', '-q', run.branch);
+  });
+
+  it('BIVE 경로 자리에 놓인 심볼릭 링크를 따라가 사용자 워크트리를 지우거나 잠그지 않는다', async () => {
+    const run1 = await createRun('EXE-001');
+    const run2 = await createRun('EXE-002');
+    await agentChange(run1, 'src/lib/added.ts', 'export const added = 1;\n');
+    const userWorktree = path.join(tempDir('uw.'), 'user-wt');
+    userGit(repo, 'worktree', 'add', '-q', '-b', 'user/feature', userWorktree);
+    write(userWorktree, 'src/lib/user-wip.ts', '사용자 미커밋 작업\n');
+    const slot = path.join(biveHome, 'work', projectId, 'merges', 'EXE-002');
+    fs.mkdirSync(path.dirname(slot), { recursive: true });
+    fs.symlinkSync(userWorktree, slot);
+    const before = worktreeCount(repo);
+
+    // preserve는 남은 임시 병합 워크트리를 먼저 지운다
+    await manager.preserve(run2);
+
+    expect(read(userWorktree, 'src/lib/user-wip.ts')).toBe('사용자 미커밋 작업\n');
+    expect(worktreeCount(repo)).toBe(before);
+    const userRecord = userGit(repo, 'worktree', 'list', '--porcelain', '-z')
+      .split('\0\0')
+      .find((record) => record.startsWith(`worktree ${fs.realpathSync(userWorktree)}\0`));
+    expect(userRecord).toBeDefined();
+    expect(userRecord?.split('\0').some((field) => field.startsWith('locked'))).toBe(false);
+    // 링크만 지웠다
+    expect(fs.existsSync(slot)).toBe(false);
+    expect(fs.existsSync(run1.worktreePath)).toBe(true);
   });
 });

@@ -196,6 +196,11 @@ export type MergeResult =
       files?: string[];
       /** 검사 결과의 사유 (`check_failed` · `check_error`) */
       checkDetail?: string;
+      /**
+       * 기준 브랜치 대신 병합 커밋으로 옮겨진 브랜치 (`base_update_failed`, 갱신하는 순간 프로젝트 폴더의
+       * 체크아웃이 바뀐 경우). BIVE는 되돌리지 않으므로 사람이 `previousCommit`으로 되돌릴 때 쓴다
+       */
+      movedRef?: { ref: string; previousCommit: string | null; commit: string };
     };
 
 export interface PreserveResult {
@@ -249,10 +254,72 @@ const realOrResolved = (target: string): string => {
   }
 };
 
-const samePath = (a: string, b: string): boolean => {
-  const left = realOrResolved(a);
-  const right = realOrResolved(b);
-  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+const comparable = (value: string): string =>
+  process.platform === 'win32' ? value.toLowerCase() : value;
+
+/** 링크를 따라간 실경로로 비교한다. 읽기 판단(체크아웃 위치 등)에만 쓴다. */
+const samePath = (a: string, b: string): boolean =>
+  comparable(realOrResolved(a)) === comparable(realOrResolved(b));
+
+/**
+ * git이 기록한 경로 문자열과 그대로 비교한다(링크를 따라가지 않음). BIVE가 지우거나 잠글 등록을 고를 때 쓴다:
+ * BIVE 경로 자리에 놓인 심볼릭 링크가 사용자 워크트리를 가리켜도 그 등록이 골라지지 않게 한다.
+ */
+const sameRecordedPath = (recorded: string, target: string): boolean =>
+  comparable(path.resolve(recorded)) === comparable(path.resolve(target));
+
+/**
+ * 실경로로 바꾼다. 아직 없는 끝부분은 존재하는 가장 가까운 상위의 실경로 + 나머지로 만든다
+ * (`$BIVE_HOME`이 링크여도 git이 기록하는 실경로와 BIVE가 만드는 경로가 같도록).
+ */
+const realpathLoose = (target: string): string => {
+  const absolute = path.resolve(target);
+  const rest: string[] = [];
+  let current = absolute;
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync.native(current), ...rest);
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return absolute;
+      rest.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+};
+
+const isSymbolicLink = (target: string): boolean => {
+  try {
+    return fs.lstatSync(target).isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * 저장소(프로젝트 폴더 실경로)별 작업 대기열. 같은 저장소의 `merge` · `preserve` · `removeWorktree`를 차례로 실행한다.
+ * `git merge`는 색인을 쓴 뒤에야 참조를 비교 후 교체하므로, 겹친 병합이 늦은 쪽의 참조 갱신 실패와 상관없이
+ * 프로젝트 폴더 색인 · 작업 트리를 덮어쓸 수 있다. 오케스트레이터는 사용자당 프로세스 1개(pid 잠금, ADR-041)라
+ * 프로세스 안 대기열로 충분하고, 관리자 인스턴스가 여럿이어도 같은 대기열을 쓰도록 모듈에 둔다.
+ */
+const repoQueues = new Map<string, Promise<void>>();
+
+const serializeByRepo = async <T>(repoPath: string, task: () => Promise<T>): Promise<T> => {
+  const key = comparable(repoPath);
+  const previous = repoQueues.get(key) ?? Promise.resolve();
+  let release = (): void => undefined;
+  const done = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => done);
+  repoQueues.set(key, tail);
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+    if (repoQueues.get(key) === tail) repoQueues.delete(key);
+  }
 };
 
 /** `status --porcelain=v1 -z` 출력의 파일 이름들 (이름 바꾸기의 원래 이름은 뺀다). */
@@ -309,7 +376,9 @@ const errorText = (error: unknown): string =>
  * 실행 브랜치 · 워크트리 · 병합 관리자를 만든다.
  */
 export const createWorktreeManager = (options: WorktreeManagerOptions): WorktreeManager => {
-  const biveHome = path.resolve(options.biveHome);
+  // 실경로로 정규화한다: git은 워크트리 경로를 실경로로 기록하므로, `$BIVE_HOME`이 링크면 폴더가 지워진 뒤
+  // 기록된 경로와 BIVE가 만든 경로가 달라 등록을 찾지 못한다
+  const biveHome = realpathLoose(options.biveHome);
   const git = options.git ?? createGitRunner();
 
   const out = async (cwd: string, args: readonly string[]): Promise<string> =>
@@ -390,7 +459,12 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
   const prepareRef = async (run: RunGitRef): Promise<RunGitRef> => {
     const branch = runBranchName(run.runDisplayId);
     const worktreePath = runWorktreePath(biveHome, run.projectId, run.runDisplayId);
-    if (run.branch !== branch || path.resolve(run.worktreePath) !== worktreePath) {
+    // 상위 폴더만 실경로로 바꿔 비교한다(링크인 `$BIVE_HOME`으로 적은 경로는 받되, 마지막 구성 요소의 링크는 따라가지 않음)
+    const given = path.join(
+      realpathLoose(path.dirname(run.worktreePath)),
+      path.basename(run.worktreePath),
+    );
+    if (run.branch !== branch || comparable(given) !== comparable(worktreePath)) {
       throw new GitWorktreeError(
         'invalid_input',
         `실행 참조의 브랜치 · 워크트리가 규칙과 다릅니다: ${run.branch} · ${run.worktreePath}`,
@@ -410,10 +484,15 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
   /**
    * BIVE가 만든 워크트리 하나를 지운다. 잠긴 등록 · 폴더가 이미 지워진 등록(`--force --force`는 둘 다 지운다)과
    * 등록 없이 폴더만 남은 경우도 정리한다. 사용자의 다른 워크트리 정보를 지우는 `git worktree prune`은 쓰지 않는다.
+   * 그 자리가 심볼릭 링크면 git에 넘기지 않고 링크만 지운다(git은 링크를 따라가 가리키는 워크트리를 지운다).
+   * 등록은 git이 기록한 경로 문자열과 정확히 같은 것만 지운다.
    */
   const removeOwnWorktree = async (repoPath: string, target: string): Promise<void> => {
+    if (isSymbolicLink(target)) {
+      fs.unlinkSync(target);
+    }
     const registered = (await listWorktrees(repoPath)).some((entry) =>
-      samePath(entry.path, target),
+      sameRecordedPath(entry.path, target),
     );
     if (registered) {
       await git(['worktree', 'remove', '--force', '--force', target], { cwd: repoPath });
@@ -524,13 +603,24 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
       `Bive-Branch: ${run.branch}`,
     ].join('\n');
 
+  /** 같은 저장소의 다른 병합 · 보존 · 제거가 끝난 뒤에 실행한다 (`serializeByRepo`). */
   const merge = async (input: RunGitRef, mergeOptions: MergeOptions): Promise<MergeResult> => {
     const run = await prepareRef(input);
+    return serializeByRepo(run.repoPath, () => mergeSerialized(run, mergeOptions));
+  };
+
+  const mergeSerialized = async (
+    run: RunGitRef,
+    mergeOptions: MergeOptions,
+  ): Promise<MergeResult> => {
     let headCommit: string | null = null;
     const fail = (
       reason: MergeFailureReason,
       message: string,
-      extra: { files?: string[]; checkDetail?: string } = {},
+      extra: Pick<
+        Extract<MergeResult, { status: 'failed' }>,
+        'files' | 'checkDetail' | 'movedRef'
+      > = {},
     ): MergeResult => ({
       status: 'failed',
       reason,
@@ -689,6 +779,17 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
       // 기준 브랜치가 실제로 병합 커밋을 가리킬 때만 성공이다
       // (fast-forward가 그 순간 바뀐 다른 브랜치에 적용됐다면 기준 브랜치는 그대로라 여기서 드러난다)
       if ((await resolveCommit(run.repoPath, baseRef)) !== mergeCommit) {
+        // 지금 HEAD 브랜치가 병합 커밋을 가리키면 BIVE가 그 브랜치를 옮긴 것이다. 되돌리지 않고 복구 정보를 남긴다
+        const head = fastForward ? await projectHead(run.repoPath) : '';
+        const headNow = head === '' ? null : await resolveCommit(run.repoPath, head);
+        if (head !== '' && headNow === mergeCommit) {
+          const previousCommit = await resolveCommit(run.repoPath, `${head}@{1}`);
+          return fail(
+            'base_update_failed',
+            `기준 브랜치 대신 ${head}가 병합 커밋으로 옮겨졌습니다 (이전 커밋 ${previousCommit ?? '알 수 없음'}). 되돌리지 않았습니다`,
+            { movedRef: { ref: head, previousCommit, commit: mergeCommit } },
+          );
+        }
         return fail(
           'base_update_failed',
           '기준 브랜치 갱신을 확인하지 못했습니다 (갱신하는 순간 프로젝트 폴더의 체크아웃이 바뀌었을 수 있음)',
@@ -714,17 +815,26 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
     }
   };
 
+  // 보존 · 제거는 병합용 임시 워크트리를 지우므로 같은 저장소의 병합과 겹치지 않게 같은 대기열을 쓴다.
+  // `create` · `commit`은 프로젝트 폴더 색인 · 작업 트리와 다른 실행의 워크트리를 건드리지 않으므로 대기열에 넣지 않는다
+  // (병합 검사가 오래 걸리는 동안 새 실행 시작을 막지 않으려고)
   const preserve = async (input: RunGitRef): Promise<PreserveResult> => {
     const run = await prepareRef(input);
+    return serializeByRepo(run.repoPath, () => preserveSerialized(run));
+  };
+
+  const preserveSerialized = async (run: RunGitRef): Promise<PreserveResult> => {
     const headCommit = await resolveCommit(run.repoPath, `refs/heads/${run.branch}`);
     if (headCommit === null) {
       throw new GitWorktreeError('branch_missing', `실행 브랜치가 없습니다: ${run.branch}`);
     }
     await removeMergeWorktree(run);
     const entry = (await listWorktrees(run.repoPath)).find((item) =>
-      samePath(item.path, run.worktreePath),
+      sameRecordedPath(item.path, run.worktreePath),
     );
-    const present = entry !== undefined && existsPath(run.worktreePath);
+    // 그 자리가 링크면 BIVE 워크트리가 아니다(링크를 따라가 다른 워크트리를 잠그지 않는다)
+    const present =
+      entry !== undefined && existsPath(run.worktreePath) && !isSymbolicLink(run.worktreePath);
     if (present && !entry.locked) {
       await git(
         ['worktree', 'lock', '--reason', `BIVE 실행 ${run.runDisplayId} 보존`, run.worktreePath],
@@ -743,10 +853,12 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
 
   const removeWorktree = async (input: RunGitRef): Promise<void> => {
     const run = await prepareRef(input);
-    await removeMergeWorktree(run);
-    // 잠금(`preserve`) · 미추적 파일(node_modules 등)이 있어도, 폴더가 이미 지워져 등록만 남았어도 지운다.
-    // 브랜치는 남는다(등록이 사라져야 사람이 그 브랜치를 체크아웃할 수 있다)
-    await removeOwnWorktree(run.repoPath, run.worktreePath);
+    await serializeByRepo(run.repoPath, async () => {
+      await removeMergeWorktree(run);
+      // 잠금(`preserve`) · 미추적 파일(node_modules 등)이 있어도, 폴더가 이미 지워져 등록만 남았어도 지운다.
+      // 브랜치는 남는다(등록이 사라져야 사람이 그 브랜치를 체크아웃할 수 있다)
+      await removeOwnWorktree(run.repoPath, run.worktreePath);
+    });
   };
 
   return { create, commit, merge, preserve, removeWorktree };
