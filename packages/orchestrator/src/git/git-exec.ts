@@ -20,6 +20,7 @@ const MAX_BUFFER_BYTES = 64 * 1024 * 1024;
  * 모든 호출 앞에 붙이는 설정.
  * - 커밋 주체를 BIVE로 고정한다(저장소 · 전역 설정의 `user.*` 무시)
  * - 훅을 끈다: 프로젝트 훅이 BIVE 커밋 · 병합을 막거나 임의 코드를 돌리지 않게 한다. 장치 파일 아래 경로라 훅 파일이 있을 수 없다
+ * - 같은 이유로 저장소 설정의 fsmonitor 스크립트를 끈다
  * - 서명 · 자동 정리 · 확인 프롬프트를 끈다(대화형 입력 없이 끝나야 한다)
  */
 export const gitConfigArgs = (): string[] => [
@@ -29,6 +30,8 @@ export const gitConfigArgs = (): string[] => [
   `user.email=${BIVE_GIT_IDENTITY.email}`,
   '-c',
   `core.hooksPath=${os.devNull}`,
+  '-c',
+  'core.fsmonitor=false',
   '-c',
   'commit.gpgsign=false',
   '-c',

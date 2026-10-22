@@ -9,7 +9,7 @@ import path from 'node:path';
 import { createUlidGenerator } from '@bive/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createGitRunner } from '../src/git/git-exec.js';
+import { createGitRunner, GitCommandError, type GitRunner } from '../src/git/git-exec.js';
 import {
   createWorktreeManager,
   GitWorktreeError,
@@ -23,13 +23,13 @@ const FIXTURE_REL = 'fixtures/sample-next-app';
 const USER = ['-c', 'user.name=사용자', '-c', 'user.email=user@example.com'];
 const newId = createUlidGenerator();
 
-/** 사람(사용자) 쪽 git. 훅은 끈다(훅 시험은 BIVE 쪽만 본다). */
+/** 사람(사용자) 쪽 git. 훅 · fsmonitor는 끈다(그 시험은 BIVE 쪽만 본다). */
 const userGit = (cwd: string, ...args: string[]): string =>
-  execFileSync('git', [...USER, '-c', `core.hooksPath=${os.devNull}`, ...args], {
-    cwd,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
+  execFileSync(
+    'git',
+    [...USER, '-c', `core.hooksPath=${os.devNull}`, '-c', 'core.fsmonitor=false', ...args],
+    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  ).trim();
 
 const temps: string[] = [];
 const tempDir = (prefix: string): string => {
@@ -77,6 +77,11 @@ const parents = (repo: string, commit: string): string[] =>
   userGit(repo, 'rev-list', '--parents', '-n', '1', commit).split(' ').slice(1);
 const countCommits = (repo: string, range: string): number =>
   Number(userGit(repo, 'rev-list', '--count', range));
+/** 등록된 워크트리 수 (폴더가 지워진 등록 포함). */
+const worktreeCount = (repo: string): number =>
+  userGit(repo, 'worktree', 'list', '--porcelain')
+    .split('\n')
+    .filter((line) => line.startsWith('worktree ')).length;
 const registeredWorktrees = (repo: string): string[] =>
   userGit(repo, 'worktree', 'list', '--porcelain')
     .split('\n')
@@ -112,6 +117,14 @@ const agentChange = async (run: RunGitRef, rel: string, content: string): Promis
   const result = await manager.commit(run, `구현 단계 ${rel}`);
   expect(result.created).toBe(true);
   return result.commit;
+};
+
+/** 사용자가 프로젝트 폴더의 현재 브랜치에 커밋한다. 새 커밋을 돌려준다. */
+const userCommit = (rel: string, content: string): string => {
+  write(repo, rel, content);
+  userGit(repo, 'add', '--all');
+  userGit(repo, 'commit', '-q', '-m', `사용자 변경 ${rel}`);
+  return userGit(repo, 'rev-parse', 'HEAD');
 };
 
 const passCheck: MergeCheck = () => Promise.resolve({ passed: true });
@@ -234,7 +247,7 @@ describe('커밋은 오케스트레이터 함수로만', () => {
     expect(tip(repo)).toBe(run.baseCommit);
   });
 
-  it('부모 환경의 git 변수 · 프로젝트 훅이 커밋 주체 · 결과를 바꾸지 못한다', async () => {
+  it('부모 환경의 git 변수 · 프로젝트 훅 · fsmonitor 스크립트가 커밋 주체 · 결과를 바꾸지 못한다', async () => {
     const hooks = path.join(repo, '.git', 'hooks');
     const marker = path.join(tempDir('hook.'), 'ran');
     for (const hook of ['pre-commit', 'commit-msg', 'post-commit', 'post-checkout', 'post-merge']) {
@@ -242,6 +255,11 @@ describe('커밋은 오케스트레이터 함수로만', () => {
         mode: 0o755,
       });
     }
+    const fsmonitor = path.join(repo, '.git', 'fsmonitor.sh');
+    fs.writeFileSync(fsmonitor, `#!/bin/sh\necho fsmonitor >> "${marker}"\nexit 1\n`, {
+      mode: 0o755,
+    });
+    userGit(repo, 'config', 'core.fsmonitor', fsmonitor);
     manager = createWorktreeManager({
       biveHome,
       git: createGitRunner({
@@ -530,6 +548,160 @@ describe('merge(run)', () => {
     });
     expect(tip(repo)).toBe(run.baseCommit);
   });
+
+  it('검사 도중 사용자가 기준 브랜치에서 다른 브랜치로 옮기면 참조만 갱신하고 그 브랜치는 건드리지 않는다', async () => {
+    const run = await createRun();
+    const head = await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
+    const userTip = userCommit('src/lib/user-change.ts', 'export const user = 1;\n');
+
+    const result = await manager.merge(run, {
+      check: () => {
+        userGit(repo, 'checkout', '-q', '-b', 'feature/x');
+        return Promise.resolve({ passed: true });
+      },
+    });
+
+    expect(result).toMatchObject({ status: 'merged', rechecked: true, baseUpdate: 'update_ref' });
+    if (result.status !== 'merged') throw new Error('merged가 아님');
+    expect(tip(repo)).toBe(result.mergeCommit);
+    expect(parents(repo, result.mergeCommit)).toEqual([userTip, head]);
+    // 사용자가 옮겨 간 브랜치 · 작업 트리는 그대로
+    expect(tip(repo, 'feature/x')).toBe(userTip);
+    expect(userGit(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/feature/x');
+    expect(fs.existsSync(path.join(repo, 'src/lib/added.ts'))).toBe(false);
+    expect(userGit(repo, 'status', '--porcelain')).toBe('');
+  });
+
+  it('검사 도중 사용자가 기준 브랜치를 체크아웃하면 fast-forward로 작업 트리까지 갱신한다', async () => {
+    const run = await createRun();
+    const head = await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
+    const userTip = userCommit('src/lib/user-change.ts', 'export const user = 1;\n');
+    userGit(repo, 'checkout', '-q', '-b', 'feature/y');
+
+    const result = await manager.merge(run, {
+      check: () => {
+        userGit(repo, 'checkout', '-q', 'main');
+        return Promise.resolve({ passed: true });
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: 'merged',
+      rechecked: true,
+      baseUpdate: 'checkout_fast_forward',
+    });
+    if (result.status !== 'merged') throw new Error('merged가 아님');
+    expect(tip(repo)).toBe(result.mergeCommit);
+    expect(parents(repo, result.mergeCommit)).toEqual([userTip, head]);
+    expect(userGit(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    // 참조만 옮겨 작업 트리 · 색인이 낡는 일이 없다
+    expect(read(repo, 'src/lib/added.ts')).toBe('export const added = 1;\n');
+    expect(userGit(repo, 'status', '--porcelain')).toBe('');
+  });
+
+  it('검사 도중 기준 브랜치가 다른 워크트리에 체크아웃되면 failed', async () => {
+    const run = await createRun();
+    await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
+    const userTip = userCommit('src/lib/user-change.ts', 'export const user = 1;\n');
+    userGit(repo, 'checkout', '-q', '-b', 'feature/z');
+    const other = path.join(tempDir('ow.'), 'main-wt');
+
+    const result = await manager.merge(run, {
+      check: () => {
+        userGit(repo, 'worktree', 'add', '-q', other, 'main');
+        return Promise.resolve({ passed: true });
+      },
+    });
+
+    expect(result).toMatchObject({ status: 'failed', reason: 'base_checked_out_elsewhere' });
+    expect(tip(repo)).toBe(userTip);
+    expect(userGit(other, 'status', '--porcelain')).toBe('');
+  });
+
+  it('프로젝트 폴더의 무시된 파일(로컬 DB)을 덮어쓰지 않고 failed', async () => {
+    write(repo, 'prisma/dev.db', '사용자 로컬 DB 원본');
+    expect(userGit(repo, 'check-ignore', 'prisma/dev.db')).toBe('prisma/dev.db');
+    const run = await createRun();
+    // 에이전트는 파일 도구로 `.gitignore`를 고칠 수 있다
+    write(
+      run.worktreePath,
+      '.gitignore',
+      read(run.worktreePath, '.gitignore').replace(/^\*\.db\n/mu, ''),
+    );
+    write(run.worktreePath, 'prisma/dev.db', '에이전트가 만든 DB');
+    const head = await manager.commit(run, '구현 단계');
+    expect(userGit(repo, 'show', '--name-only', '--format=', head.commit).split('\n')).toContain(
+      'prisma/dev.db',
+    );
+
+    const result = await manager.merge(run, { check: passCheck });
+
+    expect(result).toMatchObject({ status: 'failed', reason: 'base_update_failed' });
+    expect(read(repo, 'prisma/dev.db')).toBe('사용자 로컬 DB 원본');
+    expect(tip(repo)).toBe(run.baseCommit);
+    expect(runBranches(repo)).toEqual(['bive/run-EXE-001']);
+  });
+
+  it('덮어쓸 미추적 파일이 있으면 failed (base_update_failed)', async () => {
+    write(repo, 'notes/memo.txt', '사용자 메모\n');
+    const run = await createRun();
+    await agentChange(run, 'notes/memo.txt', '에이전트 메모\n');
+
+    const result = await manager.merge(run, { check: passCheck });
+
+    expect(result).toMatchObject({ status: 'failed', reason: 'base_update_failed' });
+    expect(read(repo, 'notes/memo.txt')).toBe('사용자 메모\n');
+    expect(tip(repo)).toBe(run.baseCommit);
+  });
+
+  it('기준 브랜치가 체크아웃돼 있지 않아도 프로젝트 폴더가 더러우면 failed', async () => {
+    const run = await createRun();
+    await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
+    userGit(repo, 'checkout', '-q', '-b', 'feature/user');
+    write(repo, 'package.json', `${read(repo, 'package.json')}\n`);
+
+    const result = await manager.merge(run, { check: passCheck });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'project_dirty',
+      files: ['package.json'],
+    });
+    expect(tip(repo)).toBe(run.baseCommit);
+  });
+
+  it('git 명령이 실패하면 git_error로 돌려주고 기준 브랜치 · 실행 브랜치는 그대로', async () => {
+    const real = createGitRunner();
+    const failing: GitRunner = (args, options) =>
+      args[0] === 'merge-tree'
+        ? Promise.reject(new GitCommandError(args, { stdout: '', stderr: '손상', code: 128 }))
+        : real(args, options);
+    const run = await createRun();
+    const head = await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
+
+    const result = await createWorktreeManager({ biveHome, git: failing }).merge(run, {
+      check: passCheck,
+    });
+
+    expect(result).toMatchObject({ status: 'failed', reason: 'git_error', headCommit: head });
+    expect(tip(repo)).toBe(run.baseCommit);
+    expect(tip(repo, run.branch)).toBe(head);
+  });
+
+  it('지난 병합이 남긴 임시 워크트리 등록(잠김 · 폴더 삭제)이 있어도 병합한다', async () => {
+    const run = await createRun();
+    await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
+    const leftover = path.join(biveHome, 'work', projectId, 'merges', 'EXE-001');
+    fs.mkdirSync(path.dirname(leftover), { recursive: true });
+    userGit(repo, 'worktree', 'add', '-q', '--detach', leftover, 'main');
+    userGit(repo, 'worktree', 'lock', '--reason', 'initializing', leftover);
+    fs.rmSync(leftover, { recursive: true, force: true });
+
+    const result = await manager.merge(run, { check: passCheck });
+
+    expect(result.status).toBe('merged');
+    expect(worktreeCount(repo)).toBe(2);
+  });
 });
 
 describe('preserve(run)', () => {
@@ -572,5 +744,23 @@ describe('preserve(run)', () => {
     expect(runBranches(repo)).toEqual(['bive/run-EXE-001']);
     expect(tip(repo, run.branch)).toBe(head);
     expect(await manager.preserve(run)).toMatchObject({ worktreePath: null, headCommit: head });
+  });
+
+  it('보존 뒤 $BIVE_HOME 폴더가 지워져도 removeWorktree가 잠긴 등록을 지워 브랜치를 체크아웃할 수 있다', async () => {
+    const run = await createRun();
+    const head = await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
+    await manager.preserve(run);
+    fs.rmSync(path.join(biveHome, 'work'), { recursive: true, force: true });
+    expect(worktreeCount(repo)).toBe(2);
+    // 잠긴 등록이 남아 있으면 git이 그 브랜치를 '사용 중'으로 본다
+    expect(() => userGit(repo, 'checkout', '-q', run.branch)).toThrow();
+    expect(await manager.preserve(run)).toMatchObject({ worktreePath: null, headCommit: head });
+
+    await manager.removeWorktree(run);
+
+    expect(worktreeCount(repo)).toBe(1);
+    expect(runBranches(repo)).toEqual(['bive/run-EXE-001']);
+    userGit(repo, 'checkout', '-q', run.branch);
+    expect(read(repo, 'src/lib/added.ts')).toBe('export const added = 1;\n');
   });
 });

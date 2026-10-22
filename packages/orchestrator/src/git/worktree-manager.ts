@@ -164,7 +164,10 @@ export type MergeFailureReason =
   | 'check_error'
   /** 병합하는 동안 기준 브랜치가 다시 바뀌었다 */
   | 'base_changed'
-  /** 기준 브랜치 갱신을 git이 거부했다 (예: 덮어쓸 미추적 파일) */
+  /**
+   * 기준 브랜치를 갱신하지 못했거나 갱신을 확인하지 못했다
+   * (예: 덮어쓸 미추적 · 무시된 파일, 갱신 직전 · 순간의 프로젝트 폴더 체크아웃 변경)
+   */
   | 'base_update_failed'
   /** 그 밖의 git 실패 */
   | 'git_error';
@@ -213,7 +216,9 @@ export interface WorktreeManager {
   merge(run: RunGitRef, options: MergeOptions): Promise<MergeResult>;
   /** 실패 · 예산 초과 종료: 병합하지 않고 브랜치 · 워크트리를 남긴다. */
   preserve(run: RunGitRef): Promise<PreserveResult>;
-  /** 실행 워크트리만 지운다. 브랜치는 남긴다. 언제 부를지는 실행 엔진이 정한다. */
+  /**
+   * 실행 워크트리만 지운다(잠긴 등록 · 폴더가 지워져 남은 등록 포함). 브랜치는 남긴다. 언제 부를지는 실행 엔진이 정한다.
+   */
   removeWorktree(run: RunGitRef): Promise<void>;
 }
 
@@ -402,18 +407,38 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
     return { ...run, repoPath, worktreePath };
   };
 
-  /** 병합용 임시 워크트리를 지운다. 등록만 남았거나 폴더만 남은 경우도 정리한다. */
-  const removeMergeWorktree = async (run: RunGitRef): Promise<void> => {
-    const target = mergeWorktreePath(biveHome, run.projectId, run.runDisplayId);
-    const registered = (await listWorktrees(run.repoPath)).some((entry) =>
+  /**
+   * BIVE가 만든 워크트리 하나를 지운다. 잠긴 등록 · 폴더가 이미 지워진 등록(`--force --force`는 둘 다 지운다)과
+   * 등록 없이 폴더만 남은 경우도 정리한다. 사용자의 다른 워크트리 정보를 지우는 `git worktree prune`은 쓰지 않는다.
+   */
+  const removeOwnWorktree = async (repoPath: string, target: string): Promise<void> => {
+    const registered = (await listWorktrees(repoPath)).some((entry) =>
       samePath(entry.path, target),
     );
-    if (registered && existsPath(target)) {
-      await git(['worktree', 'remove', '--force', '--force', target], { cwd: run.repoPath });
+    if (registered) {
+      await git(['worktree', 'remove', '--force', '--force', target], { cwd: repoPath });
     }
-    // 폴더만 남은 경우 (등록이 없으면 git이 지우지 않는다). 등록만 남은 경우는 다음 `add -f`가 덮어쓴다
     fs.rmSync(target, { recursive: true, force: true });
   };
+
+  /** 병합용 임시 워크트리를 지운다. */
+  const removeMergeWorktree = (run: RunGitRef): Promise<void> =>
+    removeOwnWorktree(run.repoPath, mergeWorktreePath(biveHome, run.projectId, run.runDisplayId));
+
+  /** 기준 브랜치가 체크아웃된 곳: 프로젝트 폴더 · 다른 워크트리 · 없음 (`worktree list`로 매번 새로 읽는다). */
+  const locateBase = async (
+    run: RunGitRef,
+    baseRef: string,
+  ): Promise<{ kind: 'project' } | { kind: 'elsewhere'; path: string } | { kind: 'none' }> => {
+    const holders = (await listWorktrees(run.repoPath)).filter((entry) => entry.branch === baseRef);
+    const elsewhere = holders.find((entry) => !samePath(entry.path, run.repoPath));
+    if (elsewhere !== undefined) return { kind: 'elsewhere', path: elsewhere.path };
+    return holders.length > 0 ? { kind: 'project' } : { kind: 'none' };
+  };
+
+  /** 프로젝트 폴더의 HEAD가 가리키는 참조 (분리된 HEAD면 빈 문자열). */
+  const projectHead = async (repoPath: string): Promise<string> =>
+    (await git(['symbolic-ref', '-q', 'HEAD'], { cwd: repoPath, okCodes: [0, 1] })).stdout.trim();
 
   const create = async (input: CreateRunInput): Promise<RunGitRef> => {
     const branch = runBranchName(input.runDisplayId);
@@ -543,17 +568,14 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
         return fail('base_branch_missing', `기준 브랜치가 없습니다: ${run.baseBranch}`);
       }
 
-      const checkouts = (await listWorktrees(run.repoPath)).filter(
-        (entry) => entry.branch === baseRef,
-      );
-      const elsewhere = checkouts.find((entry) => !samePath(entry.path, run.repoPath));
-      if (elsewhere !== undefined) {
+      // 먼저 한 번 보고(검사 전에 빨리 실패), 갱신 직전에 다시 본다(검사하는 동안 체크아웃이 바뀔 수 있다)
+      const initialLocation = await locateBase(run, baseRef);
+      if (initialLocation.kind === 'elsewhere') {
         return fail(
           'base_checked_out_elsewhere',
-          `기준 브랜치가 다른 워크트리에 체크아웃돼 있습니다: ${elsewhere.path}`,
+          `기준 브랜치가 다른 워크트리에 체크아웃돼 있습니다: ${initialLocation.path}`,
         );
       }
-      const checkedOutInProject = checkouts.length > 0;
 
       if (await isAncestor(run.repoPath, headCommit, baseTip)) {
         return fail('no_changes', '실행 브랜치에 병합할 커밋이 없습니다');
@@ -583,7 +605,7 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
       await removeMergeWorktree(run);
       fs.mkdirSync(path.dirname(mergePath), { recursive: true, mode: 0o700 });
       mergeWorktreeCreated = true;
-      await git(['worktree', 'add', '--detach', '-f', mergePath, baseTip], { cwd: run.repoPath });
+      await git(['worktree', 'add', '--detach', mergePath, baseTip], { cwd: run.repoPath });
       await git(
         ['merge', '--no-ff', '--no-edit', '--no-verify', '-m', mergeMessage(run), headCommit],
         {
@@ -616,7 +638,7 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
         }
       }
 
-      // 갱신 직전 다시 확인한다: 검사하는 동안 사용자가 커밋하거나 파일을 고쳤을 수 있다
+      // 갱신 직전 다시 확인한다: 검사하는 동안 사용자가 커밋하거나 파일을 고치거나 브랜치를 바꿨을 수 있다
       if ((await resolveCommit(run.repoPath, baseRef)) !== baseTip) {
         return fail('base_changed', '병합하는 동안 기준 브랜치가 바뀌었습니다');
       }
@@ -626,11 +648,29 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
           files: dirtyNow,
         });
       }
+      const location = await locateBase(run, baseRef);
+      if (location.kind === 'elsewhere') {
+        return fail(
+          'base_checked_out_elsewhere',
+          `기준 브랜치가 다른 워크트리에 체크아웃돼 있습니다: ${location.path}`,
+        );
+      }
+      const fastForward = location.kind === 'project';
+      // fast-forward는 HEAD에 적용되므로 HEAD가 기준 브랜치인지 직접 확인한다
+      if (fastForward && (await projectHead(run.repoPath)) !== baseRef) {
+        return fail(
+          'base_update_failed',
+          '프로젝트 폴더의 체크아웃이 바뀌는 중이라 기준 브랜치를 갱신하지 않았습니다',
+        );
+      }
 
       try {
-        if (checkedOutInProject) {
-          // 작업 트리 · 색인 · 참조를 함께 옮긴다. 병합 커밋이 HEAD의 자손이 아니면 git이 거부한다
-          await git(['merge', '--ff-only', '--quiet', mergeCommit], { cwd: run.repoPath });
+        if (fastForward) {
+          // 작업 트리 · 색인 · 참조를 함께 옮긴다. 병합 커밋이 HEAD의 자손이 아니면 git이 거부하고,
+          // 덮어쓸 미추적 파일이나 무시된 파일(예: 로컬 DB)이 있어도 거부한다(`merge` 기본값은 무시된 파일 덮어쓰기)
+          await git(['merge', '--ff-only', '--no-overwrite-ignore', '--quiet', mergeCommit], {
+            cwd: run.repoPath,
+          });
         } else {
           // 이전 값이 baseTip일 때만 바꾼다 (비교 후 교체)
           await git(
@@ -646,13 +686,22 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
           : fail('base_update_failed', `기준 브랜치를 갱신하지 못했습니다: ${error.message}`);
       }
 
+      // 기준 브랜치가 실제로 병합 커밋을 가리킬 때만 성공이다
+      // (fast-forward가 그 순간 바뀐 다른 브랜치에 적용됐다면 기준 브랜치는 그대로라 여기서 드러난다)
+      if ((await resolveCommit(run.repoPath, baseRef)) !== mergeCommit) {
+        return fail(
+          'base_update_failed',
+          '기준 브랜치 갱신을 확인하지 못했습니다 (갱신하는 순간 프로젝트 폴더의 체크아웃이 바뀌었을 수 있음)',
+        );
+      }
+
       return {
         status: 'merged',
         mergeCommit,
         previousBaseCommit: baseTip,
         headCommit,
         rechecked: baseChanged,
-        baseUpdate: checkedOutInProject ? 'checkout_fast_forward' : 'update_ref',
+        baseUpdate: fastForward ? 'checkout_fast_forward' : 'update_ref',
       };
     } catch (error) {
       if (error instanceof GitCommandError) return fail('git_error', error.message);
@@ -695,16 +744,9 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
   const removeWorktree = async (input: RunGitRef): Promise<void> => {
     const run = await prepareRef(input);
     await removeMergeWorktree(run);
-    const registered = (await listWorktrees(run.repoPath)).some((entry) =>
-      samePath(entry.path, run.worktreePath),
-    );
-    if (registered && existsPath(run.worktreePath)) {
-      // 잠금(`preserve`) · 미추적 파일(node_modules 등)이 있어도 지운다. 브랜치는 남는다
-      await git(['worktree', 'remove', '--force', '--force', run.worktreePath], {
-        cwd: run.repoPath,
-      });
-    }
-    fs.rmSync(run.worktreePath, { recursive: true, force: true });
+    // 잠금(`preserve`) · 미추적 파일(node_modules 등)이 있어도, 폴더가 이미 지워져 등록만 남았어도 지운다.
+    // 브랜치는 남는다(등록이 사라져야 사람이 그 브랜치를 체크아웃할 수 있다)
+    await removeOwnWorktree(run.repoPath, run.worktreePath);
   };
 
   return { create, commit, merge, preserve, removeWorktree };
