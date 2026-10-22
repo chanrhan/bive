@@ -16,11 +16,13 @@ import {
   Requirement,
   RoleSettings,
   Rule,
+  Run,
   RunLimits,
   Settings,
+  Step,
 } from './domain.js';
-import { AgentRole, JudgmentStatus, ProposalKind, ProposalState } from './enums.js';
-import { Ulid } from './id.js';
+import { AgentRole, JudgmentStatus, ProposalKind, ProposalState, RunStatus } from './enums.js';
+import { displayIdSchema, Ulid } from './id.js';
 
 export const JSONRPC_VERSION = '2.0';
 
@@ -475,6 +477,53 @@ export const SettingsValidateResult = z.discriminatedUnion('ok', [
 ]);
 export type SettingsValidateResult = z.infer<typeof SettingsValidateResult>;
 
+// ── 실행 (RUN-01, RUN-02, NFR-07, M1-12, ADR-061) ─────────────
+// - 모든 요청에 `projectId`가 필수다. 등록되지 않은 프로젝트 · 없는 실행은 -32004
+// - `run.create`는 실행 시작 확인이다. 주체 `author`를 싣고 사람(`human`)만 받는다(에이전트 주체 -32020).
+//   설정(실행 전체 한도 · M1 필수 역할의 모델 · 한도)이 비면 -32010(`data.reason = SETTINGS_INCOMPLETE`)이고
+//   실행을 만들지 않는다. 없는 규칙 -32004, 삭제된 규칙 -32009, 대상 규칙 중복 -32602
+// - 만든 실행은 유형 A · 상태 `waiting_approval` · 현재 단계 승인이고, 같은 트랜잭션에서 승인 기록
+//   `run_start`(대상 규칙 포함)를 1건 추가한다. 승인 단계의 판정과 이후 단계 진행은 오케스트레이터 엔진이 한다
+// - `run.get`의 `id`는 ULID 또는 표시 ID(`EXE-001`)
+
+/** 대상 규칙 ID 목록: 1개 이상, 중복 없음. 순서는 요청 그대로 저장한다. */
+export const RunTargetRuleIds = z
+  .array(Ulid)
+  .min(1)
+  .refine((ids) => new Set(ids).size === ids.length, '대상 규칙이 중복됐습니다');
+
+/** `run.create`: 실행 시작 확인 (RUN-01, RUN-02). 유형은 M1에서 A뿐이라 받지 않는다. */
+export const RunCreateParams = z.strictObject({
+  projectId: Ulid,
+  ruleIds: RunTargetRuleIds,
+  author: Author,
+});
+export type RunCreateParams = z.infer<typeof RunCreateParams>;
+
+/** 실행 1건과 단계 목록(파이프라인 순서 → 시도 번호 순). 세션 수치는 해당 이슈가 더한다. */
+export const RunDetailResult = z.strictObject({ run: Run, steps: z.array(Step) });
+export type RunDetailResult = z.infer<typeof RunDetailResult>;
+
+export const RunCreateResult = z.strictObject({
+  run: Run,
+  steps: z.array(Step),
+  approvalLog: ApprovalLogEntry,
+});
+export type RunCreateResult = z.infer<typeof RunCreateResult>;
+
+/** 실행을 가리키는 값: ULID 또는 표시 ID(`EXE-NNN`). */
+export const RunRef = z.union([Ulid, displayIdSchema('EXE')]);
+export type RunRef = z.infer<typeof RunRef>;
+
+export const RunGetParams = z.strictObject({ projectId: Ulid, id: RunRef });
+export type RunGetParams = z.infer<typeof RunGetParams>;
+
+/** `run.list`: 표시 ID 순(= 생성 순). `status`로 거른다 (생략하면 전부). */
+export const RunListParams = z.strictObject({ projectId: Ulid, status: RunStatus.optional() });
+export type RunListParams = z.infer<typeof RunListParams>;
+export const RunListResult = z.strictObject({ runs: z.array(Run) });
+export type RunListResult = z.infer<typeof RunListResult>;
+
 /**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
@@ -504,6 +553,9 @@ export const METHODS = {
   'settings.get': { params: SettingsGetParams, result: SettingsResult },
   'settings.update': { params: SettingsUpdateParams, result: SettingsResult },
   'settings.validateForRun': { params: SettingsValidateParams, result: SettingsValidateResult },
+  'run.create': { params: RunCreateParams, result: RunCreateResult },
+  'run.get': { params: RunGetParams, result: RunDetailResult },
+  'run.list': { params: RunListParams, result: RunListResult },
 } as const satisfies Record<string, MethodSpec>;
 
 export type MethodName = keyof typeof METHODS;

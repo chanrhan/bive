@@ -3,6 +3,7 @@ import { createProjectHandlers } from './project-handlers.js';
 import { createProposalHandlers } from './proposal-handlers.js';
 import { createRequirementHandlers } from './requirement-handlers.js';
 import { createRuleHandlers } from './rule-handlers.js';
+import { createRunHandlers } from './run-handlers.js';
 import type { MethodHandlers } from './server.js';
 import { createSettingsHandlers } from './settings-handlers.js';
 
@@ -44,4 +45,5 @@ export const createHandlers = ({
   ...createRuleHandlers({ biveHome }),
   ...createProposalHandlers({ biveHome, now }),
   ...createSettingsHandlers({ biveHome, now }),
+  ...createRunHandlers({ biveHome, now }),
 });
