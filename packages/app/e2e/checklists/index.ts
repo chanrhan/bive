@@ -2,6 +2,7 @@
 import { shellChecklist } from './scr-00-shell.js';
 import { projectStartChecklist } from './scr-01.js';
 import { requirementsChecklist } from './scr-02.js';
+import { rulesChecklist } from './scr-03.js';
 import { settingsChecklist } from './scr-21.js';
 import type { ScreenChecklist, ScreenId } from './types.js';
 
@@ -9,5 +10,6 @@ export const CHECKLISTS: Partial<Record<ScreenId, ScreenChecklist>> = {
   'SCR-00': shellChecklist,
   'SCR-01': projectStartChecklist,
   'SCR-02': requirementsChecklist,
+  'SCR-03': rulesChecklist,
   'SCR-21': settingsChecklist,
 };

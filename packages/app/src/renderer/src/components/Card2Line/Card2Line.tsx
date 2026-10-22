@@ -22,6 +22,8 @@ export interface CardData {
   title: string;
   /** 2줄: 표시 ID (예: 규칙 표시 ID) */
   id: string;
+  /** 2줄: ID 다음 보조 문구 (화면별 정의, 예: 규칙의 WHEN 조건 · ADR-060). 없으면 미표시 */
+  note?: string;
   /** 판정 · 변이 상태. 정상은 1줄 앞 흐린 점, 예외는 2줄째 예외가 된다 */
   statuses?: readonly BadgeStatus[];
   /** 상태 밖의 예외 (글자 + 색, 화면별 정의). 정상 항목은 비움 */
@@ -49,6 +51,7 @@ export interface Card2LineProps extends CardData {
 export const Card2Line = ({
   title,
   id,
+  note,
   statuses = [],
   exceptions = [],
   dateTime,
@@ -60,7 +63,12 @@ export const Card2Line = ({
   const marks = cardExceptions({ statuses, exceptions });
   const time = dateTime === undefined ? null : formatCardTime(dateTime);
   // 2줄째 툴팁: 말줄임으로 가려질 수 있는 문구 전체
-  const line2 = [id, ...marks.map((e) => e.label), ...(time === null ? [] : [time])].join(' · ');
+  const line2 = [
+    id,
+    ...(note === undefined ? [] : [note]),
+    ...marks.map((e) => e.label),
+    ...(time === null ? [] : [time]),
+  ].join(' · ');
   const body = (
     <>
       <span className="card-line card-line-1">
@@ -76,6 +84,11 @@ export const Card2Line = ({
         <span className="card-id" data-testid="card-id">
           {id}
         </span>
+        {note !== undefined && (
+          <span className="card-note" data-testid="card-note">
+            {note}
+          </span>
+        )}
         {marks.map((mark) => (
           <ExceptionLabel
             key={mark.key}
