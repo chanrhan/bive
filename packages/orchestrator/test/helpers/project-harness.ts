@@ -9,6 +9,7 @@ import { createHandlers } from '../../src/ipc/handlers.js';
 import { PipeServer } from '../../src/ipc/server.js';
 import { NetPipeTransport } from '../../src/ipc/transport.js';
 import { ProposalService } from '../../src/proposals/proposal-service.js';
+import type { RuleWriterLauncher } from '../../src/rule-writer/rule-writer-service.js';
 import { connect, type TestClient } from './client.js';
 import { makeBiveHome } from './process.js';
 
@@ -38,7 +39,15 @@ export interface HarnessRegistry {
   clients: TestClient[];
 }
 
-export const startProjectHarness = async (registry: HarnessRegistry): Promise<ProjectHarness> => {
+export interface ProjectHarnessOptions {
+  /** `requirement.create` 뒤 세션 창구를 만든다 (생략하면 세션을 띄우지 않는다) */
+  ruleWriter?: (context: { biveHome: string; now: () => number }) => RuleWriterLauncher;
+}
+
+export const startProjectHarness = async (
+  registry: HarnessRegistry,
+  options: ProjectHarnessOptions = {},
+): Promise<ProjectHarness> => {
   const biveHome = makeBiveHome();
   const project = registerProject(
     {
@@ -53,6 +62,7 @@ export const startProjectHarness = async (registry: HarnessRegistry): Promise<Pr
   const clock = { now: T0 };
   const now = () => clock.now;
   const socketPath = path.join(biveHome, 'p.sock');
+  const ruleWriter = options.ruleWriter?.({ biveHome, now });
   const server = new PipeServer({
     transport: new NetPipeTransport(),
     path: socketPath,
@@ -63,6 +73,7 @@ export const startProjectHarness = async (registry: HarnessRegistry): Promise<Pr
       status: { startedAt: T0, connectionCount: 0, activeRunCount: 0 },
       biveHome,
       now,
+      ...(ruleWriter === undefined ? {} : { ruleWriter }),
     }),
   });
   registry.servers.push(server);

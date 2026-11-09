@@ -33,6 +33,8 @@ export const ERROR_REASONS = [
   'unsupported_platform',
   /** 제안 등록 콜백이 주입되지 않음 */
   'not_configured',
+  /** 대상의 상태가 호출과 맞지 않음 (예: 부모 요구사항이 삭제됨, ADR-062) */
+  'state_conflict',
   /** 그 밖의 실행 오류 (입출력 · 콜백 예외) */
   'tool_failed',
 ] as const;
