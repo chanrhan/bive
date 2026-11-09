@@ -8,7 +8,11 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { SessionSpec, ToolExecutor } from '../src/agent/adapter.js';
-import { CLAUDE_SDK_NOT_IMPLEMENTED, ClaudeSdkAdapter } from '../src/agent/claude-sdk-adapter.js';
+import {
+  AGENT_NOT_CONFIGURED_MESSAGE,
+  AgentNotConfiguredError,
+  ClaudeSdkAdapter,
+} from '../src/agent/claude-sdk-adapter.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { AgentConfigError, selectAgent } from '../src/agent/select.js';
 import { startOrchestrator } from '../src/orchestrator.js';
@@ -90,11 +94,33 @@ describe('selectAgent', () => {
     ).toThrow(AgentConfigError);
   });
 
-  it('claude 어댑터는 같은 인터페이스이고 세션을 순회하면 미구현 오류로 끝난다', async () => {
-    const adapter = selectAgent({ BIVE_AGENT: 'claude' }, { biveHome: BIVE_HOME }).adapter;
-    expect(adapter.kind).toBe('claude');
-    const iterator = adapter.startSession(sessionSpec)[Symbol.asyncIterator]();
-    await expect(iterator.next()).rejects.toThrow(CLAUDE_SDK_NOT_IMPLEMENTED);
+  it('claude 어댑터는 API 키가 없으면 세션을 순회할 때 not_configured로 끝난다', async () => {
+    for (const env of [{ BIVE_AGENT: 'claude' }, { BIVE_AGENT: 'claude', ANTHROPIC_API_KEY: '' }]) {
+      const adapter = selectAgent(env, { biveHome: BIVE_HOME }).adapter;
+      expect(adapter.kind).toBe('claude');
+      expect((adapter as ClaudeSdkAdapter).configured).toBe(false);
+      const iterator = adapter.startSession(sessionSpec)[Symbol.asyncIterator]();
+      const error: unknown = await iterator.next().then(
+        () => null,
+        (reason: unknown) => reason,
+      );
+      expect(error).toBeInstanceOf(AgentNotConfiguredError);
+      expect(error).toMatchObject({
+        code: 'not_configured',
+        message: AGENT_NOT_CONFIGURED_MESSAGE,
+      });
+      // 화면 문구에 로드맵 키 · 모델 이름 · 코드 표기가 없다 (라틴 문자 · 숫자 · 백틱 없음)
+      expect(AGENT_NOT_CONFIGURED_MESSAGE).not.toMatch(/[A-Za-z0-9`]/);
+    }
+  });
+
+  it('claude 어댑터는 API 키가 있으면 설정됨으로 본다 (실제 호출은 하지 않음)', () => {
+    const adapter = selectAgent(
+      { BIVE_AGENT: 'claude', ANTHROPIC_API_KEY: 'test-key' },
+      { biveHome: BIVE_HOME },
+    ).adapter as ClaudeSdkAdapter;
+    expect(adapter.configured).toBe(true);
+    expect(adapter.configDir).toBe(path.join(BIVE_HOME, 'agent', 'claude'));
   });
 });
 

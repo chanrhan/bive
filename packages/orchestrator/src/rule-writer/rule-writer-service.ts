@@ -1,7 +1,7 @@
 // 요구사항 → 규칙 자동 생성 rule-writer 세션 (NRM-02, NFR-01 · NFR-02 · NFR-07, ADR-009 · ADR-024 · ADR-057 · ADR-062).
 // - `requirement.create`가 요구사항을 저장한 같은 저장소 열림 안에서 `start`를 부른다. `start`는 중복 · 설정 검사만
 //   동기로 하고 세션은 대기열에서 하나씩 비동기로 돈다(응답을 세션 종료까지 붙잡지 않는다)
-// - 설정의 rule-writer 모델 · 한도(`requireRunnableSettings(store, ['rule-writer'])`)가 없으면 세션을 띄우지 않고
+// - 설정의 rule-writer 모델 · 한도(`roleSessionSettings(settings, 'rule-writer')`, 실행 전체 한도 검사 포함)가 없으면 세션을 띄우지 않고
 //   그 사실을 기록한다. 요구사항 저장 자체는 성공한다 (NRM-01, ADR-062)
 // - 세션 도구는 `propose_rule` 하나다(ADR-024). 제안은 `ProposalService.submit`으로 승인 대기(`pending`)에만 들어가고
 //   규칙 테이블은 건드리지 않는다(NRM-04). 세션 가드가 init의 도구 · MCP 서버 목록을 검사한다(NFR-02)
@@ -34,7 +34,7 @@ import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import type { TaskTracker } from '../lifecycle.js';
 import { ProposalService } from '../proposals/proposal-service.js';
-import { requireRunnableSettings } from '../settings/settings-service.js';
+import { roleSessionSettings } from '../settings/settings-service.js';
 import type { ProposeRuleInput } from '../tools/definitions.js';
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
 import { denied, failed, invalidArgs, type IssueList, ok } from '../tools/result.js';
@@ -43,7 +43,6 @@ import { RULE_WRITER_SYSTEM_PROMPT, ruleWriterTaskPrompt } from './prompts.js';
 
 /** 이 세션의 역할. 설정 검사도 이 역할만 본다 (ADR-057: 실행 전체 한도는 항상 함께 검사). */
 export const RULE_WRITER_ROLE = 'rule-writer' as const satisfies AgentRole;
-const RULE_WRITER_ROLES = [RULE_WRITER_ROLE] as const;
 
 /** 세션을 띄우지 않은 이유. */
 export type RuleWriterSkipReason =
@@ -216,9 +215,10 @@ export class RuleWriterService implements RuleWriterLauncher {
           record: existing === undefined ? null : structuredClone(existing),
         };
       }
-      let settings;
+      let session;
       try {
-        settings = requireRunnableSettings(store, RULE_WRITER_ROLES);
+        // 실행 전체 한도까지 검사하고(ADR-057) rule-writer 모델 · 한도를 그대로 쓴다 (실행 밖 세션이라 cap 없음)
+        session = roleSessionSettings(store.settings.get(), RULE_WRITER_ROLE);
       } catch (error) {
         if (error instanceof RpcError && error.code === ErrorCode.SettingsIncomplete) {
           const data = SettingsIncompleteData.safeParse(error.data);
@@ -231,14 +231,9 @@ export class RuleWriterService implements RuleWriterLauncher {
         }
         throw error;
       }
-      const role = settings.roles[RULE_WRITER_ROLE];
-      // requireRunnableSettings를 통과했으므로 세 값 모두 있다
-      if (role.model === null || role.maxBudgetUsd === null || role.maxTurns === null) {
-        throw new Error('rule-writer 설정 검사 뒤 값이 비어 있음');
-      }
       const record = this.#newRecord(input, 'queued');
-      record.model = role.model;
-      record.budget = { maxBudgetUsd: role.maxBudgetUsd, maxTurns: role.maxTurns };
+      record.model = session.model;
+      record.budget = { ...session.budget };
       this.#launched.set(keyOf(projectId, requirement.id), record);
       this.#enqueue(record, requirement);
       return { status: 'queued', record: structuredClone(record) };
