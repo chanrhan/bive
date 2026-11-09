@@ -681,23 +681,62 @@ export const ModelUsage = z.strictObject({
 });
 export type ModelUsage = z.infer<typeof ModelUsage>;
 
-/** 에이전트 세션 = SDK `query()` 1회 (기획서 3.2, RUN-04). 진행 중이면 종료 사유 · 비용이 `null`. */
-export const Session = z.strictObject({
-  id: Ulid,
-  stepId: Ulid,
-  role: AgentRole,
-  model: NonEmptyString,
-  sdkSessionId: NonEmptyString.nullable(),
-  workDir: NonEmptyString,
-  endReason: SessionEndReason.nullable(),
-  totalCostUsd: UsdOrNull,
-  numTurns: NonNegativeInt.nullable(),
-  modelUsage: z.record(NonEmptyString, ModelUsage),
-  firstTurnCacheWrite: NonNegativeInt.nullable(),
-  tools: z.array(NonEmptyString),
-  mcpServers: z.array(NonEmptyString),
-});
+/**
+ * 에이전트 세션 = SDK `query()` 1회 (기획서 3.2, RUN-04). 진행 중이면 종료 사유 · 비용 · 종료 시각이 `null`.
+ * 실행 엔진(M1-14, ADR-066)이 세션을 열 때 행을 만들고 끝날 때 결과를 채운다(재기동 뒤 역할별 세션 순번의 근거).
+ * 실행 밖 세션(규칙 작성, ADR-062)은 `runId` · `stepId`가 `null`이고 `requirementId`로 대상 요구사항을 가리킨다.
+ * `error`는 결과 없이 끝난 세션의 사유 문장(어댑터 오류 · 가드 위반 등).
+ */
+export const Session = z
+  .strictObject({
+    id: Ulid,
+    runId: Ulid.nullable(),
+    stepId: Ulid.nullable(),
+    requirementId: Ulid.nullable(),
+    role: AgentRole,
+    model: NonEmptyString,
+    sdkSessionId: NonEmptyString.nullable(),
+    workDir: NonEmptyString,
+    endReason: SessionEndReason.nullable(),
+    error: NonEmptyString.nullable(),
+    totalCostUsd: UsdOrNull,
+    numTurns: NonNegativeInt.nullable(),
+    modelUsage: z.record(NonEmptyString, ModelUsage),
+    firstTurnCacheWrite: NonNegativeInt.nullable(),
+    tools: z.array(NonEmptyString),
+    mcpServers: z.array(NonEmptyString),
+    startedAt: Timestamp,
+    endedAt: Timestamp.nullable(),
+  })
+  .refine(
+    (session) => (session.runId === null) === (session.stepId === null),
+    '실행 세션은 실행 · 단계 시도가 둘 다 있고, 실행 밖 세션은 둘 다 없다',
+  );
 export type Session = z.infer<typeof Session>;
+
+/** 도구 호출 결과 (ADR-052: `ok` · `denied` · `error`). */
+export const ToolCallStatus = z.enum(['ok', 'denied', 'error']);
+export type ToolCallStatus = z.infer<typeof ToolCallStatus>;
+
+/**
+ * 세션의 도구 호출 기록 1건 (NFR-02, ADR-052 `ToolCallRecord`, ADR-066). 거부 · 오류를 포함한 모든 호출을
+ * 호출 순서(`seq`, 세션 안 0부터)대로 추가만 한다.
+ */
+export const ToolCall = z.strictObject({
+  id: Ulid,
+  /** 실행 밖 세션의 호출이면 `null` */
+  runId: Ulid.nullable(),
+  sessionId: Ulid,
+  seq: NonNegativeInt,
+  at: Timestamp,
+  role: AgentRole,
+  name: NonEmptyString,
+  argsSummary: z.string(),
+  status: ToolCallStatus,
+  reason: NonEmptyString.nullable(),
+  durationMs: NonNegativeInt,
+});
+export type ToolCall = z.infer<typeof ToolCall>;
 
 // ── 판정 ─────────────────────────────────────────────────
 

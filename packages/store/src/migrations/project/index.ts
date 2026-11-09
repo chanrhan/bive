@@ -7,5 +7,6 @@ import { migration as m0002 } from './0002_requirements.js';
 import { migration as m0003 } from './0003_rules_proposals_approval_log.js';
 import { migration as m0004 } from './0004_settings.js';
 import { migration as m0005 } from './0005_runs.js';
+import { migration as m0006 } from './0006_sessions_tool_calls.js';
 
-export const PROJECT_MIGRATIONS: readonly Migration[] = [m0001, m0002, m0003, m0004, m0005];
+export const PROJECT_MIGRATIONS: readonly Migration[] = [m0001, m0002, m0003, m0004, m0005, m0006];

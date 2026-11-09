@@ -485,6 +485,7 @@ export type SettingsValidateResult = z.infer<typeof SettingsValidateResult>;
 // - 만든 실행은 유형 A · 상태 `waiting_approval` · 현재 단계 승인이고, 같은 트랜잭션에서 승인 기록
 //   `run_start`(대상 규칙 포함)를 1건 추가한다. 승인 단계의 판정과 이후 단계 진행은 오케스트레이터 엔진이 한다
 // - `run.get`의 `id`는 ULID 또는 표시 ID(`EXE-001`)
+// - `run.resume`은 `interrupted` 실행만 받는다(사람 주체, ADR-066)
 
 /** 대상 규칙 ID 목록: 1개 이상, 중복 없음. 순서는 요청 그대로 저장한다. */
 export const RunTargetRuleIds = z
@@ -525,6 +526,14 @@ export const RunListResult = z.strictObject({ runs: z.array(Run) });
 export type RunListResult = z.infer<typeof RunListResult>;
 
 /**
+ * `run.resume`: 중단(`interrupted`)된 실행을 사람이 재개한다 (PRD 5.1, ADR-011 · ADR-027 · ADR-066).
+ * 주체는 사람만(에이전트 -32020), `interrupted`가 아니면 -32009, 없는 실행 -32004. 결과는 재개 직후(`running`)의
+ * 실행과 단계. 워크트리를 마지막 완료 단계 커밋으로 되돌린 뒤 지금 단계를 새 시도 · 새 세션으로 이어간다.
+ */
+export const RunResumeParams = z.strictObject({ projectId: Ulid, id: RunRef, author: Author });
+export type RunResumeParams = z.infer<typeof RunResumeParams>;
+
+/**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
  */
@@ -556,6 +565,7 @@ export const METHODS = {
   'run.create': { params: RunCreateParams, result: RunCreateResult },
   'run.get': { params: RunGetParams, result: RunDetailResult },
   'run.list': { params: RunListParams, result: RunListResult },
+  'run.resume': { params: RunResumeParams, result: RunDetailResult },
 } as const satisfies Record<string, MethodSpec>;
 
 export type MethodName = keyof typeof METHODS;

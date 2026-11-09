@@ -149,18 +149,23 @@ const step = {
 
 const session = {
   id: ID.session,
+  runId: ID.run,
   stepId: ID.step,
+  requirementId: null,
   role: 'test-writer',
   model: 'model-a',
   sdkSessionId: null,
   workDir: '/tmp/bive/work/p/sessions/s',
   endReason: null,
+  error: null,
   totalCostUsd: null,
   numTurns: null,
   modelUsage: {},
   firstTurnCacheWrite: null,
   tools: [],
   mcpServers: [],
+  startedAt: AT,
+  endedAt: null,
 };
 
 const judgment = {
@@ -574,6 +579,9 @@ describe('실행', () => {
     };
     expect(Session.safeParse(ended).success).toBe(true);
     expect(Session.safeParse({ ...session, endReason: 'timeout' }).success).toBe(false);
+    // 실행 밖 세션(규칙 작성)은 실행 · 단계가 둘 다 없다
+    expect(Session.safeParse({ ...session, runId: null, stepId: null }).success).toBe(true);
+    expect(Session.safeParse({ ...session, stepId: null }).success).toBe(false);
   });
 });
 
