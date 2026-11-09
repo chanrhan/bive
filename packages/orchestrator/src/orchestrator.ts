@@ -1,5 +1,5 @@
 // 오케스트레이터 기동 · 종료: 어댑터 선택 → 단일 인스턴스 잠금 → 토큰 → 파이프 서버 → 수명 감시
-// (PRD 5.1, ADR-027 · ADR-041 · ADR-049).
+// (PRD 5.1, ADR-027 · ADR-041 · ADR-049). 규칙 자동 생성 세션(ADR-062)은 선택된 어댑터로 돈다.
 import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 
@@ -10,6 +10,7 @@ import { NetPipeTransport, type PipeTransport } from './ipc/transport.js';
 import { DEFAULT_IDLE_SHUTDOWN_MS, Lifecycle, type RunTracker } from './lifecycle.js';
 import { acquirePidLock } from './lock.js';
 import { assertSocketPathLength } from './pipe-path.js';
+import { RuleWriterService } from './rule-writer/rule-writer-service.js';
 import { type RunPaths, runPaths } from './run-paths.js';
 import { writeTokenFile } from './token.js';
 import { ORCHESTRATOR_VERSION } from './version.js';
@@ -28,6 +29,8 @@ export interface OrchestratorOptions {
   version?: string;
   /** 에이전트 어댑터. 생략하면 `BIVE_AGENT` · `BIVE_SCENARIO`로 고른다 (잘못되면 AgentConfigError) */
   agent?: AgentSelection;
+  /** 진행 기록 한 줄 (규칙 작성 세션 시작 · 생략 · 종료, 기본 표준 출력) */
+  log?: (line: string) => void;
 }
 
 export interface Orchestrator {
@@ -40,6 +43,8 @@ export interface Orchestrator {
   readonly agent: AgentSelection;
   /** 실행 엔진이 진행 중 실행을 알리는 자리 */
   readonly runs: RunTracker;
+  /** `requirement.create` 뒤 rule-writer 세션 (기록은 메모리, ADR-062) */
+  readonly ruleWriter: RuleWriterService;
   readonly connectionCount: number;
   /** 정상 종료. 여러 번 불러도 한 번만 수행한다 */
   stop(reason?: ShutdownReason): Promise<void>;
@@ -150,6 +155,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       stopping ??= (async () => {
         lifecycle.stop();
         try {
+          // 진행 중 규칙 작성 세션을 중단한다 (이미 등록된 제안은 승인 대기로 남는다)
+          await ruleWriter.close();
           await closeAndCleanup();
         } finally {
           resolveClosed(reason);
@@ -161,6 +168,12 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
     const lifecycle = new Lifecycle({
       idleShutdownMs,
       onIdle: () => void stop('idle'),
+    });
+    const ruleWriter = new RuleWriterService({
+      biveHome: options.biveHome,
+      adapter: agent.adapter,
+      tasks: lifecycle,
+      log: options.log ?? ((line) => console.log(line)),
     });
     server = new PipeServer({
       transport: options.transport ?? new NetPipeTransport({ platform }),
@@ -179,6 +192,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
             return lifecycle.activeRunCount;
           },
         },
+        ruleWriter,
       }),
       ...(options.helloTimeoutMs === undefined ? {} : { helloTimeoutMs: options.helloTimeoutMs }),
       onConnectionOpened: () => lifecycle.connectionOpened(),
@@ -198,6 +212,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         staleLockTakenOver: locked.staleTakenOver,
         agent,
         runs: lifecycle,
+        ruleWriter,
         get connectionCount() {
           return listening.connectionCount;
         },

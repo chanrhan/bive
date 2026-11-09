@@ -47,10 +47,14 @@ export interface ProposalContext {
 
 export interface RoleToolsHooks {
   /**
-   * `propose_rule` 등록. 제안은 항상 `pending`으로 만든다(NFR-01). 돌려준 문자열은 모델에게 보여 줄 본문.
+   * `propose_rule` 등록. 제안은 항상 `pending`으로 만든다(NFR-01). 돌려준 문자열은 모델에게 보여 줄 본문(`ok`)이고,
+   * 등록을 거부하거나 실패를 알릴 때는 `ToolResult`(`denied` · `error` + 사유 코드, ADR-052 · ADR-062)를 돌려준다.
    * 주입하지 않으면 호출이 `error`(`not_configured`)로 끝난다.
    */
-  proposeRule?: (input: ProposeRuleInput, context: ProposalContext) => Promise<string> | string;
+  proposeRule?: (
+    input: ProposeRuleInput,
+    context: ProposalContext,
+  ) => Promise<string | ToolResult> | string | ToolResult;
   /** 도구 호출이 끝날 때마다 (거부 · 오류 포함) */
   onToolCall?: (record: ToolCallRecord) => void;
 }
@@ -200,7 +204,8 @@ export class FixedToolExecutor implements ToolExecutor {
     const register = this.hooks.proposeRule;
     if (register === undefined) return failed('not_configured', '제안 등록 경로가 연결되지 않음');
     try {
-      return ok(await register(parsed.data, { role: this.role, sessionId: this.sessionId }));
+      const outcome = await register(parsed.data, { role: this.role, sessionId: this.sessionId });
+      return typeof outcome === 'string' ? ok(outcome) : outcome;
     } catch (error) {
       return failed('tool_failed', error instanceof Error ? error.message : String(error));
     }
