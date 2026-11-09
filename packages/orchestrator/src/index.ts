@@ -3,6 +3,8 @@ export const PACKAGE_NAME = '@bive/orchestrator';
 
 export * from './agent/adapter.js';
 export * from './agent/claude-sdk-adapter.js';
+export * from './agent/guarded-session.js';
+export * from './engine/index.js';
 export * from './agent/scenario.js';
 export * from './agent/scripted-adapter.js';
 export * from './agent/select.js';

@@ -21,7 +21,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { PipeServer } from '../src/ipc/server.js';
 import { runPaths } from '../src/run-paths.js';
-import { completeStep, evaluateApprovalStep, RunService } from '../src/runs/run-service.js';
+import { INTERRUPTED_EXIT_DETAIL } from '../src/engine/pipeline-engine.js';
+import {
+  completeStep,
+  createRun,
+  evaluateApprovalStep,
+  RunService,
+} from '../src/runs/run-service.js';
 import { connect, RpcCallError, type TestClient } from './helpers/client.js';
 import { cleanup, makeBiveHome, spawnCli, type Spawned, waitFor } from './helpers/process.js';
 import { iso, startProjectHarness, T0, type ProjectHarness } from './helpers/project-harness.js';
@@ -557,48 +563,45 @@ describe('프로세스 재시작 뒤 run.get이 같은 값 (수용 기준 4, RUN
     }
   };
 
-  it('생성 · 승인 단계 종료 · 테스트 작성 종료마다 저장된 값을 새 프로세스가 그대로 돌려준다', async () => {
+  it('생성 · 승인 단계 종료 · 테스트 작성 종료마다 저장된 값을 새 프로세스가 그대로 돌려준다 (running은 interrupted로, M1-14)', async () => {
     const biveHome = makeBiveHome();
     const { project, ruleId } = seed(biveHome);
     const engine = new RunService({ biveHome });
+    const withStore = <T>(fn: (store: ProjectStore) => T): T => {
+      const store = openProjectStore(project.id, { home: biveHome, create: false });
+      try {
+        return fn(store);
+      } finally {
+        store.close();
+      }
+    };
 
-    // 1) 생성 직후
+    // 1) 생성 직후 (오케스트레이터가 꺼진 동안 저장된 값, run.create와 같은 함수). 재기동은 승인 대기를 건드리지 않는다
+    const created = withStore((store) =>
+      createRun(
+        store,
+        { ruleIds: [ruleId], author: human },
+        { clientId: null },
+        {
+          now: () => T0,
+          newId,
+        },
+      ),
+    );
     let current = await start(biveHome);
-    const created = await current.client.call('run.create', {
-      projectId: project.id,
-      ruleIds: [ruleId],
-      author: human,
-    });
     const afterCreate = await current.client.call('run.get', {
       projectId: project.id,
       id: created.run.id,
     });
     expect(afterCreate).toEqual({ run: created.run, steps: created.steps });
-    await kill(current);
-
-    current = await start(biveHome);
-    expect(
-      await current.client.call('run.get', { projectId: project.id, id: created.run.id }),
-    ).toEqual(afterCreate);
     expect(await current.client.call('run.get', { projectId: project.id, id: 'EXE-001' })).toEqual(
       afterCreate,
     );
-
-    // 2) 승인 단계 종료 (엔진 내부 API, 같은 DB) → 새 프로세스
-    const approval = engine.evaluateApproval(project.id, created.run.id);
-    expect(approval.approved).toBe(true);
-    const afterApproval = { run: approval.run, steps: approval.steps };
-    expect(
-      await current.client.call('run.get', { projectId: project.id, id: created.run.id }),
-    ).toEqual(afterApproval);
     await kill(current);
 
-    current = await start(biveHome);
-    expect(
-      await current.client.call('run.get', { projectId: project.id, id: created.run.id }),
-    ).toEqual(afterApproval);
-
-    // 3) 테스트 작성 종료(커밋 · 비용 · 턴 · 종료 조건 결과) → 새 프로세스
+    // 2) 승인 단계 종료 · 테스트 작성 종료(커밋 · 비용 · 턴 · 종료 조건 결과)를 저장한 뒤 비정상 종료된 것과 같은 상태
+    const approval = engine.evaluateApproval(project.id, created.run.id);
+    expect(approval.approved).toBe(true);
     const afterTestWriting = engine.completeStep(project.id, created.run.id, {
       status: 'passed',
       exitDetail: { files: ['bive-acceptance/RULE-001/health.acc.ts'] },
@@ -613,21 +616,40 @@ describe('프로세스 재시작 뒤 run.get이 같은 값 (수용 기준 4, RUN
       lastCompletedStep: 'test_writing',
       headCommit: SHA,
     });
-    expect(stepOf(afterTestWriting.steps, 'test_writing')).toMatchObject({
+
+    // 재기동: running은 interrupted가 되고, 끝난 단계 값은 그대로, 진행 중이던 시도는 끝나고 새 시도가 대기한다
+    current = await start(biveHome);
+    const afterRestart = await current.client.call('run.get', {
+      projectId: project.id,
+      id: created.run.id,
+    });
+    expect(afterRestart.run).toEqual({ ...afterTestWriting.run, status: 'interrupted' });
+    for (const kind of ['approval', 'test_writing'] as const) {
+      expect(stepOf(afterRestart.steps, kind)).toEqual(stepOf(afterTestWriting.steps, kind));
+    }
+    expect(stepOf(afterRestart.steps, 'test_writing')).toMatchObject({
       status: 'passed',
       commit: SHA,
       costUsd: 0.0123,
       turns: 7,
     });
-    expect(stepOf(afterTestWriting.steps, 'red_check').status).toBe('running');
+    expect(stepOf(afterRestart.steps, 'red_check')).toMatchObject({
+      status: 'failed',
+      exitDetail: INTERRUPTED_EXIT_DETAIL,
+    });
+    expect(stepOf(afterRestart.steps, 'red_check', 2)).toMatchObject({
+      status: 'pending',
+      startedAt: null,
+    });
     await kill(current);
 
+    // 3) 다시 띄워도 자동으로 이어가지 않는다
     current = await start(biveHome);
     expect(
       await current.client.call('run.get', { projectId: project.id, id: created.run.id }),
-    ).toEqual(afterTestWriting);
+    ).toEqual(afterRestart);
     expect(await current.client.call('run.list', { projectId: project.id })).toEqual({
-      runs: [afterTestWriting.run],
+      runs: [afterRestart.run],
     });
     const log = await current.client.call('approvalLog.list', { projectId: project.id });
     expect(log.entries.map((e) => e.action)).toEqual(['run_start']);
