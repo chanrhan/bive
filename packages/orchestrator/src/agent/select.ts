@@ -1,5 +1,6 @@
-// 어댑터 선택 (ADR-016 · ADR-049).
+// 어댑터 선택 (ADR-016 · ADR-049 · ADR-059).
 // BIVE_AGENT: `scripted` | `claude` (기본 `claude`). 빈 값은 미설정과 같다.
+// `claude`는 API 키가 없어도 선택되고, 세션을 열면 not_configured로 끝난다.
 // BIVE_SCENARIO: 시나리오 이름 (기본 `happy-path`). `scripted`일 때만 읽는다.
 // 잘못된 값 · 없는 시나리오 · 형식이 틀린 시나리오는 AgentConfigError → CLI 종료 코드 2.
 import { AGENT_KINDS, type AgentAdapter, type AgentKind } from './adapter.js';
@@ -48,7 +49,12 @@ export const selectAgent = (
     );
   }
   if (kind === 'claude') {
-    return { kind, adapter: new ClaudeSdkAdapter(), scenario: null };
+    // API 키가 없어도 선택 · 기동은 되고, 세션을 열면 not_configured로 끝난다 (ADR-059)
+    return {
+      kind,
+      adapter: new ClaudeSdkAdapter({ biveHome: options.biveHome, env }),
+      scenario: null,
+    };
   }
   const name = envValue(env, 'BIVE_SCENARIO') ?? DEFAULT_SCENARIO;
   try {

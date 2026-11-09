@@ -37,7 +37,7 @@ flowchart LR
   G --> PRJ["프로젝트 폴더 (기준 브랜치)"]
 ```
 
-- 오케스트레이터 수명 (PRD 5.1): 앱 실행 또는 실행 시작 시 기동. 진행 중 실행 없음 + 연결된 앱 없음이면 자동 종료. 사용자당 1개, 여러 프로젝트 관리
+- 오케스트레이터 수명 (PRD 5.1): 앱 실행 또는 실행 시작 시 기동. 진행 중 실행 없음 + 연결된 앱 없음이면 자동 종료(실행 밖 rule-writer 세션이 대기 · 진행 중이어도 미룸, ADR-062). 사용자당 1개, 여러 프로젝트 관리
 - 끊김 복구 (PRD 5.1): 재기동 시 `running` 실행을 `interrupted`로 표시. 자동 재개 없음
 - 꺼져 있던 동안의 코드 변경: 다음 기동 시 감시자가 마지막 판정 커밋과 기준 브랜치 HEAD 비교 → 영향 규칙 `재검증 필요` (PRD 5.1, JDG-02)
 
@@ -59,22 +59,23 @@ pnpm 워크스페이스 · TypeScript strict · ESM. 경계는 ESLint `no-restri
 - 의존 방향: `shared` ← `store` · `parser` ← `orchestrator`. `app`은 `shared`만. 순환 금지
 - 저장소 접근 주체: 오케스트레이터 프로세스 1개뿐. 앱 · 에이전트는 파이프 · MCP 도구를 거쳐서만 (NFR-01)
 
-에이전트 어댑터 (`orchestrator/src/agents/`)
+에이전트 어댑터 (`orchestrator/src/agent/`, ADR-049 · ADR-059)
 
 ```ts
 interface AgentAdapter {
-  startSession(spec: SessionSpec): AgentSession; // role · model · workDir · 도구 목록 · maxTurns · maxBudgetUsd · 프롬프트
+  readonly kind: 'scripted' | 'claude';
+  // role · model · workDir · tools(ToolExecutor) · budget(maxTurns · maxBudgetUsd) · systemPrompt · prompt · signal
+  startSession(spec: SessionSpec): AsyncIterable<SessionEvent>;
 }
-interface AgentSession {
-  turns(): AsyncIterable<AgentEvent>; // init(tools · mcp_servers) · assistant · tool_use · tool_result · result
-  cost(): CostReport | null;          // total_cost_usd · num_turns · modelUsage, 값 없으면 null
-  abort(reason: AbortReason): Promise<void>;
-}
+// SessionEvent: init(tools · mcpServers) → turn_start → tool_call · tool_result | message → result
+// result: subtype · total_cost_usd(모르면 null) · num_turns · modelUsage. 중단은 signal.reason으로 순회 종료
 ```
 
-- `ClaudeSdkAdapter`: SDK `query()` 1회 = 세션 1개 (기획서 3.2). 세션 옵션은 10장
+- `ClaudeSdkAdapter`: SDK `query()` 1회 = 세션 1개 (기획서 3.2). `query`는 생성자 주입(기본 실제 SDK). 옵션은 순수 함수 `buildQueryOptions(spec, deps)`가 조립하고 키는 허용 목록(`QUERY_OPTION_KEYS`)뿐이다. 도구는 `toolDefinitions(role)`을 인프로세스 MCP 서버 `bive`(`createSdkMcpServer` + 저수준 `tools/list` · `tools/call` 처리기)로 노출한다. 입력 스키마는 strict 정의에서 만든 JSON 스키마(`additionalProperties: false`)이고, 인자는 검사 · 변형 없이 `ToolExecutor`에 넘겨 실행기가 검증 · 기록한다. API 키(`ANTHROPIC_API_KEY`)가 없으면 세션이 `not_configured`("에이전트 인증 미설정")로 끝난다. 세션 옵션은 10장, 세부는 ADR-059
 - `ScriptedAdapter`: 시나리오 파일의 도구 호출 · 파일 변경 · 비용 메시지를 순서대로 재생. 도구 호출은 실제 고정 도구 · 경로 가드를 통과 (가드도 함께 검증). 모든 자동 테스트가 사용 (Claude 인증 없음)
+- 설정 → 세션 값: `settings/settings-service.ts`의 `roleSessionSettings(settings, role, cap?)`가 역할별 모델 · 한도를 `SessionSpec`의 `model` · `budget`으로 바꾼다. 미설정이면 `requireRunnableSettings`와 같은 -32010
 - 실행 엔진은 `AgentEvent`만 소비. 에이전트 텍스트는 이벤트 로그로만 저장, 상태 전이 입력 아님 (JDG-01)
+- 규칙 자동 생성 (M1-08, ADR-062): `orchestrator/src/rule-writer/`의 `RuleWriterService`. `requirement.create`가 요구사항을 저장한 같은 저장소 열림에서 `start`를 부르고, 중복 · 설정 검사(`roleSessionSettings(settings, 'rule-writer')`, cap 없음) 뒤 세션을 대기열(동시 1개)에서 비동기로 돌린다. 설정 미비면 세션 없이 생략 기록 · 로그만 남기고 요구사항 저장은 성공. 세션은 선택된 어댑터 · 설정의 rule-writer 모델 · 한도 · 도구 `propose_rule` 하나 · 세션 가드로 돌고, 제안은 `ProposalService.submit`으로 `pending`만 등록한다. 기록(도구 호출 · 매니페스트 · 결과)은 메모리 `Orchestrator.ruleWriter.records`와 표준 출력 로그뿐이고 저장은 M1-14
 
 패키지 간 import 해석 (M0-03)
 - `@bive/shared`의 `exports` 맨 앞에 사용자 정의 조건 `@bive/source` → `./src/index.ts`를 두고, 그 뒤 `types` · `default`는 `dist`를 가리킨다. store · parser가 import 대상이 되면 같은 조건을 추가한다 (store는 M0-04에서 추가)
@@ -150,8 +151,9 @@ interface AgentSession {
 | `~/.bive/run/` | 파이프 경로 · 접속 토큰 · pid 잠금 (권한 0700/0600) | 불가 |
 | `~/.bive/projects/<projectId>/bive.db` | 규범 · 실행 · 판정 · 승인 기록 | 불가 (NFR-01) |
 | `~/.bive/projects/<projectId>/judge/<runId>/<judgeId>/` | 판정 1회마다 하위 폴더 (ADR-051): BIVE 러너 설정(`vitest.config.mjs` · `collect.config.mjs` · `global-setup.mjs`) · vitest JSON 원본(`result.json`) · 로그 | 불가 |
-| `~/.bive/work/<projectId>/worktrees/<runId>/` | 실행 워크트리 (RUN-08) | 역할별 경로 가드 안에서만 |
-| `~/.bive/work/<projectId>/sessions/<sessionId>/` | 역할 작업 디렉터리 (허용 목록 파일만 배치) | 해당 세션만 |
+| `~/.bive/work/<projectId>/worktrees/<EXE-ID>/` | 실행 워크트리, 브랜치 `bive/run-<EXE-ID>` (RUN-08, ADR-058) | 역할별 경로 가드 안에서만 |
+| `~/.bive/work/<projectId>/merges/<EXE-ID>/` | 병합 검사용 임시 워크트리 (병합이 끝나면 삭제, ADR-058) | 불가 (오케스트레이터 검사만) |
+| `~/.bive/work/<projectId>/sessions/<sessionId>/` | 역할 작업 디렉터리 (허용 목록 파일만 배치). rule-writer는 빈 폴더이고 세션이 끝나면 지운다 (ADR-062) | 해당 세션만 |
 | `~/.bive/registry.db` | 프로젝트 등록부 (등록된 프로젝트 ID · 등록 시각만) | 불가 |
 
 - 등록부 (M0-04, ADR-040): 프로젝트별 DB와 분리한 SQLite 파일 `registry.db`. 프로젝트 내용(이름 · 경로 · 기준 브랜치)의 원본은 프로젝트별 `bive.db`의 `projects` 행이고, 등록부는 ID만 가진다. 등록은 프로젝트별 DB 생성 → 등록부 추가 순서라 등록부에 있는 ID = 등록이 끝난 프로젝트. 등록 해제는 등록부 항목만 지운다
@@ -200,7 +202,8 @@ stateDiagram-v2
 - 판정: 5단계 결과를 규칙별 JudgmentResult로 기록 (커밋 · 시각 포함, JDG-02). 에이전트 메시지는 상태 변경 입력 아님 (JDG-01)
 - 커밋: 2 · 4 단계 종료 시 오케스트레이터가 워크트리에서 커밋. 에이전트는 git 도구 없음 (RUN-08)
 - 인수 테스트 보호: 3단계 종료 시 테스트 파일 해시 기록 → 5단계 전 대조, 바뀌었으면 `failed` (`guard_violation`)
-- 병합 절차 (RUN-08 미정 → 보수적 기본): ① 기준 브랜치가 실행 시작 후 바뀌지 않음 → `--no-ff` merge commit ② 바뀜 · 충돌 없음 → merge commit을 임시 워크트리에서 만들고 5단계 검사 재실행, 통과 시에만 기준 브랜치 갱신 ③ 충돌 → `failed`, 브랜치 보존 ④ 기준 브랜치가 프로젝트 폴더에 체크아웃돼 있고 작업 트리가 더러우면 병합 보류 → `failed` (사유 기록)
+- 병합 절차 (RUN-08 미정 → 보수적 기본, ADR-017): ① 기준 브랜치가 실행 시작 후 바뀌지 않음 → `--no-ff` merge commit ② 바뀜 · 충돌 없음 → merge commit을 임시 워크트리에서 만들고 5단계 검사 재실행, 통과 시에만 기준 브랜치 갱신 ③ 충돌 → `failed`, 브랜치 보존 ④ 프로젝트 폴더 작업 트리가 더러우면(추적 파일의 커밋되지 않은 변경, 미추적 `.bive.json` 무시) 기준 브랜치 체크아웃 여부와 상관없이 병합 보류 → `failed` (사유 기록)
+- 병합 구현 (M1-13, ADR-058): `orchestrator/src/git/worktree-manager.ts`의 `createWorktreeManager` → `create` · `commit` · `merge(run, { check })` · `preserve` · `removeWorktree`. 충돌은 `merge-tree --write-tree`로 먼저 확인하고, 병합 커밋은 `$BIVE_HOME/work/<projectId>/merges/<EXE-ID>`(기준 커밋에서 분리된 임시 워크트리)에서 `merge --no-ff`로 만든다. 갱신 직전에 `worktree list`를 다시 읽어 체크아웃 위치를 새로 정하고(검사 도중 브랜치 변경 대비), 기준 브랜치가 프로젝트 폴더에 체크아웃돼 있으면(HEAD 확인) `merge --ff-only --no-overwrite-ignore`(무시된 파일 · 미추적 파일을 덮어쓰지 않음), 아니면 `update-ref` 비교 후 교체. 갱신 뒤 기준 브랜치가 병합 커밋을 가리킬 때만 `merged`. 같은 저장소의 `merge` · `preserve` · `removeWorktree`는 프로세스 안 대기열로 하나씩 실행한다(오케스트레이터 1개 전제, ADR-041). 다른 워크트리에 체크아웃돼 있거나 병합할 커밋이 없거나 실행 워크트리가 더러워도 `failed`. 실패 사유 값 · 결과 모양 · 커밋 주체(`BIVE <bive@bive.invalid>`)는 ADR-058. 실행 브랜치는 병합 뒤에도 지우지 않는다
 - 예산: 세션마다 `maxBudgetUsd = min(역할 잔여, 실행 잔여)`. SDK `error_max_budget_usd` 또는 집계 초과 → 세션 중단 → `budget_exceeded` (COST-01)
 - 중단 · 재개 (PRD 5.1, ADR-011): 재기동 시 `running` → `interrupted`. `run.resume` → 워크트리를 `lastCompletedStep` 커밋으로 되돌림 → 다음 단계부터 새 세션. `regressionCount` 유지. 재개 버튼은 SCR-05 파이프라인 영역 (ADR-011)
 
@@ -234,7 +237,7 @@ stateDiagram-v2
 | `project.sync` | `{projectId}` → 블록 선언 제안 | PRJ-02 | M2 |
 | `requirement.list` | `{projectId}` → `{requirements}` (삭제 제외, 표시 ID 순). 필터는 화면 이슈에서 | NRM-01, SCR-02, ADR-047 | M1 |
 | `requirement.get` | `{projectId, id}` → `{requirement}` (삭제된 것도). 자식 규칙 · 이력은 해당 이슈에서 | SCR-06, ADR-047 | M1 |
-| `requirement.create` | `{projectId, text, author}` → `{requirement}` (사람 작성만, 승인 불필요). 규칙 생성 시작은 M1-08 | NRM-01, NRM-02, ADR-047 | M1 |
+| `requirement.create` | `{projectId, text, author}` → `{requirement}` (사람 작성만, 승인 불필요). 저장 뒤 rule-writer 세션을 비동기로 시작하고 응답은 기다리지 않는다. 설정 미비면 세션만 생략(기록 · 로그), 응답은 그대로 | NRM-01, NRM-02, ADR-047, ADR-062 | M1 |
 | `requirement.update` · `requirement.delete` | `{projectId, id, text, author}` / `{projectId, id, author}` → `{requirement}` (사람만, 삭제는 소프트) | NRM-01, ADR-047 | M1 |
 | `requirement.markUnrulable` | `{id, reason}` | NRM-08 | M2 |
 | `rule.list` | `{projectId}` → `{rules: [{rule, judgment}]}` (규칙 테이블의 규범만 · 제안 제외, 삭제 제외, 표시 ID 순). `judgment = {status, latest}`, 판정 기록이 없으면 `{status: 'unjudged', latest: null}`, 실행 링크는 `latest.runId`. 필터는 렌더러 목록 | NRM-02, JDG-02, SCR-03, ADR-060 | M1 |
@@ -282,7 +285,7 @@ stateDiagram-v2
 | `@playwright/test` | 1.64 | app e2e | 브라우저 모드 화면 검사 + `_electron` 스모크. 브라우저는 VM 사전 설치본 사용 |
 | `better-sqlite3` | 13 | store | 동기 API · 트랜잭션 · 단일 파일. 오케스트레이터(Node)에서만 로드 → Electron 재빌드 불필요 |
 | `zod` | 4 | shared | IPC 스키마 · 설정 검증 |
-| `@anthropic-ai/claude-agent-sdk` | 0.3.x | orchestrator | PRD 5.1 확정. 사용 옵션: `tools: []` · `settingSources: []` · `strictMcpConfig` · `mcpServers` (`createSdkMcpServer`) · `maxTurns` · `maxBudgetUsd` · `canUseTool` · `persistSession: false` |
+| `@anthropic-ai/claude-agent-sdk` | 0.3.289 (정확히 고정, peer `@anthropic-ai/sdk` 0.131.0 · `@modelcontextprotocol/sdk` 1.32.0) | orchestrator | PRD 5.1 확정. 사용 옵션(ADR-059): `model` · `systemPrompt`(문자열) · `cwd` · `tools: []` · `allowedTools` · `permissionMode: 'dontAsk'` · `canUseTool` · `mcpServers` (`createSdkMcpServer`) · `strictMcpConfig: true` · `settingSources: []` · `persistSession: false` · `verbatimPrompts: true` · `maxTurns` · `maxBudgetUsd` · `env`(허용 목록) · `abortController` |
 | `ulid` | 최신 | shared | 정렬 가능한 ID |
 | git CLI | ≥ 2.38 | orchestrator | `worktree` · `merge-tree --write-tree`. `execFile`로 호출, 셸 없음. VM 2.43 확인 |
 | `jscpd` | M2 조회 | parser | 클론 탐지 (DSN-02 카드 3) |
@@ -354,12 +357,16 @@ stateDiagram-v2
 | 승인은 파이프 경로로만 (PRD 5.1) | `orchestrator/src/ipc/server.ts`: 인증 전 연결은 `system.hello` 외 전부 -32020. `orchestrator/src/ipc/proposal-handlers.ts`: `proposal.approve` · `amend` · `reject`(사람 주체만) · `run.create`, ApprovalLog 기록. 제안 등록 · 규칙 · 계약 쓰기 RPC 없음 | `proposal-guard.test.ts`: 토큰 없는 연결 거부, `rule.update` · `contract.update` -32601 |
 | 잠정 승인은 도구 정책만 (NRM-05) | `orchestrator/src/norms/provisional-policy.ts`, 기본 `off` (ADR-012) | 정책 off 시 provisional 미발생 |
 | 규범 저장소 직접 접근 불가 (NFR-01) | `orchestrator/src/tools/path-guard.ts`: 세션 루트 밖 · `BIVE_HOME/projects` · `BIVE_HOME/run` 거부, 심볼릭 링크 실경로 확인 | 금지 경로 시나리오 |
-| 셸 도구 없음 (NFR-02) | `orchestrator/src/agents/claude-sdk-adapter.ts`: `tools: []` (내장 도구 전부 끔), `mcpServers: { bive }`만, `strictMcpConfig: true` | 옵션 조립 스냅샷 테스트 |
-| 사용자 · 프로젝트 설정 비로드, 자동 메모리 비활성 (PRD 5.1) | 같은 파일: `settingSources: []`, `persistSession: false`, 자동 메모리 끔 (설정 키는 M0 확인) | 옵션 스냅샷 |
-| 서브 에이전트 금지 (ADR-007) | 같은 파일: `agents` 미지정 + 내장 도구 없음 → 생성 경로 없음 | init 도구 목록 검사 |
-| 계정 MCP 차단 · 도구 기록 (NFR-02) | `orchestrator/src/tools/session-guard.ts`(ADR-052): init 메시지의 `tools` · `mcp_servers`가 역할 허용 목록과 다르면 세션 중단 → 실행 `failed`. Run.toolManifest 기록 | 추가 MCP 시나리오 |
+| 셸 도구 없음 (NFR-02) | `orchestrator/src/agent/claude-sdk-adapter.ts`(ADR-059): `tools: []` (내장 도구 전부 끔), `mcpServers: { bive }`(인프로세스 `sdk`)만, `strictMcpConfig: true`, 역할 도구만 `allowedTools` · 나머지는 `permissionMode: 'dontAsk'`로 거부(`canUseTool`은 권한 모드가 바뀔 때의 대비) | `claude-sdk-adapter.test.ts` 옵션 스냅샷 · 허용 키 목록 대조 |
+| 프롬프트로 파일 읽기 · 명령 실행 불가 (NFR-01 · NFR-02) | 같은 파일: `verbatimPrompts: true` → CLI가 프롬프트의 `@경로`를 파일 내용으로 펼치거나 `/` 문구를 슬래시 명령으로 실행하지 않는다(요구사항 · 규칙 · 이전 역할 산출물이 프롬프트에 들어가도 경로 가드를 거치지 않는 읽기가 없음) | 옵션 스냅샷 |
+| 도구 인자는 실행기가 엄격 검증 · 전부 기록 (NFR-02) | 같은 파일 `createBiveMcpServer`: SDK `tool()` 대신 저수준 MCP 처리기. `tools/list` 입력 스키마는 strict 정의의 JSON 스키마(`additionalProperties: false`), `tools/call`은 원본 인자를 그대로 실행기로 → 모르는 인자 · 빈 값도 `denied`(`invalid_args`) + 기록 1건 | MCP 클라이언트(InMemoryTransport) 경유 호출 테스트 |
+| 사용자 · 프로젝트 설정 비로드, 자동 메모리 비활성 (PRD 5.1) | 같은 파일: `settingSources: []`, `persistSession: false`, 하위 프로세스 환경 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` · `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` · `CLAUDE_CONFIG_DIR=$BIVE_HOME/agent/claude`(사용자 `~/.claude` 비사용, 경로 가드 밖) | 옵션 스냅샷 |
+| 서브 에이전트 금지 (ADR-007) | 같은 파일: `agents` · `agent` 미지정 + 내장 도구 없음(에이전트 도구 포함) + 허용 목록 밖 도구 거부(`dontAsk`) → 생성 경로 없음 | 옵션 키 검사 · init 도구 목록 검사 |
+| 외부 전송은 모델 추론만 (NFR-04) | 같은 파일: 하위 프로세스 `env`는 허용 목록(명령 도구 목록 + `ANTHROPIC_API_KEY`) + 고정 변수(`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` · `DISABLE_TELEMETRY` · `DISABLE_ERROR_REPORTING` · `DISABLE_AUTOUPDATER`)만. 프록시 · `ANTHROPIC_BASE_URL` · 다른 인증 · 원격 MCP 없음 | 옵션 · 환경 스냅샷에 URL · 프록시 키 없음 단언 |
+| rule-writer는 자기 요구사항의 규칙 제안만 (NRM-02, NRM-04) | `orchestrator/src/rule-writer/rule-writer-service.ts`(ADR-062): 도구 `propose_rule` 하나, 입력은 제목 한 줄 · EARS `WHEN … THE SYSTEM SHALL …`(`tools/ears.ts`, 조건 안 낱말 when · shall · 끝 쉼표 불가 → 규칙 화면 `whenCondition`과 같은 경계) · 검사 종류 1개 이상 검증, 부모가 세션의 요구사항이 아니면 `invalid_args` · 삭제됐으면 `state_conflict`. 제안은 `pending`만, 규칙 테이블 쓰기 없음 | `rule-writer.test.ts` |
+| 계정 MCP 차단 · 도구 기록 (NFR-02) | `orchestrator/src/tools/session-guard.ts`(ADR-052 · ADR-059): init 메시지의 `tools` · `mcp_servers`가 역할 허용 목록과 다르거나, `plugins`가 비어 있지 않거나, `permissionMode`가 `dontAsk`가 아니면 세션 중단 → 실행 `failed`. Run.toolManifest 기록. 관리 정책 설정은 `settingSources: []`로 꺼지지 않는다(ADR-059 한계) | 추가 MCP · 플러그인 · 권한 모드 시나리오 |
 | 명령은 고정 도구로만 (NFR-02) | `orchestrator/src/tools/commands.ts`: 허용 argv 템플릿 (`run_tests` · `prisma_generate` · `prisma_migrate` · `install_package`=허용 목록) · 셸 없는 실행(`spawn`, 프로세스 그룹 정리, ADR-052) · 타임아웃 · 환경 변수 정리 | 임의 인자 거부 테스트 |
-| 커밋 · 병합은 오케스트레이터만 (RUN-08) | `orchestrator/src/git/*`. 에이전트 도구에 git 없음, 워크트리 `.git` 쓰기 경로 가드 거부 | `.git` 쓰기 거부 테스트 |
+| 커밋 · 병합은 오케스트레이터만 (RUN-08) | `orchestrator/src/git/*`(ADR-058): 셸 없는 `execFile`, 환경 변수 허용 목록(`GIT_*` · API 키 미전달), 커밋 주체 `-c user.name/user.email` 고정, 프로젝트 훅 끔(`core.hooksPath`=널 장치). 에이전트 도구에 git 없음, 워크트리 `.git` 쓰기 경로 가드 거부 | `.git` 쓰기 거부 테스트, `worktree.test.ts`(커밋은 `commit()`으로만 · 부모 환경 git 변수 · 훅 무시) |
 | 판정 근거는 실행기 결과만 (JDG-01) | `orchestrator/src/judge/runner.ts`: BIVE 전용 vitest 설정(`judge/<runId>/<judgeId>/vitest.config.mjs`, ADR-051)으로 직접 실행, 프로젝트 설정 미사용. Run · Rule 상태 변경 함수는 `judge`만 호출 | "통과" 보고 시나리오 |
 | 인수 테스트는 HTTP로만 (JDG-01) | `orchestrator/src/judge/acceptance-lint.ts`: 테스트 파일 import 허용 목록 (vitest · BIVE HTTP 도우미 · Node 내장) 위반 시 테스트 작성 단계 미종료 | 소스 import 테스트 거부 |
 | 인수 테스트 변조 방지 | implementer 경로 가드에서 인수 테스트 디렉터리 쓰기 거부 + 해시 대조 (4장) | 해시 불일치 시나리오 |

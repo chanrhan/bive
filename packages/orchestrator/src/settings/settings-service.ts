@@ -18,6 +18,7 @@ import {
 } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
+import type { SessionBudget } from '../agent/adapter.js';
 import { RpcError } from '../ipc/server.js';
 
 /** 검사 결과 (`settings.validateForRun`의 결과 값). */
@@ -58,4 +59,37 @@ export const requireRunnableSettings = (
   const missing = findMissingSettings(settings, roles);
   if (missing.length > 0) throw settingsIncompleteError(missing);
   return settings;
+};
+
+/** 세션 한 개의 모델 · 한도. `SessionSpec`의 `model` · `budget`에 그대로 넣는다. */
+export interface RoleSessionSettings {
+  model: string;
+  budget: SessionBudget;
+}
+
+/**
+ * 설정의 역할별 모델 · 한도를 세션 값으로 바꾼다 (ADR-059). 실행 엔진(#25 · #27) · 규칙 작성 세션(#21)이
+ * `SessionSpec`을 만들 때 쓴다. 검사는 `requireRunnableSettings(store, [role])`와 같고
+ * 미설정이면 같은 -32010을 던진다. `cap`은 잔여 예산처럼 더 작게 묶을 값(COST-01 `min(역할 잔여, 실행 잔여)`)이다.
+ * @throws {RpcError} -32010 설정 미비
+ */
+export const roleSessionSettings = (
+  settings: Pick<Settings, 'run' | 'roles'>,
+  role: AgentRole,
+  cap: Partial<SessionBudget> = {},
+): RoleSessionSettings => {
+  const missing = findMissingSettings(settings, [role]);
+  if (missing.length > 0) throw settingsIncompleteError(missing);
+  const values = settings.roles[role];
+  // findMissingSettings가 null을 걸렀으므로 값은 모두 있다
+  const model = values.model as string;
+  const maxBudgetUsd = values.maxBudgetUsd as number;
+  const maxTurns = values.maxTurns as number;
+  return {
+    model,
+    budget: {
+      maxBudgetUsd: Math.min(maxBudgetUsd, cap.maxBudgetUsd ?? Infinity),
+      maxTurns: Math.min(maxTurns, cap.maxTurns ?? Infinity),
+    },
+  };
 };
