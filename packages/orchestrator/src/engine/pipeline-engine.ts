@@ -12,14 +12,18 @@
 //   지금 단계의 새 시도 · 새 세션으로 이어간다. `regressionCount`는 그대로 둔다 (ADR-027)
 import {
   type Author,
+  CommitSha,
   createUlidGenerator,
   ErrorCode,
+  isFinalStepStatus,
   MAX_REGRESSION_COUNT,
   type ModelUsage,
   parseDisplayId,
   type Project,
   type Run,
+  RUN_STEP_PLANS,
   type Step,
+  type StepKind,
   STEP_KIND_LABELS,
   STEP_ROLES,
   type Ulid,
@@ -57,6 +61,7 @@ import {
   type StepExecutor,
   type StepExecutors,
   type StepOutcome,
+  type StepRunPatch,
   type StepSessionRequest,
   type StepSessionResult,
   UNMET_POLICY,
@@ -134,6 +139,32 @@ const isInterruptedAttempt = (step: Step): boolean =>
 const sameIds = (a: readonly string[] | undefined, b: readonly string[]): boolean =>
   a !== undefined && a.length === b.length && a.every((id, index) => id === b[index]);
 
+/** 구동 중인 실행 · 단계 시도 · git 참조. */
+interface DriveState {
+  run: Run;
+  step: Step | null;
+  git: RunGitRef | null;
+}
+
+/** 실행기가 함께 저장하려는 실행 필드의 형식 오류 (없으면 `null`). */
+const invalidStepRunPatch = (patch: StepRunPatch | undefined): string | null => {
+  if (patch === undefined) return null;
+  for (const key of ['mergeCommit', 'headCommit'] as const) {
+    const value = patch[key];
+    if (value !== undefined && value !== null && !CommitSha.safeParse(value).success) {
+      return `${key}가 커밋 해시가 아닙니다: ${String(value)}`;
+    }
+  }
+  const { costUsd, turns } = patch;
+  if (costUsd !== undefined && costUsd !== null && !(Number.isFinite(costUsd) && costUsd >= 0)) {
+    return `costUsd가 0 이상의 수가 아닙니다: ${String(costUsd)}`;
+  }
+  if (turns !== undefined && turns !== null && !(Number.isSafeInteger(turns) && turns >= 0)) {
+    return `turns가 0 이상의 정수가 아닙니다: ${String(turns)}`;
+  }
+  return null;
+};
+
 /** 실행 레코드의 git 참조. 워크트리를 만들기 전이면 `null`. */
 const gitRefOf = (project: Project, run: Run): RunGitRef | null =>
   run.branch === null || run.worktreePath === null || run.baseCommit === null
@@ -209,9 +240,10 @@ export class PipelineEngine {
     const interrupted: InterruptedRun[] = [];
     for (const projectId of projectIds) {
       try {
-        const details = this.#store(projectId, (store) =>
-          store.runs.list({ status: 'running' }).map((run) => this.#interrupt(store, run)),
-        );
+        const details = this.#store(projectId, (store) => {
+          this.#closeRunlessSessions(store);
+          return store.runs.list({ status: 'running' }).map((run) => this.#interrupt(store, run));
+        });
         for (const detail of details) {
           interrupted.push({ projectId, runId: detail.run.id, displayId: detail.run.displayId });
           this.#emit({ type: 'run.saved', projectId, detail });
@@ -222,6 +254,19 @@ export class PipelineEngine {
       }
     }
     return interrupted;
+  }
+
+  /** 실행 밖 세션(규칙 작성, ADR-062) 중 끝나지 않은 것: 앞 프로세스가 죽은 것이므로 `aborted`로 닫는다. */
+  #closeRunlessSessions(store: ProjectStore): void {
+    const at = this.#timestamp();
+    for (const session of store.sessions.listUnended()) {
+      if (session.runId !== null) continue;
+      store.sessions.end(session.id, {
+        endReason: 'aborted',
+        error: '오케스트레이터가 비정상 종료됨',
+        endedAt: at,
+      });
+    }
   }
 
   #interrupt(store: ProjectStore, run: Run): RunDetail {
@@ -275,7 +320,12 @@ export class PipelineEngine {
       const waiting = this.#store(projectId, (store) =>
         store.runs.list({ status: 'waiting_approval' }).map((run) => run.id),
       );
-      for (const runId of waiting) this.evaluateApproval(projectId, runId);
+      // 한 실행의 판정 예외가 나머지 실행의 판정을 막지 않게 한다
+      for (const runId of waiting) {
+        this.#quietly(`승인 단계 판정 (${runId})`, () => {
+          this.evaluateApproval(projectId, runId);
+        });
+      }
     });
   }
 
@@ -431,8 +481,11 @@ export class PipelineEngine {
 
   async #drive(projectId: string, runId: string, signal: AbortSignal): Promise<void> {
     const handle = this.#tracker?.beginRun();
+    /** 지금 다루는 실행 · 단계 시도 · git 참조 (저장 실패 시 실패로 끝내는 데 쓴다) */
+    let current: DriveState | null = null;
     try {
       while (!signal.aborted) {
+        current = null;
         const loaded = this.#store(projectId, (store) => ({
           detail: store.runs.getDetail(runId),
           project: store.getProject(),
@@ -440,6 +493,7 @@ export class PipelineEngine {
         if (loaded.detail === null || loaded.project === null) return;
         const { run, steps } = loaded.detail;
         if (run.status !== 'running') return;
+        current = { run, step: null, git: null };
         const step =
           run.currentStep === null
             ? undefined
@@ -457,8 +511,10 @@ export class PipelineEngine {
           );
           return;
         }
+        current = { run, step, git: null };
         const prepared = await this.#prepare(projectId, loaded.project, run);
         if (signal.aborted) return;
+        if ('git' in prepared) current = { run, step, git: prepared.git };
         const outcome =
           'halt' in prepared
             ? prepared.halt
@@ -475,9 +531,49 @@ export class PipelineEngine {
         await this.#apply(projectId, loaded.detail, step, outcome, git);
       }
     } catch (error) {
-      if (!signal.aborted) this.#log(`실행 엔진 오류 (${runId}): ${errorMessage(error)}`);
+      if (!signal.aborted) {
+        this.#log(`실행 엔진 오류 (${runId}): ${errorMessage(error)}`);
+        // 결과 저장 · 커밋 등에서 예외가 나면 실행이 running에 고아로 남지 않게 실패로 끝낸다 (ADR-066)
+        if (current !== null) await this.#failAfterError(projectId, current, error);
+      }
     } finally {
       handle?.end();
+    }
+  }
+
+  /**
+   * 구동 중 예외 뒤: 실행이 아직 `running`이면 `failed`(`step_error`)로 끝낸다. 지금 시도가 아직 열려 있으면 그
+   * 시도를 실패로, 아니면 실행만 바꾼다. 그것도 실패하면 로그만 남긴다(다음 기동 때 `interrupted`).
+   */
+  async #failAfterError(projectId: string, current: DriveState, error: unknown): Promise<void> {
+    const exitDetail = { message: errorMessage(error) };
+    try {
+      const latest = this.#store(projectId, (store) => store.runs.getDetail(current.run.id));
+      if (latest?.run.status !== 'running') return;
+      const stepId = current.step?.id;
+      const open = latest.steps.find((s) => s.id === stepId && !isFinalStepStatus(s.status));
+      if (open !== undefined) {
+        await this.#halt(
+          projectId,
+          latest.run,
+          open,
+          'failed',
+          'step_error',
+          exitDetail,
+          current.git,
+        );
+        return;
+      }
+      const at = this.#timestamp();
+      this.#save(projectId, (store) =>
+        store.runs.transition(current.run.id, {
+          expectedStatus: 'running',
+          run: { status: 'failed', failureReason: 'step_error', endedAt: at },
+        }),
+      );
+      if (current.git !== null) await this.#worktrees.preserve(current.git);
+    } catch (failure) {
+      this.#log(`실행을 실패로 끝내지 못함 (${current.run.displayId}): ${errorMessage(failure)}`);
     }
   }
 
@@ -500,6 +596,22 @@ export class PipelineEngine {
           runStatus: 'failed',
           reason: 'run_without_log',
           exitDetail: { runStartEntries: logged.length },
+        },
+      };
+    }
+    // 남은 단계의 실행기가 하나라도 없으면 워크트리 · 브랜치를 만들기 전에 끝낸다
+    const plan: readonly StepKind[] =
+      (RUN_STEP_PLANS as Partial<Record<string, readonly StepKind[]>>)[run.type] ?? [];
+    const missing = plan.filter(
+      (kind) => kind !== 'approval' && this.#executors[kind as EngineStepKind] === undefined,
+    );
+    if (missing.length > 0) {
+      return {
+        halt: {
+          status: 'halt',
+          runStatus: 'failed',
+          reason: 'step_executor_missing',
+          exitDetail: { missing },
         },
       };
     }
@@ -637,9 +749,15 @@ export class PipelineEngine {
         return;
       }
     }
+    const stepRun = outcome.status === 'passed' ? outcome.run : undefined;
+    const invalid = invalidStepRunPatch(stepRun);
+    if (invalid !== null) {
+      // 실행기가 형식이 틀린 값(커밋 해시 아님 등)을 내면 저장 전에 실패로 끝낸다
+      await this.#halt(projectId, run, step, 'failed', 'step_error', { message: invalid }, git);
+      return;
+    }
     const index = steps.findIndex((s) => s.id === step.id);
     const last = !steps.slice(index + 1).some((s) => s.status === 'pending');
-    const stepRun = outcome.status === 'passed' ? outcome.run : undefined;
     const mergeCommit = stepRun?.mergeCommit ?? run.mergeCommit;
     if (last && mergeCommit === null) {
       await this.#halt(projectId, run, step, 'failed', 'merge_missing', outcome.exitDetail, git);

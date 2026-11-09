@@ -53,15 +53,6 @@ import {
 const temps: string[] = [];
 const engines: PipelineEngine[] = [];
 
-/** 시험 전체에서 관찰한 실행 상태 전이 (마지막 시험이 상태 기계의 모든 전이를 거쳤는지 본다). */
-const observed = new Set<string>();
-const lastStatus = new Map<string, RunStatus>();
-const observe = (detail: RunDetail): void => {
-  const previous = lastStatus.get(detail.run.id) ?? 'waiting_approval';
-  if (previous !== detail.run.status) observed.add(`${previous}→${detail.run.status}`);
-  lastStatus.set(detail.run.id, detail.run.status);
-};
-
 afterEach(async () => {
   for (const engine of engines.splice(0)) await engine.stop();
   await cleanup();
@@ -108,7 +99,6 @@ const setup = (options: SetupOptions = {}): Harness => {
       executors,
       onEvent: (event) => {
         if (event.type !== 'run.saved') return;
-        observe(event.detail);
         saves.push(`${event.detail.run.status}:${String(event.detail.run.currentStep)}`);
       },
     });
@@ -190,7 +180,6 @@ describe('유형 A 단계 순서 · 전이 (수용 기준 1)', () => {
       onEvent: (event) => {
         if (event.type === 'notify') notified.push(event.topic);
         if (event.type !== 'run.saved') return;
-        observe(event.detail);
         h.saves.push(`${event.detail.run.status}:${String(event.detail.run.currentStep)}`);
       },
     });
@@ -445,12 +434,22 @@ describe('종료 조건 미충족 · 회귀 (수용 기준 2)', () => {
       currentStep: 'merge',
     });
 
+    // 남은 단계의 실행기가 하나라도 없으면 워크트리 · 브랜치를 만들기 전에 첫 단계에서 끝난다
     const missing = setup({ executors: { red_check: undefined } });
-    expect((await runToEnd(missing)).run).toMatchObject({
+    const missingDone = await runToEnd(missing);
+    expect(missingDone.run).toMatchObject({
       status: 'failed',
       failureReason: 'step_executor_missing',
-      currentStep: 'red_check',
+      currentStep: 'test_writing',
+      branch: null,
+      worktreePath: null,
     });
+    expect(stepOf(missingDone, 'test_writing').exitDetail).toEqual({
+      reason: 'step_executor_missing',
+      detail: { missing: ['red_check'] },
+    });
+    expect(sessionsOf(missing)).toEqual([]);
+    expect(userGit(missing.repo, 'branch', '--list', 'bive/run-*')).toBe('');
 
     const thrown = setup({ executors: { check: () => Promise.reject(new Error('검사 폭발')) } });
     const done = await runToEnd(thrown);
@@ -460,6 +459,48 @@ describe('종료 조건 미충족 · 회귀 (수용 기준 2)', () => {
       detail: { message: '검사 폭발' },
     });
   }, 90_000);
+});
+
+describe('결과 저장 실패 (리뷰 반영)', () => {
+  it('실행기가 형식이 틀린 실행 필드(커밋 해시 아님)를 내면 저장 전에 failed (step_error)', async () => {
+    const h = setup({
+      executors: {
+        merge: () => Promise.resolve({ status: 'passed', run: { mergeCommit: 'not-a-sha' } }),
+      },
+    });
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'step_error',
+      currentStep: 'merge',
+      mergeCommit: null,
+    });
+    expect(stepOf(done, 'merge').exitDetail).toEqual({
+      reason: 'step_error',
+      detail: { message: 'mergeCommit가 커밋 해시가 아닙니다: not-a-sha' },
+    });
+    expect(h.engine.activeRunIds).toEqual([]);
+    expect(isLocked(h, String(done.run.worktreePath))).toBe(true);
+  }, 60_000);
+
+  it('결과 저장이 예외로 실패해도 running에 남지 않고 failed (step_error)', async () => {
+    // JSON으로 저장할 수 없는 종료 조건 결과 → completeStep 저장에서 예외
+    const h = setup({
+      executors: { check: () => Promise.resolve({ status: 'passed', exitDetail: { n: 1n } }) },
+    });
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'step_error',
+      currentStep: 'check',
+    });
+    expect(stepOf(done, 'check')).toMatchObject({
+      status: 'failed',
+      exitDetail: { reason: 'step_error', detail: { message: expect.any(String) } },
+    });
+    expect(h.engine.activeRunIds).toEqual([]);
+    expect(isLocked(h, String(done.run.worktreePath))).toBe(true);
+  }, 60_000);
 });
 
 describe('세션 실행 틀: 가드 · 예산 · 시작 실패', () => {
@@ -657,6 +698,65 @@ describe('중단 · 재개 (수용 기준 3 · 4, 엔진 인스턴스 교체)', 
   }, 90_000);
 });
 
+describe('재개 · 재기동의 예외 경로 (리뷰 반영)', () => {
+  /** 테스트 작성 실행기가 중단될 때까지 멈춰 있는 실행을 만들고, 엔진을 멈춘 뒤 새 엔진으로 interrupted 표시. */
+  const interruptedHarness = async (): Promise<{ h: Harness; engine: PipelineEngine }> => {
+    const h = setup({
+      executors: {
+        test_writing: (context) =>
+          new Promise((_resolve, reject) => {
+            context.signal.addEventListener('abort', () => reject(context.signal.reason as Error), {
+              once: true,
+            });
+          }),
+      },
+    });
+    expect(h.engine.evaluateApproval(h.project.id, h.runId)).toBe(true);
+    await waitFor(() => detailOf(h).run.worktreePath !== null, 20_000, '워크트리 생성');
+    await h.engine.stop();
+    const engine = h.newEngine();
+    expect(engine.recoverInterruptedRuns()).toHaveLength(1);
+    return { h, engine };
+  };
+
+  it('워크트리를 되돌리지 못하면 -32009, 실행은 interrupted 그대로, 예약은 풀린다', async () => {
+    const { h, engine } = await interruptedHarness();
+    const before = detailOf(h);
+    fs.rmSync(String(before.run.worktreePath), { recursive: true, force: true });
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const error: unknown = await engine
+        .resume(h.project.id, h.runId, human)
+        .catch((e: unknown) => e);
+      expect(error).toMatchObject({ code: ErrorCode.StateConflict });
+      // 두 번째도 "이미 진행 중"이 아니라 되돌리기 실패다 (예약이 풀렸다)
+      expect((error as Error).message).toContain('되돌리지 못했습니다');
+      expect(engine.activeRunIds).toEqual([]);
+      expect(detailOf(h)).toEqual(before);
+    }
+  }, 60_000);
+
+  it('재기동 복구는 끝나지 않은 규칙 작성 세션(실행 밖)도 aborted로 닫는다', () => {
+    const h = setup();
+    const sessionId = newId();
+    withProject(h.biveHome, h.project.id, (store) => {
+      store.sessions.start({
+        id: sessionId,
+        runId: null,
+        stepId: null,
+        requirementId: h.rule.parentRequirementId,
+        role: 'rule-writer',
+        model: 'test-model',
+        workDir: '/tmp/w',
+        startedAt: new Date().toISOString(),
+      });
+    });
+    expect(h.engine.recoverInterruptedRuns()).toEqual([]);
+    const closed = withProject(h.biveHome, h.project.id, (store) => store.sessions.get(sessionId));
+    expect(closed).toMatchObject({ endReason: 'aborted', error: '오케스트레이터가 비정상 종료됨' });
+  });
+});
+
 describe('비정상 종료(SIGKILL) 뒤 재기동 · run.resume (수용 기준 3 · 4, 실제 프로세스)', () => {
   interface Running {
     proc: Spawned;
@@ -784,11 +884,93 @@ describe('비정상 종료(SIGKILL) 뒤 재기동 · run.resume (수용 기준 3
 });
 
 describe('상태 기계', () => {
-  it('위 시험들이 RUN_STATUS_TRANSITIONS의 모든 전이를 거쳤다', () => {
+  it('RUN_STATUS_TRANSITIONS의 모든 전이를 이 시험 안에서 거친다 (다른 시험에 기대지 않음)', async () => {
+    const seen = new Set<string>();
+    const last = new Map<string, RunStatus>();
+    const track = (detail: RunDetail): void => {
+      const previous = last.get(detail.run.id) ?? 'waiting_approval';
+      if (previous !== detail.run.status) seen.add(`${previous}→${detail.run.status}`);
+      last.set(detail.run.id, detail.run.status);
+    };
+    // 세션 · 판정 없이 결과만 내는 실행기 (병합 커밋은 기준 커밋을 그대로 쓴다)
+    const stub = (overrides: StepExecutors): StepExecutors => ({
+      test_writing: scripted(['passed']),
+      red_check: scripted(['passed']),
+      implementation: scripted(['passed']),
+      check: scripted(['passed']),
+      merge: (context) =>
+        Promise.resolve({ status: 'passed', run: { mergeCommit: context.git.baseCommit } }),
+      ...overrides,
+    });
+    const engineFor = (h: Harness, executors: StepExecutors): PipelineEngine => {
+      const engine = new PipelineEngine({
+        biveHome: h.biveHome,
+        agent: h.adapter,
+        executors,
+        onEvent: (event) => {
+          if (event.type === 'run.saved') track(event.detail);
+        },
+      });
+      engines.push(engine);
+      return engine;
+    };
+    const drive = async (h: Harness, engine: PipelineEngine): Promise<RunDetail> => {
+      expect(engine.evaluateApproval(h.project.id, h.runId)).toBe(true);
+      await engine.settled();
+      return detailOf(h);
+    };
+
+    // waiting_approval → running → merged
+    const merged = setup();
+    expect((await drive(merged, engineFor(merged, stub({})))).run.status).toBe('merged');
+    // running → failed
+    const failed = setup();
+    const failedExecutors = stub({ check: scripted(['halt']) });
+    expect((await drive(failed, engineFor(failed, failedExecutors))).run.status).toBe('failed');
+    // running → budget_exceeded
+    const budget = setup();
+    const budgetExecutors = stub({
+      test_writing: () =>
+        Promise.resolve({
+          status: 'halt',
+          runStatus: 'budget_exceeded',
+          reason: 'budget_exhausted',
+        }),
+    });
+    expect((await drive(budget, engineFor(budget, budgetExecutors))).run.status).toBe(
+      'budget_exceeded',
+    );
+    // running → interrupted (재기동 복구) → running (재개) → merged
+    const paused = setup();
+    let release = false;
+    const pausedExecutors = stub({
+      test_writing: (context) =>
+        release
+          ? Promise.resolve({ status: 'passed' })
+          : new Promise((_resolve, reject) => {
+              context.signal.addEventListener(
+                'abort',
+                () => reject(context.signal.reason as Error),
+                {
+                  once: true,
+                },
+              );
+            }),
+    });
+    const first = engineFor(paused, pausedExecutors);
+    expect(first.evaluateApproval(paused.project.id, paused.runId)).toBe(true);
+    await waitFor(() => detailOf(paused).run.worktreePath !== null, 20_000, '워크트리 생성');
+    await first.stop();
+    const second = engineFor(paused, pausedExecutors);
+    expect(second.recoverInterruptedRuns()).toHaveLength(1);
+    release = true;
+    await second.resume(paused.project.id, paused.runId, human);
+    await second.settled();
+    expect(detailOf(paused).run.status).toBe('merged');
+
     const all = Object.entries(RUN_STATUS_TRANSITIONS).flatMap(([from, tos]) =>
       (tos as readonly string[]).map((to) => `${from}→${to}`),
     );
-    expect([...observed].sort()).toEqual(expect.arrayContaining(all.sort()));
-    expect(all.every((edge) => observed.has(edge))).toBe(true);
-  });
+    expect([...seen].sort()).toEqual([...all].sort());
+  }, 120_000);
 });
