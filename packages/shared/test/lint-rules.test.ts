@@ -1,6 +1,7 @@
 // 루트 eslint.config.js의 import 금지 규칙 검증 (M0-01, NFR-03, architecture.md 2장).
 // lint-fixtures/의 예제 파일을 머리말 `// lint-path: <경로>`에 적힌 가상 경로로 검사한다.
 // 줄 끝 표시: `// 위반` 줄에는 import 금지 오류가 있어야 하고, `// 허용` 줄에는 없어야 한다.
+// 제한: 30초(첫 검사가 ESLint 설정 · 타입스크립트 파서를 처음 불러와 부하 평균 12 이상에서 기본 5초를 넘었다, #122).
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -60,7 +61,10 @@ const restrictionErrorLines = async (code: string, filePath: string): Promise<nu
     .map((m) => m.line);
 };
 
-describe('ESLint import 금지 규칙', () => {
+/** ESLint 설정 · 플러그인을 처음 불러오는 검사의 제한 (#122). */
+const LINT_TEST_OPTIONS = { timeout: 30_000 };
+
+describe('ESLint import 금지 규칙', LINT_TEST_OPTIONS, () => {
   it('위반 · 허용 예제 파일이 있다', () => {
     expect(fixtures.length).toBeGreaterThanOrEqual(8);
     for (const f of fixtures) {

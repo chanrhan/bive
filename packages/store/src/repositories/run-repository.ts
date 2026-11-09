@@ -10,8 +10,12 @@ import {
   isFinalStepStatus,
   isTerminalRunStatus,
   Run,
+  RUN_STEP_PLANS,
   type RunStatus,
   Step,
+  type StepKind,
+  STEP_ROLES,
+  type StepStatus,
   type Ulid,
 } from '@bive/shared';
 
@@ -87,6 +91,27 @@ export interface RunTransition {
   readonly steps?: readonly StepPatch[];
   /** 새 단계 시도 (회귀 · 재시도) */
   readonly addSteps?: readonly StepCreateInput[];
+}
+
+/**
+ * 회귀 · 재시도 · 중단 저장 (`regress`). 지금 단계의 끝나지 않은 시도를 끝내고(`failedStatus`, 기본 `failed`),
+ * 유형의 단계 순서에서 `toKind`부터 지금 단계까지 단계마다 새 시도(`attempt + 1`)를 더한다.
+ * `toKind`의 새 시도는 `startStatus`(기본 `running`), 나머지는 `pending`이고 `currentStep = toKind`가 된다.
+ * 같은 단계를 다시 하는 재시도는 `toKind = 지금 단계`다.
+ */
+export interface RunRegression {
+  readonly toKind: StepKind;
+  /** 시각 (끝낸 시도의 `endedAt` · 새 `running` 시도의 `startedAt`) */
+  readonly at: string;
+  /** 새 시도 ID를 만든다 (단계 순서대로 불린다) */
+  readonly newId: () => Ulid;
+  readonly expectedStatus?: RunStatus;
+  /** 끝내는 시도의 종료 조건 결과 */
+  readonly exitDetail?: unknown;
+  readonly failedStatus?: 'failed';
+  readonly startStatus?: 'running' | 'pending';
+  /** 같은 트랜잭션에 함께 저장할 실행 변경 (회귀 수 · 상태 · 도구 목록 등) */
+  readonly run?: RunPatch;
 }
 
 export interface RunListFilter {
@@ -276,6 +301,28 @@ const assertDistinctSteps = (steps: readonly Step[]): void => {
   }
 };
 
+/** 단계 시도의 역할은 단계 종류로 정해진다 (`STEP_ROLES`). 다르면 `ConflictError`. */
+const assertStepRole = (step: Step): void => {
+  if (step.role !== STEP_ROLES[step.kind]) {
+    throw new ConflictError(
+      STEP_ENTITY,
+      step.id,
+      `단계 ${step.kind}의 역할은 ${String(STEP_ROLES[step.kind])}입니다 (${String(step.role)})`,
+    );
+  }
+};
+
+/** 끝나지 않은 시도의 상태 변경: 대기 → 진행 · 끝남, 진행 → 끝남만 (진행 → 대기 역행 금지). */
+const assertStepStatusChange = (step: Step, next: StepStatus): void => {
+  if (step.status === 'running' && next === 'pending') {
+    throw new ConflictError(
+      STEP_ENTITY,
+      step.id,
+      '진행 중인 단계 시도를 대기로 되돌릴 수 없습니다',
+    );
+  }
+};
+
 export class RunRepository {
   readonly #db: SqliteDatabase;
   readonly #projectId: Ulid;
@@ -386,6 +433,7 @@ export class RunRepository {
       // 순번을 쓰기 전에 형식부터 검증한다
       Run.parse({ ...base, displayId: 'EXE-001' });
       const steps = input.steps.map((step) => newStep(input.id, step));
+      steps.forEach(assertStepRole);
       assertDistinctSteps(steps);
       if (this.#selectRun.get(input.id) !== undefined) {
         throw new ConflictError(ENTITY, input.id, '이미 있습니다');
@@ -494,9 +542,12 @@ export class RunRepository {
         if (isFinalStepStatus(step.status)) {
           throw new ConflictError(STEP_ENTITY, step.id, `끝난 단계 시도입니다 (${step.status})`);
         }
-        return Step.parse({ ...step, ...pickDefined(stepPatch, STEP_PATCH_KEYS) });
+        const next = Step.parse({ ...step, ...pickDefined(stepPatch, STEP_PATCH_KEYS) });
+        assertStepStatusChange(step, next.status);
+        return next;
       });
       const added = (change.addSteps ?? []).map((input) => newStep(runId, input));
+      added.forEach(assertStepRole);
       assertDistinctSteps([...existing.values(), ...added]);
 
       try {
@@ -513,6 +564,77 @@ export class RunRepository {
       }
       this.#updateRun.run(toRunRow(next));
       return { run: next, steps: this.steps(runId) };
+    });
+  }
+
+  /**
+   * 회귀 · 재시도 · 중단을 트랜잭션 1회로 저장한다 (`RunRegression`, RUN-02 · ADR-061 · ADR-066).
+   * @throws {NotFoundError} 실행이 없을 때
+   * @throws {ConflictError} 진행 중인 단계가 없음 · `toKind`가 유형의 단계 순서에 없거나 지금 단계보다 뒤 ·
+   *   `transition`의 거부 사유
+   */
+  regress(runId: string, change: RunRegression): RunDetail {
+    return withTransaction(this.#db, () => {
+      const current = this.get(runId);
+      if (current === null) throw new NotFoundError(ENTITY, runId);
+      const plan: readonly StepKind[] | undefined = (
+        RUN_STEP_PLANS as Partial<Record<string, readonly StepKind[]>>
+      )[current.type];
+      if (plan === undefined) {
+        throw new ConflictError(
+          ENTITY,
+          current.displayId,
+          `단계 순서가 없는 유형입니다 (${current.type})`,
+        );
+      }
+      const kind = current.currentStep;
+      if (kind === null) {
+        throw new ConflictError(ENTITY, current.displayId, '진행 중인 단계가 없습니다');
+      }
+      const from = plan.indexOf(change.toKind);
+      const to = plan.indexOf(kind);
+      if (from < 0 || to < 0 || from > to) {
+        throw new ConflictError(
+          ENTITY,
+          current.displayId,
+          `되돌아갈 수 없는 단계입니다 (${kind} → ${change.toKind})`,
+        );
+      }
+      const steps = this.steps(runId);
+      const open = steps
+        .filter((step) => step.kind === kind && !isFinalStepStatus(step.status))
+        .at(-1);
+      if (open === undefined) {
+        throw new ConflictError(ENTITY, current.displayId, `끝나지 않은 ${kind} 단계가 없습니다`);
+      }
+      const lastAttempt = (target: StepKind): number =>
+        Math.max(0, ...steps.filter((step) => step.kind === target).map((step) => step.attempt));
+      const startStatus = change.startStatus ?? 'running';
+      const addSteps: StepCreateInput[] = plan.slice(from, to + 1).map((target, index) => {
+        const status = index === 0 ? startStatus : 'pending';
+        return {
+          id: change.newId(),
+          kind: target,
+          attempt: lastAttempt(target) + 1,
+          status,
+          role: STEP_ROLES[target],
+          startedAt: status === 'running' ? change.at : null,
+        };
+      });
+      return this.transition(runId, {
+        ...(change.expectedStatus === undefined ? {} : { expectedStatus: change.expectedStatus }),
+        steps: [
+          {
+            id: open.id,
+            status: change.failedStatus ?? 'failed',
+            exitDetail: change.exitDetail ?? null,
+            startedAt: open.startedAt ?? change.at,
+            endedAt: change.at,
+          },
+        ],
+        addSteps,
+        run: { ...change.run, currentStep: change.toKind },
+      });
     });
   }
 

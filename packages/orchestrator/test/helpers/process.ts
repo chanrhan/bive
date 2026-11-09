@@ -83,6 +83,16 @@ export const spawnCli = (env: Record<string, string>): Spawned =>
     }),
   );
 
+/** 패키지 폴더 기준 상대 경로의 시험 진입점(예: `test/helpers/engine-orchestrator.ts`)을 같은 방식으로 띄운다. */
+export const spawnScript = (script: string, env: Record<string, string>): Spawned =>
+  track(
+    spawn(process.execPath, [...CLI_ARGS.slice(0, -1), script], {
+      cwd: ORCHESTRATOR_DIR,
+      env: childEnv(env),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }),
+  );
+
 /** 수용 기준 그대로 `pnpm --filter @bive/orchestrator start`로 띄운다. */
 export const spawnPnpmStart = (env: Record<string, string>): Spawned =>
   track(

@@ -11,6 +11,7 @@ import {
   rejectProposal,
 } from '../proposals/proposal-service.js';
 import { withProjectStore } from './project-store-access.js';
+import type { RunEngineHooks } from './run-handlers.js';
 import { RpcError, type MethodHandlers, type RequestContext } from './server.js';
 
 export interface ProposalHandlerDeps {
@@ -18,6 +19,8 @@ export interface ProposalHandlerDeps {
   biveHome: string;
   /** 시계 (ms). 처리 시각 · 읽은 시각 · ULID에 쓴다 */
   now: () => number;
+  /** 승인 뒤 승인 대기 실행을 다시 판정할 실행 엔진 (M1-14) */
+  engine?: Pick<RunEngineHooks, 'onNormsApproved'>;
 }
 
 type ProposalMethods = Pick<
@@ -37,7 +40,11 @@ const decisionContext = (context: RequestContext): DecisionContext => ({
   clientId: `pipe-${String(context.connectionId)}`,
 });
 
-export const createProposalHandlers = ({ biveHome, now }: ProposalHandlerDeps): ProposalMethods => {
+export const createProposalHandlers = ({
+  biveHome,
+  now,
+  engine,
+}: ProposalHandlerDeps): ProposalMethods => {
   const clock: ProposalClock = { now, newId: createUlidGenerator(now) };
 
   return {
@@ -65,14 +72,20 @@ export const createProposalHandlers = ({ biveHome, now }: ProposalHandlerDeps): 
       withProjectStore(biveHome, projectId, (store) => ({
         proposal: store.proposals.markRead(id, new Date(now()).toISOString()),
       })),
-    'proposal.approve': ({ projectId, id, author, edited }, context) =>
-      withProjectStore(biveHome, projectId, (store) =>
+    'proposal.approve': ({ projectId, id, author, edited }, context) => {
+      const approved = withProjectStore(biveHome, projectId, (store) =>
         approveProposal(store, { id, author, edited }, decisionContext(context), clock),
-      ),
-    'proposal.amend': ({ projectId, id, author, edited }, context) =>
-      withProjectStore(biveHome, projectId, (store) =>
+      );
+      engine?.onNormsApproved(projectId);
+      return approved;
+    },
+    'proposal.amend': ({ projectId, id, author, edited }, context) => {
+      const approved = withProjectStore(biveHome, projectId, (store) =>
         approveProposal(store, { id, author, edited }, decisionContext(context), clock),
-      ),
+      );
+      engine?.onNormsApproved(projectId);
+      return approved;
+    },
     'proposal.reject': ({ projectId, id, author, reason }, context) =>
       withProjectStore(biveHome, projectId, (store) =>
         rejectProposal(store, { id, author, reason }, decisionContext(context), clock),

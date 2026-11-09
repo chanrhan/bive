@@ -1,6 +1,7 @@
 // git 브랜치 · 워크트리 · 병합 관리자 (M1-13, RUN-08 · ADR-017 · ADR-025 · ADR-058).
 // 픽스처(fixtures/sample-next-app)의 추적 파일을 임시 폴더에 복사해 실제 git 저장소로 단언한다.
 // 의존성 설치는 하지 않는다(git 동작만 본다). 검사 함수는 테스트가 주입하는 가짜다.
+// 제한: git 프로세스를 수십 번 띄우는 묶음은 30초(부하 평균 12 이상에서 동시 병합 5개 테스트가 6초로 기본 5초를 넘었다, #122).
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -108,6 +109,9 @@ afterEach(() => {
   for (const dir of temps.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
+/** git 명령을 여러 번 띄우는 테스트의 제한 (#122). */
+const GIT_TEST_OPTIONS = { timeout: 30_000 };
+
 const createRun = (runDisplayId = 'EXE-001'): Promise<RunGitRef> =>
   manager.create({ projectId, runDisplayId, repoPath: repo, baseBranch: 'main' });
 
@@ -180,7 +184,7 @@ const plantHalfCreatedWorktree = (name: string): string => {
   return admin;
 };
 
-describe('실행 브랜치 · 워크트리 생성', () => {
+describe('실행 브랜치 · 워크트리 생성', GIT_TEST_OPTIONS, () => {
   it('실행마다 bive/run-<EXE-ID> 브랜치와 $BIVE_HOME/work/<projectId>/worktrees/<EXE-ID> 워크트리를 만든다', async () => {
     const base = tip(repo);
     const first = await createRun('EXE-001');
@@ -270,7 +274,7 @@ describe('실행 브랜치 · 워크트리 생성', () => {
   });
 });
 
-describe('커밋은 오케스트레이터 함수로만', () => {
+describe('커밋은 오케스트레이터 함수로만', GIT_TEST_OPTIONS, () => {
   it('워크트리 파일 변경만으로는 커밋이 생기지 않고 commit()이 BIVE 주체로 만든다', async () => {
     const run = await createRun();
     write(run.worktreePath, 'src/lib/added.ts', 'export const added = 1;\n');
@@ -350,7 +354,7 @@ describe('커밋은 오케스트레이터 함수로만', () => {
   });
 });
 
-describe('merge(run)', () => {
+describe('merge(run)', GIT_TEST_OPTIONS, () => {
   it('기준 브랜치가 그대로면 검사 없이 --no-ff 병합 커밋을 만들고 프로젝트 폴더를 갱신한다', async () => {
     const run = await createRun();
     const head = await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
@@ -969,7 +973,7 @@ describe('merge(run)', () => {
   });
 });
 
-describe('preserve(run)', () => {
+describe('preserve(run)', GIT_TEST_OPTIONS, () => {
   it('브랜치 · 워크트리를 남기고 기준 브랜치는 그대로 둔다', async () => {
     const run = await createRun();
     const head = await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
@@ -1081,7 +1085,7 @@ describe('preserve(run)', () => {
   });
 });
 
-describe('git worktree 명령 잠금 · create 실패 정리 (ADR-065)', () => {
+describe('git worktree 명령 잠금 · create 실패 정리 (ADR-065)', GIT_TEST_OPTIONS, () => {
   it('worktree add가 관리 폴더를 반쯤 만든 동안 같은 저장소의 병합 · 보존은 기다렸다가 성공한다', async () => {
     const a = await createRun('EXE-001');
     await agentChange(a, 'src/lib/a.ts', 'export const a = 1;\n');
@@ -1154,249 +1158,255 @@ describe('git worktree 명령 잠금 · create 실패 정리 (ADR-065)', () => {
   });
 });
 
-describe('병합 대기열: 제한 시간 · 중단 · 실행별 보존 · 재진입 · 키 (ADR-065)', () => {
-  /** 실행 n개를 만들고 각각 다른 파일을 커밋한 뒤, 모두 재검사 경로를 타게 기준 브랜치를 바꾼다. */
-  const runsOnChangedBase = async (count: number): Promise<RunGitRef[]> => {
-    const runs: RunGitRef[] = [];
-    for (let i = 1; i <= count; i += 1) {
-      const run = await createRun(`EXE-00${String(i)}`);
-      await agentChange(run, `src/lib/f${String(i)}.ts`, `export const v${String(i)} = 1;\n`);
-      runs.push(run);
-    }
-    userCommit('src/lib/user-change.ts', 'export const user = 1;\n');
-    return runs;
-  };
-
-  /** 풀어 줄 때까지 끝나지 않는 검사. 받은 신호를 기록한다. */
-  const hangingCheck = (): {
-    check: MergeCheck;
-    release: () => void;
-    signals: AbortSignal[];
-  } => {
-    let release = (): void => undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const signals: AbortSignal[] = [];
-    return {
-      check: async (context) => {
-        signals.push(context.signal);
-        await gate;
-        return { passed: true };
-      },
-      release,
-      signals,
+describe(
+  '병합 대기열: 제한 시간 · 중단 · 실행별 보존 · 재진입 · 키 (ADR-065)',
+  GIT_TEST_OPTIONS,
+  () => {
+    /** 실행 n개를 만들고 각각 다른 파일을 커밋한 뒤, 모두 재검사 경로를 타게 기준 브랜치를 바꾼다. */
+    const runsOnChangedBase = async (count: number): Promise<RunGitRef[]> => {
+      const runs: RunGitRef[] = [];
+      for (let i = 1; i <= count; i += 1) {
+        const run = await createRun(`EXE-00${String(i)}`);
+        await agentChange(run, `src/lib/f${String(i)}.ts`, `export const v${String(i)} = 1;\n`);
+        runs.push(run);
+      }
+      userCommit('src/lib/user-change.ts', 'export const user = 1;\n');
+      return runs;
     };
-  };
 
-  it('검사가 제한 시간을 넘으면 신호를 중단하고 check_timeout, 기다리던 병합은 이어서 진행한다', async () => {
-    const [a, b] = await runsOnChangedBase(2);
-    if (a === undefined || b === undefined) throw new Error('실행 없음');
-    const baseTip = tip(repo);
-    const hung = hangingCheck();
+    /** 풀어 줄 때까지 끝나지 않는 검사. 받은 신호를 기록한다. */
+    const hangingCheck = (): {
+      check: MergeCheck;
+      release: () => void;
+      signals: AbortSignal[];
+    } => {
+      let release = (): void => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signals: AbortSignal[] = [];
+      return {
+        check: async (context) => {
+          signals.push(context.signal);
+          await gate;
+          return { passed: true };
+        },
+        release,
+        signals,
+      };
+    };
 
-    const [timedOut, next] = await Promise.all([
-      manager.merge(a, { check: hung.check, checkTimeoutMs: 300 }),
-      manager.merge(b, { check: passCheck }),
-    ]);
+    it('검사가 제한 시간을 넘으면 신호를 중단하고 check_timeout, 기다리던 병합은 이어서 진행한다', async () => {
+      const [a, b] = await runsOnChangedBase(2);
+      if (a === undefined || b === undefined) throw new Error('실행 없음');
+      const baseTip = tip(repo);
+      const hung = hangingCheck();
 
-    expect(timedOut).toMatchObject({ status: 'failed', reason: 'check_timeout' });
-    expect(hung.signals).toHaveLength(1);
-    expect(hung.signals[0]?.aborted).toBe(true);
-    expect(next).toMatchObject({ status: 'merged', previousBaseCommit: baseTip });
-    expect(fs.existsSync(path.join(repo, 'src/lib/f1.ts'))).toBe(false);
-    expect(read(repo, 'src/lib/f2.ts')).toBe('export const v2 = 1;\n');
-    expect(mergeLeftovers()).toEqual([]);
-    expect(userGit(repo, 'status', '--porcelain', '--untracked-files=all')).toBe('');
-    hung.release();
-  });
+      const [timedOut, next] = await Promise.all([
+        manager.merge(a, { check: hung.check, checkTimeoutMs: 300 }),
+        manager.merge(b, { check: passCheck }),
+      ]);
 
-  it('대기열에서 기다리거나 검사 중에 중단 신호가 오면 aborted로 끝내고 기준 브랜치를 건드리지 않는다', async () => {
-    const [a, b] = await runsOnChangedBase(2);
-    if (a === undefined || b === undefined) throw new Error('실행 없음');
-    const baseTip = tip(repo);
-    const hung = hangingCheck();
-    const controllerA = new AbortController();
-    const controllerB = new AbortController();
-
-    const first = manager.merge(a, { check: hung.check, signal: controllerA.signal });
-    await vi.waitFor(() => {
+      expect(timedOut).toMatchObject({ status: 'failed', reason: 'check_timeout' });
       expect(hung.signals).toHaveLength(1);
-    });
-    const queued = manager.merge(b, { check: passCheck, signal: controllerB.signal });
-    controllerB.abort();
-    // 앞선 병합 검사가 멈춰 있어도 기다리던 쪽은 바로 끝난다
-    expect(await settlesWithin(queued, 2000)).toBe(true);
-    expect(await queued).toMatchObject({ status: 'failed', reason: 'aborted', headCommit: null });
-
-    controllerA.abort();
-    expect(await first).toMatchObject({ status: 'failed', reason: 'aborted' });
-    expect(hung.signals[0]?.aborted).toBe(true);
-    expect(tip(repo)).toBe(baseTip);
-    await expect(manager.merge(b, { check: passCheck, checkTimeoutMs: 0 })).rejects.toMatchObject({
-      code: 'invalid_input',
-    });
-    hung.release();
-  });
-
-  it('다른 실행의 병합 검사가 멈춰도 보존 · 워크트리 제거는 기다리지 않고, 같은 저장소 병합은 기다린다', async () => {
-    const [a, b, c] = await runsOnChangedBase(3);
-    if (a === undefined || b === undefined || c === undefined) throw new Error('실행 없음');
-    const hung = hangingCheck();
-
-    const first = manager.merge(a, { check: hung.check });
-    await vi.waitFor(() => {
-      expect(hung.signals).toHaveLength(1);
-    });
-    const preserved = manager.preserve(b);
-    const merging = manager.merge(c, { check: passCheck });
-
-    expect(await settlesWithin(preserved, 5000)).toBe(true);
-    expect((await preserved).worktreePath).toBe(b.worktreePath);
-    expect(await settlesWithin(createWorktreeManager({ biveHome }).removeWorktree(b), 5000)).toBe(
-      true,
-    );
-    expect(fs.existsSync(b.worktreePath)).toBe(false);
-    expect(await settlesWithin(merging, 300)).toBe(false);
-
-    hung.release();
-    expect(await first).toMatchObject({ status: 'merged' });
-    expect(await merging).toMatchObject({ status: 'merged' });
-    expect(userGit(repo, 'status', '--porcelain', '--untracked-files=all')).toBe('');
-  });
-
-  it('검사 함수 안에서 같은 대기열을 잡는 호출은 교착 대신 reentrant_call로 거부된다', async () => {
-    const [a, b] = await runsOnChangedBase(2);
-    if (a === undefined || b === undefined) throw new Error('실행 없음');
-    const inner: unknown[] = [];
-
-    const result = await manager.merge(a, {
-      check: async () => {
-        // 같은 저장소의 병합 · 같은 실행의 보존 · 제거는 교착이 된다(다른 관리자 인스턴스도 같은 대기열)
-        for (const call of [
-          () => createWorktreeManager({ biveHome }).merge(b, { check: passCheck }),
-          () => manager.preserve(a),
-          () => manager.removeWorktree(a),
-        ]) {
-          inner.push(await call().catch((error: unknown) => error));
-        }
-        // 다른 실행의 보존은 대기열이 달라 바로 끝난다
-        inner.push(await manager.preserve(b));
-        return { passed: true };
-      },
+      expect(hung.signals[0]?.aborted).toBe(true);
+      expect(next).toMatchObject({ status: 'merged', previousBaseCommit: baseTip });
+      expect(fs.existsSync(path.join(repo, 'src/lib/f1.ts'))).toBe(false);
+      expect(read(repo, 'src/lib/f2.ts')).toBe('export const v2 = 1;\n');
+      expect(mergeLeftovers()).toEqual([]);
+      expect(userGit(repo, 'status', '--porcelain', '--untracked-files=all')).toBe('');
+      hung.release();
     });
 
-    expect(inner.slice(0, 3)).toEqual([
-      expect.objectContaining({ code: 'reentrant_call' }),
-      expect.objectContaining({ code: 'reentrant_call' }),
-      expect.objectContaining({ code: 'reentrant_call' }),
-    ]);
-    expect(inner[3]).toMatchObject({ worktreePath: b.worktreePath });
-    expect(result).toMatchObject({ status: 'merged' });
-    // 잠금을 푼 뒤에는 같은 호출이 정상이다
-    expect(await manager.preserve(a)).toMatchObject({ branch: a.branch });
-  });
+    it('대기열에서 기다리거나 검사 중에 중단 신호가 오면 aborted로 끝내고 기준 브랜치를 건드리지 않는다', async () => {
+      const [a, b] = await runsOnChangedBase(2);
+      if (a === undefined || b === undefined) throw new Error('실행 없음');
+      const baseTip = tip(repo);
+      const hung = hangingCheck();
+      const controllerA = new AbortController();
+      const controllerB = new AbortController();
 
-  it('B의 병합이 대기열에서 기다리는 동안 A의 검사 함수가 preserve(B) · removeWorktree(B)를 불러도 교착하지 않는다', async () => {
-    const [a, b] = await runsOnChangedBase(2);
-    if (a === undefined || b === undefined) throw new Error('실행 없음');
-    let entered = (): void => undefined;
-    const inCheck = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    let proceed = (): void => undefined;
-    const gate = new Promise<void>((resolve) => {
-      proceed = resolve;
-    });
-    const inner: { preserved: boolean; removed: boolean } = { preserved: false, removed: false };
+      const first = manager.merge(a, { check: hung.check, signal: controllerA.signal });
+      await vi.waitFor(() => {
+        expect(hung.signals).toHaveLength(1);
+      });
+      const queued = manager.merge(b, { check: passCheck, signal: controllerB.signal });
+      controllerB.abort();
+      // 앞선 병합 검사가 멈춰 있어도 기다리던 쪽은 바로 끝난다
+      expect(await settlesWithin(queued, 2000)).toBe(true);
+      expect(await queued).toMatchObject({ status: 'failed', reason: 'aborted', headCommit: null });
 
-    const first = manager.merge(a, {
-      check: async () => {
-        entered();
-        await gate;
-        // B의 병합은 저장소 병합 잠금을 기다릴 뿐 B의 실행 잠금은 쥐지 않는다
-        inner.preserved = await settlesWithin(manager.preserve(b), 5000);
-        inner.removed = await settlesWithin(manager.removeWorktree(b), 5000);
-        return { passed: true };
-      },
-    });
-    await inCheck;
-    const second = manager.merge(b, { check: passCheck });
-    await sleep(100);
-    proceed();
-
-    expect(await settlesWithin(first, 15000)).toBe(true);
-    expect(inner).toEqual({ preserved: true, removed: true });
-    expect(await first).toMatchObject({ status: 'merged' });
-    expect(await second).toMatchObject({ status: 'merged' });
-    expect(fs.existsSync(b.worktreePath)).toBe(false);
-    expect(userGit(repo, 'status', '--porcelain', '--untracked-files=all')).toBe('');
-  });
-
-  it('제한 시간 뒤에도 도는 이전 검사는 같은 실행의 다음 병합 시도의 임시 워크트리를 건드리지 않는다', async () => {
-    const [a] = await runsOnChangedBase(1);
-    if (a === undefined) throw new Error('실행 없음');
-    let zombieDone = (): void => undefined;
-    const zombieFinished = new Promise<void>((resolve) => {
-      zombieDone = resolve;
-    });
-    const first = await manager.merge(a, {
-      checkTimeoutMs: 100,
-      // 신호를 무시하고 계속 돌다가 자기 임시 워크트리 경로에 쓴다
-      check: async (context) => {
-        await sleep(600);
-        fs.mkdirSync(context.worktreePath, { recursive: true });
-        fs.writeFileSync(path.join(context.worktreePath, 'ZOMBIE'), '이전 검사');
-        zombieDone();
-        return { passed: false };
-      },
-    });
-    expect(first).toMatchObject({ status: 'failed', reason: 'check_timeout' });
-
-    let seen: boolean | null = null;
-    const second = await manager.merge(a, {
-      check: async (context) => {
-        await zombieFinished;
-        seen = fs.existsSync(path.join(context.worktreePath, 'ZOMBIE'));
-        return { passed: true };
-      },
+      controllerA.abort();
+      expect(await first).toMatchObject({ status: 'failed', reason: 'aborted' });
+      expect(hung.signals[0]?.aborted).toBe(true);
+      expect(tip(repo)).toBe(baseTip);
+      await expect(manager.merge(b, { check: passCheck, checkTimeoutMs: 0 })).rejects.toMatchObject(
+        {
+          code: 'invalid_input',
+        },
+      );
+      hung.release();
     });
 
-    expect(seen).toBe(false);
-    expect(second).toMatchObject({ status: 'merged' });
-    expect(fs.existsSync(path.join(repo, 'ZOMBIE'))).toBe(false);
-    // 이전 검사가 다시 만든 폴더(등록 없음)는 다음 병합 · 보존이 지운다
-    await manager.preserve(a);
-    expect(mergeLeftovers()).toEqual([]);
-  });
+    it('다른 실행의 병합 검사가 멈춰도 보존 · 워크트리 제거는 기다리지 않고, 같은 저장소 병합은 기다린다', async () => {
+      const [a, b, c] = await runsOnChangedBase(3);
+      if (a === undefined || b === undefined || c === undefined) throw new Error('실행 없음');
+      const hung = hangingCheck();
 
-  it('같은 저장소를 다른 경로(같은 저장소의 다른 워크트리)로 연 병합도 같은 대기열을 쓴다', async () => {
-    const [a] = await runsOnChangedBase(1);
-    if (a === undefined) throw new Error('실행 없음');
-    // 같은 저장소의 사용자 워크트리를 다른 프로젝트 폴더로 연다(공통 git 폴더가 같다)
-    const other = path.join(tempDir('ow.'), 'other-wt');
-    userGit(repo, 'worktree', 'add', '-q', '-b', 'release', other, 'main');
-    const otherProject = newId();
-    const otherRun = await manager.create({
-      projectId: otherProject,
-      runDisplayId: 'EXE-101',
-      repoPath: other,
-      baseBranch: 'release',
+      const first = manager.merge(a, { check: hung.check });
+      await vi.waitFor(() => {
+        expect(hung.signals).toHaveLength(1);
+      });
+      const preserved = manager.preserve(b);
+      const merging = manager.merge(c, { check: passCheck });
+
+      expect(await settlesWithin(preserved, 5000)).toBe(true);
+      expect((await preserved).worktreePath).toBe(b.worktreePath);
+      expect(await settlesWithin(createWorktreeManager({ biveHome }).removeWorktree(b), 5000)).toBe(
+        true,
+      );
+      expect(fs.existsSync(b.worktreePath)).toBe(false);
+      expect(await settlesWithin(merging, 300)).toBe(false);
+
+      hung.release();
+      expect(await first).toMatchObject({ status: 'merged' });
+      expect(await merging).toMatchObject({ status: 'merged' });
+      expect(userGit(repo, 'status', '--porcelain', '--untracked-files=all')).toBe('');
     });
-    await agentChange(otherRun, 'src/lib/release.ts', 'export const r = 1;\n');
-    userGit(other, 'commit', '-q', '--allow-empty', '-m', '릴리스 변경');
-    const hung = hangingCheck();
 
-    const first = manager.merge(a, { check: hung.check });
-    await vi.waitFor(() => {
-      expect(hung.signals).toHaveLength(1);
+    it('검사 함수 안에서 같은 대기열을 잡는 호출은 교착 대신 reentrant_call로 거부된다', async () => {
+      const [a, b] = await runsOnChangedBase(2);
+      if (a === undefined || b === undefined) throw new Error('실행 없음');
+      const inner: unknown[] = [];
+
+      const result = await manager.merge(a, {
+        check: async () => {
+          // 같은 저장소의 병합 · 같은 실행의 보존 · 제거는 교착이 된다(다른 관리자 인스턴스도 같은 대기열)
+          for (const call of [
+            () => createWorktreeManager({ biveHome }).merge(b, { check: passCheck }),
+            () => manager.preserve(a),
+            () => manager.removeWorktree(a),
+          ]) {
+            inner.push(await call().catch((error: unknown) => error));
+          }
+          // 다른 실행의 보존은 대기열이 달라 바로 끝난다
+          inner.push(await manager.preserve(b));
+          return { passed: true };
+        },
+      });
+
+      expect(inner.slice(0, 3)).toEqual([
+        expect.objectContaining({ code: 'reentrant_call' }),
+        expect.objectContaining({ code: 'reentrant_call' }),
+        expect.objectContaining({ code: 'reentrant_call' }),
+      ]);
+      expect(inner[3]).toMatchObject({ worktreePath: b.worktreePath });
+      expect(result).toMatchObject({ status: 'merged' });
+      // 잠금을 푼 뒤에는 같은 호출이 정상이다
+      expect(await manager.preserve(a)).toMatchObject({ branch: a.branch });
     });
-    const second = manager.merge(otherRun, { check: passCheck });
 
-    expect(await settlesWithin(second, 500)).toBe(false);
-    hung.release();
-    expect(await first).toMatchObject({ status: 'merged' });
-    expect(await second).toMatchObject({ status: 'merged' });
-    expect(userGit(other, 'status', '--porcelain')).toBe('');
-  });
-});
+    it('B의 병합이 대기열에서 기다리는 동안 A의 검사 함수가 preserve(B) · removeWorktree(B)를 불러도 교착하지 않는다', async () => {
+      const [a, b] = await runsOnChangedBase(2);
+      if (a === undefined || b === undefined) throw new Error('실행 없음');
+      let entered = (): void => undefined;
+      const inCheck = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let proceed = (): void => undefined;
+      const gate = new Promise<void>((resolve) => {
+        proceed = resolve;
+      });
+      const inner: { preserved: boolean; removed: boolean } = { preserved: false, removed: false };
+
+      const first = manager.merge(a, {
+        check: async () => {
+          entered();
+          await gate;
+          // B의 병합은 저장소 병합 잠금을 기다릴 뿐 B의 실행 잠금은 쥐지 않는다
+          inner.preserved = await settlesWithin(manager.preserve(b), 5000);
+          inner.removed = await settlesWithin(manager.removeWorktree(b), 5000);
+          return { passed: true };
+        },
+      });
+      await inCheck;
+      const second = manager.merge(b, { check: passCheck });
+      await sleep(100);
+      proceed();
+
+      expect(await settlesWithin(first, 15000)).toBe(true);
+      expect(inner).toEqual({ preserved: true, removed: true });
+      expect(await first).toMatchObject({ status: 'merged' });
+      expect(await second).toMatchObject({ status: 'merged' });
+      expect(fs.existsSync(b.worktreePath)).toBe(false);
+      expect(userGit(repo, 'status', '--porcelain', '--untracked-files=all')).toBe('');
+    });
+
+    it('제한 시간 뒤에도 도는 이전 검사는 같은 실행의 다음 병합 시도의 임시 워크트리를 건드리지 않는다', async () => {
+      const [a] = await runsOnChangedBase(1);
+      if (a === undefined) throw new Error('실행 없음');
+      let zombieDone = (): void => undefined;
+      const zombieFinished = new Promise<void>((resolve) => {
+        zombieDone = resolve;
+      });
+      const first = await manager.merge(a, {
+        checkTimeoutMs: 100,
+        // 신호를 무시하고 계속 돌다가 자기 임시 워크트리 경로에 쓴다
+        check: async (context) => {
+          await sleep(600);
+          fs.mkdirSync(context.worktreePath, { recursive: true });
+          fs.writeFileSync(path.join(context.worktreePath, 'ZOMBIE'), '이전 검사');
+          zombieDone();
+          return { passed: false };
+        },
+      });
+      expect(first).toMatchObject({ status: 'failed', reason: 'check_timeout' });
+
+      let seen: boolean | null = null;
+      const second = await manager.merge(a, {
+        check: async (context) => {
+          await zombieFinished;
+          seen = fs.existsSync(path.join(context.worktreePath, 'ZOMBIE'));
+          return { passed: true };
+        },
+      });
+
+      expect(seen).toBe(false);
+      expect(second).toMatchObject({ status: 'merged' });
+      expect(fs.existsSync(path.join(repo, 'ZOMBIE'))).toBe(false);
+      // 이전 검사가 다시 만든 폴더(등록 없음)는 다음 병합 · 보존이 지운다
+      await manager.preserve(a);
+      expect(mergeLeftovers()).toEqual([]);
+    });
+
+    it('같은 저장소를 다른 경로(같은 저장소의 다른 워크트리)로 연 병합도 같은 대기열을 쓴다', async () => {
+      const [a] = await runsOnChangedBase(1);
+      if (a === undefined) throw new Error('실행 없음');
+      // 같은 저장소의 사용자 워크트리를 다른 프로젝트 폴더로 연다(공통 git 폴더가 같다)
+      const other = path.join(tempDir('ow.'), 'other-wt');
+      userGit(repo, 'worktree', 'add', '-q', '-b', 'release', other, 'main');
+      const otherProject = newId();
+      const otherRun = await manager.create({
+        projectId: otherProject,
+        runDisplayId: 'EXE-101',
+        repoPath: other,
+        baseBranch: 'release',
+      });
+      await agentChange(otherRun, 'src/lib/release.ts', 'export const r = 1;\n');
+      userGit(other, 'commit', '-q', '--allow-empty', '-m', '릴리스 변경');
+      const hung = hangingCheck();
+
+      const first = manager.merge(a, { check: hung.check });
+      await vi.waitFor(() => {
+        expect(hung.signals).toHaveLength(1);
+      });
+      const second = manager.merge(otherRun, { check: passCheck });
+
+      expect(await settlesWithin(second, 500)).toBe(false);
+      hung.release();
+      expect(await first).toMatchObject({ status: 'merged' });
+      expect(await second).toMatchObject({ status: 'merged' });
+      expect(userGit(other, 'status', '--porcelain')).toBe('');
+    });
+  },
+);
