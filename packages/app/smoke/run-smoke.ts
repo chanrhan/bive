@@ -6,6 +6,7 @@
 //   Electron 사용자 데이터가 $BIVE_HOME/app-data에 생김(ADR-055) ·
 //   app.pid 기록 · 앱 종료 코드 0 · 앱 종료 뒤 app.pid 삭제 ·
 //   앱 종료 직후 오케스트레이터 생존(NFR-06) · 유휴 종료로 오케스트레이터 정리
+// 제한: 화면 요소 대기는 60초(부하 평균 12 이상에서 Electron · 오케스트레이터 기동이 늦어 "연결됨" 15초 대기가 넘쳤다, #122).
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -22,6 +23,8 @@ import { appRunPaths } from '../src/main/run-paths.js';
 const APP_DIR = fileURLToPath(new URL('..', import.meta.url));
 const electronPath = createRequire(import.meta.url)('electron') as string;
 const IDLE_SHUTDOWN_MS = 1500;
+/** 화면 요소 · 연결 상태를 기다리는 한도. 부하에서 앱 · 오케스트레이터 기동이 늦어도 넘지 않게 둔다 (#122) */
+const UI_WAIT_MS = 60_000;
 /** 저장소 루트의 `artifacts/smoke` (CI가 artifacts/를 올린다). */
 const SCREENSHOT_DIR = fileURLToPath(new URL('../../../artifacts/smoke/', import.meta.url));
 
@@ -104,24 +107,24 @@ const main = async (): Promise<void> => {
     check(requireType === 'undefined', "typeof window.require === 'undefined'", requireType);
 
     for (const testId of ['sidebar', 'main-area', 'chat-panel']) {
-      await page.getByTestId(testId).waitFor({ timeout: 15_000 });
+      await page.getByTestId(testId).waitFor({ timeout: UI_WAIT_MS });
     }
     check(true, '레이아웃: 사이드바 · 중앙 영역 · 채팅 자리');
 
     const status = page.getByTestId('connection-status');
-    await status.and(page.locator('[data-state="connected"]')).waitFor({ timeout: 15_000 });
+    await status.and(page.locator('[data-state="connected"]')).waitFor({ timeout: UI_WAIT_MS });
     const statusText = (await status.textContent())?.trim();
     check(statusText === '연결됨', `사이드바 하단 연결 상태 "${statusText}"`, statusText);
 
     // 기동 인자 --open: 대화상자 없이 열고 요구사항 화면으로 들어간다 (M1-01)
     const project = page.getByTestId('sidebar-project');
-    await project.and(page.locator('[data-state="open"]')).waitFor({ timeout: 15_000 });
+    await project.and(page.locator('[data-state="open"]')).waitFor({ timeout: UI_WAIT_MS });
     const projectName = (await project.textContent())?.trim();
     check(projectName === 'smoke-app', `사이드바 프로젝트명 "${projectName}"`, projectName);
     await page
       .getByTestId('main-area')
       .and(page.locator('[data-route="requirements"]'))
-      .waitFor({ timeout: 15_000 });
+      .waitFor({ timeout: UI_WAIT_MS });
     check(true, '--open 뒤 요구사항 화면');
     const projectFile = JSON.parse(
       readFileSync(path.join(fixture, '.bive.json'), 'utf8'),

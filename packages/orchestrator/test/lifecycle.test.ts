@@ -1,5 +1,6 @@
 // 백그라운드 수명 (M0-05 수용 기준 3, PRD 5.1): 진행 중 실행 0개 · 연결 0개가
 // BIVE_IDLE_SHUTDOWN_MS(기본 300000) 동안 이어지면 프로세스가 종료된다.
+// 제한: CLI 테스트는 30초, 유휴 시간은 3초(0.5 · 0.8초면 부하에서 소켓 확인 · 접속 전에 먼저 유휴 종료돼 ECONNREFUSED가 났다, #122).
 import { existsSync, readFileSync } from 'node:fs';
 
 import { afterEach, describe, expect, it, type Mock, vi } from 'vitest';
@@ -128,18 +129,26 @@ describe('오케스트레이터 유휴 종료 (실제 소켓)', () => {
   });
 });
 
+/**
+ * CLI 테스트의 유휴 시간. 소켓이 생긴 걸 확인하고 접속하기까지 테스트가 부하로 잠시 멈춰도
+ * 그 사이에 유휴 종료가 오지 않을 만큼 둔다 (#122).
+ */
+const CLI_IDLE_MS = 3000;
+/** 소켓 확인이 늦어질 수 있는 폭. 유휴 종료까지 걸린 시간은 CLI_IDLE_MS - 이 값 이상이어야 한다 */
+const READY_DETECT_SLACK_MS = 1500;
+
 describe('프로세스 유휴 종료 (CLI)', () => {
   it('연결 0개 · 실행 0개가 BIVE_IDLE_SHUTDOWN_MS 동안 이어지면 종료 코드 0으로 끝난다', async () => {
     const home = makeBiveHome();
     const paths = runPaths(home);
-    const proc = spawnCli({ BIVE_HOME: home, BIVE_IDLE_SHUTDOWN_MS: '800' });
+    const proc = spawnCli({ BIVE_HOME: home, BIVE_IDLE_SHUTDOWN_MS: String(CLI_IDLE_MS) });
     await waitFor(() => existsSync(paths.pipe), 15_000, '소켓 생성');
     const readyAt = Date.now();
     const exit = await proc.exited;
     const elapsed = Date.now() - readyAt;
     expect(exit.code).toBe(0);
-    // 소켓은 lifecycle.start() 직전에 생기므로 유휴 시간보다 약간 짧을 수 있다
-    expect(elapsed).toBeGreaterThanOrEqual(600);
+    // 소켓은 lifecycle.start() 직전에 생기고, 부하에서는 테스트가 소켓을 늦게 볼 수 있어 유휴 시간보다 짧을 수 있다
+    expect(elapsed).toBeGreaterThanOrEqual(CLI_IDLE_MS - READY_DETECT_SLACK_MS);
     expect(exit.stdout).toContain('오케스트레이터 종료 (idle)');
     expect(existsSync(paths.pipe)).toBe(false);
     expect(existsSync(paths.pid)).toBe(false);
@@ -149,10 +158,11 @@ describe('프로세스 유휴 종료 (CLI)', () => {
   it('연결이 열려 있는 동안은 유지되고, 연결이 끊기면 유휴 시간 뒤 종료한다', async () => {
     const home = makeBiveHome();
     const paths = runPaths(home);
-    const proc = spawnCli({ BIVE_HOME: home, BIVE_IDLE_SHUTDOWN_MS: '500' });
+    const proc = spawnCli({ BIVE_HOME: home, BIVE_IDLE_SHUTDOWN_MS: String(CLI_IDLE_MS) });
     await waitFor(() => existsSync(paths.token) && existsSync(paths.pipe), 15_000, '기동');
     const client = await connect(paths.pipe, readFileSync(paths.token, 'utf8'));
-    await sleep(1500);
+    // 유휴 시간보다 길게 기다려도 연결이 있으므로 살아 있다
+    await sleep(CLI_IDLE_MS + 1000);
     expect(proc.child.exitCode).toBeNull();
     await expect(client.call('ping')).resolves.toMatchObject({ pong: true });
     await client.close();

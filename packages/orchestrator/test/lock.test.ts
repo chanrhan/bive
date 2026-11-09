@@ -1,6 +1,7 @@
 // 단일 인스턴스 잠금 (M0-05 수용 기준 4, PRD 5.1 · ADR-027):
 // `pnpm --filter @bive/orchestrator start` 두 번째 기동은 즉시 종료 코드 0, 죽은 pid의 잠금은 인수,
 // 토큰 파일 권한은 0600.
+// 제한: 기동 테스트는 40초, 잠금 인수 테스트의 유휴 종료는 4초(1.5초면 부하에서 기동 확인 뒤 접속 전에 먼저 종료돼 접속이 거부될 수 있다, #122).
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -124,7 +125,8 @@ describe('pnpm --filter @bive/orchestrator start', () => {
       writeFileSync(paths.pipe, '');
       writeFileSync(paths.token, 'old-token', { mode: 0o644 });
 
-      const proc = spawnPnpmStart({ BIVE_HOME: home, BIVE_IDLE_SHUTDOWN_MS: '1500' });
+      // 기동 확인과 접속 사이에 테스트가 잠시 멈춰도 유휴 종료가 먼저 오지 않을 만큼 둔다 (#122)
+      const proc = spawnPnpmStart({ BIVE_HOME: home, BIVE_IDLE_SHUTDOWN_MS: '4000' });
       await waitFor(
         () => {
           const pid = readPidFile(paths.pid);
