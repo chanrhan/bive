@@ -3,7 +3,9 @@
 // 2. test-writer 세션을 연다: 세션 루트 = 세션 디렉터리, 쓰기는 대상 규칙 폴더 `bive-acceptance/<RULE-ID>/`만
 // 3. 종료 조건: 세션이 성공으로 끝나고, 대상 규칙마다 `*.acc.ts`가 1개 이상이고, 모든 파일이 import 허용 목록을 지킨다
 //    (`judge/acceptance-lint.ts`). 아니면 `unmet` → 엔진이 새 세션으로 재시도(상한 2회, ADR-026)
-// 4. 통과면 결과 파일과 BIVE 선언 파일을 실행 워크트리에 옮기고 `passed` → 엔진이 커밋한다
+// 4. 통과면 결과 파일과 BIVE 선언 파일을 실행 워크트리에 옮기고 `passed` → 엔진이 커밋한다. 옮긴 파일이 프로젝트의
+//    무시 규칙(`.gitignore` 등)에 걸려 커밋에서 빠지면 `failed`(`acceptance_ignored`): 커밋 · 판정 · 병합에 테스트가
+//    없게 되고, 테스트를 다시 써도 무시 규칙은 그대로라 재시도하지 않는다
 // 세션 디렉터리는 단계가 끝나면(통과 · 미충족 · 예외 모두) 지운다.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,6 +13,7 @@ import path from 'node:path';
 import { createUlidGenerator, type Step } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
+import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import { lintAcceptanceSource } from '../judge/acceptance-lint.js';
 import {
   applyTestWriterOutputs,
@@ -19,6 +22,14 @@ import {
   type TestWriterRule,
 } from '../test-writer/inputs.js';
 import { TEST_WRITER_SYSTEM_PROMPT, testWriterTaskPrompt } from '../test-writer/prompts.js';
+
+/** 옮긴 인수 테스트 · 선언 파일이 무시 규칙에 걸려 커밋되지 않을 때의 실행 실패 사유 (`Run.failureReason`). */
+export const ACCEPTANCE_IGNORED_REASON = 'acceptance_ignored';
+
+export interface TestWritingOptions {
+  /** git 실행 함수 (무시 규칙 확인용, 기본 셸 없는 `execFile`) */
+  git?: GitRunner;
+}
 
 /** 테스트 작성 단계 미충족 사유 (`exitDetail.reason`). */
 export type TestWritingUnmetReason = 'session_error' | 'missing_tests' | 'lint';
@@ -141,10 +152,32 @@ const checkOutputs = (
   return { unmet: null, files, ignored: outputs.ignored };
 };
 
+/**
+ * 워크트리에 옮긴 파일 중 커밋(`add --all`)에서 빠질 파일: 추적되지 않았고 무시 규칙(`.gitignore` · `.git/info/exclude` ·
+ * `core.excludesFile`)에 걸린 것. `check-ignore`는 `--no-index` 없이 쓰므로 이미 추적된 파일은 걸리지 않는다(커밋과 같음).
+ */
+const ignoredForCommit = async (
+  git: GitRunner,
+  worktree: string,
+  files: readonly string[],
+): Promise<string[]> => {
+  if (files.length === 0) return [];
+  const result = await git(['check-ignore', '--stdin', '-z'], {
+    cwd: worktree,
+    okCodes: [0, 1],
+    input: `${files.join('\0')}\0`,
+  });
+  return result.stdout
+    .split('\0')
+    .filter((file) => file !== '')
+    .sort();
+};
+
 /** 테스트 작성 단계 실행기를 만든다 (기본 실행기 목록에 등록된다). */
 export const createTestWritingExecutor =
-  (): StepExecutor =>
+  (options: TestWritingOptions = {}): StepExecutor =>
   async (context): Promise<StepOutcome> => {
+    const git = options.git ?? createGitRunner();
     const rules = loadTargetRules(context);
     if (rules === null || rules.length === 0) {
       return {
@@ -200,6 +233,21 @@ export const createTestWritingExecutor =
         ruleIds,
         files: checked.files,
       });
+      const ignoredByRules = await ignoredForCommit(git, context.git.worktreePath, applied.written);
+      if (ignoredByRules.length > 0) {
+        return {
+          status: 'halt',
+          runStatus: 'failed',
+          reason: ACCEPTANCE_IGNORED_REASON,
+          exitDetail: {
+            sessionId: session.sessionId,
+            ruleIds,
+            ignoredByRules: ignoredByRules.slice(0, MAX_LISTED),
+            detail:
+              '인수 테스트 · 선언 파일이 프로젝트의 무시 규칙(.gitignore 등)에 걸려 커밋에 들어가지 않습니다. 무시 규칙을 고친 뒤 다시 실행합니다',
+          },
+        };
+      }
       return {
         status: 'passed',
         exitDetail: {

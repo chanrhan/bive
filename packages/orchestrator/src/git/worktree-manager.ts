@@ -408,6 +408,36 @@ const withWorktreeLock = <T>(repoKey: string, task: () => Promise<T>): Promise<T
   return holds(key) ? task() : withLock(key, task);
 };
 
+/**
+ * 대기열 · 잠금 키: git 공통 폴더(`rev-parse --git-common-dir`)의 `dev:ino`. 심볼릭 링크 · 바인드 마운트 등 다른 경로로
+ * 연 같은 저장소도 같은 키가 된다(같은 저장소의 다른 워크트리를 프로젝트로 연 경우도). 파일 시스템이 inode를
+ * 주지 않으면(0) 공통 폴더 실경로 문자열을 쓴다.
+ */
+const repoLockKey = async (git: GitRunner, repoPath: string): Promise<string> => {
+  const commonDir = path.resolve(
+    repoPath,
+    (await git(['rev-parse', '--git-common-dir'], { cwd: repoPath })).stdout.trim(),
+  );
+  const stat = fs.statSync(commonDir, { bigint: true });
+  return stat.ino === 0n
+    ? `path:${comparable(realOrResolved(commonDir))}`
+    : `${String(stat.dev)}:${String(stat.ino)}`;
+};
+
+/**
+ * 관리자 밖에서 같은 저장소의 `git worktree` 하위 명령(add · list · remove · lock)을 돌릴 때, 관리자와 같은 짧은
+ * 저장소 잠금(`worktree:<저장소>`, ADR-065) 안에서 `task`를 실행한다. 판정용 체크아웃(`judge/checkout.ts`)이 쓴다.
+ * `task` 안에서는 다른 잠금을 기다리지 않는다(관리자의 `merge` · `preserve` · `removeWorktree`를 부르지 않는다).
+ */
+export const withGitWorktreeLock = async <T>(
+  repoPath: string,
+  task: () => Promise<T>,
+  options: { git?: GitRunner } = {},
+): Promise<T> => {
+  const key = await repoLockKey(options.git ?? createGitRunner(), repoPath);
+  return withWorktreeLock(key, task);
+};
+
 /** 같은 실행 · 같은 저장소의 병합 대기열을 이미 잡은 문맥(검사 함수 안)에서 다시 잡으려 하면 교착이므로 거부한다. */
 const assertNotReentrant = (keys: readonly string[], operation: string): void => {
   if (keys.some(holds)) {
@@ -537,21 +567,7 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
       }
     });
 
-  /**
-   * 대기열 · 잠금 키: git 공통 폴더(`rev-parse --git-common-dir`)의 `dev:ino`. 심볼릭 링크 · 바인드 마운트 등 다른 경로로
-   * 연 같은 저장소도 같은 키가 된다(같은 저장소의 다른 워크트리를 프로젝트로 연 경우도). 파일 시스템이 inode를
-   * 주지 않으면(0) 공통 폴더 실경로 문자열을 쓴다.
-   */
-  const repoKeyOf = async (repoPath: string): Promise<string> => {
-    const commonDir = path.resolve(
-      repoPath,
-      await out(repoPath, ['rev-parse', '--git-common-dir']),
-    );
-    const stat = fs.statSync(commonDir, { bigint: true });
-    return stat.ino === 0n
-      ? `path:${comparable(realOrResolved(commonDir))}`
-      : `${String(stat.dev)}:${String(stat.ino)}`;
-  };
+  const repoKeyOf = (repoPath: string): Promise<string> => repoLockKey(git, repoPath);
 
   const isAncestor = async (cwd: string, ancestor: string, descendant: string): Promise<boolean> =>
     (await git(['merge-base', '--is-ancestor', ancestor, descendant], { cwd, okCodes: [0, 1] }))

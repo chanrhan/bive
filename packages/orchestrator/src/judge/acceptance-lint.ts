@@ -7,7 +7,10 @@
 //   경로라 뺀다(`ACCEPTANCE_DENIED_BUILTINS`)
 // 정적 검사라 모든 우회를 막지는 못한다(문자열을 조립해 전역 객체에서 꺼내는 등). 판정 근거는 여전히 판정 러너의
 // 실행 결과뿐이다(JDG-01). 그래서 해석이 애매하면 통과시키지 않는다: 동적 import는 문자열 리터럴만, `require` ·
-// `eval` · `Function` · `importActual` 류 · `import.meta.glob`은 이름이 나오기만 해도 거부한다.
+// `eval` · `Function` · `importActual` 류 · `getBuiltinModule` · `binding` · `dlopen` · `import.meta.glob`은 이름이
+// 나오기만 해도 거부한다. 생성자를 꺼내는 `.constructor`(예: `(async () => {}).constructor('…')`, Function 생성자
+// 우회)는 `.constructor.name`만 허용한다. 나눗셈과 정규식을 잘못 가르면 코드가 정규식으로 숨으므로, 정규식 본문에
+// `import` · `require` · `eval` 글자가 있거나 식별자 이스케이프(`\u0065val`)가 있으면 거부한다(이중 방어).
 import { builtinModules } from 'node:module';
 
 /** 판정 러너가 판정 때 제공하는 BIVE HTTP 도우미 모듈 이름 (`judge/acceptance-env.ts`). */
@@ -77,7 +80,10 @@ type Token =
   | { kind: 'ident'; value: string; line: number }
   | { kind: 'string'; value: string; line: number }
   | { kind: 'template'; line: number }
-  | { kind: 'punct'; value: string; line: number }
+  /** `pos`: 소스 안 위치 (붙어 있는 `++` · `--` 판단) */
+  | { kind: 'punct'; value: string; line: number; pos: number }
+  /** 정규식 리터럴 (`body`: 슬래시 사이 본문) */
+  | { kind: 'regex'; body: string; line: number }
   | { kind: 'other'; line: number };
 
 class LexError extends Error {
@@ -91,13 +97,15 @@ class LexError extends Error {
 
 const IDENT_START = /[A-Za-z_$\u0080-￿]/u;
 const IDENT_PART = /[A-Za-z0-9_$\u0080-￿]/u;
-/** 이 키워드 뒤의 `/`는 나눗셈이 아니라 정규식 시작이다. */
+/**
+ * 이 키워드 뒤의 `/`는 나눗셈이 아니라 정규식 시작이다(속성 이름 `o.in`은 제외). `of`는 변수 이름이 될 수 있어
+ * (`const of = 1; of / x / 1`) 넣지 않는다: 정규식을 나눗셈으로 잘못 보는 쪽은 본문을 코드로 검사하므로 안전하다.
+ */
 const REGEX_AFTER_KEYWORDS = new Set([
   'return',
   'typeof',
   'instanceof',
   'in',
-  'of',
   'new',
   'delete',
   'void',
@@ -121,13 +129,53 @@ const tokenize = (source: string): Token[] => {
   let line = 1;
   const n = source.length;
 
-  const prevSignificant = (): Token | undefined => tokens.at(-1);
+  /** 식 끝 다음의 `/`는 나눗셈이다. 키워드 뒤 · 연산자 뒤는 정규식이 올 수 있다. */
+  const isKeywordAt = (index: number): boolean => {
+    const token = tokens[index];
+    if (token?.kind !== 'ident' || !REGEX_AFTER_KEYWORDS.has(token.value)) return false;
+    // `o.in` · `this.#in`은 속성 이름이다
+    const before = tokens[index - 1];
+    return !(before?.kind === 'punct' && (before.value === '.' || before.value === '#'));
+  };
+  const endsExpressionAt = (index: number): boolean => {
+    const token = tokens[index];
+    if (token === undefined) return false;
+    if (token.kind === 'ident') return !isKeywordAt(index);
+    if (token.kind === 'punct') return [')', ']', '}'].includes(token.value);
+    return true;
+  };
+  /**
+   * 정규식이 올 자리인지. 애매하면 나눗셈으로 본다(정규식 본문이 코드로 검사되어 더 많이 거부된다).
+   * - 후위 `++` · `--` 뒤는 나눗셈이다 (`n++ / x / 1`). 붙어 있는 같은 기호가 짝수 개면 후위(또는 정규식 앞에 올 수
+   *   없는 전위) 연산자로 본다
+   * - 식 뒤의 `!`는 TypeScript non-null 단언이라 그 뒤는 나눗셈이다 (`n! / x / 1`)
+   */
   const regexAllowed = (): boolean => {
-    const prev = prevSignificant();
+    const last = tokens.length - 1;
+    const prev = tokens[last];
     if (prev === undefined) return true;
-    if (prev.kind === 'ident') return REGEX_AFTER_KEYWORDS.has(prev.value);
-    if (prev.kind === 'string' || prev.kind === 'template' || prev.kind === 'other') return false;
-    return ![')', ']', '}'].includes(prev.value);
+    if (prev.kind === 'ident') return isKeywordAt(last);
+    if (prev.kind !== 'punct') return false;
+    if ([')', ']', '}'].includes(prev.value)) return false;
+    if (prev.value === '+' || prev.value === '-') {
+      let run = 1;
+      for (let k = last - 1; k >= 0; k -= 1) {
+        const token = tokens[k];
+        const after = tokens[k + 1];
+        if (
+          token?.kind !== 'punct' ||
+          after?.kind !== 'punct' ||
+          token.value !== prev.value ||
+          token.pos !== after.pos - 1
+        ) {
+          break;
+        }
+        run += 1;
+      }
+      return run % 2 === 1;
+    }
+    if (prev.value === '!') return !endsExpressionAt(last - 1);
+    return true;
   };
 
   /** 템플릿 본문을 `` ` `` 또는 `${`까지 읽는다. `${`면 true. */
@@ -207,12 +255,16 @@ const tokenize = (source: string): Token[] => {
       // `${…}` 끝: 템플릿 본문으로 돌아간다
       templateDepth.pop();
       i += 1;
+      // 템플릿이 끝나면 템플릿 토큰을 하나 더 둔다: 그 뒤의 `/`는 나눗셈이다
       if (readTemplateChunk(line)) templateDepth.push(0);
+      else tokens.push({ kind: 'template', line });
       continue;
     }
     if (ch === '/' && regexAllowed()) {
       const startLine = line;
       i += 1;
+      const bodyStart = i;
+      let bodyEnd: number;
       let inClass = false;
       for (;;) {
         if (i >= n || source[i] === '\n') throw new LexError(startLine, '닫히지 않은 정규식');
@@ -224,10 +276,13 @@ const tokenize = (source: string): Token[] => {
         i += 1;
         if (c === '[') inClass = true;
         else if (c === ']') inClass = false;
-        else if (c === '/' && !inClass) break;
+        else if (c === '/' && !inClass) {
+          bodyEnd = i - 1;
+          break;
+        }
       }
       while (i < n && IDENT_PART.test(source[i] ?? '')) i += 1;
-      tokens.push({ kind: 'other', line: startLine });
+      tokens.push({ kind: 'regex', body: source.slice(bodyStart, bodyEnd), line: startLine });
       continue;
     }
     if (IDENT_START.test(ch)) {
@@ -249,7 +304,7 @@ const tokenize = (source: string): Token[] => {
       if (ch === '{') templateDepth[top] = (templateDepth[top] ?? 0) + 1;
       if (ch === '}') templateDepth[top] = (templateDepth[top] ?? 0) - 1;
     }
-    tokens.push({ kind: 'punct', value: ch, line });
+    tokens.push({ kind: 'punct', value: ch, line, pos: i });
     i += 1;
   }
   if (templateDepth.length > 0) throw new LexError(line, '닫히지 않은 템플릿 식');
@@ -258,16 +313,30 @@ const tokenize = (source: string): Token[] => {
 
 // ── 검사 ─────────────────────────────────────────────
 
-/** 이름이 나오기만 해도 거부하는 식별자: 다른 모듈 · 코드를 문자열로 불러오는 수단. */
-const DENIED_IDENTIFIERS: Readonly<Record<string, string>> = {
-  require: 'require로 모듈을 불러올 수 없습니다',
-  eval: 'eval을 쓸 수 없습니다',
-  importActual: 'importActual로 모듈을 불러올 수 없습니다',
-  importMock: 'importMock으로 모듈을 불러올 수 없습니다',
-  requireActual: 'requireActual로 모듈을 불러올 수 없습니다',
-  requireMock: 'requireMock으로 모듈을 불러올 수 없습니다',
-  createRequire: 'createRequire를 쓸 수 없습니다',
-};
+/**
+ * 이름이 나오기만 해도 거부하는 식별자: 다른 모듈 · 코드를 문자열로 불러오는 수단. `Map`으로 둔다: 일반 객체 조회는
+ * `toString` · `constructor` · `hasOwnProperty` 같은 프로토타입 이름까지 걸고 사유 자리에 함수가 들어간다.
+ */
+const DENIED_IDENTIFIERS: ReadonlyMap<string, string> = new Map([
+  ['require', 'require로 모듈을 불러올 수 없습니다'],
+  ['eval', 'eval을 쓸 수 없습니다'],
+  ['Function', 'Function 생성자를 쓸 수 없습니다'],
+  ['importActual', 'importActual로 모듈을 불러올 수 없습니다'],
+  ['importMock', 'importMock으로 모듈을 불러올 수 없습니다'],
+  ['requireActual', 'requireActual로 모듈을 불러올 수 없습니다'],
+  ['requireMock', 'requireMock으로 모듈을 불러올 수 없습니다'],
+  ['createRequire', 'createRequire를 쓸 수 없습니다'],
+  ['getBuiltinModule', 'getBuiltinModule로 Node 내장 모듈을 불러올 수 없습니다'],
+  ['binding', 'process.binding으로 내부 모듈을 불러올 수 없습니다'],
+  ['_linkedBinding', 'process._linkedBinding으로 내부 모듈을 불러올 수 없습니다'],
+  ['dlopen', 'process.dlopen으로 네이티브 모듈을 불러올 수 없습니다'],
+]);
+
+/** 정규식 본문에 있으면 거부하는 글자 (나눗셈 · 정규식 오판으로 코드가 정규식에 숨는 경우의 이중 방어). */
+const REGEX_BODY_DENIED = /import|require|eval/u;
+
+const CONSTRUCTOR_MESSAGE =
+  'constructor로 생성자를 꺼낼 수 없습니다 (Function 생성자 우회, .constructor.name만 허용)';
 
 const isPunct = (token: Token | undefined, value: string): boolean =>
   token?.kind === 'punct' && token.value === value;
@@ -313,18 +382,43 @@ export const lintAcceptanceSource = (source: string): AcceptanceLintProblem[] =>
 
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (token?.kind !== 'ident') continue;
     const prev = tokens[index - 1];
     const next = tokens[index + 1];
+    if (token?.kind === 'regex') {
+      if (REGEX_BODY_DENIED.test(token.body)) {
+        problems.push({
+          line: token.line,
+          message:
+            '정규식에 import · require · eval 글자를 쓸 수 없습니다 (나눗셈 · 정규식 오판 우회 방지)',
+        });
+      }
+      continue;
+    }
+    if (isPunct(token, '\\')) {
+      problems.push({
+        line: token?.line ?? 1,
+        message: '식별자 이스케이프(\\u…)를 쓸 수 없습니다',
+      });
+      continue;
+    }
+    // `x['constructor']`
+    if (token?.kind === 'string' && token.value === 'constructor' && isPunct(prev, '[')) {
+      problems.push({ line: token.line, message: CONSTRUCTOR_MESSAGE });
+      continue;
+    }
+    if (token?.kind !== 'ident') continue;
     const afterDot = isPunct(prev, '.') || isPunct(prev, '?');
 
-    const denied = DENIED_IDENTIFIERS[token.value];
+    const denied = DENIED_IDENTIFIERS.get(token.value);
     if (denied !== undefined) {
       problems.push({ line: token.line, message: denied });
       continue;
     }
-    if (token.value === 'Function' && !afterDot && isPunct(next, '(')) {
-      problems.push({ line: token.line, message: 'Function 생성자를 쓸 수 없습니다' });
+    // 속성 `.constructor`는 `.constructor.name`만. 클래스 생성자 정의 · 객체 키 `constructor`는 속성 접근이 아니다
+    if (token.value === 'constructor' && isPunct(prev, '.')) {
+      if (!(isPunct(next, '.') && isIdent(tokens[index + 2], 'name'))) {
+        problems.push({ line: token.line, message: CONSTRUCTOR_MESSAGE });
+      }
       continue;
     }
     if (token.value === 'from' && next?.kind === 'string') {

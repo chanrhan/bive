@@ -262,6 +262,26 @@ const ensureRealDirs = (worktree: string, relDir: string): void => {
   }
 };
 
+/**
+ * 워크트리 안 폴더 경로의 각 구간이 링크가 아닌 실제 폴더인지 본다(만들지 않는다). 모두 폴더면 true, 어느 구간이
+ * 없으면 false.
+ * @throws 어느 구간이 링크 · 폴더가 아닌 항목일 때
+ */
+const realDirChain = (worktree: string, relDir: string): boolean => {
+  let current = worktree;
+  for (const segment of relDir.split('/').filter((s) => s !== '')) {
+    current = path.join(current, segment);
+    const kind = lstatKind(current);
+    if (kind === null) return false;
+    if (kind !== 'dir') {
+      throw new Error(
+        `인수 테스트 경로가 폴더가 아닙니다 (링크 등): ${path.relative(worktree, current).split(path.sep).join('/')}`,
+      );
+    }
+  }
+  return true;
+};
+
 /** 워크트리에 파일을 쓴다. 대상이 링크 · 일반 파일이 아닌 항목이면 거부한다. */
 const writeIntoWorktree = (worktree: string, rel: string, content: string | Buffer): void => {
   ensureRealDirs(worktree, path.posix.dirname(rel));
@@ -285,14 +305,10 @@ const existingTargetTests = (worktree: string, ruleIds: readonly string[]): stri
     }
   };
   for (const ruleId of ruleIds) {
-    const dir = path.join(ACCEPTANCE_DIR, ruleId);
-    const kind = lstatKind(path.join(worktree, dir));
-    if (kind === 'dir') walk(dir);
-    else if (kind !== null) {
-      throw new Error(
-        `인수 테스트 경로가 폴더가 아닙니다 (링크 등): ${dir.split(path.sep).join('/')}`,
-      );
-    }
+    // 구간마다 확인한다: `bive-acceptance` 자체가 링크면 그 아래 규칙 폴더의 lstat은 링크를 따라가 대상 폴더 밖
+    // 파일을 지우게 된다
+    if (realDirChain(worktree, `${ACCEPTANCE_DIR}/${ruleId}`))
+      walk(path.join(ACCEPTANCE_DIR, ruleId));
   }
   return found.sort();
 };

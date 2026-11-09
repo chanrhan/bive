@@ -2,8 +2,11 @@
 // 픽스처 git 복사본 · 실제 git · 실제 SQLite · ScriptedAdapter(실제 고정 도구 · 경로 가드) · 실제 테스트 작성 실행기.
 // Red 확인은 대부분 판정 · 설치를 주입해 빠르게 돌리고(체크아웃은 실제 git), `실제 판정` 묶음만 픽스처 체크아웃에
 // 의존성을 설치하고 실제 판정 러너(next build · next start · vitest)로 돈다. 구현 단계는 시험용 실행기로 멈춘다.
+// 제한: 엔진 · git · 체크아웃을 띄우는 테스트는 60 · 90초, 실제 판정은 420초(설치 + 빌드 + 기동 + vitest), afterEach는
+// 120초(실제 판정이 설치한 node_modules 삭제가 부하에서 기본 훅 10초를 넘는다, ADR-064).
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import type { Rule, RunStatus, StepKind, TestCaseStatus } from '@bive/shared';
@@ -15,6 +18,8 @@ import { loadScenario } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { DEFAULT_STEP_EXECUTORS, PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
+import { createGitRunner, type GitRunner } from '../src/git/git-exec.js';
+import { createWorktreeManager } from '../src/git/worktree-manager.js';
 import {
   ACCEPTANCE_DECLARATION_FILES,
   ACCEPTANCE_ENV_DECLARATION,
@@ -25,7 +30,11 @@ import {
   BIVE_HTTP_HELPER_MODULE,
   lintAcceptanceSource,
 } from '../src/judge/acceptance-lint.js';
-import { hashAcceptanceFiles, installDependencies } from '../src/judge/checkout.js';
+import {
+  createJudgeCheckout,
+  hashAcceptanceFiles,
+  installDependencies,
+} from '../src/judge/checkout.js';
 import { buildJudgeConfig } from '../src/judge/config.js';
 import { parseVitestReport } from '../src/judge/report.js';
 import {
@@ -36,8 +45,12 @@ import {
 } from '../src/judge/runner.js';
 import { createRun } from '../src/runs/run-service.js';
 import { createRedCheckExecutor, JUDGE_RUNNER_ERROR_REASON } from '../src/steps/red-check.js';
-import { createTestWritingExecutor } from '../src/steps/test-writing.js';
-import { exportedMethods, listAppRoutes } from '../src/test-writer/inputs.js';
+import { ACCEPTANCE_IGNORED_REASON, createTestWritingExecutor } from '../src/steps/test-writing.js';
+import {
+  applyTestWriterOutputs,
+  exportedMethods,
+  listAppRoutes,
+} from '../src/test-writer/inputs.js';
 import {
   copyFixture,
   human,
@@ -50,7 +63,7 @@ import {
   userGit,
   withProject,
 } from './helpers/engine-harness.js';
-import { cleanup, makeBiveHome } from './helpers/process.js';
+import { cleanup, makeBiveHome, sleep } from './helpers/process.js';
 
 const temps: string[] = [];
 const engines: PipelineEngine[] = [];
@@ -59,7 +72,7 @@ afterEach(async () => {
   for (const engine of engines.splice(0)) await engine.stop();
   await cleanup();
   for (const dir of temps.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
-});
+}, 120_000);
 
 // ── 도우미 ─────────────────────────────────────────────
 
@@ -476,6 +489,31 @@ describe('세션 작업 디렉터리 · 쓰기 범위 (수용 기준 1, ADR-024)
     ]);
     expect(exportedMethods('export { handler as PUT, other }')).toEqual(['PUT']);
   });
+
+  it('결과 반영은 중간 경로 링크를 따라가지 않는다: bive-acceptance가 밖을 가리키면 아무것도 지우지 않고 거부', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tw-link.'));
+    temps.push(root);
+    const worktree = path.join(root, 'worktree');
+    const outside = path.join(root, 'outside');
+    const sessionDir = path.join(root, 'session');
+    fs.mkdirSync(path.join(outside, 'RULE-001'), { recursive: true });
+    fs.writeFileSync(path.join(outside, 'RULE-001', 'victim.acc.ts'), 'victim');
+    fs.mkdirSync(worktree);
+    fs.symlinkSync(outside, path.join(worktree, 'bive-acceptance'));
+    fs.mkdirSync(path.join(sessionDir, 'bive-acceptance', 'RULE-001'), { recursive: true });
+    fs.writeFileSync(path.join(sessionDir, 'bive-acceptance', 'RULE-001', 'new.acc.ts'), 'new');
+    expect(() =>
+      applyTestWriterOutputs({
+        worktree,
+        sessionDir,
+        ruleIds: ['RULE-001'],
+        files: ['bive-acceptance/RULE-001/new.acc.ts'],
+      }),
+    ).toThrow(/폴더가 아닙니다 \(링크 등\): bive-acceptance$/u);
+    // 대상 폴더 밖 파일은 그대로 (링크를 따라가면 결과에 없는 기존 *.acc.ts로 보고 지웠다)
+    expect(fs.readdirSync(path.join(outside, 'RULE-001'))).toEqual(['victim.acc.ts']);
+    expect(fs.readFileSync(path.join(outside, 'RULE-001', 'victim.acc.ts'), 'utf8')).toBe('victim');
+  });
 });
 
 // ── 수용 기준 2: 종료 조건 (규칙마다 *.acc.ts · import 허용 목록) ─────────
@@ -536,11 +574,71 @@ describe('acceptance-lint import 허용 목록 (수용 기준 2, JDG-01)', () =>
     ["eval('1');", 'eval'],
     ["const f = new Function('return 1');", 'Function'],
     ["const s = 'unterminated;", '해석할 수 없습니다'],
+    // 나눗셈 · 정규식 오판 재현 (Node로 돌리면 실제로 import된다): 후위 ++ · -- · non-null 단언 · of 변수 · 속성 이름 뒤는 나눗셈
+    ["let n = 0; let p; n++ /(p = import('../../src/lib/db'))/ 1;", '상대 · 절대 경로'],
+    ["const of = 1; of /import('../../src/lib/db')/ 1;", '상대 · 절대 경로'],
+    ["let n = 0; n-- /import('../../src/lib/db')/ 1;", '상대 · 절대 경로'],
+    ["let n = 0; n! /import('../../src/lib/db')/ 1;", '상대 · 절대 경로'],
+    ["const o = { in: 1 }; o.in /import('../../src/lib/db')/ 1;", '상대 · 절대 경로'],
+    // 이중 방어: 정규식으로 읽힌 본문에 import · require · eval 글자가 있으면 거부
+    ["const re = /import('..\\/src')/;", '정규식에 import'],
+    ['const re = /require/u;', '정규식에 import'],
+    // 식별자 이스케이프로 거부 식별자 숨기기
+    ["\\u0065val('1');", '식별자 이스케이프'],
+    // Function 생성자 우회: .constructor로 꺼내기 · 이름으로 넘기기
+    [
+      '(async () => {}).constructor(\'return import("../../src/lib/db")\')();',
+      'constructor로 생성자',
+    ],
+    ['const F = Object.getPrototypeOf(async () => {}).constructor;', 'constructor로 생성자'],
+    ["const g = (() => {})['constructor'];", 'constructor로 생성자'],
+    ['const x = (1).constructor.constructor;', 'constructor로 생성자'],
+    ["Reflect.construct(Function, ['return 1']);", 'Function 생성자'],
+    ["globalThis.Function('return 1')();", 'Function 생성자'],
+    // HTTP 밖 내장 모듈 · 네이티브 모듈을 꺼내는 process 함수
+    ["const fsm = process.getBuiltinModule('node:fs');", 'getBuiltinModule'],
+    ["const b = process.binding('fs');", 'process.binding'],
+    ["const b = process._linkedBinding('x');", '_linkedBinding'],
+    ["process.dlopen(m, '/tmp/x.node');", 'dlopen'],
   ])('%s → 거부', (source, message) => {
     const problems = lintAcceptanceSource(source);
     expect(problems.length).toBeGreaterThan(0);
     expect(problems[0]?.message).toContain(message);
     expect(problems[0]?.line).toBe(1);
+    // 기록(JSON)에 사유가 그대로 남는다
+    expect(JSON.parse(JSON.stringify(problems))).toEqual(problems);
+  });
+
+  it('프로토타입 이름(toString · constructor 등)은 거부 식별자가 아니다: 정상 코드는 통과', () => {
+    const source = [
+      "import { expect, inject, it } from 'vitest';",
+      "import { request, url } from '@bive/http';",
+      "it('x', async () => {",
+      "  const u = url('/api/health').toString();",
+      '  const res = await request(u);',
+      '  const body = (await res.json()) as Record<string, unknown>;',
+      "  expect(Object.prototype.hasOwnProperty.call(body, 'ok')).toBe(true);",
+      '  expect(res.status.valueOf()).toBe(200);',
+      '  expect(Object.prototype.isPrototypeOf(body)).toBe(true);',
+      "  expect((1000).toLocaleString('en-US')).toBe('1,000');",
+      '  expect(Object.getPrototypeOf(body)).toBe(Reflect.getPrototypeOf(body));',
+      '  expect(body.__proto__).toBeDefined();',
+      "  expect(new Error('e').constructor.name).toBe('Error');",
+      "  expect(String(inject('baseUrl')).toString()).toContain('http');",
+      '});',
+      'class Probe {',
+      '  constructor(readonly path: string) {}',
+      '  keys(): number { return { constructor: 1, valueOf: 2 }.valueOf; }',
+      '}',
+      "export const probe = new Probe('/');",
+      // 나눗셈 · 정규식 판단이 정상 코드를 거부하지 않는다
+      'export const ratio = (n: number, d: number): number => n / d / 1;',
+      "export const neg = !/abc/u.test('x') && Number(`${String(ratio(1, 2))}`) / 2;",
+      'let i = 0;',
+      'i++;',
+      'export const half = i++ / 2 + --i / 2;',
+    ].join('\n');
+    expect(lintAcceptanceSource(source)).toEqual([]);
   });
 });
 
@@ -606,6 +704,42 @@ describe('테스트 작성 종료 조건 (수용 기준 2)', () => {
     expect(done.run.headCommit).toBeNull();
     expect(done.steps.filter((s) => s.commit !== null)).toEqual([]);
   }, 60_000);
+
+  it.each([
+    [
+      'bive-acceptance/',
+      [
+        'bive-acceptance/RULE-001/health-time.acc.ts',
+        ACCEPTANCE_ENV_DECLARATION,
+        ACCEPTANCE_HTTP_DECLARATION,
+      ],
+    ],
+    ['*.d.ts', [ACCEPTANCE_ENV_DECLARATION, ACCEPTANCE_HTTP_DECLARATION]],
+  ])(
+    '옮긴 파일이 프로젝트 무시 규칙(%s)에 걸려 커밋에서 빠지면 failed (acceptance_ignored), Red 확인으로 가지 않는다',
+    async (pattern, ignored) => {
+      const h = setup({
+        prepareRepo: (repo) => {
+          fs.appendFileSync(path.join(repo, '.gitignore'), `\n${pattern}\n`);
+        },
+      });
+      const done = await runToEnd(h);
+      expectRun(done, 'failed', ACCEPTANCE_IGNORED_REASON);
+      expect(attempts(done, 'test_writing', 'red_check')).toEqual([
+        'test_writing#1:failed',
+        'red_check#1:pending',
+      ]);
+      expect(exitOf(done, 'test_writing', 1)).toMatchObject({
+        reason: ACCEPTANCE_IGNORED_REASON,
+        detail: { ruleIds: ['RULE-001'], ignoredByRules: [...ignored].sort() },
+      });
+      // 재시도하지 않는다 (무시 규칙은 테스트를 다시 써도 그대로다): 세션 1개 · 판정 0회 · 커밋 없음
+      expect(sessionsOf(h, 'test-writer')).toHaveLength(1);
+      expect(h.judgeCalls).toEqual([]);
+      expect(done.run.headCommit).toBeNull();
+    },
+    60_000,
+  );
 });
 
 // ── 수용 기준 3: Red 확인 ───────────────────────────────
@@ -790,6 +924,59 @@ describe('red-violation 시나리오 (수용 기준 4)', () => {
 });
 
 describe('판정 보조 (ADR-051 · ADR-068)', () => {
+  it('판정 체크아웃의 worktree add는 관리자와 같은 저장소 잠금 안: 겹친 병합의 worktree list가 반쯤 만든 관리 폴더를 읽지 않는다', async () => {
+    const biveHome = makeBiveHome();
+    const repo = copyFixture(temps);
+    const manager = createWorktreeManager({ biveHome });
+    const projectId = newId();
+    const run = await manager.create({
+      projectId,
+      runDisplayId: 'EXE-001',
+      repoPath: repo,
+      baseBranch: 'main',
+    });
+    fs.writeFileSync(path.join(run.worktreePath, 'bive-note.txt'), '판정 대상\n');
+    const { commit } = await manager.commit(run, '테스트 작성 단계');
+
+    // `worktree add`가 관리 폴더를 만든 뒤 `commondir`을 쓰기 전의 창(실제로는 수 ms)을, 관리자 쪽 다시 읽기
+    // (100 · 200ms)보다 길게 벌린다. 잠금 밖이면 겹친 병합의 `worktree list`가 128로 실패해 `git_error`가 된다
+    const real = createGitRunner();
+    let markStarted = (): void => undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const slowAdd: GitRunner = async (args, options) => {
+      if (args[0] === 'worktree' && args[1] === 'add') {
+        const admin = path.join(repo, '.git', 'worktrees', 'bive-half-judge');
+        fs.mkdirSync(admin, { recursive: true });
+        fs.writeFileSync(path.join(admin, 'locked'), 'initializing');
+        fs.writeFileSync(path.join(admin, 'gitdir'), `${path.join(biveHome, 'half', '.git')}\n`);
+        fs.writeFileSync(path.join(admin, 'commondir'), '');
+        markStarted();
+        await sleep(1000);
+        fs.rmSync(admin, { recursive: true, force: true });
+      }
+      return real(args, options);
+    };
+    const pending = createJudgeCheckout({
+      repoPath: repo,
+      biveHome,
+      projectId,
+      runDisplayId: 'EXE-001',
+      commit,
+      git: slowAdd,
+    });
+    await started;
+    const merged = await manager.merge(run, { check: () => Promise.resolve({ passed: true }) });
+    const checkout = await pending;
+    expect(merged).toMatchObject({ status: 'merged', headCommit: commit });
+    expect(git(checkout.dir, 'rev-parse', 'HEAD')).toBe(commit);
+    // 지우기(`worktree remove`)도 같은 잠금 안에서, 겹친 관리자 명령과 함께 돈다
+    await Promise.all([checkout.dispose(), manager.removeWorktree(run)]);
+    expect(fs.existsSync(checkout.dir)).toBe(false);
+    expect(git(repo, 'worktree', 'list', '--porcelain')).not.toContain('/judge/');
+  }, 60_000);
+
   it('한 파일에 스위트 훅 실패와 케이스 실패가 섞이면 훅 실패 스위트를 파일 수준 문제로 올린다', () => {
     const file = 'bive-acceptance/RULE-001/mixed.acc.ts';
     const json = JSON.stringify({

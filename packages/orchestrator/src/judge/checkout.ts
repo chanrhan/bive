@@ -7,6 +7,9 @@
 // - 만든 직후 HEAD가 그 커밋이고 미추적 · 무시된 파일이 하나도 없는지 확인한다
 // - 의존성은 실행 워크트리와 공유하지 않고 체크아웃 안에 lockfile 기준으로 새로 설치한다(ADR-024: 설치는 오케스트레이터)
 // - 판정이 끝나면 임시 워크트리를 지운다 (판정 결과 원본은 판정 폴더 `projects/<id>/judge/…`에 남는다)
+// - `worktree add` · `remove`는 워크트리 관리자와 같은 짧은 저장소 잠금(ADR-065 `worktree:<저장소>`) 안에서 돈다.
+//   `worktree add`가 공용 관리 폴더 `.git/worktrees/<이름>/`을 만든 뒤 `commondir`을 쓰기 전에 관리자의
+//   `worktree list` · `add` · `lock`이 돌면 그 폴더를 읽지 못해 실패하기 때문이다(분리된 HEAD라도 관리 폴더는 공용이다)
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,6 +17,7 @@ import path from 'node:path';
 import { CommitSha, createUlidGenerator } from '@bive/shared';
 
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
+import { withGitWorktreeLock } from '../git/worktree-manager.js';
 import { ACCEPTANCE_DIR } from './config.js';
 import { baseChildEnv, describeExit, runCommand } from './process.js';
 
@@ -79,7 +83,11 @@ export const createJudgeCheckout = async (
     if (registered) {
       registered = false;
       try {
-        await git(['worktree', 'remove', '--force', '--force', target], { cwd: input.repoPath });
+        await withGitWorktreeLock(
+          input.repoPath,
+          () => git(['worktree', 'remove', '--force', '--force', target], { cwd: input.repoPath }),
+          { git },
+        );
       } catch {
         // 등록이 이미 없으면 폴더만 지운다 (사용자의 다른 워크트리 정보를 지우는 prune은 쓰지 않는다)
       }
@@ -88,9 +96,14 @@ export const createJudgeCheckout = async (
   };
   try {
     registered = true;
-    await git(['worktree', 'add', '--detach', '--quiet', target, input.commit], {
-      cwd: input.repoPath,
-    });
+    await withGitWorktreeLock(
+      input.repoPath,
+      () =>
+        git(['worktree', 'add', '--detach', '--quiet', target, input.commit], {
+          cwd: input.repoPath,
+        }),
+      { git },
+    );
     const head = (
       await git(['rev-parse', '--verify', 'HEAD^{commit}'], { cwd: target })
     ).stdout.trim();
