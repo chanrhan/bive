@@ -8,6 +8,7 @@ import {
   ApprovalLogEntry,
   Author,
   EntityRef,
+  JudgmentResult,
   MissingSettingPath,
   Project,
   Proposal,
@@ -20,7 +21,7 @@ import {
   Settings,
   Step,
 } from './domain.js';
-import { AgentRole, ProposalKind, ProposalState, RunStatus } from './enums.js';
+import { AgentRole, JudgmentStatus, ProposalKind, ProposalState, RunStatus } from './enums.js';
 import { displayIdSchema, Ulid } from './id.js';
 
 export const JSONRPC_VERSION = '2.0';
@@ -218,6 +219,44 @@ export type RequirementResult = z.infer<typeof RequirementResult>;
 
 export const RequirementListResult = z.strictObject({ requirements: z.array(Requirement) });
 export type RequirementListResult = z.infer<typeof RequirementListResult>;
+
+// ── 규칙 (NRM-02, JDG-02, M1-11, ADR-060) ─────────────────
+// - 모든 요청에 `projectId`가 필수다. 등록되지 않은 프로젝트 · 없는 규칙은 -32004
+// - 규칙 테이블의 규범(승인 · 잠정 승인)만 돌려준다. 승인 전 제안은 규칙이 아니라 `proposal.*`로만 보인다 (NRM-04)
+// - 규칙마다 최신 판정을 함께 싣는다. 판정 기록이 없으면 `unjudged`(미판정) · `latest: null` (JDG-02, 기획서 3.4)
+// - list는 삭제되지 않은 것만 표시 ID 순으로, get은 삭제된 것도 돌려준다(`rule.deletedAt`으로 구분, ADR-047과 같음)
+// - 필터는 렌더러 목록이 한다(screens.md 1.4, ADR-048). 규칙을 바꾸는 RPC는 없다 (NRM-04: 지시 → 제안 → 승인)
+
+/**
+ * 규칙의 최신 판정 (파생 값, JDG-02). `latest`는 그 규칙의 가장 최근 판정 결과(커밋 · 시각 · 실행 링크 `runId`).
+ * 판정 기록이 없으면 `status = unjudged`, `latest = null`. 기록이 있으면 `status`는 기록의 상태와 같다.
+ */
+export const RuleJudgment = z
+  .strictObject({
+    status: JudgmentStatus,
+    latest: JudgmentResult.nullable(),
+  })
+  .refine(
+    ({ status, latest }) => (latest === null ? status === 'unjudged' : status === latest.status),
+    { message: '판정 상태가 최신 판정 기록과 맞지 않습니다', path: ['status'] },
+  );
+export type RuleJudgment = z.infer<typeof RuleJudgment>;
+
+/** 규칙 1건 + 최신 판정. `rule.get` 결과이자 `rule.list` 목록의 항목이다. */
+export const RuleWithJudgment = z.strictObject({ rule: Rule, judgment: RuleJudgment });
+export type RuleWithJudgment = z.infer<typeof RuleWithJudgment>;
+
+/** `rule.list`: 삭제되지 않은 규칙 전부. */
+export const RuleListParams = z.strictObject({ projectId: Ulid });
+export type RuleListParams = z.infer<typeof RuleListParams>;
+export const RuleListResult = z.strictObject({ rules: z.array(RuleWithJudgment) });
+export type RuleListResult = z.infer<typeof RuleListResult>;
+
+/** `rule.get`: ID로 1건. 제안 ID는 규칙이 아니므로 -32004. */
+export const RuleGetParams = z.strictObject({ projectId: Ulid, id: Ulid });
+export type RuleGetParams = z.infer<typeof RuleGetParams>;
+export const RuleGetResult = RuleWithJudgment;
+export type RuleGetResult = RuleWithJudgment;
 
 // ── 제안 · 승인 기록 (NRM-04, TODO-01, NFR-01, M1-09, ADR-050) ──
 // - 모든 요청에 `projectId`가 필수다. 등록되지 않은 프로젝트 · 없는 제안은 -32004
@@ -498,6 +537,8 @@ export const METHODS = {
   'requirement.delete': { params: RequirementDeleteParams, result: RequirementResult },
   'requirement.get': { params: RequirementGetParams, result: RequirementResult },
   'requirement.list': { params: RequirementListParams, result: RequirementListResult },
+  'rule.list': { params: RuleListParams, result: RuleListResult },
+  'rule.get': { params: RuleGetParams, result: RuleGetResult },
   'proposal.list': { params: ProposalListParams, result: ProposalListResult },
   'proposal.count': { params: ProposalCountParams, result: ProposalCountResult },
   'proposal.get': { params: ProposalGetParams, result: ProposalResult },
