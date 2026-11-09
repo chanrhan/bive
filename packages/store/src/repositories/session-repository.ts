@@ -159,6 +159,7 @@ export class SessionRepository {
   readonly #select;
   readonly #selectByRun;
   readonly #selectByRequirement;
+  readonly #selectUnended;
   readonly #selectCallsBySession;
   readonly #countByRunRole;
   readonly #stepOf;
@@ -186,6 +187,9 @@ export class SessionRepository {
     );
     this.#selectByRun = db.prepare<[string], SessionRow>(
       `SELECT ${SESSION_COLUMNS} FROM sessions WHERE run_id = ? ORDER BY started_at, id`,
+    );
+    this.#selectUnended = db.prepare<[], SessionRow>(
+      `SELECT ${SESSION_COLUMNS} FROM sessions WHERE end_reason IS NULL ORDER BY started_at, id`,
     );
     this.#selectByRequirement = db.prepare<[string], SessionRow>(
       `SELECT ${SESSION_COLUMNS} FROM sessions WHERE requirement_id = ? ORDER BY started_at, id`,
@@ -279,6 +283,11 @@ export class SessionRepository {
   /** 실행의 세션을 시작 순으로. */
   listByRun(runId: string): Session[] {
     return this.#selectByRun.all(runId).map(toSession);
+  }
+
+  /** 끝나지 않은 세션 전부 (시작 순). 재기동 때 앞 프로세스가 남긴 세션을 닫는 데 쓴다. */
+  listUnended(): Session[] {
+    return this.#selectUnended.all().map(toSession);
   }
 
   /** 실행 밖 세션 포함, 요구사항을 대상으로 한 세션 (시작 순). */
