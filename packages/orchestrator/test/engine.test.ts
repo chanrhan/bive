@@ -292,6 +292,13 @@ describe('유형 A 단계 순서 · 전이 (수용 기준 1)', () => {
     expect(userGit(h.repo, 'branch', '--list', 'bive/run-*')).toBe('');
   });
 
+  it('규칙 승인 뒤(onNormsApproved) 그 프로젝트의 승인 대기 실행을 판정해 진행한다', async () => {
+    const h = setup();
+    h.engine.onNormsApproved(h.project.id);
+    await h.engine.settled();
+    expect(detailOf(h).run).toMatchObject({ status: 'merged', currentStep: null });
+  }, 60_000);
+
   it('승인 기록 run_start가 없는 실행은 진행하지 않고 failed (run_without_log, NFR-01)', async () => {
     const h = setup();
     // 승인 기록을 남기지 않은 실행을 저장소에 바로 만든다 (파이프 밖 경로의 흉내)

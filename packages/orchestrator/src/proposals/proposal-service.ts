@@ -29,6 +29,7 @@ import { canonicalJson, ConflictError, NotFoundError, type ProjectStore } from '
 
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
+import { earsStatementProblem } from '../tools/ears.js';
 
 /** 제안 등록 입력 (`ProposalService.submit`). 표시 ID · diff · 대상 · 상태 · 시각은 서비스가 채운다. */
 export interface ProposalSubmitInput {
@@ -236,6 +237,20 @@ export const approveProposal = (
           reason: DomainErrorReason.EditedPayloadInvalid,
           issues: toSchemaIssues(checked.error),
         });
+      }
+      // 사람이 고친 규칙 진술도 rule-writer 제안과 같은 EARS 형식이어야 한다 (ADR-062 · ADR-063).
+      // 고치지 않은 진술은 제안 등록 때 이미 받은 값이라 다시 검사하지 않는다
+      if (kind.data === 'rule_new') {
+        const before = RuleNewPayload.parse(payload);
+        const after = RuleNewPayload.parse(checked.data);
+        const problem =
+          after.statement === before.statement ? null : earsStatementProblem(after.statement);
+        if (problem !== null) {
+          throw new RpcError(ErrorCode.ValidationFailed, `수정 진술 형식 오류: ${problem}`, {
+            reason: DomainErrorReason.EditedPayloadInvalid,
+            issues: [{ path: 'statement', message: problem }],
+          });
+        }
       }
       // 고친 내용이 없으면 그대로 승인으로 기록한다
       if (canonicalJson(checked.data) !== canonicalJson(payload)) {
