@@ -1,6 +1,8 @@
 // SCR-17 승인 대기 (screens.md 6장 할 일 · SCR-17, TODO-01, ADR-029 · ADR-035 · ADR-056).
 // 사이드바 알림 아이콘 → 할 일. 머리 탭은 [승인 대기] 하나(검토 대기열 · 계약 변경 승인 탭은 DOM에 없음).
-// 왼쪽 승인 대기 목록(검색 · 필터 칩 4종 · 2줄 카드), 오른쪽 상세 자리("선택 항목"). 상세 내용 · 처리 버튼은 #40.
+// 왼쪽 승인 대기 목록(검색 · 필터 칩 4종 · 2줄 카드), 오른쪽 상세("선택 항목"): 출처 → 에이전트 제안 → 승인하면 /
+// 거절하면 카드(처리된 제안은 처리 기록) + 오른쪽 아래 떠 있는 [거절] [수정] [승인] (#40, ADR-063).
+// 상세 · 입력 카드 · 처리 기록은 화면 상태가 아니라 scr-17.spec.ts가 아래 표로 검사하고 스크린샷을 남긴다.
 // 상태: 기본(대기 제안 있음) · 빈("대기 항목 없음", ADR-029). 로딩 · 에러는 화면 정의서에 없다
 // (에러 "상한 초과 시 머리줄 빨강"은 #58 M3-13).
 import type { ElementCheck, ScreenChecklist, StateChecklist } from './types.js';
@@ -20,6 +22,24 @@ export const APPROVAL_FILTERS = [
 ] as const;
 
 export const APPROVAL_EMPTY_TEXT = '대기 항목 없음';
+
+/** 상세 구획 순서 (SCR-17 상세: 출처 → 에이전트 제안 → 승인하면 / 거절하면): testId 접미사 · 제목. */
+export const DETAIL_SECTIONS = [
+  { id: 'source', title: '출처' },
+  { id: 'proposal', title: '에이전트 제안' },
+  { id: 'if-approve', title: '승인하면' },
+  { id: 'if-reject', title: '거절하면' },
+] as const;
+
+/** 처리된 제안의 상세 구획 순서: 승인하면 / 거절하면 대신 처리 기록. */
+export const PROCESSED_DETAIL_SECTIONS = [
+  { id: 'source', title: '출처' },
+  { id: 'proposal', title: '에이전트 제안' },
+  { id: 'record', title: '처리 기록' },
+] as const;
+
+/** 떠 있는 처리 버튼 (SCR-17 액션 버튼, 왼쪽부터). */
+export const ACTION_LABELS = ['거절', '수정', '승인'] as const;
 
 const common: ElementCheck[] = [
   {
@@ -70,6 +90,7 @@ const basic: StateChecklist = {
     { label: '카드 2줄 표시 ID', testId: 'card-id', text: /^PRP-\d{3,}$/ },
     { label: '안 읽음 점', testId: 'card-unread', role: 'img', name: '안 읽음' },
     { label: '상세 빈 자리', testId: 'empty-state', text: '선택 항목 없음' },
+    { label: '처리 버튼 미노출 (선택 없음)', testId: 'floating-actions', absent: true },
   ],
 };
 

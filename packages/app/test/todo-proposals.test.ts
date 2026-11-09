@@ -55,7 +55,8 @@ const proposal = (overrides: Partial<Proposal> = {}): Proposal => {
     targetRef: null,
     payload: {
       title: '헬스 응답에 서버 시각 포함',
-      statement: '헬스 요청을 받으면 시스템은 서버 시각을 응답에 포함한다',
+      statement:
+        'WHEN 클라이언트가 헬스 체크를 요청하면 THE SYSTEM SHALL 서버 시각을 응답에 포함한다',
       kind: 'business',
       checkKinds: ['test'],
       parentRequirementId: ULIDS[0],

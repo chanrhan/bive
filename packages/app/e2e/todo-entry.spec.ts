@@ -31,7 +31,7 @@ const ID = {
 
 const rulePayload = (title: string): Record<string, unknown> => ({
   title,
-  statement: `${title} 요청을 받으면 시스템은 결과를 응답한다`,
+  statement: `WHEN 클라이언트가 헬스 체크를 요청하면 THE SYSTEM SHALL ${title}`,
   kind: 'business',
   checkKinds: ['test'],
   parentRequirementId: ID.req,
@@ -203,7 +203,8 @@ test.describe('할 일 머리 탭 (수용 기준 2)', () => {
   test('승인 대기 탭만 있고 검토 대기열 · 계약 변경 승인 탭은 미노출', async ({ page }) => {
     await setup(page);
     await todoButton(page).click();
-    await expectScreen(page, 'SCR-17', '기본');
+    // 스크린샷은 scr-17.spec.ts가 남긴다 (같은 파일을 병렬로 쓰지 않게)
+    await expectScreen(page, 'SCR-17', '기본', { screenshot: false });
 
     const tabs = page.getByRole('tablist', { name: '할 일 종류' }).getByRole('tab');
     await expect(tabs).toHaveText([...TODO_TAB_LABELS]);
@@ -216,7 +217,7 @@ test.describe('할 일 머리 탭 (수용 기준 2)', () => {
   test('빈 상태: 대기 항목 없음', async ({ page }) => {
     await setup(page, []);
     await todoButton(page).click();
-    await expectScreen(page, 'SCR-17', '빈');
+    await expectScreen(page, 'SCR-17', '빈', { screenshot: false });
   });
 });
 
