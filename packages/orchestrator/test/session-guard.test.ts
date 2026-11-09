@@ -244,6 +244,38 @@ describe('허용 목록과 다른 init → 세션 중단', () => {
   });
 });
 
+describe('guardSession: 시작 실패 (init 없이 결과)', () => {
+  const startupFailure = (subtype: 'error_during_execution' | 'success') =>
+    async function* (): AsyncGenerator<SessionEvent> {
+      yield { type: 'result', subtype, total_cost_usd: 0, num_turns: 0, modelUsage: {} };
+      yield { type: 'message', turn: 1, text: '이후 이벤트는 읽지 않는다' };
+    };
+
+  it.each(['error_during_execution', 'success'] as const)(
+    'init 없이 %s 결과만 오면 가드 위반이 아니라 오류 결과로 끝낸다',
+    async (subtype) => {
+      const controller = new AbortController();
+      const events: SessionEvent[] = [];
+      for await (const event of guardSession(startupFailure(subtype)(), {
+        role: 'implementer',
+        controller,
+      })) {
+        events.push(event);
+      }
+      expect(events).toEqual([
+        {
+          type: 'result',
+          subtype: 'error_during_execution',
+          total_cost_usd: 0,
+          num_turns: 0,
+          modelUsage: {},
+        },
+      ]);
+      expect(controller.signal.aborted).toBe(false);
+    },
+  );
+});
+
 describe('checkSessionInit', () => {
   const init = (tools: string[], mcpServers: string[]): SessionInitEvent => ({
     type: 'init',

@@ -13,6 +13,7 @@ import { ProposalRepository } from './repositories/proposal-repository.js';
 import { RequirementRepository } from './repositories/requirement-repository.js';
 import { RuleRepository } from './repositories/rule-repository.js';
 import { RunRepository } from './repositories/run-repository.js';
+import { SessionRepository } from './repositories/session-repository.js';
 import { SettingsRepository } from './repositories/settings-repository.js';
 
 export interface OpenStoreOptions extends MigrateOptions {
@@ -37,6 +38,8 @@ export class ProjectStore {
   readonly settings: SettingsRepository;
   /** 실행 · 대상 규칙 · 단계 시도 (RUN-01, RUN-02). 상태 저장은 `runs.transition` 1회 = 트랜잭션 1회. */
   readonly runs: RunRepository;
+  /** 에이전트 세션 · 도구 호출 기록 (RUN-04, NFR-02, ADR-066). 세션 도중에도 바로 남기는 기록이다. */
+  readonly sessions: SessionRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -52,6 +55,7 @@ export class ProjectStore {
     this.approvalLog = new ApprovalLogRepository(db);
     this.settings = new SettingsRepository(db, projectId);
     this.runs = new RunRepository(db, projectId, this.sequences);
+    this.sessions = new SessionRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

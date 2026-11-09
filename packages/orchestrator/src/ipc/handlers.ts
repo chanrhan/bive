@@ -1,5 +1,6 @@
 // 인증된 연결이 부를 수 있는 메서드 처리기. 메서드는 각 이슈에서 여기에 더한다.
 import type { RuleWriterLauncher } from '../rule-writer/rule-writer-service.js';
+import type { RunEngineHooks } from './run-handlers.js';
 import { createProjectHandlers } from './project-handlers.js';
 import { createProposalHandlers } from './proposal-handlers.js';
 import { createRequirementHandlers } from './requirement-handlers.js';
@@ -27,6 +28,8 @@ export interface HandlerDeps {
   now?: () => number;
   /** `requirement.create` 뒤 규칙 자동 생성 세션 창구 (M1-08). 생략하면 세션을 띄우지 않는다 */
   ruleWriter?: RuleWriterLauncher;
+  /** 실행 엔진 (M1-14): 실행 생성 · 규칙 승인 뒤 승인 단계 판정, `run.resume`. 생략하면 실행이 진행되지 않는다 */
+  engine?: RunEngineHooks;
 }
 
 export const createHandlers = ({
@@ -35,6 +38,7 @@ export const createHandlers = ({
   biveHome,
   now = Date.now,
   ruleWriter,
+  engine,
 }: HandlerDeps): MethodHandlers => ({
   ping: () => ({ pong: true, version: orchestratorVersion }),
   'system.status': () => ({
@@ -51,7 +55,7 @@ export const createHandlers = ({
     ...(ruleWriter === undefined ? {} : { ruleWriter }),
   }),
   ...createRuleHandlers({ biveHome }),
-  ...createProposalHandlers({ biveHome, now }),
+  ...createProposalHandlers({ biveHome, now, ...(engine === undefined ? {} : { engine }) }),
   ...createSettingsHandlers({ biveHome, now }),
-  ...createRunHandlers({ biveHome, now }),
+  ...createRunHandlers({ biveHome, now, ...(engine === undefined ? {} : { engine }) }),
 });

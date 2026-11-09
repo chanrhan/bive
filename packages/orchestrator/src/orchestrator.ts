@@ -1,9 +1,12 @@
 // 오케스트레이터 기동 · 종료: 어댑터 선택 → 단일 인스턴스 잠금 → 토큰 → 파이프 서버 → 수명 감시
 // (PRD 5.1, ADR-027 · ADR-041 · ADR-049). 규칙 자동 생성 세션(ADR-062)은 선택된 어댑터로 돈다.
+// 연결을 받기 전에 `running` 실행을 `interrupted`로 바꾸고(자동 재개 없음) 실행 엔진(ADR-066)을 붙인다.
 import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 
 import { type AgentSelection, selectAgent } from './agent/select.js';
+import { type InterruptedRun, PipelineEngine } from './engine/pipeline-engine.js';
+import type { StepExecutors } from './engine/types.js';
 import { createHandlers } from './ipc/handlers.js';
 import { PipeServer } from './ipc/server.js';
 import { NetPipeTransport, type PipeTransport } from './ipc/transport.js';
@@ -29,8 +32,10 @@ export interface OrchestratorOptions {
   version?: string;
   /** 에이전트 어댑터. 생략하면 `BIVE_AGENT` · `BIVE_SCENARIO`로 고른다 (잘못되면 AgentConfigError) */
   agent?: AgentSelection;
-  /** 진행 기록 한 줄 (규칙 작성 세션 시작 · 생략 · 종료, 기본 표준 출력) */
+  /** 진행 기록 한 줄 (규칙 작성 세션 시작 · 생략 · 종료, 실행 엔진, 기본 표준 출력) */
   log?: (line: string) => void;
+  /** 실행 엔진의 단계 실행기 (테스트 작성 · Red 확인 #28, 구현 · 검사 · 병합 #29, 화면 갱신 #32) */
+  executors?: StepExecutors;
 }
 
 export interface Orchestrator {
@@ -45,6 +50,10 @@ export interface Orchestrator {
   readonly runs: RunTracker;
   /** `requirement.create` 뒤 rule-writer 세션 (기록은 메모리, ADR-062) */
   readonly ruleWriter: RuleWriterService;
+  /** 파이프라인 엔진 (ADR-066) */
+  readonly engine: PipelineEngine;
+  /** 기동 때 `interrupted`로 바꾼 실행 */
+  readonly interruptedRuns: readonly InterruptedRun[];
   readonly connectionCount: number;
   /** 정상 종료. 여러 번 불러도 한 번만 수행한다 */
   stop(reason?: ShutdownReason): Promise<void>;
@@ -157,6 +166,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         try {
           // 진행 중 규칙 작성 세션을 중단한다 (이미 등록된 제안은 승인 대기로 남는다)
           await ruleWriter.close();
+          // 진행 중 실행을 중단한다. 상태는 저장하지 않으므로 다음 기동 때 interrupted가 된다
+          await engine.stop();
           await closeAndCleanup();
         } finally {
           resolveClosed(reason);
@@ -169,12 +180,22 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       idleShutdownMs,
       onIdle: () => void stop('idle'),
     });
+    const log = options.log ?? ((line: string) => console.log(line));
     const ruleWriter = new RuleWriterService({
       biveHome: options.biveHome,
       adapter: agent.adapter,
       tasks: lifecycle,
-      log: options.log ?? ((line) => console.log(line)),
+      log,
     });
+    const engine = new PipelineEngine({
+      biveHome: options.biveHome,
+      agent: agent.adapter,
+      runs: lifecycle,
+      log,
+      ...(options.executors === undefined ? {} : { executors: options.executors }),
+    });
+    // 잠금을 잡은 뒤 · 연결을 받기 전: 비정상 종료로 남은 running 실행은 interrupted (PRD 5.1, 자동 재개 없음)
+    const interruptedRuns = engine.recoverInterruptedRuns();
     server = new PipeServer({
       transport: options.transport ?? new NetPipeTransport({ platform }),
       path: paths.pipe,
@@ -193,6 +214,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
           },
         },
         ruleWriter,
+        engine,
       }),
       ...(options.helloTimeoutMs === undefined ? {} : { helloTimeoutMs: options.helloTimeoutMs }),
       onConnectionOpened: () => lifecycle.connectionOpened(),
@@ -213,6 +235,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         agent,
         runs: lifecycle,
         ruleWriter,
+        engine,
+        interruptedRuns,
         get connectionCount() {
           return listening.connectionCount;
         },
