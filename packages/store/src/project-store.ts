@@ -54,8 +54,8 @@ export class ProjectStore {
     this.proposals = new ProposalRepository(db, this.sequences);
     this.approvalLog = new ApprovalLogRepository(db);
     this.settings = new SettingsRepository(db, projectId);
-    this.runs = new RunRepository(db, projectId, this.sequences);
     this.sessions = new SessionRepository(db);
+    this.runs = new RunRepository(db, projectId, this.sequences, this.sessions);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

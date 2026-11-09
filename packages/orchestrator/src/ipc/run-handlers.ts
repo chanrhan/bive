@@ -63,7 +63,13 @@ export const createRunHandlers = ({ biveHome, now, engine }: RunHandlerDeps): Ru
       return created;
     },
     'run.get': ({ projectId, id }) =>
-      withProjectStore(biveHome, projectId, (store) => findRun(store, id)),
+      withProjectStore(biveHome, projectId, (store) => {
+        const detail = findRun(store, id);
+        const usage = store.runs.usage(detail.run.id);
+        if (usage === null)
+          throw new RpcError(ErrorCode.NotFound, `실행을 찾을 수 없습니다: ${id}`);
+        return { ...detail, usage };
+      }),
     'run.list': ({ projectId, status }) =>
       withProjectStore(biveHome, projectId, (store) => ({ runs: store.runs.list({ status }) })),
     'run.resume': ({ projectId, id, author }) => {

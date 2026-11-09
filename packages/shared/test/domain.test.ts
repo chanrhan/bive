@@ -162,6 +162,7 @@ const session = {
   numTurns: null,
   modelUsage: {},
   firstTurnCacheWrite: null,
+  budget: { maxBudgetUsd: 2, maxTurns: 100 },
   tools: [],
   mcpServers: [],
   startedAt: AT,
@@ -582,6 +583,11 @@ describe('실행', () => {
     // 실행 밖 세션(규칙 작성)은 실행 · 단계가 둘 다 없다
     expect(Session.safeParse({ ...session, runId: null, stepId: null }).success).toBe(true);
     expect(Session.safeParse({ ...session, stepId: null }).success).toBe(false);
+    // 세션에 넘긴 한도 (ADR-067): 한도 없이 연 세션은 null, 있으면 양수 · 양의 정수
+    expect(Session.safeParse({ ...session, budget: null }).success).toBe(true);
+    expect(
+      Session.safeParse({ ...session, budget: { maxBudgetUsd: 0, maxTurns: 1 } }).success,
+    ).toBe(false);
   });
 });
 

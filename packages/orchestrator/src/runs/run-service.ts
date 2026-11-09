@@ -71,9 +71,7 @@ export interface StepCompletion {
   /** 종료 조건 결과 (SCR-16에 표시) */
   readonly exitDetail?: unknown;
   readonly commit?: string | null;
-  readonly costUsd?: number | null;
-  readonly turns?: number | null;
-  /** 같은 트랜잭션에 함께 저장할 실행 변경 (예: 마지막 단계 뒤 `merged` · `endedAt`, 커밋 · 비용 합계) */
+  /** 같은 트랜잭션에 함께 저장할 실행 변경 (예: 마지막 단계 뒤 `merged` · `endedAt`, 커밋). 비용 · 턴은 저장소가 채운다 */
   readonly run?: RunPatch;
 }
 
@@ -196,8 +194,6 @@ const completionTransition = (
         status: input.status,
         exitDetail: input.exitDetail ?? null,
         commit: input.commit ?? null,
-        costUsd: input.costUsd ?? null,
-        turns: input.turns ?? null,
         startedAt: current.startedAt ?? at,
         endedAt: at,
       },

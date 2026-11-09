@@ -686,6 +686,8 @@ export type ModelUsage = z.infer<typeof ModelUsage>;
  * 실행 엔진(M1-14, ADR-066)이 세션을 열 때 행을 만들고 끝날 때 결과를 채운다(재기동 뒤 역할별 세션 순번의 근거).
  * 실행 밖 세션(규칙 작성, ADR-062)은 `runId` · `stepId`가 `null`이고 `requirementId`로 대상 요구사항을 가리킨다.
  * `error`는 결과 없이 끝난 세션의 사유 문장(어댑터 오류 · 가드 위반 등).
+ * `budget`은 세션을 열 때 어댑터에 넘긴 한도(min(역할 잔여, 실행 잔여), ADR-067). 결과 없이 끝나 비용 · 턴을 모르는
+ * 세션은 잔여 한도 계산에서 이 한도를 다 쓴 것으로 본다. 한도 없이 연 세션(실행 밖 세션)은 `null`.
  */
 export const Session = z
   .strictObject({
@@ -703,6 +705,7 @@ export const Session = z
     numTurns: NonNegativeInt.nullable(),
     modelUsage: z.record(NonEmptyString, ModelUsage),
     firstTurnCacheWrite: NonNegativeInt.nullable(),
+    budget: BudgetLimits.nullable(),
     tools: z.array(NonEmptyString),
     mcpServers: z.array(NonEmptyString),
     startedAt: Timestamp,

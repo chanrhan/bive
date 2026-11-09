@@ -14,12 +14,12 @@ import {
 import { withTransaction, type SqliteDatabase } from '../database.js';
 import { ConflictError, NotFoundError } from '../errors.js';
 
-/** 새 세션. 결과 필드는 `end`가 채운다. */
+/** 새 세션. 결과 필드는 `end`가 채운다. `budget`은 어댑터에 넘긴 한도(실행 세션, ADR-067). */
 export type SessionStartInput = Pick<
   Session,
   'id' | 'runId' | 'stepId' | 'role' | 'model' | 'workDir' | 'startedAt'
 > &
-  Partial<Pick<Session, 'requirementId'>>;
+  Partial<Pick<Session, 'requirementId' | 'budget'>>;
 
 /** 세션 init 보고 (SDK 세션 ID · 도구 목록 · MCP 서버). 끝나기 전에 한 번 이상 기록할 수 있다. */
 export interface SessionInitInput {
@@ -59,6 +59,8 @@ interface SessionRow {
   num_turns: number | null;
   model_usage: string;
   first_turn_cache_write: number | null;
+  budget_max_usd: number | null;
+  budget_max_turns: number | null;
   tools: string;
   mcp_servers: string;
   started_at: string;
@@ -80,7 +82,8 @@ interface ToolCallRow {
 }
 
 const SESSION_COLUMNS = `id, run_id, step_id, requirement_id, role, model, sdk_session_id, work_dir, end_reason, error,
-  total_cost_usd, num_turns, model_usage, first_turn_cache_write, tools, mcp_servers, started_at, ended_at`;
+  total_cost_usd, num_turns, model_usage, first_turn_cache_write, budget_max_usd, budget_max_turns, tools,
+  mcp_servers, started_at, ended_at`;
 
 const TOOL_CALL_COLUMNS = `id, run_id, session_id, seq, at, role, name, args_summary, status, reason,
   duration_ms`;
@@ -100,6 +103,8 @@ const toSessionRow = (session: Session): SessionRow => ({
   num_turns: session.numTurns,
   model_usage: JSON.stringify(session.modelUsage),
   first_turn_cache_write: session.firstTurnCacheWrite,
+  budget_max_usd: session.budget?.maxBudgetUsd ?? null,
+  budget_max_turns: session.budget?.maxTurns ?? null,
   tools: JSON.stringify(session.tools),
   mcp_servers: JSON.stringify(session.mcpServers),
   started_at: session.startedAt,
@@ -122,6 +127,10 @@ const toSession = (row: SessionRow): Session =>
     numTurns: row.num_turns,
     modelUsage: JSON.parse(row.model_usage) as unknown,
     firstTurnCacheWrite: row.first_turn_cache_write,
+    budget:
+      row.budget_max_usd === null && row.budget_max_turns === null
+        ? null
+        : { maxBudgetUsd: row.budget_max_usd, maxTurns: row.budget_max_turns },
     tools: JSON.parse(row.tools) as unknown,
     mcpServers: JSON.parse(row.mcp_servers) as unknown,
     startedAt: row.started_at,
@@ -163,7 +172,8 @@ export class SessionRepository {
     this.#insert = db.prepare<[SessionRow]>(
       `INSERT INTO sessions (${SESSION_COLUMNS}) VALUES (@id, @run_id, @step_id, @requirement_id, @role, @model,
        @sdk_session_id, @work_dir, @end_reason, @error, @total_cost_usd, @num_turns, @model_usage,
-       @first_turn_cache_write, @tools, @mcp_servers, @started_at, @ended_at)`,
+       @first_turn_cache_write, @budget_max_usd, @budget_max_turns, @tools, @mcp_servers, @started_at,
+       @ended_at)`,
     );
     this.#update = db.prepare<[SessionRow]>(
       `UPDATE sessions SET sdk_session_id = @sdk_session_id, end_reason = @end_reason, error = @error,
@@ -215,6 +225,7 @@ export class SessionRepository {
     return withTransaction(this.#db, () => {
       const session = Session.parse({
         requirementId: null,
+        budget: null,
         ...input,
         sdkSessionId: null,
         endReason: null,
