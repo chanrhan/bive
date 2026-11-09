@@ -3,11 +3,39 @@
 // test/todo-proposals.test.ts가 shared의 *_LABELS와 같은지 대조한다.
 import type {
   AgentRole,
+  CheckKind,
   ProposalCountResult,
   ProposalKind,
+  ProposalSource,
   ProposalState,
   Risk,
+  RuleKind,
 } from '@bive/shared';
+
+/** 제안 출처 표시명 (shared PROPOSAL_SOURCE_LABELS와 같음). 상세의 출처에 쓴다. */
+export const PROPOSAL_SOURCE_LABELS = {
+  rule_generation: '규칙 자동 생성',
+  chat: '채팅 지시',
+  reverse_extraction: '역추출',
+  writing_rules: '작성 규칙',
+  implementation: '구현',
+} as const satisfies Record<ProposalSource, string>;
+
+/** 규칙 종류 표시명 (shared RULE_KIND_LABELS와 같음). 규칙 제안 본문에 쓴다. */
+export const RULE_KIND_LABELS = {
+  architecture: '아키텍처',
+  'tech-constraint': '기술 제약',
+  business: '비즈니스',
+} as const satisfies Record<RuleKind, string>;
+
+/** 검사 종류 표시명 (shared CHECK_KIND_LABELS와 같음). 규칙 제안 본문에 쓴다. */
+export const CHECK_KIND_LABELS = {
+  test: '인수 테스트',
+  pbt: '속성 기반 테스트',
+  contract: '계약 검사',
+  static: '정적 분석',
+  structure: '구조 검사',
+} as const satisfies Record<CheckKind, string>;
 
 /** 제안 종류 8종 표시명 (shared PROPOSAL_KIND_LABELS와 같음). 순서가 툴팁 · 필터 메뉴 순서다. */
 export const PROPOSAL_KIND_LABELS = {

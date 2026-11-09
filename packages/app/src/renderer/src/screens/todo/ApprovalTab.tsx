@@ -1,6 +1,7 @@
-// [승인 대기] 탭 (SCR-17, TODO-01): 왼쪽 목록(ListView) + 오른쪽 상세 자리.
+// [승인 대기] 탭 (SCR-17, TODO-01): 왼쪽 목록(ListView) + 오른쪽 상세(ProposalDetail).
 // - 목록 = 현재 프로젝트의 제안 중 승인 대기 탭 종류(기존 계약 변경 제외). 처리 상태 필터 기본값 '대기'
 // - 카드를 고르면 안 읽은 제안만 `proposal.markRead`를 1회 부르고 응답으로 안 읽음 점을 지운다
+// - 상세에서 승인 · 수정 후 승인 · 거절하면 선택을 풀고 목록 · 배지(`proposal.count`)를 다시 읽는다 (ADR-063)
 // - 머리줄 "대기 n / 상한 40"(#58 M3-13)은 아직 미노출 (ADR-035)
 import type { Proposal } from '@bive/shared';
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -12,6 +13,7 @@ import {
   setListFilter,
 } from '../../components/ListView/index.js';
 import { EmptyState } from '../../layout/EmptyState.js';
+import { useProposalCount } from '../../proposals/ProposalCountContext.js';
 import { APPROVAL_CRITERIA, isApprovalProposal, proposalCard } from './proposalCard.js';
 import { ProposalDetail } from './ProposalDetail.js';
 import { useProposalList } from './useProposalList.js';
@@ -25,7 +27,8 @@ export const APPROVAL_EMPTY_TEXT = '대기 항목 없음';
 const proposalKey = (proposal: Proposal): string => proposal.id;
 
 export const ApprovalTab = ({ projectId }: { projectId: string }): React.JSX.Element => {
-  const { state, replace } = useProposalList(projectId);
+  const { state, refresh, replace } = useProposalList(projectId);
+  const { refresh: refreshCount } = useProposalCount();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // 읽음 요청을 보냈거나 끝난 제안 ID. 같은 제안을 다시 골라도 다시 부르지 않는다
   const readRequested = useRef(new Set<string>());
@@ -62,6 +65,24 @@ export const ApprovalTab = ({ projectId }: { projectId: string }): React.JSX.Ele
     [projectId, replace],
   );
 
+  // 처리 성공: 응답으로 목록을 바로 고치고(처리된 제안은 '대기' 필터에서 빠진다) 선택을 풀고,
+  // 목록 · 배지를 다시 읽는다 (ADR-056 · ADR-063)
+  const onProcessed = useCallback(
+    (updated: Proposal): void => {
+      replace(updated);
+      setSelectedId(null);
+      void refresh();
+      void refreshCount();
+    },
+    [replace, refresh, refreshCount],
+  );
+
+  // 이미 처리됨 · 없는 제안: 목록 · 배지를 다시 읽어 상세가 지금 상태를 보이게 한다
+  const onStale = useCallback((): void => {
+    void refresh();
+    void refreshCount();
+  }, [refresh, refreshCount]);
+
   return (
     <div className="todo-body" data-testid="todo-approval" data-state={state.status}>
       <div className="todo-list-pane">
@@ -80,7 +101,12 @@ export const ApprovalTab = ({ projectId }: { projectId: string }): React.JSX.Ele
         )}
         {state.status === 'error' && <EmptyState text="목록 불러오기 실패" />}
       </div>
-      <ProposalDetail proposal={selected} />
+      <ProposalDetail
+        projectId={projectId}
+        proposal={selected}
+        onProcessed={onProcessed}
+        onStale={onStale}
+      />
     </div>
   );
 };

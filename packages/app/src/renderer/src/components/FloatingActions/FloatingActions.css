@@ -1,0 +1,49 @@
+/* 떠 있는 처리 버튼 (SCR-17). 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.floating-actions {
+  position: absolute;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2);
+  background: var(--color-surface-raised);
+}
+
+.floating-actions-busy {
+  padding: 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+}
+
+.floating-action {
+  height: 30px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-2);
+  cursor: pointer;
+}
+
+.floating-action:hover:not(:disabled),
+.floating-action[aria-pressed='true'] {
+  border-color: var(--color-accent);
+}
+
+.floating-action[data-primary='true'] {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-bg);
+  font-weight: 600;
+}
+
+.floating-action:disabled {
+  opacity: var(--opacity-dimmed);
+  cursor: default;
+}
