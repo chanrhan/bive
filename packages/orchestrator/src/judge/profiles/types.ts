@@ -16,6 +16,8 @@ export interface ProfileContext {
   profileLog: string;
   /** 서버 출력 로그 */
   serverLog: string;
+  /** 임시 파일(임시 DB 폴더)을 만들 상위 폴더 (절대 경로) */
+  tempDir: string;
   deadline: Deadline;
   /** 단계 소요 시간(ms) 보고 */
   onStep: (step: ProfileStep, ms: number) => void;

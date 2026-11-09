@@ -95,6 +95,8 @@ export interface GitRunOptions {
   /** 오류로 보지 않을 종료 코드 (기본 `[0]`) */
   okCodes?: readonly number[];
   timeoutMs?: number;
+  /** 표준 입력으로 넘길 내용 (`check-ignore --stdin` 등). 없으면 표준 입력을 바로 닫는다 */
+  input?: string;
 }
 
 /** git 실행 함수. 시험에서 바꿔 끼울 수 있게 주입받는다. */
@@ -115,7 +117,7 @@ export const createGitRunner = (options: GitRunnerOptions = {}): GitRunner => {
   return (args, run) =>
     new Promise((resolve, reject) => {
       const fullArgs = [...gitConfigArgs(), ...args];
-      execFile(
+      const child = execFile(
         gitPath,
         fullArgs,
         {
@@ -146,5 +148,8 @@ export const createGitRunner = (options: GitRunnerOptions = {}): GitRunner => {
           reject(new GitCommandError(args, result));
         },
       );
+      // 입력을 기다리는 git이 멈추지 않게 항상 닫는다. 먼저 끝난 자식에 쓰다 난 오류(EPIPE)는 종료 코드로 판단한다
+      child.stdin?.on('error', () => undefined);
+      child.stdin?.end(run.input ?? '');
     });
 };

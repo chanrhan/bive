@@ -1,5 +1,7 @@
 // 판정 러너 (M1-24 수용 기준, JDG-01 · ADR-026 · ADR-051).
 // scripts/reset-fixture.sh로 만든 픽스처 복사본 하나에서 여러 판정을 순서대로 돌린다(서버 빌드는 1회).
+// 제한: afterAll 정리 120초(부하 평균 12 이상에서 픽스처 node_modules 삭제가 기본 10초를 넘었다), 남은 프로세스 확인은
+// SIGKILL 뒤 3초까지 폴링, 임시 DB는 이 파일 전용 폴더에 만들어 같은 VM의 다른 판정 테스트와 섞지 않는다 (#122, ADR-064).
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -28,6 +30,8 @@ const RESET_FIXTURE = path.join(REPO_ROOT, 'scripts', 'reset-fixture.sh');
 const JUDGE_TIMEOUT_MS = 180_000;
 /** 서버를 띄우는 테스트의 vitest 제한 시간. */
 const BUILD_TEST_TIMEOUT_MS = 240_000;
+/** 픽스처 복사본(node_modules 포함) 삭제 제한 시간. 부하에서 기본 10초를 넘는다 (#122). */
+const CLEANUP_TIMEOUT_MS = 120_000;
 
 const newId = createUlidGenerator();
 const projectId = newId();
@@ -35,6 +39,8 @@ const runId = newId();
 
 let fixtureDir = '';
 let biveHome = '';
+/** 판정 임시 DB의 상위 폴더. 이 파일 전용이라 다른 worktree의 판정이 만든 폴더가 섞이지 않는다 */
+let judgeTempDir = '';
 let runner: JudgeRunner;
 
 const write = (relative: string, content: string): void => {
@@ -66,9 +72,9 @@ describe('판정 서버', () => {
 
 const STRAY_ACC = "throw new Error('규칙 폴더 밖 파일이 실행됨');\n";
 
-/** 임시 DB 폴더 목록 (프로필이 os.tmpdir() 아래에 만든다). */
+/** 임시 DB 폴더 목록 (프로필이 러너의 tempDir 아래에 만든다). */
 const tempDbDirs = (): string[] =>
-  readdirSync(os.tmpdir())
+  readdirSync(judgeTempDir)
     .filter((name) => name.startsWith('bive-judge-db-'))
     .sort();
 
@@ -105,8 +111,18 @@ const isAlive = (pid: number): boolean => {
   }
 };
 
+/**
+ * 러너가 보낸 SIGKILL은 비동기라, 부하에서는 러너가 돌아온 직후에도 신호를 받은 하위 프로세스
+ * (prisma의 schema-engine 등 같은 프로세스 그룹)가 잠깐 /proc에 보인다. 사라질 때까지 이만큼 기다린다 (#122).
+ */
+const LEFTOVER_GRACE_MS = 3_000;
+
 /** 판정 뒤 서버 프로세스 · 임시 DB가 남지 않았음을 확인한다. */
 const expectNoLeftovers = async (result: JudgeRunResult, dbDirsBefore: string[]) => {
+  const deadline = Date.now() + LEFTOVER_GRACE_MS;
+  while (processesIn(fixtureDir).length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
   expect(processesIn(fixtureDir)).toEqual([]);
   expect(tempDbDirs()).toEqual(dbDirsBefore);
   if (result.server !== null) {
@@ -119,6 +135,7 @@ const expectNoLeftovers = async (result: JudgeRunResult, dbDirsBefore: string[])
 beforeAll(() => {
   fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'bive-judge-fx-'));
   biveHome = mkdtempSync(path.join(os.tmpdir(), 'bive-judge-home-'));
+  judgeTempDir = mkdtempSync(path.join(os.tmpdir(), 'bive-judge-tmp-'));
   execFileSync('bash', [RESET_FIXTURE, fixtureDir], { stdio: 'pipe' });
   // 프로젝트 vitest 설정을 읽으면 바로 실패하게 만든다 (JDG-01: 프로젝트 테스트 설정 불사용)
   write(
@@ -128,13 +145,14 @@ beforeAll(() => {
   write('bive-acceptance/RULE-001/health.acc.ts', HEALTH_ACC);
   // 규칙 폴더 밖 파일은 규칙에 매핑되지 않으므로 줍지 않는다 (줍히면 파일 로드 오류로 collect_error가 된다)
   write('bive-acceptance/stray.acc.ts', STRAY_ACC);
-  runner = new JudgeRunner({ biveHome });
+  runner = new JudgeRunner({ biveHome, tempDir: judgeTempDir });
 }, 180_000);
 
 afterAll(() => {
   if (fixtureDir) rmSync(fixtureDir, { recursive: true, force: true });
   if (biveHome) rmSync(biveHome, { recursive: true, force: true });
-});
+  if (judgeTempDir) rmSync(judgeTempDir, { recursive: true, force: true });
+}, CLEANUP_TIMEOUT_MS);
 
 describe('JudgeRunner · next-prisma-sqlite', () => {
   it(
@@ -175,7 +193,7 @@ describe('JudgeRunner · next-prisma-sqlite', () => {
       expect(result.server).not.toBeNull();
       const server = result.server!;
       expect(server.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-      expect(path.dirname(path.dirname(server.databasePath))).toBe(os.tmpdir());
+      expect(path.dirname(path.dirname(server.databasePath))).toBe(judgeTempDir);
       const port = new URL(server.baseUrl).port;
       const profileLog = readFileSync(result.paths.profileLog, 'utf8');
       const bin = path.join(fixtureDir, 'node_modules', '.bin');
@@ -410,6 +428,11 @@ describe('훅', () => {
       rmSync(path.join(fixtureDir, path.dirname(broken)), { recursive: true, force: true });
     }
   }, 60_000);
+
+  it('임시 폴더 옵션(tempDir)은 절대 경로만 받는다', () => {
+    expect(() => new JudgeRunner({ biveHome, tempDir: 'relative/tmp' })).toThrow(TypeError);
+    expect(() => new JudgeRunner({ biveHome, tempDir: judgeTempDir })).not.toThrow();
+  });
 
   it('잘못된 입력은 판정 폴더를 만들기 전에 거부한다', async () => {
     const base = {

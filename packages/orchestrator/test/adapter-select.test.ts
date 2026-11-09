@@ -1,6 +1,7 @@
 // 어댑터 선택 (이슈 #19 수용 기준 2 · 3, ADR-016 · ADR-049).
 // BIVE_AGENT(`scripted` | `claude`, 기본 claude)로 고르고 다른 값이면 기동 실패(종료 코드 2).
 // BIVE_SCENARIO(기본 happy-path)는 scripted일 때만 읽고 없는 이름이면 기동 실패.
+// 제한: 오케스트레이터 CLI를 띄우는 '기동 경로' 묶음은 30초(부하 평균 12 이상에서 2초대가 걸려 순간 정지에 기본 5초가 빠듯하다, #122).
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -127,7 +128,10 @@ describe('selectAgent', () => {
   });
 });
 
-describe('기동 경로', () => {
+/** 오케스트레이터 CLI(tsx)를 띄우는 테스트의 제한 (#122). */
+const PROCESS_TEST_OPTIONS = { timeout: 30_000 };
+
+describe('기동 경로', PROCESS_TEST_OPTIONS, () => {
   it('startOrchestrator가 고른 어댑터를 보관한다', async () => {
     const home = makeBiveHome();
     const agent = selectAgent({ BIVE_AGENT: 'scripted' }, { biveHome: home });
@@ -168,7 +172,7 @@ describe('기동 경로', () => {
   ])('올바른 값이면 기동하고 선택을 기록한다 (%j)', async (env, expected) => {
     const home = makeBiveHome();
     const proc = spawnCli({ BIVE_HOME: home, BIVE_IDLE_SHUTDOWN_MS: '60000', ...env });
-    await waitFor(() => proc.stdout.includes('오케스트레이터 기동'), 10_000, '기동 로그');
+    await waitFor(() => proc.stdout.includes('오케스트레이터 기동'), 20_000, '기동 로그');
     expect(proc.stdout).toContain(expected);
     proc.child.kill('SIGTERM');
     expect((await proc.exited).code).toBe(0);

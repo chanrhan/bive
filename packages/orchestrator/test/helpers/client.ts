@@ -172,3 +172,26 @@ export const connect = async (socketPath: string, token: string): Promise<TestCl
   }
   return client;
 };
+
+/**
+ * 다른 프로세스가 띄운 오케스트레이터에 접속한다. 소켓 파일은 bind 직후 생기고 listen은 그다음이라,
+ * 부하에서 그 사이에 접속하면 ECONNREFUSED가 난다. 앱 클라이언트(ADR-041)처럼 ENOENT · ECONNREFUSED는
+ * 제한 시간까지 다시 시도하고, 토큰도 시도마다 다시 읽는다 (#122).
+ */
+export const connectWhenReady = async (
+  socketPath: string,
+  readToken: () => string,
+  timeoutMs = 15_000,
+): Promise<TestClient> => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      return await connect(socketPath, readToken());
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const retryable = code === 'ECONNREFUSED' || code === 'ENOENT';
+      if (!retryable || Date.now() > deadline) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+};
