@@ -257,6 +257,16 @@ describe('세션 한도 · 비용 기록 (M1-17, ADR-067)', () => {
       expect(() =>
         store.db.prepare('UPDATE sessions SET budget_max_usd = 9 WHERE id = ?').run(withBudget.id),
       ).toThrow(/세션 한도는 바꿀 수 없습니다/);
+      // 한쪽만 채운 행은 DB가 거부한다 (읽을 때 스키마 예외로 막히지 않게)
+      expect(() =>
+        store.db
+          .prepare(
+            `INSERT INTO sessions (id, run_id, step_id, role, model, work_dir, model_usage, tools,
+             mcp_servers, started_at, budget_max_usd) VALUES (?, ?, ?, 'test-writer', 'model-a', '/tmp/w',
+             '{}', '[]', '[]', ?, 1)`,
+          )
+          .run(newId(), run.id, base.stepId, T0),
+      ).toThrow(/CHECK constraint failed/);
       store.sessions.end(withBudget.id, {
         endReason: 'success',
         totalCostUsd: 0.2,

@@ -32,6 +32,24 @@ export const sumUsd = (values: readonly (number | null)[]): number | null => {
 export const subtractUsd = (a: number, b: number): number =>
   fromNanoUsd(toNanoUsd(a) - toNanoUsd(b));
 
+/**
+ * 나노 달러 정수로 내림 · 올림. 곱셈의 부동소수 오차(0.1 × 1e9 = 100000000.00000001 등)로 한 단위가 틀어지지 않게,
+ * 정수에 충분히 가까우면(1e-3 나노 달러 안) 그 정수로 본다.
+ */
+const roundNanoUsd = (usd: number, direction: 'floor' | 'ceil'): number => {
+  const scaled = usd * NANO_PER_USD;
+  const nearest = Math.round(scaled);
+  if (Math.abs(scaled - nearest) < 1e-3) return nearest;
+  return direction === 'floor' ? Math.floor(scaled) : Math.ceil(scaled);
+};
+
+/**
+ * 남은 한도 `limit - spent` (ADR-067). 한도는 나노 달러 단위로 내리고 사용량은 올려서, 반올림 때문에 남은 한도가
+ * 실제보다 커지지 않는다(예: 한도 6e-10 USD → 남은 한도 0, 반올림이면 1e-9로 커짐).
+ */
+export const remainingUsd = (limit: number, spent: number): number =>
+  fromNanoUsd(roundNanoUsd(limit, 'floor') - roundNanoUsd(spent, 'ceil'));
+
 /** 정수(턴 · 토큰) 합. `null`은 건너뛰고, 모두 `null`이면 `null`. */
 const sumInt = (values: readonly (number | null)[]): number | null => {
   let sum: number | null = null;

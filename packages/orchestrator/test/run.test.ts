@@ -417,7 +417,11 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
       });
       expect(
         await h.client.call('run.get', { projectId: h.project.id, id: created.run.id }),
-      ).toMatchObject({ run: result.run, steps: result.steps });
+      ).toEqual({
+        run: result.run,
+        steps: result.steps,
+        usage: h.read((store) => store.runs.usage(created.run.id)),
+      });
       // 승인 단계가 끝난 실행은 다시 판정하지 않는다
       expect(() =>
         h.read((store) => evaluateApprovalStep(store, created.run.id, { now: () => at })),
@@ -597,7 +601,11 @@ describe('프로세스 재시작 뒤 run.get이 같은 값 (수용 기준 4, RUN
       projectId: project.id,
       id: created.run.id,
     });
-    expect(afterCreate).toMatchObject({ run: created.run, steps: created.steps });
+    expect(afterCreate).toEqual({
+      run: created.run,
+      steps: created.steps,
+      usage: withStore((store) => store.runs.usage(created.run.id)),
+    });
     expect(afterCreate.usage.run).toMatchObject({ costUsd: null, turns: null, sessionCount: 0 });
     expect(await current.client.call('run.get', { projectId: project.id, id: 'EXE-001' })).toEqual(
       afterCreate,

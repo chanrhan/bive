@@ -12,6 +12,7 @@ import {
   type SettingsPatch,
   type Step,
   type StepKind,
+  remainingUsd,
   subtractUsd,
   sumSessionUsage,
   sumUsd,
@@ -259,13 +260,25 @@ describe('세션 한도 · 집계 초과 판정 (수용 기준 3)', () => {
         session('test-writer', 0.04, 5),
         session('test-writer', 0.0600001, 5),
       ]),
-    ).toEqual({ scope: 'role', measure: 'usd', role: 'test-writer', limit: 0.1, spent: 0.1000001 });
+    ).toEqual({
+      scope: 'role',
+      measure: 'usd',
+      role: 'test-writer',
+      limit: 0.1,
+      spent: 0.1000001,
+      known: 0.1000001,
+      estimated: 0,
+      unknownSessions: 0,
+    });
     expect(budgetOverrun(SNAPSHOT, 'test-writer', [session('test-writer', 0.01, 11)])).toEqual({
       scope: 'role',
       measure: 'turns',
       role: 'test-writer',
       limit: 10,
       spent: 11,
+      known: 11,
+      estimated: 0,
+      unknownSessions: 0,
     });
     // 역할 한도 안이지만 실행 합계가 넘음
     expect(
@@ -273,9 +286,85 @@ describe('세션 한도 · 집계 초과 판정 (수용 기준 3)', () => {
         session('test-writer', 0.09, 2),
         session('implementer', 0.22, 2),
       ]),
-    ).toEqual({ scope: 'run', measure: 'usd', role: 'implementer', limit: 0.3, spent: 0.31 });
+    ).toEqual({
+      scope: 'run',
+      measure: 'usd',
+      role: 'implementer',
+      limit: 0.3,
+      spent: 0.31,
+      known: 0.31,
+      estimated: 0,
+      unknownSessions: 0,
+    });
     // 값을 모르는 세션은 추정값으로 센다 (아는 세션이 없고 한도 기록도 없으면 역할 한도 전부 = 같음, 넘지 않음)
     expect(budgetOverrun(SNAPSHOT, 'implementer', [session('implementer', null, null)])).toBeNull();
+  });
+
+  it('리뷰 재현: 아는 세션이 모두 0 USD · 0턴이어도 결과 없이 끝난 세션은 턴을 최소 1로 세어 결국 소진된다', () => {
+    // 첫 API 요청 실패 같은 결과 (error_during_execution, 0 USD, 0턴)
+    const failedFirst = session('test-writer', 0, 0, {}, { endReason: 'error_during_execution' });
+    const history: Session[] = [failedFirst];
+    const limits: (ReturnType<typeof sessionLimits> | undefined)[] = [];
+    for (let i = 0; i < 50; i += 1) {
+      history.push(
+        session(
+          'implementer',
+          null,
+          null,
+          {},
+          {
+            endReason: 'aborted',
+            budget: { maxBudgetUsd: 0.25, maxTurns: 15 },
+          },
+        ),
+      );
+      limits.push(sessionLimits(SNAPSHOT, 'implementer', history));
+    }
+    // 매번 턴 1씩 줄고(USD 추정은 0), 15번째에 소진된다
+    expect(limits.slice(0, 3)).toEqual([
+      { maxBudgetUsd: 0.25, maxTurns: 14 },
+      { maxBudgetUsd: 0.25, maxTurns: 13 },
+      { maxBudgetUsd: 0.25, maxTurns: 12 },
+    ]);
+    expect(limits[13]).toEqual({ maxBudgetUsd: 0.25, maxTurns: 1 });
+    expect(limits[14]).toBeNull();
+    expect(limits.slice(14).every((limit) => limit === null)).toBe(true);
+  });
+
+  it('남은 USD는 한도를 나노 달러 단위로 내려 계산한다 (반올림으로 커지지 않음)', () => {
+    const tiny = {
+      run: { maxBudgetUsd: 6e-10, maxTurns: 10 },
+      roles: { 'test-writer': { maxBudgetUsd: 1, maxTurns: 10 } },
+    };
+    expect(sessionLimits(tiny, 'test-writer', [])).toBeNull();
+    expect(remainingUsd(0.1, 0.04)).toBe(0.06);
+    expect(remainingUsd(2, 0.0421)).toBe(1.9579);
+    expect(remainingUsd(0.3, 0.1 + 0.2)).toBe(0);
+  });
+
+  it('집계 초과의 종료 결과는 보고된 합 · 추정분 · 값을 모르는 세션 수를 나눠 싣고, 추정분은 소급해 커질 수 있다', () => {
+    const budget = { maxBudgetUsd: 0.24, maxTurns: 14 };
+    // test-writer 0.01 · 1턴 성공 → implementer aborted (추정 0.01 · 1턴) → 재개 세션이 한도 안 0.2로 성공
+    const history = [
+      session('test-writer', 0.01, 1),
+      session('implementer', null, null, {}, { endReason: 'aborted', budget }),
+    ];
+    expect(sessionLimits(SNAPSHOT, 'implementer', history)).toEqual({
+      maxBudgetUsd: 0.24,
+      maxTurns: 14,
+    });
+    history.push(session('implementer', 0.2, 3));
+    // 아는 최댓값이 0.2로 커져 앞선 aborted 추정이 0.2가 된다: 역할 합 0.4 > 0.25 (ADR-067 한계)
+    expect(budgetOverrun(SNAPSHOT, 'implementer', history)).toEqual({
+      scope: 'role',
+      measure: 'usd',
+      role: 'implementer',
+      limit: 0.25,
+      spent: 0.4,
+      known: 0.2,
+      estimated: 0.2,
+      unknownSessions: 1,
+    });
   });
 });
 
@@ -844,6 +933,9 @@ describe('세션 한도 · 예산 초과 (수용 기준 3 · 4)', () => {
         role: 'implementer',
         limit: 0.08,
         spent: 0.1008,
+        known: 0.1008,
+        estimated: 0,
+        unknownSessions: 0,
       },
     });
     expectStopped(h, done, initialMain);
