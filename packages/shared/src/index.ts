@@ -5,3 +5,4 @@ export * from './domain.js';
 export * from './enums.js';
 export * from './id.js';
 export * from './protocol.js';
+export * from './usage.js';

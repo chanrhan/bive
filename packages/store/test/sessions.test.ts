@@ -232,3 +232,105 @@ describe('sessions', () => {
     });
   });
 });
+
+describe('세션 한도 · 비용 기록 (M1-17, ADR-067)', () => {
+  it('세션에 넘긴 한도를 저장하고 바꿀 수 없다. 한도 없이 연 세션은 null', () => {
+    withStore((store) => {
+      const { run, steps } = seedRun(store);
+      const base = {
+        runId: run.id,
+        stepId: stepOf(steps, 'test_writing').id,
+        role: 'test-writer' as const,
+        model: 'model-a',
+        workDir: '/tmp/w',
+        startedAt: T0,
+      };
+      const withBudget = store.sessions.start({
+        ...base,
+        id: newId(),
+        budget: { maxBudgetUsd: 1.5, maxTurns: 40 },
+      });
+      const limits = { maxBudgetUsd: 1.5, maxTurns: 40 };
+      expect(store.sessions.get(withBudget.id)?.budget).toEqual(limits);
+      const without = store.sessions.start({ ...base, id: newId() });
+      expect(store.sessions.get(without.id)?.budget).toBeNull();
+      expect(() =>
+        store.db.prepare('UPDATE sessions SET budget_max_usd = 9 WHERE id = ?').run(withBudget.id),
+      ).toThrow(/세션 한도는 바꿀 수 없습니다/);
+      // 한쪽만 채운 행은 DB가 거부한다 (읽을 때 스키마 예외로 막히지 않게)
+      expect(() =>
+        store.db
+          .prepare(
+            `INSERT INTO sessions (id, run_id, step_id, role, model, work_dir, model_usage, tools,
+             mcp_servers, started_at, budget_max_usd) VALUES (?, ?, ?, 'test-writer', 'model-a', '/tmp/w',
+             '{}', '[]', '[]', ?, 1)`,
+          )
+          .run(newId(), run.id, base.stepId, T0),
+      ).toThrow(/CHECK constraint failed/);
+      store.sessions.end(withBudget.id, {
+        endReason: 'success',
+        totalCostUsd: 0.2,
+        numTurns: 3,
+        endedAt: T1,
+      });
+      expect(store.sessions.get(withBudget.id)?.budget).toEqual(limits);
+    });
+  });
+
+  it('단계 시도는 끝나는 저장 때, 실행은 저장마다 세션 기록의 합계를 비용 · 턴으로 남긴다 (값이 없으면 null)', () => {
+    withStore((store) => {
+      const { run, steps } = seedRun(store);
+      const testWriting = stepOf(steps, 'test_writing');
+      store.runs.transition(run.id, {
+        steps: [{ id: testWriting.id, status: 'running', startedAt: T0 }],
+      });
+      const record = (cost: number | null, turns: number | null): void => {
+        const id = newId();
+        store.sessions.start({
+          id,
+          runId: run.id,
+          stepId: testWriting.id,
+          role: 'test-writer',
+          model: 'model-a',
+          workDir: '/tmp/w',
+          startedAt: T0,
+        });
+        store.sessions.end(id, {
+          endReason: cost === null ? 'error_during_execution' : 'success',
+          totalCostUsd: cost,
+          numTurns: turns,
+          endedAt: T1,
+        });
+      };
+      record(null, null);
+      // 끝나지 않은 단계 시도는 비워 두고, 실행은 저장 때의 합계 (모두 값 없음 → null)
+      let saved = store.runs.transition(run.id, {
+        steps: [{ id: testWriting.id, exitDetail: { note: '진행 중' } }],
+      });
+      expect([saved.run.costUsd, saved.run.turns]).toEqual([null, null]);
+      expect(stepOf(saved.steps, 'test_writing')).toMatchObject({ costUsd: null, turns: null });
+      record(0.1, 2);
+      record(0.2, 3);
+      saved = store.runs.transition(run.id, {
+        steps: [{ id: testWriting.id, status: 'passed', endedAt: T1 }],
+      });
+      expect(stepOf(saved.steps, 'test_writing')).toMatchObject({ costUsd: 0.3, turns: 5 });
+      expect([saved.run.costUsd, saved.run.turns]).toEqual([0.3, 5]);
+      expect(store.runs.getDetail(run.id)).toEqual(saved);
+
+      const usage = store.runs.usage(run.id);
+      expect(usage?.run).toMatchObject({
+        costUsd: 0.3,
+        turns: 5,
+        sessionCount: 3,
+        costUnknownCount: 1,
+      });
+      expect(usage?.roles).toEqual({ 'test-writer': usage?.run });
+      expect(usage?.steps.map((s) => [s.kind, s.costUsd])).toEqual([
+        ['test_writing', 0.3],
+        ['implementation', null],
+      ]);
+      expect(store.runs.usage(newId())).toBeNull();
+    });
+  });
+});

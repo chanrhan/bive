@@ -67,14 +67,16 @@ export const ENGINE_FAILURE_REASONS = [
   /** 세션 결과 subtype (`budget_exceeded`) */
   'error_max_budget_usd',
   'error_max_turns',
+  /** 세션이 끝난 뒤 역할 · 실행 사용량 합계가 한도를 넘음 (COST-01, `budget_exceeded`, ADR-067) */
+  'budget_aggregate_exceeded',
 ] as const;
 export type EngineFailureReason = (typeof ENGINE_FAILURE_REASONS)[number];
 
 /** 실행을 끝내는 상태 (`halt`). */
 export type HaltStatus = Extract<RunStatus, 'failed' | 'budget_exceeded'>;
 
-/** 단계 실행기가 함께 저장할 실행 필드 (진행 상태 · 회귀 수 · 시각은 엔진만 바꾼다). */
-export type StepRunPatch = Pick<RunPatch, 'mergeCommit' | 'headCommit' | 'costUsd' | 'turns'>;
+/** 단계 실행기가 함께 저장할 실행 필드 (진행 상태 · 회귀 수 · 시각은 엔진만, 비용 · 턴은 저장소가 세션 기록에서). */
+export type StepRunPatch = Pick<RunPatch, 'mergeCommit' | 'headCommit'>;
 
 /**
  * 단계 실행 결과.
