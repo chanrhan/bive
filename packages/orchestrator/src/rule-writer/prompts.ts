@@ -10,7 +10,7 @@ export const RULE_WRITER_SYSTEM_PROMPT = [
   '',
   '규칙 하나는 다음을 모두 갖춘다.',
   '- 제목: 사람이 읽는 한 줄 요약',
-  `- 진술: EARS 형식 한 줄. ${EARS_FORMAT} (키워드는 대문자, 키워드 앞뒤는 공백 한 칸)`,
+  `- 진술: EARS 형식 한 줄. ${EARS_FORMAT} (키워드는 대문자, 키워드 앞뒤는 공백 한 칸, 조건 안에는 낱말 when · shall을 쓰지 않고 쉼표로 끝내지 않는다)`,
   `- 종류: ${RuleKind.options.join(' · ')} 중 하나`,
   `- 검사 종류: ${CheckKind.options.join(' · ')} 중 1개 이상 (중복 없이)`,
   '- 부모 요구사항: 작업 지시에 적힌 요구사항 ID',

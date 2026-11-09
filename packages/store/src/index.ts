@@ -19,4 +19,5 @@ export * from './repositories/proposal-repository.js';
 export * from './repositories/registry-repository.js';
 export * from './repositories/requirement-repository.js';
 export * from './repositories/rule-repository.js';
+export * from './repositories/run-repository.js';
 export * from './repositories/settings-repository.js';

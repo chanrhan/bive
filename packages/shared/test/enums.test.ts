@@ -10,6 +10,11 @@ import {
   AUTHOR_KIND_LABELS,
   AuthorKind,
   BlockKind,
+  canTransitionRun,
+  FINAL_STEP_STATUSES,
+  isFinalStepStatus,
+  isTerminalRunStatus,
+  RUN_STATUS_TRANSITIONS,
   CHECK_KIND_LABELS,
   CheckKind,
   CodeOpenReason,
@@ -109,6 +114,32 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
   it('종료 상태는 병합 완료 · 실패 · 예산 초과뿐이고 중단은 재개 가능', () => {
     expect([...TERMINAL_RUN_STATUSES]).toEqual(['merged', 'failed', 'budget_exceeded']);
     expect(TERMINAL_RUN_STATUSES).not.toContain('interrupted');
+  });
+
+  it('상태 전이는 architecture.md 4장 상태 기계 그대로이고 종료 상태에서는 나가지 않는다 (ADR-061)', () => {
+    expect(RUN_STATUS_TRANSITIONS).toEqual({
+      waiting_approval: ['running'],
+      running: ['merged', 'failed', 'budget_exceeded', 'interrupted'],
+      interrupted: ['running'],
+      merged: [],
+      failed: [],
+      budget_exceeded: [],
+    });
+    expect(canTransitionRun('waiting_approval', 'running')).toBe(true);
+    expect(canTransitionRun('interrupted', 'running')).toBe(true);
+    expect(canTransitionRun('waiting_approval', 'merged')).toBe(false);
+    expect(canTransitionRun('running', 'running')).toBe(false);
+    expect(canTransitionRun('merged', 'running')).toBe(false);
+    for (const status of RunStatus.options) {
+      expect(isTerminalRunStatus(status)).toBe(RUN_STATUS_TRANSITIONS[status].length === 0);
+    }
+  });
+
+  it('끝난 단계 상태는 통과 · 실패 · 생략', () => {
+    expect([...FINAL_STEP_STATUSES]).toEqual(['passed', 'failed', 'skipped']);
+    expect(isFinalStepStatus('running')).toBe(false);
+    expect(isFinalStepStatus('pending')).toBe(false);
+    expect(isFinalStepStatus('skipped')).toBe(true);
   });
 
   it('실행 유형 A~D', () => {

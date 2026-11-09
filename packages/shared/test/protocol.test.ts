@@ -8,6 +8,7 @@ import {
   ERROR_MESSAGES,
   ErrorCode,
   isMethodName,
+  type JudgmentResult,
   JsonRpcErrorResponse,
   JsonRpcMessage,
   JsonRpcNotification,
@@ -22,6 +23,8 @@ import {
   parseResponse,
   PROTOCOL_VERSION,
   rpcError,
+  type Rule,
+  type RuleJudgment,
 } from '../src/index.js';
 
 /** 파이프 프레임 왕복: JSON 1줄로 직렬화했다가 다시 해석한다. */
@@ -316,6 +319,95 @@ describe('requirement.* (M1-02, ADR-047)', () => {
   });
 });
 
+describe('rule.list · rule.get (M1-11, ADR-060)', () => {
+  const PROJECT = '01JA0000000000000000000001';
+  const REQ = '01JA0000000000000000000002';
+  const RULE = '01JA0000000000000000000004';
+  const AT = '2026-10-16T00:00:00.000Z';
+  const rule: Rule = {
+    id: RULE,
+    displayId: 'RULE-001',
+    title: '중복 이메일 가입 거부',
+    statement: 'WHEN 이미 가입된 이메일로 가입을 요청하면 THE SYSTEM SHALL 가입을 거부한다',
+    kind: 'business',
+    checkKinds: ['test'],
+    parentRequirementId: REQ,
+    parentDetachedAt: null,
+    builtin: false,
+    targetBlockIds: [],
+    risk: null,
+    contractId: null,
+    author: { kind: 'agent', role: 'rule-writer' },
+    normState: 'approved',
+    createdAt: AT,
+    updatedAt: AT,
+    deletedAt: null,
+  };
+  const judgmentRecord: JudgmentResult = {
+    id: '01JA0000000000000000000005',
+    ruleId: RULE,
+    runId: '01JA0000000000000000000006',
+    stepId: null,
+    commit: 'a'.repeat(40),
+    judgedAt: AT,
+    status: 'fail',
+    runner: 'vitest',
+    exitCode: 1,
+    reporterPath: null,
+    cases: [],
+    quarantineReason: null,
+  };
+  const unjudged = { status: 'unjudged', latest: null } as const;
+  const request = (method: string, params: unknown) =>
+    parseRequest({ jsonrpc: '2.0', id: 1, method, params });
+
+  it('조회 메서드만 등록돼 있다 (규칙을 바꾸는 메서드 없음)', () => {
+    expect(isMethodName('rule.list')).toBe(true);
+    expect(isMethodName('rule.get')).toBe(true);
+    for (const name of ['rule.create', 'rule.update', 'rule.delete']) {
+      expect(isMethodName(name)).toBe(false);
+    }
+  });
+
+  it.each([
+    ['projectId 누락', 'rule.list', {}],
+    ['필터 필드 (렌더러 목록이 거른다)', 'rule.list', { projectId: PROJECT, filter: {} }],
+    ['id 누락', 'rule.get', { projectId: PROJECT }],
+    ['id가 ULID 아님', 'rule.get', { projectId: PROJECT, id: 'RULE-001' }],
+  ])('%s → -32602', (_, method, params) => {
+    const result = request(method, params);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe(-32602);
+  });
+
+  it('결과: 목록은 { rules: [{ rule, judgment }] }, 단건은 { rule, judgment }', () => {
+    const list = createSuccessResponse(1, 'rule.list', {
+      rules: [{ rule, judgment: unjudged }],
+    });
+    expect(parseResponse('rule.list', throughFrame(list))).toEqual({
+      ok: true,
+      id: 1,
+      result: { rules: [{ rule, judgment: unjudged }] },
+    });
+    const judged: RuleJudgment = { status: 'fail', latest: judgmentRecord };
+    const single = createSuccessResponse(2, 'rule.get', { rule, judgment: judged });
+    expect(parseResponse('rule.get', throughFrame(single))).toMatchObject({
+      ok: true,
+      result: { judgment: judged },
+    });
+  });
+
+  it.each([
+    ['기록 없는데 미판정이 아님', { status: 'pass', latest: null }],
+    ['기록과 상태가 다름', { status: 'pass', latest: judgmentRecord }],
+    ['기록 있는데 미판정', { status: 'unjudged', latest: judgmentRecord }],
+  ])('최신 판정 %s → 받는 쪽 -32602', (_, judgment) => {
+    expect(
+      parseResponse('rule.get', { jsonrpc: '2.0', id: 3, result: { rule, judgment } }),
+    ).toMatchObject({ ok: false, error: { code: -32602 } });
+  });
+});
+
 describe('settings.* (M1-05, ADR-057)', () => {
   const PROJECT = '01JA0000000000000000000001';
   const human = { kind: 'human' } as const;
@@ -393,6 +485,55 @@ describe('settings.* (M1-05, ADR-057)', () => {
     expect(ok({ ...fail, missing: [] })).toBe(false);
     expect(ok({ ...fail, code: -32001 })).toBe(false);
     expect(ok({ ...fail, missing: ['roles.reviewer.model'] })).toBe(false);
+  });
+});
+
+describe('run.* (M1-12, ADR-061)', () => {
+  const PROJECT = '01JA0000000000000000000001';
+  const RULE_A = '01JA0000000000000000000002';
+  const RULE_B = '01JA0000000000000000000003';
+  const human = { kind: 'human' } as const;
+  const request = (method: string, params: unknown) =>
+    parseRequest({ jsonrpc: '2.0', id: 1, method, params });
+  const code = (result: ReturnType<typeof parseRequest>): number | null =>
+    result.ok ? null : result.error.code;
+
+  it('실행 메서드 3개가 등록돼 있다 (run.resume은 M1-14)', () => {
+    for (const name of ['run.create', 'run.get', 'run.list']) expect(isMethodName(name)).toBe(true);
+    expect(isMethodName('run.resume')).toBe(false);
+  });
+
+  it.each([
+    ['run.create', { projectId: PROJECT, ruleIds: [RULE_A], author: human }],
+    ['run.create', { projectId: PROJECT, ruleIds: [RULE_B, RULE_A], author: human }],
+    // 에이전트 주체는 스키마는 통과하고 처리기가 -32020으로 거부한다
+    [
+      'run.create',
+      { projectId: PROJECT, ruleIds: [RULE_A], author: { kind: 'agent', role: 'implementer' } },
+    ],
+    ['run.get', { projectId: PROJECT, id: RULE_A }],
+    ['run.get', { projectId: PROJECT, id: 'EXE-001' }],
+    ['run.list', { projectId: PROJECT }],
+    ['run.list', { projectId: PROJECT, status: 'waiting_approval' }],
+  ])('%s 파라미터 통과', (method, params) => {
+    expect(request(method, params).ok).toBe(true);
+  });
+
+  it.each([
+    ['빈 규칙 목록', 'run.create', { projectId: PROJECT, ruleIds: [], author: human }],
+    ['중복 규칙', 'run.create', { projectId: PROJECT, ruleIds: [RULE_A, RULE_A], author: human }],
+    ['주체 누락', 'run.create', { projectId: PROJECT, ruleIds: [RULE_A] }],
+    [
+      '유형 지정 (M1은 A만)',
+      'run.create',
+      { projectId: PROJECT, ruleIds: [RULE_A], author: human, type: 'B' },
+    ],
+    ['projectId 누락', 'run.list', {}],
+    ['다른 접두 표시 ID', 'run.get', { projectId: PROJECT, id: 'REQ-001' }],
+    ['비정규 표시 ID', 'run.get', { projectId: PROJECT, id: 'EXE-1' }],
+    ['모르는 상태', 'run.list', { projectId: PROJECT, status: 'done' }],
+  ])('%s → -32602', (_, method, params) => {
+    expect(code(request(method, params))).toBe(-32602);
   });
 });
 

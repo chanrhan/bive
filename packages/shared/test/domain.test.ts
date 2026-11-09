@@ -7,10 +7,12 @@ import {
   ApprovalLogEntry,
   Author,
   CommitSha,
+  compareSteps,
   defaultSettings,
   EntityName,
   findMissingSettings,
   JudgmentResult,
+  M1_RUN_TYPE,
   MissingSettingPath,
   Project,
   ProjectFile,
@@ -20,9 +22,11 @@ import {
   RESERVED_ENTITY_NAMES,
   Rule,
   Run,
+  RUN_STEP_PLANS,
   Session,
   Settings,
   Step,
+  stepRoles,
   SupportedProposalKind,
   Timestamp,
 } from '../src/index.js';
@@ -111,7 +115,13 @@ const run = {
   baseCommit: SHA,
   headCommit: null,
   mergeCommit: null,
-  budgetSnapshot: { runTotalUsd: 5, perRole: { testWriter: 1, implementer: 3 } },
+  budgetSnapshot: {
+    run: { maxBudgetUsd: 5, maxTurns: 200 },
+    roles: {
+      'test-writer': { maxBudgetUsd: 1, maxTurns: 50 },
+      implementer: { maxBudgetUsd: 3, maxTurns: 100 },
+    },
+  },
   modelSnapshot: { 'test-writer': 'model-a', implementer: 'model-b' },
   costUsd: null,
   turns: null,
@@ -446,6 +456,27 @@ describe('규범', () => {
     expect(ApprovalLogEntry.safeParse({ ...entry, actor: testWriter }).success).toBe(false);
     expect(ApprovalLogEntry.safeParse({ ...entry, prevHash: 'x' }).success).toBe(false);
   });
+
+  it('실행 시작 기록은 대상 규칙(ruleIds)이 필수이고, 다른 행동에는 둘 수 없다 (ADR-061)', () => {
+    const start = {
+      seq: 1,
+      at: AT,
+      action: 'run_start',
+      actor: human,
+      targetRef: { entity: 'Run', id: ID.run },
+      clientId: 'pipe-1',
+      detail: { ruleIds: [ID.rule] },
+      prevHash: APPROVAL_LOG_GENESIS_HASH,
+      hash: 'f'.repeat(64),
+    };
+    expect(ApprovalLogEntry.parse(start)).toEqual(start);
+    expect(ApprovalLogEntry.safeParse({ ...start, detail: {} }).success).toBe(false);
+    expect(ApprovalLogEntry.safeParse({ ...start, detail: { ruleIds: [] } }).success).toBe(false);
+    expect(
+      ApprovalLogEntry.safeParse({ ...start, action: 'approve', detail: { ruleIds: [ID.rule] } })
+        .success,
+    ).toBe(false);
+  });
 });
 
 describe('실행', () => {
@@ -456,6 +487,65 @@ describe('실행', () => {
     expect(Run.safeParse({ ...run, startedBy: testWriter }).success).toBe(false);
     expect(Run.safeParse({ ...run, type: 'E' }).success).toBe(false);
     expect(Run.safeParse({ ...run, regressionCount: -1 }).success).toBe(false);
+    expect(Run.safeParse({ ...run, targetRuleIds: [ID.rule, ID.rule] }).success).toBe(false);
+  });
+
+  it('워크트리 전(승인 대기)에는 브랜치 · 워크트리 · 기준 커밋 · 시작 시각이 없다 (ADR-061)', () => {
+    const waiting = {
+      ...run,
+      status: 'waiting_approval',
+      currentStep: 'approval',
+      lastCompletedStep: null,
+      branch: null,
+      worktreePath: null,
+      baseCommit: null,
+      toolManifest: [],
+      startedAt: null,
+    };
+    expect(Run.parse(waiting)).toEqual(waiting);
+  });
+
+  it('예산 스냅샷은 실행 전체 · 역할 한도가 모두 있어야 한다 (NFR-07)', () => {
+    const roleless = { ...run.budgetSnapshot, roles: {} };
+    expect(Run.safeParse({ ...run, budgetSnapshot: roleless }).success).toBe(true);
+    for (const bad of [
+      { ...run.budgetSnapshot, run: { maxBudgetUsd: null, maxTurns: 200 } },
+      { ...run.budgetSnapshot, run: { maxBudgetUsd: 0, maxTurns: 200 } },
+      { ...run.budgetSnapshot, roles: { implementer: { maxBudgetUsd: 1, maxTurns: 0.5 } } },
+      { runTotalUsd: 5, perRole: { testWriter: 1, implementer: 3 } },
+    ]) {
+      expect(Run.safeParse({ ...run, budgetSnapshot: bad }).success).toBe(false);
+    }
+    expect(Run.safeParse({ ...run, modelSnapshot: { implementer: '  ' } }).success).toBe(false);
+  });
+
+  it('유형 A 단계 순서 · 역할 · 정렬 (RUN-02)', () => {
+    expect(RUN_STEP_PLANS.A).toEqual([
+      'approval',
+      'test_writing',
+      'red_check',
+      'implementation',
+      'check',
+      'mutation',
+      'merge',
+      'screen_update',
+    ]);
+    expect(M1_RUN_TYPE).toBe('A');
+    expect(stepRoles(RUN_STEP_PLANS.A)).toEqual(['test-writer', 'implementer']);
+    const steps = [
+      { kind: 'check', attempt: 2 },
+      { kind: 'implementation', attempt: 2 },
+      { kind: 'approval', attempt: 1 },
+      { kind: 'check', attempt: 1 },
+      { kind: 'implementation', attempt: 1 },
+    ] as const;
+    expect([...steps].sort(compareSteps)).toEqual([
+      { kind: 'approval', attempt: 1 },
+      { kind: 'implementation', attempt: 1 },
+      { kind: 'implementation', attempt: 2 },
+      { kind: 'check', attempt: 1 },
+      { kind: 'check', attempt: 2 },
+    ]);
   });
 
   it('단계', () => {

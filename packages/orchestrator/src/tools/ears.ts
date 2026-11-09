@@ -4,6 +4,9 @@
 // - 진술은 한 줄이다(줄바꿈 · 탭 등 제어 문자 불가). 앞뒤 공백도 받지 않는다
 // - `WHEN` 뒤와 `THE SYSTEM SHALL` 앞뒤는 공백 한 칸이고, 조건 · 응답은 비어 있지 않으며 공백으로 시작 · 끝나지 않는다
 // - `THE SYSTEM SHALL`은 한 번만 나온다
+// - 조건 안에는 낱말 when · shall(대소문자 무관)이 없고, 조건은 쉼표로 끝나지 않는다. 규칙 화면의 WHEN 조건 표시
+//   (`whenCondition`, ADR-060)가 첫 낱말 shall · 유일한 낱말 when으로 경계를 정하므로, 받은 진술은 언제나 정확히
+//   `WHEN <조건>`으로 표시된다 (ADR-062)
 // 상시형(`THE SYSTEM SHALL …`) · 상태형(`WHILE`) · 선택형(`WHERE`) · 비정상형(`IF … THEN`)은 M1에서 받지 않는다.
 
 /** 조건 키워드 (문장 맨 앞, 뒤에 공백 한 칸). */
@@ -19,6 +22,10 @@ export const EARS_FORMAT = `${EARS_WHEN} <조건> ${EARS_SHALL} <응답>`;
 export const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 /** 비어 있지 않고 공백으로 시작 · 끝나지 않는 구절. */
 const TRIMMED_PHRASE = /^\S(?:.*\S)?$/u;
+/** 조건 안의 낱말 키워드: 앞이 처음이나 공백, 뒤가 공백이나 끝 (규칙 화면 `whenCondition`과 같은 낱말 경계). */
+const KEYWORD_IN_CONDITION = /(?:^|\s)(when|shall)(?=\s|$)/iu;
+/** 조건 끝의 쉼표 (화면 표시가 지우므로 받지 않는다). */
+const TRAILING_COMMA = /[,，]$/u;
 
 const countOccurrences = (text: string, needle: string): number => text.split(needle).length - 1;
 
@@ -43,6 +50,13 @@ export const earsStatementProblem = (statement: string): string | null => {
   const response = statement.slice(at + separator.length);
   if (!TRIMMED_PHRASE.test(condition)) {
     return `${EARS_WHEN} 뒤 조건이 비어 있거나 공백이 겹침 (${EARS_FORMAT})`;
+  }
+  const keyword = KEYWORD_IN_CONDITION.exec(condition);
+  if (keyword !== null) {
+    return `조건 안에 낱말 ${keyword[1] ?? ''}를 쓸 수 없음 (when · shall은 대소문자와 무관하게 키워드 자리에만, ${EARS_FORMAT})`;
+  }
+  if (TRAILING_COMMA.test(condition)) {
+    return `조건은 쉼표로 끝날 수 없음 (${EARS_FORMAT})`;
   }
   if (!TRIMMED_PHRASE.test(response)) {
     return `${EARS_SHALL} 뒤 응답이 비어 있거나 공백이 겹침 (${EARS_FORMAT})`;

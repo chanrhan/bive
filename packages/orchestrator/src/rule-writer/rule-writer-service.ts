@@ -30,6 +30,7 @@ import type {
   SessionResultEvent,
   ToolResult,
 } from '../agent/adapter.js';
+import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import type { TaskTracker } from '../lifecycle.js';
 import { ProposalService } from '../proposals/proposal-service.js';
@@ -53,7 +54,9 @@ export type RuleWriterSkipReason =
   /** 오케스트레이터가 종료 중 */
   | 'closed'
   /** 시작 준비 중 예상하지 못한 오류 */
-  | 'start_failed';
+  | 'start_failed'
+  /** 대기하는 사이 요구사항이 삭제됐거나 읽을 수 없게 됨(프로젝트 등록 해제 등) */
+  | 'requirement_unavailable';
 
 export type RuleWriterSessionStatus = 'skipped' | 'queued' | 'running' | 'ended';
 
@@ -357,12 +360,15 @@ export class RuleWriterService implements RuleWriterLauncher {
   /** 세션 1개를 끝까지 돌린다. 던지지 않는다. */
   async #run(
     record: RuleWriterSessionRecord,
-    requirement: RuleWriterStartInput['requirement'],
+    queued: RuleWriterStartInput['requirement'],
   ): Promise<void> {
     if (this.#closed) {
       this.#end(record, 'aborted', '오케스트레이터 종료로 세션을 시작하지 않음');
       return;
     }
+    // 대기하는 사이 바뀌었을 수 있으므로 시작 직전에 다시 읽는다: 삭제됐으면 생략, 수정됐으면 최신 본문
+    const requirement = this.#reloadRequirement(record, queued);
+    if (requirement === null) return;
     const { model, budget } = record;
     if (model === null || budget === null) {
       this.#end(record, 'error_during_execution', '세션 설정 없음');
@@ -444,6 +450,29 @@ export class RuleWriterService implements RuleWriterLauncher {
       rmSync(workDir, { recursive: true, force: true });
     }
     this.#end(record, endReason, detail);
+  }
+
+  /** 시작 직전의 요구사항. 삭제 · 없음 · 읽기 실패면 생략 기록을 남기고 `null`. */
+  #reloadRequirement(
+    record: RuleWriterSessionRecord,
+    queued: RuleWriterStartInput['requirement'],
+  ): RuleWriterStartInput['requirement'] | null {
+    let detail: string;
+    try {
+      const current = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+        store.requirements.get(queued.id),
+      );
+      if (current !== null && current.deletedAt === null) return current;
+      detail = current === null ? '요구사항 없음' : `요구사항 삭제됨 (${current.deletedAt})`;
+    } catch (error) {
+      detail = errorMessage(error);
+    }
+    record.status = 'skipped';
+    record.skipReason = 'requirement_unavailable';
+    record.error = detail;
+    record.endedAt = this.#timestamp();
+    this.#log(`규칙 작성 생략 (${record.requirementDisplayId}, ${detail})`);
+    return null;
   }
 
   #end(record: RuleWriterSessionRecord, endReason: SessionEndReason, detail: string | null): void {

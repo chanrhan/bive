@@ -27,6 +27,8 @@ import {
 } from '../src/rule-writer/rule-writer-service.js';
 import { toolDefinitions } from '../src/tools/definitions.js';
 import { earsStatementProblem, isEarsStatement } from '../src/tools/ears.js';
+// 규칙 화면의 WHEN 조건 표시와 교차 확인한다 (DOM · React에 의존하지 않는 순수 함수, ADR-060 · ADR-062)
+import { whenCondition } from '../../app/src/renderer/src/screens/rules/rulesView.js';
 import { connect, type TestClient } from './helpers/client.js';
 import { cleanup, makeBiveHome, waitFor } from './helpers/process.js';
 import { iso, type ProjectHarness, startProjectHarness, T0 } from './helpers/project-harness.js';
@@ -179,6 +181,56 @@ const validArgs = (overrides: Record<string, unknown> = {}): Record<string, unkn
   ...overrides,
 });
 
+/** EARS 검사가 받는 진술 (규칙 화면 whenCondition과 교차 확인하는 공용 사례). */
+const EARS_ACCEPTED = [
+  'WHEN 결제 후 7일 초과 환불 요청 THE SYSTEM SHALL 요청 거절',
+  'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 상태 코드 200을 돌려준다',
+  'WHEN THE USER LOGS IN THE SYSTEM SHALL CREATE A SESSION',
+  'WHEN the user opens the page THE SYSTEM SHALL load it within 1,000 ms',
+  'WHEN 주문 금액이 1,000원 이상이면 THE SYSTEM SHALL 무료 배송을 적용한다',
+  'WHEN 사용자가 로그인할 때(WHEN) THE SYSTEM SHALL 세션을 만든다',
+  'WHEN Whenever 버튼을 누르면 THE SYSTEM SHALL 저장한다',
+  'WHEN 결제가 실패하면 THE SYSTEM SHALL 재시도하고 when 세 번 실패하면 shall 알린다',
+];
+
+/** EARS 검사가 거부하는 진술. 조건 안 when · shall 사례는 규칙 화면에서 조건이 빠지거나 잘못 잘린다(리뷰 재현). */
+const EARS_REJECTED = [
+  'when 요청하면 the system shall 응답한다',
+  'When 요청하면 The System Shall 응답한다',
+  'WHEN 요청하면 응답한다',
+  'THE SYSTEM SHALL 응답한다',
+  'WHILE 로그인 상태 THE SYSTEM SHALL 메뉴를 보인다',
+  'IF 요청이 실패하면 THEN THE SYSTEM SHALL 오류를 돌려준다',
+  'WHEN 요청하면\nTHE SYSTEM SHALL 응답한다',
+  'WHEN 요청하면\tTHE SYSTEM SHALL 응답한다',
+  ' WHEN 요청하면 THE SYSTEM SHALL 응답한다',
+  'WHEN 요청하면 THE SYSTEM SHALL 응답한다 ',
+  'WHEN  요청하면 THE SYSTEM SHALL 응답한다',
+  'WHEN 요청하면  THE SYSTEM SHALL 응답한다',
+  'WHEN 요청하면 THE SYSTEM SHALL  응답한다',
+  'WHEN 요청하면 THE  SYSTEM SHALL 응답한다',
+  'WHEN THE SYSTEM SHALL 응답한다',
+  'WHEN 요청하면 THE SYSTEM SHALL',
+  'WHEN 요청하면 THE SYSTEM SHALLx',
+  'WHEN a THE SYSTEM SHALL b THE SYSTEM SHALL c',
+  'WHEN',
+  '',
+  // 조건 안의 낱말 when · shall (화면에 조건이 표시되지 않음)
+  'WHEN a WHEN b THE SYSTEM SHALL c',
+  'WHEN the user saves when offline THE SYSTEM SHALL queue the change',
+  'WHEN 결제 shall 확인 THE SYSTEM SHALL 거부',
+  // 조건 안의 낱말 shall (화면에서 조건이 잘못 잘림)
+  'WHEN A PAYMENT THAT THE BUYER SHALL CONFIRM EXPIRES THE SYSTEM SHALL CANCEL THE ORDER',
+  'WHEN the order, the buyer shall confirm, expires THE SYSTEM SHALL cancel it',
+  // 조건 끝의 쉼표 (화면이 지운다)
+  'WHEN 결제가 실패하면, THE SYSTEM SHALL 알린다',
+  'WHEN 결제가 실패하면， THE SYSTEM SHALL 알린다',
+];
+
+/** 진술에서 기대하는 화면 조건: `WHEN `부터 ` THE SYSTEM SHALL ` 앞까지 그대로. */
+const expectedWhen = (statement: string): string =>
+  statement.slice(0, statement.indexOf(' THE SYSTEM SHALL '));
+
 /** 세션을 멈춰 둘 관문 파일 (지우면 이어 간다). */
 const GATE = '{{biveHome}}/rw-gate';
 const gateTurn = { pause: { file: GATE } };
@@ -265,38 +317,76 @@ describe('requirement.create 뒤 rule-writer 세션 (happy-path)', () => {
 
 describe('propose_rule 검증 (제목 · EARS 진술 · 검사 종류 · 부모 요구사항)', () => {
   it('EARS 형식: WHEN … THE SYSTEM SHALL … 한 줄만 받는다', () => {
-    for (const ok of [
-      'WHEN 결제 후 7일 초과 환불 요청 THE SYSTEM SHALL 요청 거절',
-      'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 상태 코드 200을 돌려준다',
-      'WHEN a WHEN b THE SYSTEM SHALL c',
-    ]) {
-      expect(earsStatementProblem(ok)).toBeNull();
+    for (const ok of EARS_ACCEPTED) {
+      expect(earsStatementProblem(ok), ok).toBeNull();
       expect(isEarsStatement(ok)).toBe(true);
     }
-    for (const bad of [
-      'when 요청하면 the system shall 응답한다',
-      'When 요청하면 The System Shall 응답한다',
-      'WHEN 요청하면 응답한다',
-      'THE SYSTEM SHALL 응답한다',
-      'WHILE 로그인 상태 THE SYSTEM SHALL 메뉴를 보인다',
-      'IF 요청이 실패하면 THEN THE SYSTEM SHALL 오류를 돌려준다',
-      'WHEN 요청하면\nTHE SYSTEM SHALL 응답한다',
-      'WHEN 요청하면\tTHE SYSTEM SHALL 응답한다',
-      ' WHEN 요청하면 THE SYSTEM SHALL 응답한다',
-      'WHEN 요청하면 THE SYSTEM SHALL 응답한다 ',
-      'WHEN  요청하면 THE SYSTEM SHALL 응답한다',
-      'WHEN 요청하면  THE SYSTEM SHALL 응답한다',
-      'WHEN 요청하면 THE SYSTEM SHALL  응답한다',
-      'WHEN 요청하면 THE  SYSTEM SHALL 응답한다',
-      'WHEN THE SYSTEM SHALL 응답한다',
-      'WHEN 요청하면 THE SYSTEM SHALL',
-      'WHEN 요청하면 THE SYSTEM SHALLx',
-      'WHEN a THE SYSTEM SHALL b THE SYSTEM SHALL c',
-      'WHEN',
-      '',
-    ]) {
+    for (const bad of EARS_REJECTED) {
       expect(earsStatementProblem(bad), JSON.stringify(bad)).not.toBeNull();
     }
+    expect(earsStatementProblem('WHEN a WHEN b THE SYSTEM SHALL c')).toContain('낱말 WHEN');
+  });
+
+  it('받은 진술은 규칙 화면의 WHEN 조건(whenCondition, ADR-060)으로 정확히 WHEN <조건>이 된다', () => {
+    const scenarioStatements = ['happy-path', 'fail-check', 'pause-implement'].flatMap((name) =>
+      (loadScenario(name).roles['rule-writer']?.sessions ?? []).flatMap((session) =>
+        session.turns.flatMap((turn) =>
+          'tool' in turn && turn.tool === 'propose_rule' ? [String(turn.args.statement)] : [],
+        ),
+      ),
+    );
+    expect(scenarioStatements.length).toBeGreaterThan(0);
+    for (const statement of [...EARS_ACCEPTED, ...scenarioStatements]) {
+      expect(isEarsStatement(statement), statement).toBe(true);
+      expect(whenCondition(statement), statement).toBe(expectedWhen(statement));
+    }
+    // 화면에서 조건이 빠지거나 잘못 잘리는 진술은 받지 않는다 (리뷰 재현 사례)
+    for (const statement of EARS_REJECTED) {
+      const shown = whenCondition(statement);
+      if (shown === null || !statement.startsWith('WHEN ')) continue;
+      if (shown !== expectedWhen(statement))
+        expect(isEarsStatement(statement), statement).toBe(false);
+    }
+  });
+
+  it('무작위 조건 조합에서도 받은 진술은 언제나 화면 조건과 같다', () => {
+    // 경계를 흔드는 낱말 · 문장 부호를 섞은 결정적 의사 난수 조합
+    const tokens = [
+      '결제',
+      'A',
+      'THE',
+      'the',
+      'SYSTEM',
+      'system',
+      'when',
+      'WHEN',
+      'When',
+      'shall',
+      'SHALL',
+      'shall,',
+      '(WHEN)',
+      'Whenever',
+      'shallow',
+      '1,000',
+      ',',
+      '，',
+      'user,',
+      'THE,',
+    ];
+    let seed = 21;
+    const next = (n: number): number => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    let accepted = 0;
+    for (let i = 0; i < 5000; i += 1) {
+      const words = Array.from({ length: 1 + next(6) }, () => tokens[next(tokens.length)] ?? '');
+      const statement = `WHEN ${words.join(' ')} THE SYSTEM SHALL 응답한다`;
+      if (!isEarsStatement(statement)) continue;
+      accepted += 1;
+      expect(whenCondition(statement), statement).toBe(expectedWhen(statement));
+    }
+    expect(accepted).toBeGreaterThan(500);
   });
 
   it('틀린 인자는 denied(invalid_args)로 거부하고 제안을 만들지 않는다', async () => {
@@ -306,6 +396,8 @@ describe('propose_rule 검증 (제목 · EARS 진술 · 검사 종류 · 부모 
     expect(h.specs).toHaveLength(0);
     const invalid: [string, Record<string, unknown>][] = [
       ['소문자 키워드', { statement: 'when 요청하면 the system shall 응답한다' }],
+      ['조건 안의 WHEN', { statement: 'WHEN a WHEN b THE SYSTEM SHALL c' }],
+      ['조건 안의 shall', { statement: 'WHEN 결제 shall 확인 THE SYSTEM SHALL 거부' }],
       ['SHALL 없음', { statement: 'WHEN 요청하면 응답한다' }],
       ['상시형', { statement: 'THE SYSTEM SHALL 응답에 서버 시각을 담는다' }],
       ['여러 줄 진술', { statement: 'WHEN 요청하면\nTHE SYSTEM SHALL 응답한다' }],
@@ -477,6 +569,117 @@ describe('도구 목록 · 모델 · 한도 (ADR-024)', () => {
 });
 
 describe('설정 미비 · 중복 · 종료', () => {
+  it('대기 중 삭제된 요구사항은 세션 없이 생략하고, 수정된 요구사항은 최신 본문으로 시작한다', async () => {
+    const proposeOnce = { tool: 'propose_rule', args: validArgs() };
+    const h = await startHarness({
+      scenario: ScenarioSchema.parse({
+        name: 'rule-writer-queue',
+        description: '첫 세션만 관문에서 기다린다',
+        roles: {
+          'rule-writer': {
+            sessions: [
+              { turns: [gateTurn, proposeOnce], result: SCENARIO_RESULT },
+              { turns: [proposeOnce], result: SCENARIO_RESULT },
+            ],
+          },
+        },
+      }),
+    });
+    await saveSettings(h);
+    const first = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
+    await waitFor(() => existsSync(gatePath(h)), 5000, '첫 세션이 관문에서 대기');
+    const removed = await createRequirement(h, '헬스 체크 응답에 버전 포함');
+    const edited = await createRequirement(h, '헬스 체크 응답에 호스트 포함');
+    expect(onlyRecord(h, removed.id).status).toBe('queued');
+    expect(onlyRecord(h, edited.id).status).toBe('queued');
+
+    await h.client.call('requirement.delete', {
+      projectId: h.project.id,
+      id: removed.id,
+      author: human,
+    });
+    await h.client.call('requirement.update', {
+      projectId: h.project.id,
+      id: edited.id,
+      text: '헬스 체크 응답에 호스트 이름 포함',
+      author: human,
+    });
+    rmSync(gatePath(h));
+    await h.service.idle();
+
+    expect(onlyRecord(h, removed.id)).toMatchObject({
+      status: 'skipped',
+      skipReason: 'requirement_unavailable',
+      proposalIds: [],
+    });
+    expect(onlyRecord(h, removed.id).error).toContain('요구사항 삭제됨');
+    expect(h.logs.some((line) => line.startsWith('규칙 작성 생략 (REQ-002, 요구사항 삭제됨'))).toBe(
+      true,
+    );
+    expect(h.specs.map((spec) => spec.vars?.requirementId)).toEqual([first.id, edited.id]);
+    expect(h.specs[1]?.prompt).toContain('헬스 체크 응답에 호스트 이름 포함');
+    expect(onlyRecord(h, edited.id)).toMatchObject({ status: 'ended', endReason: 'success' });
+    const parents = h
+      .read((store) => store.proposals.list())
+      .map((proposal) => proposal.targetRef?.id);
+    expect(parents).toEqual([first.id, edited.id]);
+  });
+
+  it('앞 세션이 예외로 끝나도 다음 대기 세션은 돈다', async () => {
+    const specs: SessionSpec[] = [];
+    let service: RuleWriterService | null = null;
+    const h = await startProjectHarness(
+      { servers, clients },
+      {
+        ruleWriter: ({ biveHome, now }) => {
+          const scripted = new ScriptedAdapter({
+            scenario: loadScenario('happy-path'),
+            biveHome,
+            pollIntervalMs: 10,
+          });
+          service = new RuleWriterService({
+            biveHome,
+            now,
+            adapter: {
+              kind: 'scripted',
+              startSession: (spec) => {
+                specs.push(spec);
+                // 첫 세션은 시작하자마자 예외 (어댑터 오류)
+                if (specs.length === 1) throw new Error('어댑터 시작 실패');
+                return scripted.startSession(spec);
+              },
+            },
+          });
+          services.push(service);
+          return service;
+        },
+      },
+    );
+    if (service === null) throw new Error('서비스가 만들어지지 않음');
+    const rw: RuleWriterService = service;
+    await saveSettings(h);
+
+    const [failing, next] = await Promise.all([
+      createRequirement(h, '헬스 체크 응답에 서버 시각 포함'),
+      createRequirement(h, '헬스 체크 응답에 버전 포함'),
+    ]);
+    await rw.idle();
+
+    expect(specs).toHaveLength(2);
+    const failedRecords = [failing, next].map((requirement) =>
+      rw.recordsFor(h.project.id, requirement.id),
+    );
+    const ended = failedRecords.flat();
+    expect(ended.map((record) => record.endReason).sort()).toEqual([
+      'error_during_execution',
+      'success',
+    ]);
+    expect(ended.find((record) => record.endReason === 'error_during_execution')?.error).toBe(
+      '어댑터 시작 실패',
+    );
+    expect(h.read((store) => store.proposals.list())).toHaveLength(2);
+  });
+
   it('rule-writer 설정이 비면 요구사항은 저장되고 세션은 뜨지 않으며 그 사실이 기록된다', async () => {
     const h = await startHarness();
 
