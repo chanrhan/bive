@@ -245,19 +245,59 @@ export const initialEditValues = (kind: ActionableKind, payload: unknown): EditV
   ) as EditValues;
 };
 
+// 규칙 진술(EARS) 형식: orchestrator `tools/ears.ts`의 `earsStatementProblem`과 같은 규칙 (ADR-062 · ADR-063).
+// 렌더러는 orchestrator를 런타임에 가져올 수 없어 다시 적고, test/todo-proposal-detail.test.ts가 원본과 대조한다.
+// eslint-disable-next-line no-control-regex -- 제어 문자를 찾는 것이 목적
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
+const TRIMMED_PHRASE = /^\S(?:.*\S)?$/u;
+const KEYWORD_IN_CONDITION = /(?:^|\s)(when|shall)(?=\s|$)/iu;
+const TRAILING_COMMA = /[,，]$/u;
+const EARS_HEAD = 'WHEN ';
+const EARS_SHALL = 'THE SYSTEM SHALL';
+
+/** 진술이 한 줄 `WHEN <조건> THE SYSTEM SHALL <응답>`인지 (대문자 키워드, 조건 안 낱말 when · shall · 끝 쉼표 불가). */
+export const isEarsStatement = (statement: string): boolean => {
+  if (CONTROL_CHARACTERS.test(statement) || statement !== statement.trim()) return false;
+  if (!statement.startsWith(EARS_HEAD)) return false;
+  if (statement.split(EARS_SHALL).length - 1 !== 1) return false;
+  const separator = ` ${EARS_SHALL} `;
+  const at = statement.indexOf(separator);
+  if (at < 0) return false;
+  const condition = statement.slice(EARS_HEAD.length, at);
+  const response = statement.slice(at + separator.length);
+  return (
+    TRIMMED_PHRASE.test(condition) &&
+    !KEYWORD_IN_CONDITION.test(condition) &&
+    !TRAILING_COMMA.test(condition) &&
+    TRIMMED_PHRASE.test(response)
+  );
+};
+
+/** 규칙 진술 형식 오류 문구 (형식 안내 포함). */
+export const STATEMENT_FORMAT_ERROR = '진술 형식 오류 (WHEN 조건 THE SYSTEM SHALL 응답)';
+
 /**
- * 입력 검증 (shared 본문 스키마의 문장 규칙과 같음: 공백만 있는 문장은 안 됨). 키 → 화면 문구.
- * 비어 있으면 통과.
+ * 입력 검증. 키 → 화면 문구, 비어 있으면 통과.
+ * - 공백만 있는 문장은 안 됨 (shared 본문 스키마의 문장 규칙)
+ * - 규칙 진술을 고쳤으면 EARS 형식이어야 함. 고치지 않은 진술은 서버가 다시 검사하지 않으므로 여기서도 넘긴다 (ADR-063)
  */
 export const editErrors = (
   kind: ActionableKind,
   values: EditValues,
-): Partial<Record<EditKey, string>> =>
-  Object.fromEntries(
-    EDIT_FIELDS[kind].flatMap(({ key, label }) =>
-      (values[key] ?? '').trim() === '' ? [[key, `${label} 비어 있음`]] : [],
-    ),
+  payload: unknown,
+): Partial<Record<EditKey, string>> => {
+  const original = initialEditValues(kind, payload);
+  return Object.fromEntries(
+    EDIT_FIELDS[kind].flatMap(({ key, label }): [EditKey, string][] => {
+      const value = values[key] ?? '';
+      if (value.trim() === '') return [[key, `${label} 비어 있음`]];
+      if (key === 'statement' && value !== original.statement && !isEarsStatement(value)) {
+        return [[key, STATEMENT_FORMAT_ERROR]];
+      }
+      return [];
+    }),
   );
+};
 
 /** 수정 본문 = 원래 본문 + 고친 문장 (본문 전체, ADR-050). 입력 문구는 그대로 보낸다. */
 export const editedPayload = (

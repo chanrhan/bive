@@ -3,9 +3,9 @@
 //   거절하면 대신 처리 기록(처리 · 주체 · 시각 · 사유 · 수정 내용). 예상 비용은 보이지 않는다
 // - 오른쪽 아래 떠 있는 [거절] [수정] [승인] (대기 제안만). [수정] · [거절] 입력은 상세 끝 카드로 열린다
 // - 처리는 사람 주체로만 `proposal.approve` · `proposal.amend` · `proposal.reject`를 부른다 (NFR-01).
-//   처리 중에는 다시 보내지 않는다. 성공하면 onProcessed(목록 · 배지 다시 읽기), 이미 처리됨 · 없음이면 onStale
+//   요청은 목록(ApprovalTab)에 맡긴다: 같은 제안의 재전송 방지 · 처리 중 · 실패 문구를 제안 ID별로 기억한다
 import type { Proposal } from '@bive/shared';
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 
 import { AuthorMark } from '../../components/AuthorMark/AuthorMark.js';
 import { formatCardTime } from '../../components/Card2Line/time.js';
@@ -15,7 +15,6 @@ import { EmptyState } from '../../layout/EmptyState.js';
 import { EditCard, RejectCard } from './DecisionInputs.js';
 import { kindTag, proposalTitle } from './proposalCard.js';
 import {
-  actionErrorText,
   authorName,
   availableActions,
   consequences,
@@ -27,27 +26,32 @@ import {
   editedPayload,
   type EditValues,
   isActionableKind,
-  isStaleError,
   type RequirementLabel,
   sourceRows,
 } from './proposalDetailView.js';
 import { useDecisionRecord, useParentRequirement } from './useDetailData.js';
 
+/** 처리 요청: 응답의 제안으로 풀리는 RPC 호출. */
+export type ProcessCall = () => Promise<{ proposal: Proposal }>;
+
 export interface ProposalDetailProps {
   projectId: string;
   /** 고른 제안. 없으면 null */
   proposal: Proposal | null;
-  /** 처리 성공: 응답의 제안 (목록 반영 · 선택 해제 · 목록 · 배지 다시 읽기) */
-  onProcessed: (proposal: Proposal) => void;
-  /** 이미 처리됨 · 없는 제안: 목록 · 배지 다시 읽기 */
-  onStale: () => void;
+  /** 이 제안의 처리 요청이 진행 중 (목록이 제안 ID별로 기억해 상세를 다시 열어도 유지) */
+  busy: boolean;
+  /** 이 제안의 마지막 처리 실패 문구 */
+  error: string | null;
+  /** 처리 요청을 맡긴다. 같은 제안의 요청이 진행 중이거나 이미 성공했으면 목록이 무시한다 */
+  onSubmit: (id: string, call: ProcessCall) => void;
 }
 
 export const ProposalDetail = ({
   projectId,
   proposal,
-  onProcessed,
-  onStale,
+  busy,
+  error,
+  onSubmit,
 }: ProposalDetailProps): React.JSX.Element => (
   <section
     className="todo-detail"
@@ -58,13 +62,14 @@ export const ProposalDetail = ({
     {proposal === null ? (
       <EmptyState text={DETAIL_TEXT.noSelection} />
     ) : (
-      // 제안이 바뀌면 입력 · 처리 상태를 새로 시작한다
+      // 제안이 바뀌면 입력 카드를 새로 시작한다 (처리 중 · 실패 상태는 목록이 제안별로 들고 있다)
       <DetailBody
         key={proposal.id}
         projectId={projectId}
         proposal={proposal}
-        onProcessed={onProcessed}
-        onStale={onStale}
+        busy={busy}
+        error={error}
+        onSubmit={onSubmit}
       />
     )}
   </section>
@@ -77,50 +82,21 @@ const HUMAN = { kind: 'human' } as const;
 const DetailBody = ({
   projectId,
   proposal,
-  onProcessed,
-  onStale,
+  busy,
+  error,
+  onSubmit,
 }: ProposalDetailProps & { proposal: Proposal }): React.JSX.Element => {
   const parent = useParentRequirement(projectId, proposal);
   const record = useDecisionRecord(projectId, proposal);
   const [input, setInput] = useState<InputMode>('none');
   // [수정] · [거절]을 다시 누르면 카드로 다시 스크롤 · 포커스한다
   const [focusKey, setFocusKey] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // 같은 틱에 두 번 눌러도 한 번만 보내도록 상태와 별도로 둔다. 성공한 뒤에는 풀지 않는다(같은 제안 재처리 없음)
-  const busyRef = useRef(false);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
 
   const requirementLabel: RequirementLabel = (id) =>
     parent !== null && parent.id === id ? parent.displayId : null;
   const parentText = parent === null ? null : `${parent.displayId} · ${parent.text}`;
 
-  const submit = (call: () => Promise<{ proposal: Proposal }>): void => {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
-    setError(null);
-    call().then(
-      ({ proposal: updated }) => {
-        if (mounted.current) setBusy(false);
-        onProcessed(updated);
-      },
-      (reason: unknown) => {
-        busyRef.current = false;
-        if (mounted.current) {
-          setBusy(false);
-          setError(actionErrorText(reason));
-        }
-        if (isStaleError(reason)) onStale();
-      },
-    );
-  };
+  const submit = (call: ProcessCall): void => onSubmit(proposal.id, call);
 
   const approve = (): void =>
     submit(() =>

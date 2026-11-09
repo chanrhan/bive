@@ -31,7 +31,7 @@ const ID = {
 
 const rulePayload = (title: string): Record<string, unknown> => ({
   title,
-  statement: `${title} 요청을 받으면 시스템은 결과를 응답한다`,
+  statement: `WHEN 클라이언트가 헬스 체크를 요청하면 THE SYSTEM SHALL ${title}`,
   kind: 'business',
   checkKinds: ['test'],
   parentRequirementId: ID.req,

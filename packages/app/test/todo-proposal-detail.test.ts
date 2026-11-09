@@ -1,6 +1,7 @@
 // 승인 대기 상세의 순수 함수 (이슈 #40, screens.md SCR-17 상세 · 동작, NRM-04, ADR-050 · ADR-063).
 // renderer는 shared를 import type으로만 쓰므로 표시명 · 검증을 다시 적는다. 여기서 shared 원본(스키마 · 표시명 ·
-// 오류 사유)과 대조한다. 제안 · 승인 기록 데이터는 이 테스트 안에서만 만들고 shared 스키마로 검증한다 (NFR-03).
+// 오류 사유)과 orchestrator EARS 검사(tools/ears.ts)와 대조한다.
+// 제안 · 승인 기록 데이터는 이 테스트 안에서만 만들고 shared 스키마로 검증한다 (NFR-03).
 import {
   APPROVAL_LOG_GENESIS_HASH,
   ApprovalLogEntry,
@@ -15,6 +16,9 @@ import {
   SupportedProposalKind,
 } from '@bive/shared';
 import { describe, expect, it } from 'vitest';
+
+// 제품 코드는 orchestrator를 import할 수 없지만(architecture.md 2장) 테스트는 원본을 직접 불러 대조한다 (run-paths.test.ts 선례)
+import { earsStatementProblem } from '../../orchestrator/src/tools/ears.js';
 
 import * as labels from '../src/renderer/src/proposals/labels.js';
 import {
@@ -31,11 +35,51 @@ import {
   editedPayload,
   editErrors,
   initialEditValues,
+  isEarsStatement,
   isStaleError,
   payloadFields,
   shortcutHint,
   sourceRows,
+  STATEMENT_FORMAT_ERROR,
 } from '../src/renderer/src/screens/todo/proposalDetailView.js';
+
+/** 사례: orchestrator test/rule-writer.test.ts의 받는 · 거부하는 진술과 리뷰 재현 사례. */
+const EARS_CASES = [
+  'WHEN 결제 후 7일 초과 환불 요청 THE SYSTEM SHALL 요청 거절',
+  'WHEN THE USER LOGS IN THE SYSTEM SHALL CREATE A SESSION',
+  'WHEN the user opens the page THE SYSTEM SHALL load it within 1,000 ms',
+  'WHEN 사용자가 로그인할 때(WHEN) THE SYSTEM SHALL 세션을 만든다',
+  'WHEN Whenever 버튼을 누르면 THE SYSTEM SHALL 저장한다',
+  'WHEN 결제가 실패하면 THE SYSTEM SHALL 재시도하고 when 세 번 실패하면 shall 알린다',
+  'when 요청하면 the system shall 응답한다',
+  'WHEN 요청하면 응답한다',
+  'THE SYSTEM SHALL 응답한다',
+  'WHILE 로그인 상태 THE SYSTEM SHALL 메뉴를 보인다',
+  'WHEN 요청하면\nTHE SYSTEM SHALL 응답한다',
+  'WHEN 요청하면\tTHE SYSTEM SHALL 응답한다',
+  ' WHEN 요청하면 THE SYSTEM SHALL 응답한다',
+  'WHEN 요청하면 THE SYSTEM SHALL 응답한다 ',
+  'WHEN  요청하면 THE SYSTEM SHALL 응답한다',
+  'WHEN 요청하면 THE SYSTEM SHALL  응답한다',
+  'WHEN 요청하면 THE  SYSTEM SHALL 응답한다',
+  'WHEN THE SYSTEM SHALL 응답한다',
+  'WHEN 요청하면 THE SYSTEM SHALL',
+  'WHEN 요청하면 THE SYSTEM SHALLx',
+  'WHEN a THE SYSTEM SHALL b THE SYSTEM SHALL c',
+  'WHEN',
+  '',
+  'WHEN a WHEN b THE SYSTEM SHALL c',
+  'WHEN 결제 shall 확인 THE SYSTEM SHALL 거부',
+  'WHEN A PAYMENT THAT THE BUYER SHALL CONFIRM EXPIRES THE SYSTEM SHALL CANCEL',
+  'WHEN the order, the buyer shall confirm, expires THE SYSTEM SHALL cancel it',
+  'WHEN 결제가 실패하면, THE SYSTEM SHALL 알린다',
+  'WHEN 결제가 실패하면， THE SYSTEM SHALL 알린다',
+  'WHEN 결제\n취소 THE SYSTEM SHALL 환불',
+  'WHEN 결제\u2028취소 THE SYSTEM SHALL 환불',
+];
+
+const NEW_STATEMENT =
+  'WHEN 클라이언트가 헬스 체크를 요청하면 THE SYSTEM SHALL UTC 시각을 응답에 포함한다';
 
 const REQ_ID = '01JAAAAAAAAAAAAAAAAAAAAAR1';
 const PRP_ID = '01JAAAAAAAAAAAAAAAAAAAAAP1';
@@ -43,7 +87,7 @@ const OTHER_ID = '01JAAAAAAAAAAAAAAAAAAAAAP2';
 
 const RULE_PAYLOAD = {
   title: '헬스 응답에 서버 시각 포함',
-  statement: '헬스 요청을 받으면 시스템은 서버 시각을 응답에 포함한다',
+  statement: 'WHEN 클라이언트가 헬스 체크를 요청하면 THE SYSTEM SHALL 서버 시각을 응답에 포함한다',
   kind: 'business',
   checkKinds: ['test', 'pbt'],
   parentRequirementId: REQ_ID,
@@ -213,32 +257,94 @@ describe('수정 후 승인 입력', () => {
       {
         kind: 'rule_new',
         payload: RULE_PAYLOAD,
-        values: { title: '새 제목', statement: '새 진술' },
+        values: { title: '새 제목', statement: NEW_STATEMENT },
       },
-      { kind: 'rule_new', payload: RULE_PAYLOAD, values: { title: '  ', statement: '새 진술' } },
+      {
+        kind: 'rule_new',
+        payload: RULE_PAYLOAD,
+        values: { title: '  ', statement: NEW_STATEMENT },
+      },
       { kind: 'rule_new', payload: RULE_PAYLOAD, values: { title: '새 제목', statement: '\n' } },
       { kind: 'requirement_new', payload: { text: '원문' }, values: { text: '고친 문장' } },
       { kind: 'requirement_new', payload: { text: '원문' }, values: { text: ' \t' } },
     ] as const;
     for (const { kind, payload, values } of cases) {
-      const errors = editErrors(kind, values);
+      const errors = editErrors(kind, values, payload);
       const edited = editedPayload(kind, payload, values);
       const ok = PROPOSAL_PAYLOAD_SCHEMAS[kind].safeParse(edited).success;
       expect(ok, JSON.stringify(values)).toBe(Object.keys(errors).length === 0);
     }
-    expect(editErrors('rule_new', { title: '', statement: ' ' })).toEqual({
+    expect(editErrors('rule_new', { title: '', statement: ' ' }, RULE_PAYLOAD)).toEqual({
       title: '제목 비어 있음',
       statement: '진술 비어 있음',
     });
   });
 
+  it('고친 규칙 진술이 EARS 형식이 아니면 진술 형식 오류 (고치지 않은 진술은 넘긴다)', () => {
+    for (const statement of [
+      'WHEN A PAYMENT THAT THE BUYER SHALL CONFIRM EXPIRES THE SYSTEM SHALL CANCEL',
+      'WHEN 결제\n취소 THE SYSTEM SHALL 환불',
+      '새 진술',
+    ]) {
+      expect(editErrors('rule_new', { title: '제목', statement }, RULE_PAYLOAD)).toEqual({
+        statement: STATEMENT_FORMAT_ERROR,
+      });
+    }
+    expect(
+      editErrors('rule_new', { title: '제목', statement: NEW_STATEMENT }, RULE_PAYLOAD),
+    ).toEqual({});
+    // 원래 진술이 형식에 맞지 않아도 고치지 않았으면 막지 않는다 (서버와 같음)
+    const legacy = { ...RULE_PAYLOAD, statement: '헬스 요청을 받으면 시각을 응답한다' };
+    expect(
+      editErrors('rule_new', { title: '새 제목', statement: legacy.statement }, legacy),
+    ).toEqual({});
+  });
+
+  it('EARS 형식 검사가 orchestrator 원본(tools/ears.ts)과 같다', () => {
+    const tokens = [
+      '결제',
+      'A',
+      'THE',
+      'the',
+      'SYSTEM',
+      'SHALL',
+      'shall',
+      'WHEN',
+      'when',
+      ',',
+      '，',
+      ' ',
+      '  ',
+      '\n',
+      'Whenever',
+      '(WHEN)',
+      '1,000',
+    ];
+    let seed = 7;
+    const next = (): number => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed;
+    };
+    const random: string[] = [];
+    for (let i = 0; i < 2000; i += 1) {
+      const pick = (n: number): string =>
+        Array.from({ length: n }, () => tokens[next() % tokens.length]).join(next() % 2 ? ' ' : '');
+      random.push(`WHEN ${pick(1 + (next() % 4))} THE SYSTEM SHALL ${pick(1 + (next() % 3))}`);
+    }
+    for (const statement of [...EARS_CASES, ...random]) {
+      expect(isEarsStatement(statement), JSON.stringify(statement)).toBe(
+        earsStatementProblem(statement) === null,
+      );
+    }
+  });
+
   it('수정 본문 = 원래 본문 + 고친 문장 (종류 · 검사 종류 · 부모는 그대로, 입력 문구 그대로)', () => {
     expect(
-      editedPayload('rule_new', RULE_PAYLOAD, { title: ' 새 제목', statement: '새 진술' }),
+      editedPayload('rule_new', RULE_PAYLOAD, { title: ' 새 제목', statement: NEW_STATEMENT }),
     ).toEqual({
       ...RULE_PAYLOAD,
       title: ' 새 제목',
-      statement: '새 진술',
+      statement: NEW_STATEMENT,
     });
   });
 

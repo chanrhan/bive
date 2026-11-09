@@ -54,7 +54,7 @@ const HUMAN = { kind: 'human' } as const;
 
 const rulePayload = (title: string): Record<string, unknown> => ({
   title,
-  statement: `${title} 요청을 받으면 시스템은 결과를 응답한다`,
+  statement: `WHEN 클라이언트가 헬스 체크를 요청하면 THE SYSTEM SHALL ${title}`,
   kind: 'business',
   checkKinds: ['test'],
   parentRequirementId: ID.req,
@@ -426,6 +426,26 @@ test.describe('수정 · 거절 입력 카드 (수용 기준 3)', () => {
     await expect(page.getByTestId('edit-error')).toHaveCount(0);
     await expect(confirm).toBeEnabled();
 
+    // 고친 진술이 EARS 형식이 아니면 화면 문구 + 확인 비활성 (조건 안 낱말 shall · 여러 줄 · 형식 없음)
+    const statement = page.getByTestId('edit-statement');
+    for (const bad of [
+      'WHEN A PAYMENT THAT THE BUYER SHALL CONFIRM EXPIRES THE SYSTEM SHALL CANCEL',
+      'WHEN 결제\n취소 THE SYSTEM SHALL 환불',
+      '헬스 요청을 받으면 시스템은 시각을 응답한다',
+    ]) {
+      await statement.fill(bad);
+      await expect(page.getByTestId('edit-error')).toHaveText(
+        '진술 형식 오류 (WHEN 조건 THE SYSTEM SHALL 응답)',
+      );
+      await expect(statement).toHaveAttribute('aria-invalid', 'true');
+      await expect(confirm).toBeDisabled();
+      await statement.press('Control+Enter');
+    }
+    expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
+    await statement.fill(String(P1_PAYLOAD.statement));
+    await expect(page.getByTestId('edit-error')).toHaveCount(0);
+    await expect(confirm).toBeEnabled();
+
     // 처리 뒤 목록 · 배지 응답
     const approved: Proposal = {
       ...P1,
@@ -541,6 +561,57 @@ test.describe('수정 · 거절 입력 카드 (수용 기준 3)', () => {
     ]);
     await expect(page.getByTestId('card-id')).toHaveText(['PRP-003']);
     await expect(page.getByTestId('todo-badge')).toHaveText('1');
+  });
+
+  test('처리 중 다른 카드를 골라도 그 선택은 유지되고, 돌아와도 같은 제안을 다시 보내지 않는다', async ({
+    page,
+  }) => {
+    const bive = await setup(page);
+    const approved: Proposal = {
+      ...P1,
+      state: 'approved',
+      decision: {
+        at: '2026-10-16T05:00:00.000Z',
+        by: HUMAN,
+        appliedRef: { entity: 'Rule', id: ID.rule },
+      },
+    };
+    await bive.setResponse('proposal.approve', {
+      result: {
+        proposal: approved,
+        applied: { entity: 'Rule', rule: RULE },
+        approvalLog: LOG_APPROVE,
+      },
+      delayMs: 2500,
+    });
+    await bive.setResponse('proposal.list', { result: { proposals: [approved, P3, P4, P5] } });
+    await bive.setResponse('proposal.count', { result: countOf([approved, P3, P4, P5]) });
+
+    await card(page, 'PRP-001').click();
+    await action(page, 'approve').click();
+    await expect(page.getByTestId('floating-actions-busy')).toBeVisible();
+
+    // 처리 중 다른 카드 → 그 상세는 처리 중이 아님
+    await card(page, 'PRP-003').click();
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-003');
+    await expect(action(page, 'approve')).toBeEnabled();
+    await expect(page.getByTestId('floating-actions-busy')).toHaveCount(0);
+
+    // 처리 중인 제안으로 돌아오면 여전히 처리 중이고 다시 보낼 수 없다
+    await card(page, 'PRP-001').click();
+    await expect(page.getByTestId('floating-actions-busy')).toBeVisible();
+    await expect(action(page, 'approve')).toBeDisabled();
+    await action(page, 'approve').click({ force: true });
+
+    // 다시 다른 카드를 고른 채로 앞 요청이 끝나면 그 선택은 풀리지 않는다
+    await card(page, 'PRP-003').click();
+    await expect(page.getByTestId('card-id')).toHaveText(['PRP-003']);
+    await expect(page.getByTestId('todo-badge')).toHaveText('1');
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-003');
+    await expect(page.getByTestId('detail-title')).toHaveText('헬스 응답에 호스트 이름을 포함한다');
+    expect(await callsOf(bive, 'proposal.approve')).toEqual([
+      { projectId: PROJECT_ID, id: ID.p1, author: HUMAN },
+    ]);
   });
 
   test('Esc로 입력 카드 닫기, [승인]은 바로 사람 주체 승인 1회', async ({ page }) => {

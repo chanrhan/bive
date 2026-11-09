@@ -1,5 +1,6 @@
 // [수정] · [거절] 입력 카드 (screens.md SCR-17 동작: 대화 끝 카드로 열리고 자동 스크롤 · 포커스, NRM-04).
-// - 수정: 제안 문장만 고친다(요구사항 = 문장, 규칙 = 제목 · 진술). 빈 문장은 칸 아래 문구로 알리고 확인 비활성
+// - 수정: 제안 문장만 고친다(요구사항 = 문장, 규칙 = 제목 · 진술). 빈 문장 · 고친 진술의 형식 오류(EARS)는 칸 아래
+//   문구로 알리고 확인 비활성
 // - 거절: 사유 필수. 공백만 있으면 확인 비활성 (서버도 -32001)
 // - ⌘↵(Ctrl+Enter) 확인 · Esc 닫기. 한글 등 입력기 조합 중의 Enter · Esc는 조합 확정용이라 가로채지 않는다
 // - 처리 중(`busy`)에는 입력을 읽기 전용으로 두고 확인을 막는다 (재전송 없음)
@@ -68,7 +69,7 @@ export const EditCard = ({
 }: EditCardProps): React.JSX.Element => {
   const [values, setValues] = useState<EditValues>(() => initialEditValues(kind, payload));
   const { cardRef, firstRef } = useRevealAndFocus(focusKey);
-  const errors = editErrors(kind, values);
+  const errors = editErrors(kind, values, payload);
   const valid = Object.keys(errors).length === 0;
   const confirm = (): void => {
     if (busy || !valid) return;

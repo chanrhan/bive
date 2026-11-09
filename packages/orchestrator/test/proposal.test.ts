@@ -379,6 +379,51 @@ describe('proposal.approve: 규범 반영 + 승인 기록 (행동 · 주체 · �
     expect(logCount()).toBe(0);
   });
 
+  it('사람이 고친 규칙 진술이 EARS 형식이 아니면 -32001(EDITED_PAYLOAD_INVALID)이고 아무것도 바뀌지 않는다', async () => {
+    const req = await createRequirement();
+    const ruleProposal = submitRule(req.id);
+    const bad = [
+      // 조건 안의 낱말 shall: 규칙 화면 조건이 "WHEN A PAYMENT THAT"으로 잘린다 (ADR-062)
+      'WHEN A PAYMENT THAT THE BUYER SHALL CONFIRM EXPIRES THE SYSTEM SHALL CANCEL',
+      // 여러 줄
+      'WHEN 결제\n취소 THE SYSTEM SHALL 환불',
+      '결제가 취소되면 시스템은 환불한다',
+    ];
+    for (const statement of bad) {
+      for (const method of ['proposal.amend', 'proposal.approve'] as const) {
+        await expect(
+          h.client.call(method, {
+            projectId: h.project.id,
+            id: ruleProposal.id,
+            author: human,
+            edited: { ...rulePayload(req.id), statement },
+          }),
+        ).rejects.toMatchObject({
+          code: ErrorCode.ValidationFailed,
+          data: {
+            reason: DomainErrorReason.EditedPayloadInvalid,
+            issues: [{ path: 'statement' }],
+          },
+        });
+      }
+    }
+    await expect(getProposal(ruleProposal.id)).resolves.toEqual(ruleProposal);
+    expect(h.read((store) => store.rules.list())).toEqual([]);
+    expect(logCount()).toBe(0);
+
+    // EARS 형식으로 고친 진술은 수정 후 승인된다
+    const statement =
+      'WHEN 이미 가입된 이메일로 가입을 요청하면 THE SYSTEM SHALL 409 응답으로 거부한다';
+    const amended = await h.client.call('proposal.amend', {
+      projectId: h.project.id,
+      id: ruleProposal.id,
+      author: human,
+      edited: { ...rulePayload(req.id), statement },
+    });
+    expect(amended.approvalLog.action).toBe('approve_edited');
+    expect(amended.applied).toMatchObject({ entity: 'Rule', rule: { statement } });
+  });
+
   it('승인 전에 부모 요구사항이 삭제된 규칙 제안은 -32009이고 아무것도 바뀌지 않는다', async () => {
     const req = await createRequirement();
     const ruleProposal = submitRule(req.id);
