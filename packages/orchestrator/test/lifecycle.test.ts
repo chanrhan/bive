@@ -1,6 +1,6 @@
 // 백그라운드 수명 (M0-05 수용 기준 3, PRD 5.1): 진행 중 실행 0개 · 연결 0개가
 // BIVE_IDLE_SHUTDOWN_MS(기본 300000) 동안 이어지면 프로세스가 종료된다.
-// 제한: CLI 테스트는 30초, 유휴 시간은 3초(0.5 · 0.8초면 부하에서 소켓 확인 · 접속 전에 먼저 유휴 종료돼 ECONNREFUSED가 났다, #122).
+// 제한: CLI 테스트는 30초, 유휴 시간은 3초 · 접속은 거부되면 재시도(부하에서 접속 전 유휴 종료 · listen 전 접속으로 ECONNREFUSED가 났다, #122).
 import { existsSync, readFileSync } from 'node:fs';
 
 import { afterEach, describe, expect, it, type Mock, vi } from 'vitest';
@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { DEFAULT_IDLE_SHUTDOWN_MS, Lifecycle, parseIdleShutdownMs } from '../src/lifecycle.js';
 import { startOrchestrator } from '../src/orchestrator.js';
 import { runPaths } from '../src/run-paths.js';
-import { connect } from './helpers/client.js';
+import { connectWhenReady } from './helpers/client.js';
 import { cleanup, makeBiveHome, sleep, spawnCli, waitFor } from './helpers/process.js';
 
 afterEach(async () => {
@@ -160,7 +160,7 @@ describe('프로세스 유휴 종료 (CLI)', () => {
     const paths = runPaths(home);
     const proc = spawnCli({ BIVE_HOME: home, BIVE_IDLE_SHUTDOWN_MS: String(CLI_IDLE_MS) });
     await waitFor(() => existsSync(paths.token) && existsSync(paths.pipe), 15_000, '기동');
-    const client = await connect(paths.pipe, readFileSync(paths.token, 'utf8'));
+    const client = await connectWhenReady(paths.pipe, () => readFileSync(paths.token, 'utf8'));
     // 유휴 시간보다 길게 기다려도 연결이 있으므로 살아 있다
     await sleep(CLI_IDLE_MS + 1000);
     expect(proc.child.exitCode).toBeNull();

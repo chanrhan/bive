@@ -1,7 +1,7 @@
 // 단일 인스턴스 잠금 (M0-05 수용 기준 4, PRD 5.1 · ADR-027):
 // `pnpm --filter @bive/orchestrator start` 두 번째 기동은 즉시 종료 코드 0, 죽은 pid의 잠금은 인수,
 // 토큰 파일 권한은 0600.
-// 제한: 기동 테스트는 40초, 잠금 인수 테스트의 유휴 종료는 4초(1.5초면 부하에서 기동 확인 뒤 접속 전에 먼저 종료돼 접속이 거부될 수 있다, #122).
+// 제한: 기동 테스트는 40초, 잠금 인수 테스트의 유휴 종료는 4초 · 접속은 거부(bind 뒤 listen 전)되면 재시도(부하에서 ECONNREFUSED가 났다, #122).
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { acquirePidLock, isProcessAlive, readPidFile } from '../src/lock.js';
 import { runPaths } from '../src/run-paths.js';
-import { connect } from './helpers/client.js';
+import { connectWhenReady } from './helpers/client.js';
 import { cleanup, makeBiveHome, spawnCli, spawnPnpmStart, waitFor } from './helpers/process.js';
 
 const unixOnly = process.platform === 'win32' ? it.skip : it;
@@ -97,7 +97,7 @@ describe('pnpm --filter @bive/orchestrator start', () => {
       expect(first.child.exitCode).toBeNull();
       expect(readPidFile(paths.pid)).toBe(first.child.pid);
       expect(readFileSync(paths.token, 'utf8')).toBe(token);
-      const client = await connect(paths.pipe, token);
+      const client = await connectWhenReady(paths.pipe, () => token);
       await expect(client.call('ping')).resolves.toMatchObject({ pong: true });
       await client.close();
 
@@ -146,7 +146,7 @@ describe('pnpm --filter @bive/orchestrator start', () => {
       expect(statSync(paths.token).mode & 0o777).toBe(0o600);
       const token = readFileSync(paths.token, 'utf8');
       expect(token).not.toBe('old-token');
-      const client = await connect(paths.pipe, token);
+      const client = await connectWhenReady(paths.pipe, () => token);
       await expect(client.call('ping')).resolves.toMatchObject({ pong: true });
       await client.close();
 
