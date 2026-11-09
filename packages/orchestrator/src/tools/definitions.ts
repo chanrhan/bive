@@ -104,7 +104,7 @@ export const ProposeRuleInput = z.strictObject({
 });
 export type ProposeRuleInput = z.infer<typeof ProposeRuleInput>;
 
-/** 도구 정의. M1-26이 SDK MCP 도구로 그대로 감싼다(`inputSchema.shape`). */
+/** 도구 정의. SDK MCP 서버(M1-26)는 strict 스키마에서 만든 JSON 스키마로 노출하고 인자 검증은 실행기에 맡긴다. */
 export interface ToolDefinition {
   name: FixedToolName;
   description: string;

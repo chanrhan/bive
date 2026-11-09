@@ -5,13 +5,12 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import type {
-  AgentAdapter,
-  SessionEvent,
-  SessionResultEvent,
-  SessionSpec,
-  ToolExecutor,
-  ToolResult,
+import {
+  type AgentAdapter,
+  executeTool,
+  type SessionEvent,
+  type SessionResultEvent,
+  type SessionSpec,
 } from './adapter.js';
 import {
   type Scenario,
@@ -77,23 +76,6 @@ const resolveTurn = (
     file: path.resolve(workDir, fill(turn.pause.file, vars)),
     until: turn.pause.until,
   };
-};
-
-/** 실행기 예외는 SDK의 MCP 도구 오류처럼 오류 결과로 바꿔 세션을 이어간다. */
-const executeTool = async (
-  tools: ToolExecutor,
-  name: string,
-  args: Record<string, unknown>,
-): Promise<ToolResult> => {
-  try {
-    return await tools.execute(name, args);
-  } catch (error) {
-    return {
-      status: 'error',
-      content: error instanceof Error ? error.message : String(error),
-      reason: 'executor_error',
-    };
-  }
 };
 
 /** `removed`: 파일이 없으면 만들고 지워질 때까지, `created`: 생길 때까지 기다린다. */
