@@ -152,7 +152,7 @@ interface AgentAdapter {
 | `~/.bive/projects/<projectId>/bive.db` | 규범 · 실행 · 판정 · 승인 기록 | 불가 (NFR-01) |
 | `~/.bive/projects/<projectId>/judge/<runId>/<judgeId>/` | 판정 1회마다 하위 폴더 (ADR-051): BIVE 러너 설정(`vitest.config.mjs` · `collect.config.mjs` · `global-setup.mjs`) · vitest JSON 원본(`result.json`) · 로그 | 불가 |
 | `~/.bive/work/<projectId>/worktrees/<EXE-ID>/` | 실행 워크트리, 브랜치 `bive/run-<EXE-ID>` (RUN-08, ADR-058) | 역할별 경로 가드 안에서만 |
-| `~/.bive/work/<projectId>/merges/<EXE-ID>/` | 병합 검사용 임시 워크트리 (병합이 끝나면 삭제, ADR-058) | 불가 (오케스트레이터 검사만) |
+| `~/.bive/work/<projectId>/merges/<EXE-ID>.<시도 ID>/` | 병합 검사용 임시 워크트리 (시도마다 새로 만들고 병합이 끝나면 삭제, ADR-058 · ADR-065) | 불가 (오케스트레이터 검사만) |
 | `~/.bive/work/<projectId>/sessions/<sessionId>/` | 역할 작업 디렉터리 (허용 목록 파일만 배치). rule-writer는 빈 폴더이고 세션이 끝나면 지운다 (ADR-062) | 해당 세션만 |
 | `~/.bive/registry.db` | 프로젝트 등록부 (등록된 프로젝트 ID · 등록 시각만) | 불가 |
 

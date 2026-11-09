@@ -129,6 +129,12 @@ const userCommit = (rel: string, content: string): string => {
 
 const passCheck: MergeCheck = () => Promise.resolve({ passed: true });
 
+/** 남은 병합 검사용 임시 워크트리 폴더 (`merges/` 아래, 없으면 빈 목록). */
+const mergeLeftovers = (): string[] => {
+  const dir = path.join(biveHome, 'work', projectId, 'merges');
+  return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+};
+
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -373,7 +379,7 @@ describe('merge(run)', () => {
     expect(userGit(repo, 'status', '--porcelain')).toBe('');
     // 실행 브랜치는 남고, 병합용 임시 워크트리는 지워졌다
     expect(runBranches(repo)).toEqual(['bive/run-EXE-001']);
-    expect(fs.existsSync(path.join(biveHome, 'work', projectId, 'merges', 'EXE-001'))).toBe(false);
+    expect(mergeLeftovers()).toEqual([]);
     expect(registeredWorktrees(repo)).toHaveLength(2);
   });
 
@@ -400,7 +406,11 @@ describe('merge(run)', () => {
     expect(check).toHaveBeenCalledTimes(1);
     const context = check.mock.calls[0]?.[0];
     expect(context).toMatchObject({ baseCommit: userTip, headCommit: head });
-    expect(context?.worktreePath).toBe(path.join(biveHome, 'work', projectId, 'merges', 'EXE-001'));
+    // 시도마다 다른 임시 워크트리 `merges/<EXE-ID>.<시도 ID>`
+    expect(path.dirname(context?.worktreePath ?? '')).toBe(
+      path.join(biveHome, 'work', projectId, 'merges'),
+    );
+    expect(path.basename(context?.worktreePath ?? '')).toMatch(/^EXE-001\.[0-9a-z]+$/u);
     // 검사는 두 변경이 모두 든 병합 커밋에서 돌았다
     expect(seen).toEqual([
       { files: ['src/lib/added.ts', 'src/lib/user-change.ts'], head: context?.mergeCommit },
@@ -451,7 +461,7 @@ describe('merge(run)', () => {
     expect(fs.existsSync(path.join(repo, 'src/lib/added.ts'))).toBe(false);
     expect(runBranches(repo)).toEqual(['bive/run-EXE-001']);
     expect(tip(repo, run.branch)).toBe(head);
-    expect(fs.existsSync(path.join(biveHome, 'work', projectId, 'merges', 'EXE-001'))).toBe(false);
+    expect(mergeLeftovers()).toEqual([]);
   });
 
   it('충돌이면 병합 없이 사유 · 충돌 파일과 함께 failed를 돌려주고 브랜치를 보존한다', async () => {
@@ -479,7 +489,7 @@ describe('merge(run)', () => {
     expect(userGit(repo, 'status', '--porcelain')).toBe('');
     expect(runBranches(repo)).toEqual(['bive/run-EXE-001']);
     expect(tip(repo, run.branch)).toBe(head);
-    expect(fs.existsSync(path.join(biveHome, 'work', projectId, 'merges', 'EXE-001'))).toBe(false);
+    expect(mergeLeftovers()).toEqual([]);
   });
 
   it('프로젝트 폴더 추적 파일에 커밋되지 않은 변경이 있으면 병합 없이 failed, 변경은 그대로 둔다', async () => {
@@ -695,7 +705,7 @@ describe('merge(run)', () => {
     expect(read(repo, 'prisma/dev.db')).toBe('사용자 로컬 DB 원본');
     expect(tip(repo)).toBe(run.baseCommit);
     expect(runBranches(repo)).toEqual(['bive/run-EXE-001']);
-    expect(fs.existsSync(path.join(biveHome, 'work', projectId, 'merges', 'EXE-001'))).toBe(false);
+    expect(mergeLeftovers()).toEqual([]);
   });
 
   it('기준 브랜치가 체크아웃돼 있지 않아도(참조 갱신 경로) 무시되던 경로의 새 추적은 병합하지 않아 나중 체크아웃이 로컬 파일을 바꾸지 않는다', async () => {
@@ -714,6 +724,26 @@ describe('merge(run)', () => {
     expect(tip(repo)).toBe(run.baseCommit);
     userGit(repo, 'checkout', '-q', 'main');
     expect(read(repo, 'prisma/dev.db')).toBe('사용자 로컬 DB 원본');
+  });
+
+  it('프로젝트 폴더가 그 경로를 무시하지 않는 브랜치에 있어도 기준 브랜치 끝의 무시 규칙으로 막는다', async () => {
+    const run = await createRun();
+    await trackIgnoredDb(run);
+    // 사용자는 `*.db`를 무시하지 않는 브랜치에 있다: 프로젝트 폴더 규칙으로는 걸리지 않는다
+    userGit(repo, 'checkout', '-q', '-b', 'feature/no-db-ignore');
+    write(repo, '.gitignore', read(repo, '.gitignore').replace(/^\*\.db\n/mu, ''));
+    userGit(repo, 'commit', '-q', '-am', '사용자: *.db 무시 해제');
+    expect(() => userGit(repo, 'check-ignore', '--no-index', 'prisma/dev.db')).toThrow();
+
+    const result = await manager.merge(run, { check: passCheck });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'ignored_path_tracked',
+      files: ['prisma/dev.db'],
+    });
+    expect(tip(repo)).toBe(run.baseCommit);
+    expect(mergeLeftovers()).toEqual([]);
   });
 
   it('프로젝트 폴더의 미추적 .gitignore가 무시하는 경로를 새로 추적해도 failed (지금 작업 트리 규칙도 본다)', async () => {
@@ -1176,7 +1206,7 @@ describe('병합 대기열: 제한 시간 · 중단 · 실행별 보존 · 재�
     expect(next).toMatchObject({ status: 'merged', previousBaseCommit: baseTip });
     expect(fs.existsSync(path.join(repo, 'src/lib/f1.ts'))).toBe(false);
     expect(read(repo, 'src/lib/f2.ts')).toBe('export const v2 = 1;\n');
-    expect(fs.existsSync(path.join(biveHome, 'work', projectId, 'merges', 'EXE-001'))).toBe(false);
+    expect(mergeLeftovers()).toEqual([]);
     expect(userGit(repo, 'status', '--porcelain', '--untracked-files=all')).toBe('');
     hung.release();
   });
@@ -1265,6 +1295,79 @@ describe('병합 대기열: 제한 시간 · 중단 · 실행별 보존 · 재�
     expect(result).toMatchObject({ status: 'merged' });
     // 잠금을 푼 뒤에는 같은 호출이 정상이다
     expect(await manager.preserve(a)).toMatchObject({ branch: a.branch });
+  });
+
+  it('B의 병합이 대기열에서 기다리는 동안 A의 검사 함수가 preserve(B) · removeWorktree(B)를 불러도 교착하지 않는다', async () => {
+    const [a, b] = await runsOnChangedBase(2);
+    if (a === undefined || b === undefined) throw new Error('실행 없음');
+    let entered = (): void => undefined;
+    const inCheck = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let proceed = (): void => undefined;
+    const gate = new Promise<void>((resolve) => {
+      proceed = resolve;
+    });
+    const inner: { preserved: boolean; removed: boolean } = { preserved: false, removed: false };
+
+    const first = manager.merge(a, {
+      check: async () => {
+        entered();
+        await gate;
+        // B의 병합은 저장소 병합 잠금을 기다릴 뿐 B의 실행 잠금은 쥐지 않는다
+        inner.preserved = await settlesWithin(manager.preserve(b), 5000);
+        inner.removed = await settlesWithin(manager.removeWorktree(b), 5000);
+        return { passed: true };
+      },
+    });
+    await inCheck;
+    const second = manager.merge(b, { check: passCheck });
+    await sleep(100);
+    proceed();
+
+    expect(await settlesWithin(first, 15000)).toBe(true);
+    expect(inner).toEqual({ preserved: true, removed: true });
+    expect(await first).toMatchObject({ status: 'merged' });
+    expect(await second).toMatchObject({ status: 'merged' });
+    expect(fs.existsSync(b.worktreePath)).toBe(false);
+    expect(userGit(repo, 'status', '--porcelain', '--untracked-files=all')).toBe('');
+  });
+
+  it('제한 시간 뒤에도 도는 이전 검사는 같은 실행의 다음 병합 시도의 임시 워크트리를 건드리지 않는다', async () => {
+    const [a] = await runsOnChangedBase(1);
+    if (a === undefined) throw new Error('실행 없음');
+    let zombieDone = (): void => undefined;
+    const zombieFinished = new Promise<void>((resolve) => {
+      zombieDone = resolve;
+    });
+    const first = await manager.merge(a, {
+      checkTimeoutMs: 100,
+      // 신호를 무시하고 계속 돌다가 자기 임시 워크트리 경로에 쓴다
+      check: async (context) => {
+        await sleep(600);
+        fs.mkdirSync(context.worktreePath, { recursive: true });
+        fs.writeFileSync(path.join(context.worktreePath, 'ZOMBIE'), '이전 검사');
+        zombieDone();
+        return { passed: false };
+      },
+    });
+    expect(first).toMatchObject({ status: 'failed', reason: 'check_timeout' });
+
+    let seen: boolean | null = null;
+    const second = await manager.merge(a, {
+      check: async (context) => {
+        await zombieFinished;
+        seen = fs.existsSync(path.join(context.worktreePath, 'ZOMBIE'));
+        return { passed: true };
+      },
+    });
+
+    expect(seen).toBe(false);
+    expect(second).toMatchObject({ status: 'merged' });
+    expect(fs.existsSync(path.join(repo, 'ZOMBIE'))).toBe(false);
+    // 이전 검사가 다시 만든 폴더(등록 없음)는 다음 병합 · 보존이 지운다
+    await manager.preserve(a);
+    expect(mergeLeftovers()).toEqual([]);
   });
 
   it('같은 저장소를 다른 경로(같은 저장소의 다른 워크트리)로 연 병합도 같은 대기열을 쓴다', async () => {

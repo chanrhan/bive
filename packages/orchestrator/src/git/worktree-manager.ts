@@ -7,6 +7,7 @@
 // - 잠금 3종(ADR-065): 저장소 병합 대기열(`merge`), 실행 대기열(같은 실행의 `merge` · `preserve` · `removeWorktree`),
 //   `git worktree` 하위 명령의 짧은 저장소 잠금. 키는 git 공통 폴더의 `dev:ino`다
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -37,8 +38,9 @@ export const runWorktreePath = (
 };
 
 /**
- * 병합 검사용 임시 워크트리 경로 `$BIVE_HOME/work/<projectId>/merges/<EXE-ID>`.
- * 병합이 끝나면(성공 · 실패 모두) 지운다.
+ * 병합 검사용 임시 워크트리 경로의 기준 `$BIVE_HOME/work/<projectId>/merges/<EXE-ID>`.
+ * 실제 임시 워크트리는 병합 시도마다 `<이 경로>.<시도 ID>`(소문자 · 숫자)로 만들고(제한 시간 뒤에도 도는 이전 검사가
+ * 다음 시도의 체크아웃을 건드리지 않게, ADR-065), 병합이 끝나면(성공 · 실패 모두) 지운다.
  */
 export const mergeWorktreePath = (
   biveHome: string,
@@ -336,7 +338,8 @@ const isSymbolicLink = (target: string): boolean => {
  * - `merge:<저장소>`: 같은 저장소의 병합을 하나씩. `git merge`는 색인을 쓴 뒤에야 참조를 비교 후 교체하므로, 겹친 병합은
  *   늦은 쪽의 참조 갱신 실패와 상관없이 프로젝트 폴더 색인 · 작업 트리를 덮어쓸 수 있다. 검사가 오래 걸려도 잡고 있다
  * - `run:<저장소>:<EXE-ID>`: 같은 실행의 `merge` · `preserve` · `removeWorktree`(같은 임시 병합 워크트리 · 실행 워크트리를
- *   지우거나 잠근다). 다른 실행의 보존 · 제거는 병합 검사가 멈춰도 기다리지 않는다
+ *   지우거나 잠근다). 다른 실행의 보존 · 제거는 병합 검사가 멈춰도 기다리지 않는다. `merge`는 `merge:` 다음에 잡는다
+ *   (실행 잠금을 쥔 채 저장소 병합 잠금을 기다리지 않아, 검사 함수 안의 다른 실행 보존 · 제거와 순환 대기가 없다)
  * - `worktree:<저장소>`: `git worktree` 하위 명령(add · list · remove · lock). `worktree add`가 관리 폴더를 만든 뒤
  *   `commondir`을 쓰기 전에 같은 저장소의 다른 `worktree` 명령이 돌면 그 폴더를 읽지 못해 실패한다(종료 코드 128).
  *   `worktree` 명령과 그 앞뒤 확인(등록 찾기 · 존재 확인) 동안만 잡는 짧은 잠금이고, 잡은 채 다른 잠금을 기다리지 않는다
@@ -475,6 +478,12 @@ const errorText = (error: unknown): string =>
 const nulFields = (stdout: string): string[] => stdout.split('\0').filter((f) => f !== '');
 
 const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+
+/** 병합 시도 ID (임시 워크트리 이름 `<EXE-ID>.<시도 ID>`의 뒷부분). */
+const MERGE_ATTEMPT_ID = /^[0-9a-z]{1,32}$/u;
+
+const newMergeAttemptId = (): string =>
+  `${Date.now().toString(36)}${randomBytes(4).toString('hex')}`;
 
 /** 다른 git의 `worktree add`가 관리 폴더를 반쯤 만든 순간에 `worktree list`가 실패한 경우. */
 const isHalfCreatedWorktreeError = (error: unknown): boolean =>
@@ -643,13 +652,41 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
       fs.rmSync(target, { recursive: true, force: true });
     });
 
-  /** 병합용 임시 워크트리를 지운다. */
-  const removeMergeWorktree = ({ run, repoKey }: Prepared): Promise<void> =>
-    removeOwnWorktree(
-      run.repoPath,
-      repoKey,
-      mergeWorktreePath(biveHome, run.projectId, run.runDisplayId),
-    );
+  /**
+   * 이 실행의 병합용 임시 워크트리(지난 시도가 남긴 것 포함)를 모두 지운다. 대상은 `merges/` 바로 아래의 `<EXE-ID>` ·
+   * `<EXE-ID>.<시도 ID>` 이름뿐이고, 폴더 목록과 git 등록(기록된 경로 문자열 그대로 비교)에서 모은다. 각 자리는
+   * `removeOwnWorktree` 규칙(링크면 링크만 지움)을 따른다.
+   */
+  const removeMergeWorktrees = ({ run, repoKey }: Prepared): Promise<void> =>
+    withWorktreeLock(repoKey, async () => {
+      const base = mergeWorktreePath(biveHome, run.projectId, run.runDisplayId);
+      const dir = path.dirname(base);
+      const own = (name: string): boolean => {
+        const prefix = `${path.basename(base)}.`;
+        return (
+          name === path.basename(base) ||
+          (name.startsWith(prefix) && MERGE_ATTEMPT_ID.test(name.slice(prefix.length)))
+        );
+      };
+      const targets = new Set<string>();
+      let names: string[] = [];
+      try {
+        names = fs.readdirSync(dir);
+      } catch {
+        // 아직 병합한 적이 없다
+      }
+      for (const name of names) if (own(name)) targets.add(path.join(dir, name));
+      for (const entry of await listWorktrees(run.repoPath, repoKey)) {
+        const recorded = path.resolve(entry.path);
+        if (
+          comparable(path.dirname(recorded)) === comparable(dir) &&
+          own(path.basename(recorded))
+        ) {
+          targets.add(path.join(dir, path.basename(recorded)));
+        }
+      }
+      for (const target of targets) await removeOwnWorktree(run.repoPath, repoKey, target);
+    });
 
   /** 기준 브랜치가 체크아웃된 곳: 프로젝트 폴더 · 다른 워크트리 · 없음 (`worktree list`로 매번 새로 읽는다). */
   const locateBase = async (
@@ -774,8 +811,10 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
   const mergeLockKey = ({ repoKey }: Prepared): string => `merge:${repoKey}`;
 
   /**
-   * 같은 실행의 보존 · 제거, 같은 저장소의 다른 병합이 끝난 뒤에 실행한다(ADR-065). 대기열에서 기다리는 동안
+   * 같은 저장소의 다른 병합, 같은 실행의 보존 · 제거가 끝난 뒤에 실행한다(ADR-065). 대기열에서 기다리는 동안
    * `signal`이 중단되면 아무것도 하지 않고 `aborted`를 돌려준다.
+   * 잠금 순서는 `merge:<저장소>` → `run:<실행>`이다. 실행 잠금을 쥔 채 저장소 병합 잠금을 기다리지 않으므로, 앞선 병합의
+   * 검사 함수가 기다리는 병합의 실행(`preserve` · `removeWorktree`)을 불러도 순환 대기가 생기지 않는다
    */
   const merge = async (input: RunGitRef, mergeOptions: MergeOptions): Promise<MergeResult> => {
     const timeoutMs = mergeOptions.checkTimeoutMs;
@@ -792,8 +831,8 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
     const { signal } = mergeOptions;
     try {
       return await withLock(
-        runKey,
-        () => withLock(mergeKey, () => mergeSerialized(prepared, mergeOptions), signal),
+        mergeKey,
+        () => withLock(runKey, () => mergeSerialized(prepared, mergeOptions), signal),
         signal,
       );
     } catch (error) {
@@ -953,7 +992,7 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
       fail('aborted', '기준 브랜치를 갱신하기 전에 병합이 중단됐습니다');
     const isAborted = (): boolean => signal?.aborted === true;
 
-    let mergeWorktreeCreated = false;
+    let createdMergePath: string | null = null;
     try {
       if (isAborted()) return abortedResult();
       headCommit = await resolveCommit(run.repoPath, `refs/heads/${run.branch}`);
@@ -1014,10 +1053,11 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
 
       if (isAborted()) return abortedResult();
       // 병합 커밋은 기준 브랜치 커밋에서 분리된 임시 워크트리에서 `--no-ff`로 만든다
-      const mergePath = mergeWorktreePath(biveHome, run.projectId, run.runDisplayId);
-      await removeMergeWorktree(prepared);
+      // 시도마다 새 이름: 제한 시간 뒤에도 도는 이전 검사가 이 시도의 체크아웃을 건드리지 않는다
+      const mergePath = `${mergeWorktreePath(biveHome, run.projectId, run.runDisplayId)}.${newMergeAttemptId()}`;
+      await removeMergeWorktrees(prepared);
       fs.mkdirSync(path.dirname(mergePath), { recursive: true, mode: 0o700 });
-      mergeWorktreeCreated = true;
+      createdMergePath = mergePath;
       await withWorktreeLock(prepared.repoKey, () =>
         git(['worktree', 'add', '--detach', mergePath, baseTip], { cwd: run.repoPath }),
       );
@@ -1174,9 +1214,11 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
       if (error instanceof GitCommandError) return fail('git_error', error.message);
       throw error;
     } finally {
-      if (mergeWorktreeCreated) {
+      if (createdMergePath !== null) {
         // 정리 실패는 결과를 바꾸지 않는다 (다음 병합 · 보존 때 다시 지운다)
-        await removeMergeWorktree(prepared).catch(() => undefined);
+        await removeOwnWorktree(run.repoPath, prepared.repoKey, createdMergePath).catch(
+          () => undefined,
+        );
       }
     }
   };
@@ -1197,7 +1239,7 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
     if (headCommit === null) {
       throw new GitWorktreeError('branch_missing', `실행 브랜치가 없습니다: ${run.branch}`);
     }
-    await removeMergeWorktree(prepared);
+    await removeMergeWorktrees(prepared);
     const present = await withWorktreeLock(repoKey, async () => {
       const entry = (await listWorktrees(run.repoPath, repoKey)).find((item) =>
         sameRecordedPath(item.path, run.worktreePath),
@@ -1228,7 +1270,7 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
     const runKey = runLockKey(prepared);
     assertNotReentrant([runKey], 'removeWorktree');
     await withLock(runKey, async () => {
-      await removeMergeWorktree(prepared);
+      await removeMergeWorktrees(prepared);
       // 잠금(`preserve`) · 미추적 파일(node_modules 등)이 있어도, 폴더가 이미 지워져 등록만 남았어도 지운다.
       // 브랜치는 남는다(등록이 사라져야 사람이 그 브랜치를 체크아웃할 수 있다)
       await removeOwnWorktree(prepared.run.repoPath, prepared.repoKey, prepared.run.worktreePath);
