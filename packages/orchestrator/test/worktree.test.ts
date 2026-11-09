@@ -1,6 +1,7 @@
 // git 브랜치 · 워크트리 · 병합 관리자 (M1-13, RUN-08 · ADR-017 · ADR-025 · ADR-058).
 // 픽스처(fixtures/sample-next-app)의 추적 파일을 임시 폴더에 복사해 실제 git 저장소로 단언한다.
 // 의존성 설치는 하지 않는다(git 동작만 본다). 검사 함수는 테스트가 주입하는 가짜다.
+// 제한: git 프로세스를 수십 번 띄우는 묶음은 30초(부하 평균 12 이상에서 동시 병합 5개 테스트가 6초로 기본 5초를 넘었다, #122).
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -108,6 +109,9 @@ afterEach(() => {
   for (const dir of temps.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
+/** git 명령을 여러 번 띄우는 테스트의 제한 (#122). */
+const GIT_TEST_OPTIONS = { timeout: 30_000 };
+
 const createRun = (runDisplayId = 'EXE-001'): Promise<RunGitRef> =>
   manager.create({ projectId, runDisplayId, repoPath: repo, baseBranch: 'main' });
 
@@ -129,7 +133,7 @@ const userCommit = (rel: string, content: string): string => {
 
 const passCheck: MergeCheck = () => Promise.resolve({ passed: true });
 
-describe('실행 브랜치 · 워크트리 생성', () => {
+describe('실행 브랜치 · 워크트리 생성', GIT_TEST_OPTIONS, () => {
   it('실행마다 bive/run-<EXE-ID> 브랜치와 $BIVE_HOME/work/<projectId>/worktrees/<EXE-ID> 워크트리를 만든다', async () => {
     const base = tip(repo);
     const first = await createRun('EXE-001');
@@ -219,7 +223,7 @@ describe('실행 브랜치 · 워크트리 생성', () => {
   });
 });
 
-describe('커밋은 오케스트레이터 함수로만', () => {
+describe('커밋은 오케스트레이터 함수로만', GIT_TEST_OPTIONS, () => {
   it('워크트리 파일 변경만으로는 커밋이 생기지 않고 commit()이 BIVE 주체로 만든다', async () => {
     const run = await createRun();
     write(run.worktreePath, 'src/lib/added.ts', 'export const added = 1;\n');
@@ -299,7 +303,7 @@ describe('커밋은 오케스트레이터 함수로만', () => {
   });
 });
 
-describe('merge(run)', () => {
+describe('merge(run)', GIT_TEST_OPTIONS, () => {
   it('기준 브랜치가 그대로면 검사 없이 --no-ff 병합 커밋을 만들고 프로젝트 폴더를 갱신한다', async () => {
     const run = await createRun();
     const head = await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
@@ -767,7 +771,7 @@ describe('merge(run)', () => {
   });
 });
 
-describe('preserve(run)', () => {
+describe('preserve(run)', GIT_TEST_OPTIONS, () => {
   it('브랜치 · 워크트리를 남기고 기준 브랜치는 그대로 둔다', async () => {
     const run = await createRun();
     const head = await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');

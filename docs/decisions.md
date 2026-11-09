@@ -653,6 +653,18 @@
   - 컴포넌트: 떠 있는 버튼은 prototype-map 표 2 이름대로 `components/FloatingActions/`(SCR-19가 재사용), 상세 표시 규칙은 `screens/todo/proposalDetailView.ts`(DOM 없음), 입력 카드는 `screens/todo/DecisionInputs.tsx`.
 - 결과: M1-27. 서버 검사는 `orchestrator/src/proposals/proposal-service.ts`(`test/proposal.test.ts`). 체크리스트 `e2e/checklists/scr-17.ts`에 상세 구획 순서 · 처리 버튼 표를 두고 `e2e/scr-17.spec.ts`가 검사하며, 상세 · 수정 · 거절 · 처리됨 스크린샷을 `artifacts/screens/SCR-17/`에 남긴다. 본문 스키마가 생기는 종류(설계 변경 · 규칙 제목 변경 · 계약 신규 등)는 그 이슈가 `ACTIONABLE_KINDS` · `EDIT_FIELDS` · `payloadFields` · `consequences`를 더한다. 잠정 승인(M3-17)이 생기면 거절하면 카드에 되돌리는 실행 문구를 더한다. 사람이 문구 · 고칠 수 있는 필드 · 처리 뒤 선택을 바꾸면 `proposalDetailView.ts` · `ApprovalTab.tsx`와 해당 테스트만 고친다.
 
+## ADR-064 공유 VM 부하에서 프로세스 기동 테스트의 제한 시간 · 임시 폴더 격리
+
+- 상태: 제안 (에이전트) · 2026-11-09
+- 맥락: #122. 이 VM(4 vCPU)은 여러 worktree의 에이전트가 함께 쓰고, 부하 평균이 10~19까지 오른다. 그때 프로세스(pnpm · tsx 오케스트레이터 · Electron 진입점)를 띄우는 테스트가 vitest 기본 제한 5초 · 훅 10초를 넘었다(측정: `cli ping` 9.0초, `launch-flags` 진입점 7.7초, 판정 테스트 afterAll의 픽스처 삭제 10초 초과, `lint-rules` 첫 ESLint 로드 5.1초). 유휴 종료를 0.5 · 0.8 · 1.5초로 짧게 둔 기동 테스트는 테스트가 소켓을 확인한 뒤 접속하기 전에 오케스트레이터가 먼저 유휴 종료돼 ECONNREFUSED가 날 수 있었다. 판정 테스트는 공용 `/tmp`의 `bive-judge-db-*` 전체를 앞뒤로 비교해 다른 worktree의 판정과 섞였고, 러너가 보낸 SIGKILL이 비동기라 부하에서는 러너가 돌아온 직후 schema-engine이 /proc에 잠깐 남았다. 단독 재실행은 늘 통과했다(제품 결함 아님).
+- 결정:
+  - 제한은 테스트 파일 단위로만 늘리고 패키지 전체 `testTimeout`은 그대로 둔다. 프로세스를 띄우는 묶음(또는 테스트)에만 30초(`cli` 실제 오케스트레이터 묶음은 60초), 첫 ESLint 로드 검사는 30초, git 명령을 여러 번 띄우는 워크트리 관리자 테스트는 30초, 판정 테스트 afterAll은 120초. 늘린 값과 이유는 각 파일 맨 위 주석 한 줄에 적는다. 끄기 · `skip` · `retry`는 쓰지 않는다(CLAUDE.md 2-5).
+  - 유휴 종료 경합은 유휴 시간을 늘려 없앤다: lifecycle CLI 테스트 3초(연결 유지 확인은 유휴 시간 + 1초 대기, 유휴 종료까지 걸린 시간 하한은 유휴 시간 - 1.5초), lock 잠금 인수 테스트 4초. 또 소켓 파일은 bind 직후 생기고 listen은 그다음이라 "소켓 파일이 있다"를 준비 신호로 보고 바로 접속하면 부하에서 ECONNREFUSED가 났다(lock 테스트에서 실측). 다른 프로세스가 띄운 오케스트레이터에 접속하는 테스트는 앱 클라이언트(ADR-041)처럼 ENOENT · ECONNREFUSED를 제한 시간까지 다시 시도하는 `connectWhenReady`(`orchestrator/test/helpers/client.ts`)를 쓴다. 제품의 기동 순서는 바꾸지 않는다(실제 클라이언트는 이미 재시도한다).
+  - 판정 러너에 `JudgeRunnerOptions.tempDir`(절대 경로, 기본 `os.tmpdir()`)를 더해 임시 DB 폴더의 상위 폴더를 주입할 수 있게 하고, 판정 테스트는 파일 전용 폴더를 줘 그 안만 비교한다. 기본 동작(ADR-051의 `os.tmpdir()/bive-judge-db-*`)은 바꾸지 않는다. 남은 프로세스 확인은 SIGKILL 뒤 3초까지 폴링한다(그 뒤에도 보이면 실패).
+  - 스모크(`packages/app/smoke/run-smoke.ts`)의 화면 요소 · "연결됨" 대기는 15초 → 60초.
+  - 제품의 오케스트레이터 접속 제한(`CONNECT_TIMEOUT_MS` 5초, ADR-041)은 바꾸지 않는다. 앱은 첫 접속이 늦어도 1초 감시 주기 재접속(ADR-042)으로 붙고, 측정한 부하(평균 12~19)에서 CLI 접속은 5초 안에 끝났다.
+- 결과: 부하 평균 12 이상에서 `pnpm test` 3회 연속 통과를 수용 기준으로 확인했다(#122 PR). 새로 프로세스를 띄우는 테스트를 쓸 때도 같은 방식(해당 묶음만 제한 상향 + 파일 상단 주석, 짧은 유휴 시간 대신 접속 뒤 동작 확인)을 따른다. 기본 제한 안에서 부하 때문에 실패하는 다른 파일이 생기면 같은 기준으로 그 파일만 늘린다. 기각하면 패키지 설정의 `testTimeout`을 한 번에 올린다.
+
 ## ADR-066 파이프라인 엔진: 단계 실행기 계약 · 회귀 규칙 · 중단 표시 · 재개 · 세션 실행 틀 · 세션 기록
 
 - 상태: 제안 (에이전트) · 2026-11-09 · 리뷰 반영 2026-11-09 (저장 실패 시 실패 처리 · 실행기 결과 검증 · 실행기 확인 시점 · 되돌리기 범위 문구 · 실행 밖 세션 닫기)

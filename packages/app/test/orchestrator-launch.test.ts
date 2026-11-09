@@ -1,5 +1,6 @@
 // 앱 main의 오케스트레이터 기동 · 접속 · app.pid 기록 (이슈 #9 수용 기준 2, NFR-06, ADR-041).
 // main(src/main/index.ts)이 부르는 startMainSession · ensureOrchestrator를 그대로 시험한다.
+// 제한: 프로세스를 띄우는 묶음은 30초(부하 평균 12 이상에서 실제 오케스트레이터 기동 테스트가 4초를 넘어 기본 5초에 닿았다, #122).
 import { type ChildProcess, spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -32,6 +33,9 @@ import {
 } from './helpers/orchestrator.js';
 
 afterEach(cleanup);
+
+/** 실제 오케스트레이터 · node 자식을 띄우는 테스트의 제한 (#122). */
+const PROCESS_TEST_OPTIONS = { timeout: 30_000 };
 
 interface SpawnCall {
   command: string;
@@ -91,7 +95,7 @@ const processGroup = (pid: number): { pgrp: number; session: number } | null => 
   return { pgrp: Number(fields[2]), session: Number(fields[3]) };
 };
 
-describe('main 세션: 오케스트레이터 기동 · 접속 · app.pid', () => {
+describe('main 세션: 오케스트레이터 기동 · 접속 · app.pid', PROCESS_TEST_OPTIONS, () => {
   it('오케스트레이터가 없으면 분리(detached) 프로세스로 기동하고 앱 main pid를 app.pid에 기록한다', async () => {
     const home = makeBiveHome();
     const paths = appRunPaths(home);
@@ -179,7 +183,7 @@ describe('main 세션: 오케스트레이터 기동 · 접속 · app.pid', () =>
   });
 });
 
-describe('ensureOrchestrator: 접속 재시도 (ADR-041)', () => {
+describe('ensureOrchestrator: 접속 재시도 (ADR-041)', PROCESS_TEST_OPTIONS, () => {
   it('잠금 pid는 살아 있는데 소켓이 늦게 열리면(ENOENT) 재시도해 붙고 기동하지 않는다', async () => {
     const home = makeBiveHome();
     writeRunFiles(home, { pid: process.pid, token: 'tok' });

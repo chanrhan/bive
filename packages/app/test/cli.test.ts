@@ -1,4 +1,5 @@
 // 개발용 CLI (이슈 #9 수용 기준 3).
+// 제한: 실제 pnpm · 오케스트레이터를 띄우는 묶음은 60초(부하 평균 12 이상에서 cli ping이 9초까지 걸려 기본 5초를 넘었다, #122).
 import { spawnSync } from 'node:child_process';
 
 import { ErrorCode, rpcError } from '@bive/shared';
@@ -18,6 +19,9 @@ import { appRunPaths } from '../src/main/run-paths.js';
 import { cleanup, makeBiveHome, REPO_ROOT } from './helpers/orchestrator.js';
 
 afterEach(cleanup);
+
+/** pnpm → tsx CLI → 오케스트레이터 기동까지 기다리는 테스트의 제한 (#122). */
+const PROCESS_TEST_OPTIONS = { timeout: 60_000 };
 
 const fakeDeps = (
   request: (method: string, params?: unknown) => Promise<unknown> = () =>
@@ -101,14 +105,15 @@ describe('cli 본체', () => {
   });
 });
 
-describe('pnpm --filter @bive/app cli (실제 오케스트레이터)', () => {
+describe('pnpm --filter @bive/app cli (실제 오케스트레이터)', PROCESS_TEST_OPTIONS, () => {
   const runPnpmCli = (home: string, args: string[]) =>
     spawnSync('pnpm', ['--silent', '--filter', '@bive/app', 'cli', ...args], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
       env: { ...process.env, BIVE_HOME: home, BIVE_IDLE_SHUTDOWN_MS: '60000' },
       shell: process.platform === 'win32',
-      timeout: 60_000,
+      // 테스트 제한보다 먼저 끝내 시간 초과 대신 종료 상태 · 표준 오류를 단언 메시지로 보인다
+      timeout: PROCESS_TEST_OPTIONS.timeout - 5_000,
     });
 
   it('cli ping → 오케스트레이터를 기동해 표준 출력 pong, 종료 0', () => {

@@ -4,7 +4,6 @@
 import type { ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
@@ -86,7 +85,7 @@ export const nextPrismaSqliteProfile: StackProfile = {
   name: 'next-prisma-sqlite',
 
   async start(ctx: ProfileContext): Promise<StartedServer> {
-    const dbDir = await mkdtemp(path.join(tmpdir(), 'bive-judge-db-'));
+    const dbDir = await mkdtemp(path.join(ctx.tempDir, 'bive-judge-db-'));
     const databasePath = path.join(dbDir, 'judge.db');
     const env: NodeJS.ProcessEnv = {
       ...ctx.env,
