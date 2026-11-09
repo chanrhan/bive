@@ -8,6 +8,7 @@ import {
   ERROR_MESSAGES,
   ErrorCode,
   isMethodName,
+  type JudgmentResult,
   JsonRpcErrorResponse,
   JsonRpcMessage,
   JsonRpcNotification,
@@ -22,6 +23,8 @@ import {
   parseResponse,
   PROTOCOL_VERSION,
   rpcError,
+  type Rule,
+  type RuleJudgment,
 } from '../src/index.js';
 
 /** 파이프 프레임 왕복: JSON 1줄로 직렬화했다가 다시 해석한다. */
@@ -312,6 +315,95 @@ describe('requirement.* (M1-02, ADR-047)', () => {
         id: 4,
         result: { requirement: withoutUpdatedBy },
       }),
+    ).toMatchObject({ ok: false, error: { code: -32602 } });
+  });
+});
+
+describe('rule.list · rule.get (M1-11, ADR-060)', () => {
+  const PROJECT = '01JA0000000000000000000001';
+  const REQ = '01JA0000000000000000000002';
+  const RULE = '01JA0000000000000000000004';
+  const AT = '2026-10-16T00:00:00.000Z';
+  const rule: Rule = {
+    id: RULE,
+    displayId: 'RULE-001',
+    title: '중복 이메일 가입 거부',
+    statement: 'WHEN 이미 가입된 이메일로 가입을 요청하면 THE SYSTEM SHALL 가입을 거부한다',
+    kind: 'business',
+    checkKinds: ['test'],
+    parentRequirementId: REQ,
+    parentDetachedAt: null,
+    builtin: false,
+    targetBlockIds: [],
+    risk: null,
+    contractId: null,
+    author: { kind: 'agent', role: 'rule-writer' },
+    normState: 'approved',
+    createdAt: AT,
+    updatedAt: AT,
+    deletedAt: null,
+  };
+  const judgmentRecord: JudgmentResult = {
+    id: '01JA0000000000000000000005',
+    ruleId: RULE,
+    runId: '01JA0000000000000000000006',
+    stepId: null,
+    commit: 'a'.repeat(40),
+    judgedAt: AT,
+    status: 'fail',
+    runner: 'vitest',
+    exitCode: 1,
+    reporterPath: null,
+    cases: [],
+    quarantineReason: null,
+  };
+  const unjudged = { status: 'unjudged', latest: null } as const;
+  const request = (method: string, params: unknown) =>
+    parseRequest({ jsonrpc: '2.0', id: 1, method, params });
+
+  it('조회 메서드만 등록돼 있다 (규칙을 바꾸는 메서드 없음)', () => {
+    expect(isMethodName('rule.list')).toBe(true);
+    expect(isMethodName('rule.get')).toBe(true);
+    for (const name of ['rule.create', 'rule.update', 'rule.delete']) {
+      expect(isMethodName(name)).toBe(false);
+    }
+  });
+
+  it.each([
+    ['projectId 누락', 'rule.list', {}],
+    ['필터 필드 (렌더러 목록이 거른다)', 'rule.list', { projectId: PROJECT, filter: {} }],
+    ['id 누락', 'rule.get', { projectId: PROJECT }],
+    ['id가 ULID 아님', 'rule.get', { projectId: PROJECT, id: 'RULE-001' }],
+  ])('%s → -32602', (_, method, params) => {
+    const result = request(method, params);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe(-32602);
+  });
+
+  it('결과: 목록은 { rules: [{ rule, judgment }] }, 단건은 { rule, judgment }', () => {
+    const list = createSuccessResponse(1, 'rule.list', {
+      rules: [{ rule, judgment: unjudged }],
+    });
+    expect(parseResponse('rule.list', throughFrame(list))).toEqual({
+      ok: true,
+      id: 1,
+      result: { rules: [{ rule, judgment: unjudged }] },
+    });
+    const judged: RuleJudgment = { status: 'fail', latest: judgmentRecord };
+    const single = createSuccessResponse(2, 'rule.get', { rule, judgment: judged });
+    expect(parseResponse('rule.get', throughFrame(single))).toMatchObject({
+      ok: true,
+      result: { judgment: judged },
+    });
+  });
+
+  it.each([
+    ['기록 없는데 미판정이 아님', { status: 'pass', latest: null }],
+    ['기록과 상태가 다름', { status: 'pass', latest: judgmentRecord }],
+    ['기록 있는데 미판정', { status: 'unjudged', latest: judgmentRecord }],
+  ])('최신 판정 %s → 받는 쪽 -32602', (_, judgment) => {
+    expect(
+      parseResponse('rule.get', { jsonrpc: '2.0', id: 3, result: { rule, judgment } }),
     ).toMatchObject({ ok: false, error: { code: -32602 } });
   });
 });

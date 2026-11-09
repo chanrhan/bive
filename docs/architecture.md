@@ -237,7 +237,8 @@ stateDiagram-v2
 | `requirement.create` | `{projectId, text, author}` → `{requirement}` (사람 작성만, 승인 불필요). 규칙 생성 시작은 M1-08 | NRM-01, NRM-02, ADR-047 | M1 |
 | `requirement.update` · `requirement.delete` | `{projectId, id, text, author}` / `{projectId, id, author}` → `{requirement}` (사람만, 삭제는 소프트) | NRM-01, ADR-047 | M1 |
 | `requirement.markUnrulable` | `{id, reason}` | NRM-08 | M2 |
-| `rule.list` · `rule.get` | `{projectId, filter?}` / `{id}` → 규칙 · 최신 판정 · 실행 링크 | NRM-02, JDG-02 | M1 |
+| `rule.list` | `{projectId}` → `{rules: [{rule, judgment}]}` (규칙 테이블의 규범만 · 제안 제외, 삭제 제외, 표시 ID 순). `judgment = {status, latest}`, 판정 기록이 없으면 `{status: 'unjudged', latest: null}`, 실행 링크는 `latest.runId`. 필터는 렌더러 목록 | NRM-02, JDG-02, SCR-03, ADR-060 | M1 |
+| `rule.get` | `{projectId, id}` → `{rule, judgment}` (삭제된 것도, 제안 ID는 `-32004`). 최신 판정 결합 지점은 `orchestrator/src/judgments/latest-judgment.ts` | NRM-02, JDG-02, ADR-060 | M1 |
 | `contract.list` · `contract.get` | 계약 | NRM-03 | M2 |
 | `proposal.list` · `proposal.get` | `{projectId, state?, kind?}` → `{proposals}` (표시 ID 순) / `{projectId, id}` → `{proposal}` | TODO-01, ADR-050 | M1 |
 | `proposal.count` | `{projectId}` → `{pending, pendingByKind}` (할 일 배지 · 툴팁, 모든 종류 키) | SCR-17, ADR-050 | M1 |
