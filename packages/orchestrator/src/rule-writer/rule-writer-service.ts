@@ -7,7 +7,8 @@
 //   규칙 테이블은 건드리지 않는다(NRM-04). 세션 가드가 init의 도구 · MCP 서버 목록을 검사한다(NFR-02)
 // - 같은 요구사항에 세션을 두 번 띄우지 않는다: 프로세스 안에서는 요구사항별 기록으로, 재기동 뒤에는 저장된
 //   `rule_generation` 제안으로 가린다. 재기동 때 끊긴 세션을 다시 띄우지 않는다 (PRD 5.1 자동 재개 없음)
-// - 세션 기록(도구 호출 · 매니페스트 · 결과)은 메모리와 로그에만 남긴다. 저장은 실행 기록 저장(M1-14)이 맡는다
+// - 세션 기록(도구 호출 · 매니페스트 · 결과)은 메모리 · 로그와 함께 프로젝트 저장소(`sessions` · `tool_calls`,
+//   실행 밖 세션, ADR-066)에도 남긴다. 저장 실패는 로그만 남기고 세션을 막지 않는다
 import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -30,6 +31,7 @@ import type {
   SessionResultEvent,
   ToolResult,
 } from '../agent/adapter.js';
+import { runGuardedSession } from '../agent/guarded-session.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import type { TaskTracker } from '../lifecycle.js';
@@ -38,7 +40,6 @@ import { roleSessionSettings } from '../settings/settings-service.js';
 import type { ProposeRuleInput } from '../tools/definitions.js';
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
 import { denied, failed, invalidArgs, type IssueList, ok } from '../tools/result.js';
-import { guardSession, SessionGuardError } from '../tools/session-guard.js';
 import { RULE_WRITER_SYSTEM_PROMPT, ruleWriterTaskPrompt } from './prompts.js';
 
 /** 이 세션의 역할. 설정 검사도 이 역할만 본다 (ADR-057: 실행 전체 한도는 항상 함께 검사). */
@@ -152,6 +153,8 @@ export class RuleWriterService implements RuleWriterLauncher {
   readonly #proposals: ProposalService;
   readonly #tasks: TaskTracker | undefined;
   readonly #log: (line: string) => void;
+  /** 저장소에 세션 행을 만든 기록 ID */
+  readonly #persisted = new Set<string>();
   readonly #closeTimeoutMs: number;
   /** 모든 기록 (생략 포함, 만든 순서) */
   readonly #records: RuleWriterSessionRecord[] = [];
@@ -379,7 +382,7 @@ export class RuleWriterService implements RuleWriterLauncher {
         `한도 USD ${String(budget.maxBudgetUsd)} · 턴 ${String(budget.maxTurns)})`,
     );
     let endReason: SessionEndReason = 'error_during_execution';
-    let detail: string | null = null;
+    let detail: string | null;
     try {
       // rule-writer는 파일 도구가 없으므로 작업 폴더는 비어 있다 (ADR-024 허용 목록 방식)
       mkdirSync(workDir, { recursive: true, mode: 0o700 });
@@ -392,6 +395,7 @@ export class RuleWriterService implements RuleWriterLauncher {
           proposeRule: (input) => this.#propose(record, input),
           onToolCall: (call) => {
             record.toolCalls.push(call);
+            this.#persistToolCall(record, call);
             this.#log(
               `규칙 작성 도구 호출 (${record.requirementDisplayId}, ${call.name} ${call.status}` +
                 `${call.reason === undefined ? '' : ` ${call.reason}`})`,
@@ -399,8 +403,22 @@ export class RuleWriterService implements RuleWriterLauncher {
           },
         },
       });
-      const events = guardSession(
-        this.#adapter.startSession({
+      this.#persist(record, (store) =>
+        store.sessions.start({
+          id: record.id,
+          runId: null,
+          stepId: null,
+          requirementId: requirement.id,
+          role: RULE_WRITER_ROLE,
+          model,
+          workDir,
+          startedAt: record.startedAt ?? this.#timestamp(),
+        }),
+      );
+      const outcome = await runGuardedSession({
+        adapter: this.#adapter,
+        controller,
+        spec: {
           role: RULE_WRITER_ROLE,
           systemPrompt: RULE_WRITER_SYSTEM_PROMPT,
           prompt: ruleWriterTaskPrompt(requirement),
@@ -408,37 +426,30 @@ export class RuleWriterService implements RuleWriterLauncher {
           tools,
           budget,
           model,
-          signal: controller.signal,
           vars: {
             projectId: record.projectId,
             requirementId: requirement.id,
             requirementDisplayId: requirement.displayId,
           },
-        }),
-        {
-          role: RULE_WRITER_ROLE,
-          controller,
-          onManifest: (manifest, init) => {
-            record.manifest = manifest;
-            record.sdkSessionId = init.sessionId;
-            tools.setSessionId(init.sessionId);
-          },
         },
-      );
-      for await (const event of events) {
-        if (event.type === 'result') record.result = event;
-      }
-      if (record.result === null) {
-        detail = '결과 메시지 없이 세션이 끝남';
-      } else {
-        endReason = record.result.subtype;
-      }
+        onInit: (manifest, init) => {
+          record.manifest = manifest;
+          record.sdkSessionId = init.sessionId;
+          tools.setSessionId(init.sessionId);
+          this.#persist(record, (store) =>
+            store.sessions.recordInit(record.id, {
+              sdkSessionId: init.sessionId,
+              tools: init.tools,
+              mcpServers: init.mcpServers,
+            }),
+          );
+        },
+      });
+      record.result = outcome.result;
+      endReason = outcome.endReason;
+      detail = outcome.detail;
     } catch (error) {
-      if (error instanceof SessionGuardError) {
-        endReason = 'guard_violation';
-      } else if (controller.signal.aborted) {
-        endReason = 'aborted';
-      }
+      // 작업 폴더 · 도구 준비 실패 (세션 실행 자체의 예외는 runGuardedSession이 분류한다)
       detail = errorMessage(error);
     } finally {
       this.#controllers.delete(controller);
@@ -470,11 +481,66 @@ export class RuleWriterService implements RuleWriterLauncher {
     return null;
   }
 
+  /** 세션 기록을 프로젝트 저장소에 남긴다 (실패는 로그만). 세션 행을 만든 기록은 `#persisted`에 둔다. */
+  #persist(record: RuleWriterSessionRecord, fn: (store: ProjectStore) => unknown): void {
+    try {
+      withRegisteredProjectStore(this.#biveHome, record.projectId, fn);
+      this.#persisted.add(record.id);
+    } catch (error) {
+      this.#log(
+        `규칙 작성 세션 기록 저장 실패 (${record.requirementDisplayId}): ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  #persistToolCall(record: RuleWriterSessionRecord, call: ToolCallRecord): void {
+    if (!this.#persisted.has(record.id)) return;
+    this.#persist(record, (store) =>
+      store.sessions.appendToolCall({
+        id: this.#newId(),
+        runId: null,
+        sessionId: record.id,
+        at: call.at,
+        role: call.role,
+        name: call.name,
+        argsSummary: call.argsSummary,
+        status: call.status,
+        reason: call.reason ?? null,
+        durationMs: Math.max(0, Math.round(call.durationMs)),
+      }),
+    );
+  }
+
   #end(record: RuleWriterSessionRecord, endReason: SessionEndReason, detail: string | null): void {
     record.status = 'ended';
     record.endReason = endReason;
     record.error = detail;
     record.endedAt = this.#timestamp();
+    const endedAt = record.endedAt;
+    if (this.#persisted.has(record.id)) {
+      const { result } = record;
+      this.#persist(record, (store) =>
+        store.sessions.end(record.id, {
+          endReason,
+          error: detail,
+          totalCostUsd: result?.total_cost_usd ?? null,
+          numTurns: result?.num_turns ?? null,
+          modelUsage: Object.fromEntries(
+            Object.entries(result?.modelUsage ?? {}).map(([name, usage]) => [
+              name,
+              {
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                cacheReadInputTokens: usage.cacheReadInputTokens,
+                cacheCreationInputTokens: usage.cacheCreationInputTokens,
+                costUsd: usage.costUSD,
+              },
+            ]),
+          ),
+          endedAt,
+        }),
+      );
+    }
     const cost = record.result?.total_cost_usd;
     this.#log(
       `규칙 작성 세션 종료 (${record.requirementDisplayId}, ${endReason}, ` +

@@ -434,3 +434,145 @@ describe('기록 보존 트리거 (NFR-01)', () => {
     });
   });
 });
+
+describe('runs.transition: 단계 시도 상태 역행 · 역할 불일치 거부 (ADR-066)', () => {
+  it('진행 중인 시도를 대기로 되돌릴 수 없다', () => {
+    withStore((store) => {
+      const created = passApproval(store, store.runs.create(runInput([seedRule(store)])));
+      const writing = stepOf(created, 'test_writing');
+      expect(() =>
+        store.runs.transition(created.run.id, { steps: [{ id: writing.id, status: 'pending' }] }),
+      ).toThrow(ConflictError);
+      expect(store.runs.getDetail(created.run.id)).toEqual(created);
+    });
+  });
+
+  it('새 시도 · 생성 단계의 역할이 단계 종류의 역할(STEP_ROLES)과 다르면 거부한다', () => {
+    withStore((store) => {
+      const ruleId = seedRule(store);
+      const created = passApproval(store, store.runs.create(runInput([ruleId])));
+      const wrong = {
+        id: newId(),
+        kind: 'implementation' as const,
+        attempt: 2,
+        status: 'pending' as const,
+        role: 'test-writer' as const,
+        startedAt: null,
+      };
+      expect(() => store.runs.transition(created.run.id, { addSteps: [wrong] })).toThrow(
+        /역할은 implementer/,
+      );
+      expect(() =>
+        store.runs.transition(created.run.id, {
+          addSteps: [{ ...wrong, kind: 'check', role: 'implementer' }],
+        }),
+      ).toThrow(ConflictError);
+      expect(store.runs.steps(created.run.id)).toHaveLength(8);
+
+      const input = runInput([ruleId]);
+      const steps = input.steps.map((step) =>
+        step.kind === 'test_writing' ? { ...step, role: 'implementer' as const } : step,
+      );
+      expect(() => store.runs.create({ ...input, steps })).toThrow(ConflictError);
+    });
+  });
+});
+
+describe('runs.regress (회귀 · 재시도 · 중단 저장, ADR-066)', () => {
+  /** 테스트 작성 · Red 확인 · 구현을 통과시키고 검사 단계로 간다. */
+  const toCheck = (store: ProjectStore): RunDetail => {
+    let detail = passApproval(store, store.runs.create(runInput([seedRule(store)])));
+    for (const [kind, next] of [
+      ['test_writing', 'red_check'],
+      ['red_check', 'implementation'],
+      ['implementation', 'check'],
+    ] as const) {
+      detail = store.runs.transition(detail.run.id, {
+        run: { currentStep: next, lastCompletedStep: kind },
+        steps: [
+          { id: stepOf(detail, kind).id, status: 'passed', endedAt: T2 },
+          { id: stepOf(detail, next).id, status: 'running', startedAt: T2 },
+        ],
+      });
+    }
+    return detail;
+  };
+
+  it('검사 실패 → 구현으로: 검사 시도 실패 · 구현 · 검사 새 시도 · 회귀 수를 트랜잭션 1회로', () => {
+    withStore((store) => {
+      const atCheck = toCheck(store);
+      const regressed = store.runs.regress(atCheck.run.id, {
+        toKind: 'implementation',
+        at: T2,
+        newId,
+        expectedStatus: 'running',
+        exitDetail: { failed: 1 },
+        run: { regressionCount: 1 },
+      });
+      expect(regressed.run).toMatchObject({ currentStep: 'implementation', regressionCount: 1 });
+      expect(stepOf(regressed, 'check')).toMatchObject({
+        status: 'failed',
+        exitDetail: { failed: 1 },
+        endedAt: T2,
+      });
+      expect(stepOf(regressed, 'implementation', 2)).toMatchObject({
+        status: 'running',
+        role: 'implementer',
+        startedAt: T2,
+      });
+      expect(stepOf(regressed, 'check', 2)).toMatchObject({ status: 'pending', role: null });
+      expect(regressed.steps.map((s) => `${s.kind}#${String(s.attempt)}:${s.status}`)).toEqual([
+        'approval#1:passed',
+        'test_writing#1:passed',
+        'red_check#1:passed',
+        'implementation#1:passed',
+        'implementation#2:running',
+        'check#1:failed',
+        'check#2:pending',
+        'mutation#1:pending',
+        'merge#1:pending',
+        'screen_update#1:pending',
+      ]);
+    });
+  });
+
+  it('같은 단계 재시도 · 중단(새 시도 대기 + interrupted)', () => {
+    withStore((store) => {
+      const atCheck = toCheck(store);
+      const interrupted = store.runs.regress(atCheck.run.id, {
+        toKind: 'check',
+        at: T2,
+        newId,
+        exitDetail: { interrupted: true },
+        startStatus: 'pending',
+        run: { status: 'interrupted' },
+      });
+      expect(interrupted.run).toMatchObject({ status: 'interrupted', currentStep: 'check' });
+      expect(stepOf(interrupted, 'check', 1).status).toBe('failed');
+      expect(stepOf(interrupted, 'check', 2)).toMatchObject({ status: 'pending', startedAt: null });
+    });
+  });
+
+  it('지금 단계보다 뒤 · 유형에 없는 단계로는 못 가고, 아무것도 바뀌지 않는다', () => {
+    withStore((store) => {
+      const atCheck = toCheck(store);
+      for (const toKind of ['merge', 'green_check'] as const) {
+        expect(() => store.runs.regress(atCheck.run.id, { toKind, at: T2, newId })).toThrow(
+          ConflictError,
+        );
+      }
+      expect(() =>
+        store.runs.regress(atCheck.run.id, {
+          toKind: 'implementation',
+          at: T2,
+          newId,
+          expectedStatus: 'interrupted',
+        }),
+      ).toThrow(ConflictError);
+      expect(store.runs.getDetail(atCheck.run.id)).toEqual(atCheck);
+      expect(() => store.runs.regress(newId(), { toKind: 'check', at: T2, newId })).toThrow(
+        NotFoundError,
+      );
+    });
+  });
+});

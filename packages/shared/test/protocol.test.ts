@@ -498,9 +498,21 @@ describe('run.* (M1-12, ADR-061)', () => {
   const code = (result: ReturnType<typeof parseRequest>): number | null =>
     result.ok ? null : result.error.code;
 
-  it('실행 메서드 3개가 등록돼 있다 (run.resume은 M1-14)', () => {
-    for (const name of ['run.create', 'run.get', 'run.list']) expect(isMethodName(name)).toBe(true);
-    expect(isMethodName('run.resume')).toBe(false);
+  it('실행 메서드 4개가 등록돼 있다 (run.resume은 M1-14, ADR-066)', () => {
+    for (const name of ['run.create', 'run.get', 'run.list', 'run.resume']) {
+      expect(isMethodName(name)).toBe(true);
+    }
+  });
+
+  it('run.resume: projectId · 실행(ULID 또는 표시 ID) · 주체가 필수다', () => {
+    const ok = { projectId: PROJECT, id: 'EXE-001', author: human };
+    expect(METHODS['run.resume'].params.safeParse(ok).success).toBe(true);
+    expect(METHODS['run.resume'].params.safeParse({ ...ok, id: RULE_A }).success).toBe(true);
+    expect(
+      METHODS['run.resume'].params.safeParse({ projectId: PROJECT, id: 'EXE-001' }).success,
+    ).toBe(false);
+    expect(METHODS['run.resume'].params.safeParse({ ...ok, id: 'RUN-1' }).success).toBe(false);
+    expect(METHODS['run.resume'].params.safeParse({ ...ok, extra: 1 }).success).toBe(false);
   });
 
   it.each([

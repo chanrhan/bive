@@ -1,0 +1,77 @@
+# 엔진 시험 전용 (engine.test.ts, M1-14). 회귀 1회 뒤 구현 세션에서 멈춰 비정상 종료 · 재개를 시험한다.
+# 구현 세션 0: 서버 시각을 빼먹음 → 검사 미충족 → 구현으로 회귀(regressionCount 1)
+# 구현 세션 1: $BIVE_HOME/run/pause가 지워질 때까지 대기 (여기서 오케스트레이터를 죽인다)
+# 구현 세션 2: 재개 뒤 새 세션 - 대기 없이 서버 시각을 넣는다
+name: regress-pause
+description: 구현 첫 세션이 검사에서 떨어지고, 둘째 세션이 멈추며, 셋째 세션이 통과
+roles:
+  test-writer:
+    sessions:
+      - turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 서버 시각 (엔진 시험용 내용, 판정기는 돌리지 않는다)
+                import { expect, inject, it } from 'vitest';
+
+                it('응답 JSON에 time이 있다', async () => {
+                  const res = await fetch(new URL('/api/health', inject('baseUrl')));
+                  expect(((await res.json()) as { time?: unknown }).time).toBeTypeOf('string');
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.04
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2000
+              outputTokens: 900
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 0
+              costUSD: 0.04
+  implementer:
+    sessions:
+      - description: 0 - 서버 시각을 빼먹음
+        turns:
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                export const dynamic = 'force-dynamic';
+
+                export async function GET(): Promise<Response> {
+                  return Response.json({ ok: true });
+                }
+        result: &implement-result
+          subtype: success
+          total_cost_usd: 0.05
+          num_turns: 1
+          modelUsage:
+            model-a:
+              inputTokens: 3000
+              outputTokens: 1000
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 0
+              costUSD: 0.05
+      - description: 1 - pause 파일이 지워질 때까지 대기
+        turns:
+          - pause:
+              file: '{{biveHome}}/run/pause'
+              until: removed
+          - &write-time
+            tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                export const dynamic = 'force-dynamic';
+
+                export async function GET(): Promise<Response> {
+                  return Response.json({ ok: true, time: new Date().toISOString() });
+                }
+        result: *implement-result
+      - description: 2 - 재개 뒤 새 세션
+        turns:
+          - *write-time
+        result: *implement-result

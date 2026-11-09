@@ -288,6 +288,29 @@ describe('requirement.create 뒤 rule-writer 세션 (happy-path)', () => {
       expect(store.rules.listByParent(requirement.id)).toEqual([]);
       expect(store.approvalLog.list()).toEqual([]);
       expect(store.requirements.get(requirement.id)).toEqual(requirement);
+      // 세션 · 도구 호출 기록은 저장소에도 남는다 (실행 밖 세션, ADR-066)
+      const sessions = store.sessions.listByRequirement(requirement.id);
+      expect(sessions).toEqual([
+        expect.objectContaining({
+          id: record.id,
+          runId: null,
+          stepId: null,
+          role: 'rule-writer',
+          endReason: 'success',
+          sdkSessionId: record.sdkSessionId,
+          tools: ['propose_rule'],
+          mcpServers: ['bive'],
+          totalCostUsd: record.result?.total_cost_usd,
+        }),
+      ]);
+      expect(
+        store.sessions
+          .toolCallsBySession(record.id)
+          .map((call) => [call.seq, call.name, call.status]),
+      ).toEqual([
+        [0, 'propose_rule', 'ok'],
+        [1, 'propose_rule', 'ok'],
+      ]);
     });
     // 세션 작업 폴더는 끝나면 지운다
     expect(existsSync(path.join(h.biveHome, 'work', h.project.id, 'sessions', record.id))).toBe(
