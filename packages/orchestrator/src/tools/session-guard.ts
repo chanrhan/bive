@@ -158,7 +158,8 @@ export interface GuardSessionOptions extends SessionGuardExpectation {
 }
 
 /**
- * 어댑터 이벤트 흐름에 세션 가드를 건다. 첫 이벤트는 init이어야 하고, init(재보고 포함)이
+ * 어댑터 이벤트 흐름에 세션 가드를 건다. 첫 이벤트는 init이어야 하고(init 없이 결과만 오면 시작 실패로 보고
+ * 그 결과를 오류 결과로 내보낸 뒤 끝낸다), init(재보고 포함)이
  * 허용 목록과 다르면 `controller.abort(error)` 후 SessionGuardError를 던져 순회를 끝낸다.
  * 위반한 init 이벤트는 내보내지 않는다.
  */
@@ -180,6 +181,12 @@ export async function* guardSession(
       options.onManifest?.(manifest, event);
       if (violation !== null) stop(violation, manifest);
     } else if (!seenInit) {
+      if (event.type === 'result') {
+        // CLI 시작 실패(init 없이 결과만, SDK `startup_failure_reason`)는 가드 위반이 아니라 오류 결과다.
+        // 도구가 노출된 적이 없으므로 우회 경로가 아니다. 성공 결과여도 init이 없으면 오류로 본다 (ADR-066)
+        yield event.subtype === 'success' ? { ...event, subtype: 'error_during_execution' } : event;
+        return;
+      }
       stop(
         {
           kind: 'init_missing',
