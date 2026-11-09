@@ -6,6 +6,7 @@ export * from './agent/claude-sdk-adapter.js';
 export * from './agent/scenario.js';
 export * from './agent/scripted-adapter.js';
 export * from './agent/select.js';
+export * from './git/index.js';
 export * from './ipc/handlers.js';
 export * from './ipc/project-store-access.js';
 export * from './ipc/proposal-handlers.js';

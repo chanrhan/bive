@@ -151,7 +151,8 @@ interface AgentAdapter {
 | `~/.bive/run/` | 파이프 경로 · 접속 토큰 · pid 잠금 (권한 0700/0600) | 불가 |
 | `~/.bive/projects/<projectId>/bive.db` | 규범 · 실행 · 판정 · 승인 기록 | 불가 (NFR-01) |
 | `~/.bive/projects/<projectId>/judge/<runId>/<judgeId>/` | 판정 1회마다 하위 폴더 (ADR-051): BIVE 러너 설정(`vitest.config.mjs` · `collect.config.mjs` · `global-setup.mjs`) · vitest JSON 원본(`result.json`) · 로그 | 불가 |
-| `~/.bive/work/<projectId>/worktrees/<runId>/` | 실행 워크트리 (RUN-08) | 역할별 경로 가드 안에서만 |
+| `~/.bive/work/<projectId>/worktrees/<EXE-ID>/` | 실행 워크트리, 브랜치 `bive/run-<EXE-ID>` (RUN-08, ADR-058) | 역할별 경로 가드 안에서만 |
+| `~/.bive/work/<projectId>/merges/<EXE-ID>/` | 병합 검사용 임시 워크트리 (병합이 끝나면 삭제, ADR-058) | 불가 (오케스트레이터 검사만) |
 | `~/.bive/work/<projectId>/sessions/<sessionId>/` | 역할 작업 디렉터리 (허용 목록 파일만 배치). rule-writer는 빈 폴더이고 세션이 끝나면 지운다 (ADR-062) | 해당 세션만 |
 | `~/.bive/registry.db` | 프로젝트 등록부 (등록된 프로젝트 ID · 등록 시각만) | 불가 |
 
@@ -201,7 +202,8 @@ stateDiagram-v2
 - 판정: 5단계 결과를 규칙별 JudgmentResult로 기록 (커밋 · 시각 포함, JDG-02). 에이전트 메시지는 상태 변경 입력 아님 (JDG-01)
 - 커밋: 2 · 4 단계 종료 시 오케스트레이터가 워크트리에서 커밋. 에이전트는 git 도구 없음 (RUN-08)
 - 인수 테스트 보호: 3단계 종료 시 테스트 파일 해시 기록 → 5단계 전 대조, 바뀌었으면 `failed` (`guard_violation`)
-- 병합 절차 (RUN-08 미정 → 보수적 기본): ① 기준 브랜치가 실행 시작 후 바뀌지 않음 → `--no-ff` merge commit ② 바뀜 · 충돌 없음 → merge commit을 임시 워크트리에서 만들고 5단계 검사 재실행, 통과 시에만 기준 브랜치 갱신 ③ 충돌 → `failed`, 브랜치 보존 ④ 기준 브랜치가 프로젝트 폴더에 체크아웃돼 있고 작업 트리가 더러우면 병합 보류 → `failed` (사유 기록)
+- 병합 절차 (RUN-08 미정 → 보수적 기본, ADR-017): ① 기준 브랜치가 실행 시작 후 바뀌지 않음 → `--no-ff` merge commit ② 바뀜 · 충돌 없음 → merge commit을 임시 워크트리에서 만들고 5단계 검사 재실행, 통과 시에만 기준 브랜치 갱신 ③ 충돌 → `failed`, 브랜치 보존 ④ 프로젝트 폴더 작업 트리가 더러우면(추적 파일의 커밋되지 않은 변경, 미추적 `.bive.json` 무시) 기준 브랜치 체크아웃 여부와 상관없이 병합 보류 → `failed` (사유 기록)
+- 병합 구현 (M1-13, ADR-058): `orchestrator/src/git/worktree-manager.ts`의 `createWorktreeManager` → `create` · `commit` · `merge(run, { check })` · `preserve` · `removeWorktree`. 충돌은 `merge-tree --write-tree`로 먼저 확인하고, 병합 커밋은 `$BIVE_HOME/work/<projectId>/merges/<EXE-ID>`(기준 커밋에서 분리된 임시 워크트리)에서 `merge --no-ff`로 만든다. 갱신 직전에 `worktree list`를 다시 읽어 체크아웃 위치를 새로 정하고(검사 도중 브랜치 변경 대비), 기준 브랜치가 프로젝트 폴더에 체크아웃돼 있으면(HEAD 확인) `merge --ff-only --no-overwrite-ignore`(무시된 파일 · 미추적 파일을 덮어쓰지 않음), 아니면 `update-ref` 비교 후 교체. 갱신 뒤 기준 브랜치가 병합 커밋을 가리킬 때만 `merged`. 같은 저장소의 `merge` · `preserve` · `removeWorktree`는 프로세스 안 대기열로 하나씩 실행한다(오케스트레이터 1개 전제, ADR-041). 다른 워크트리에 체크아웃돼 있거나 병합할 커밋이 없거나 실행 워크트리가 더러워도 `failed`. 실패 사유 값 · 결과 모양 · 커밋 주체(`BIVE <bive@bive.invalid>`)는 ADR-058. 실행 브랜치는 병합 뒤에도 지우지 않는다
 - 예산: 세션마다 `maxBudgetUsd = min(역할 잔여, 실행 잔여)`. SDK `error_max_budget_usd` 또는 집계 초과 → 세션 중단 → `budget_exceeded` (COST-01)
 - 중단 · 재개 (PRD 5.1, ADR-011): 재기동 시 `running` → `interrupted`. `run.resume` → 워크트리를 `lastCompletedStep` 커밋으로 되돌림 → 다음 단계부터 새 세션. `regressionCount` 유지. 재개 버튼은 SCR-05 파이프라인 영역 (ADR-011)
 
@@ -364,7 +366,7 @@ stateDiagram-v2
 | rule-writer는 자기 요구사항의 규칙 제안만 (NRM-02, NRM-04) | `orchestrator/src/rule-writer/rule-writer-service.ts`(ADR-062): 도구 `propose_rule` 하나, 입력은 제목 한 줄 · EARS `WHEN … THE SYSTEM SHALL …`(`tools/ears.ts`, 조건 안 낱말 when · shall · 끝 쉼표 불가 → 규칙 화면 `whenCondition`과 같은 경계) · 검사 종류 1개 이상 검증, 부모가 세션의 요구사항이 아니면 `invalid_args` · 삭제됐으면 `state_conflict`. 제안은 `pending`만, 규칙 테이블 쓰기 없음 | `rule-writer.test.ts` |
 | 계정 MCP 차단 · 도구 기록 (NFR-02) | `orchestrator/src/tools/session-guard.ts`(ADR-052 · ADR-059): init 메시지의 `tools` · `mcp_servers`가 역할 허용 목록과 다르거나, `plugins`가 비어 있지 않거나, `permissionMode`가 `dontAsk`가 아니면 세션 중단 → 실행 `failed`. Run.toolManifest 기록. 관리 정책 설정은 `settingSources: []`로 꺼지지 않는다(ADR-059 한계) | 추가 MCP · 플러그인 · 권한 모드 시나리오 |
 | 명령은 고정 도구로만 (NFR-02) | `orchestrator/src/tools/commands.ts`: 허용 argv 템플릿 (`run_tests` · `prisma_generate` · `prisma_migrate` · `install_package`=허용 목록) · 셸 없는 실행(`spawn`, 프로세스 그룹 정리, ADR-052) · 타임아웃 · 환경 변수 정리 | 임의 인자 거부 테스트 |
-| 커밋 · 병합은 오케스트레이터만 (RUN-08) | `orchestrator/src/git/*`. 에이전트 도구에 git 없음, 워크트리 `.git` 쓰기 경로 가드 거부 | `.git` 쓰기 거부 테스트 |
+| 커밋 · 병합은 오케스트레이터만 (RUN-08) | `orchestrator/src/git/*`(ADR-058): 셸 없는 `execFile`, 환경 변수 허용 목록(`GIT_*` · API 키 미전달), 커밋 주체 `-c user.name/user.email` 고정, 프로젝트 훅 끔(`core.hooksPath`=널 장치). 에이전트 도구에 git 없음, 워크트리 `.git` 쓰기 경로 가드 거부 | `.git` 쓰기 거부 테스트, `worktree.test.ts`(커밋은 `commit()`으로만 · 부모 환경 git 변수 · 훅 무시) |
 | 판정 근거는 실행기 결과만 (JDG-01) | `orchestrator/src/judge/runner.ts`: BIVE 전용 vitest 설정(`judge/<runId>/<judgeId>/vitest.config.mjs`, ADR-051)으로 직접 실행, 프로젝트 설정 미사용. Run · Rule 상태 변경 함수는 `judge`만 호출 | "통과" 보고 시나리오 |
 | 인수 테스트는 HTTP로만 (JDG-01) | `orchestrator/src/judge/acceptance-lint.ts`: 테스트 파일 import 허용 목록 (vitest · BIVE HTTP 도우미 · Node 내장) 위반 시 테스트 작성 단계 미종료 | 소스 import 테스트 거부 |
 | 인수 테스트 변조 방지 | implementer 경로 가드에서 인수 테스트 디렉터리 쓰기 거부 + 해시 대조 (4장) | 해시 불일치 시나리오 |
