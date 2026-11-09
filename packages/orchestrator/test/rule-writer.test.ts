@@ -351,7 +351,12 @@ describe('propose_rule 검증 (제목 · EARS 진술 · 검사 종류 · 부모 
   });
 
   it('받은 진술은 규칙 화면의 WHEN 조건(whenCondition, ADR-060)으로 정확히 WHEN <조건>이 된다', () => {
-    const scenarioStatements = ['happy-path', 'fail-check', 'pause-implement'].flatMap((name) =>
+    const scenarioStatements = [
+      'happy-path',
+      'fail-check',
+      'pause-implement',
+      'budget-exceeded',
+    ].flatMap((name) =>
       (loadScenario(name).roles['rule-writer']?.sessions ?? []).flatMap((session) =>
         session.turns.flatMap((turn) =>
           'tool' in turn && turn.tool === 'propose_rule' ? [String(turn.args.statement)] : [],

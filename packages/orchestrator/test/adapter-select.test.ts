@@ -60,14 +60,17 @@ describe('selectAgent', () => {
     expect((selection.adapter as ScriptedAdapter).scenario.name).toBe('happy-path');
   });
 
-  it.each(['happy-path', 'fail-check', 'pause-implement'])('BIVE_SCENARIO=%s를 고른다', (name) => {
-    const selection = selectAgent(
-      { BIVE_AGENT: 'scripted', BIVE_SCENARIO: name },
-      { biveHome: BIVE_HOME },
-    );
-    expect(selection.scenario).toBe(name);
-    expect((selection.adapter as ScriptedAdapter).scenario.name).toBe(name);
-  });
+  it.each(['happy-path', 'fail-check', 'pause-implement', 'budget-exceeded'])(
+    'BIVE_SCENARIO=%s를 고른다',
+    (name) => {
+      const selection = selectAgent(
+        { BIVE_AGENT: 'scripted', BIVE_SCENARIO: name },
+        { biveHome: BIVE_HOME },
+      );
+      expect(selection.scenario).toBe(name);
+      expect((selection.adapter as ScriptedAdapter).scenario.name).toBe(name);
+    },
+  );
 
   it.each(['Scripted', 'fake', 'claude-sdk', ' scripted'])(
     'BIVE_AGENT=%j는 AgentConfigError',

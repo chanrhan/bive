@@ -221,12 +221,16 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
       expect(log.chain).toEqual({ valid: true, brokenAtSeq: null, reason: null });
 
       // 저장된 값 = 돌려준 값 (ULID · 표시 ID 어느 쪽으로도 조회)
+      // 세션이 없으므로 비용 · 턴 집계는 모두 '없음'(null, ADR-067)
       const detail = { run: created.run, steps: created.steps };
-      expect(
-        await h.client.call('run.get', { projectId: h.project.id, id: created.run.id }),
-      ).toEqual(detail);
+      const got = await h.client.call('run.get', { projectId: h.project.id, id: created.run.id });
+      expect(got).toEqual({
+        ...detail,
+        usage: h.read((store) => store.runs.usage(created.run.id)),
+      });
+      expect(got.usage.run).toMatchObject({ costUsd: null, turns: null, modelUsage: null });
       expect(await h.client.call('run.get', { projectId: h.project.id, id: 'EXE-001' })).toEqual(
-        detail,
+        got,
       );
       expect(h.read((store) => store.runs.getDetail(created.run.id))).toEqual(detail);
       expect(await h.client.call('run.list', { projectId: h.project.id })).toEqual({
@@ -413,7 +417,7 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
       });
       expect(
         await h.client.call('run.get', { projectId: h.project.id, id: created.run.id }),
-      ).toEqual({ run: result.run, steps: result.steps });
+      ).toMatchObject({ run: result.run, steps: result.steps });
       // 승인 단계가 끝난 실행은 다시 판정하지 않는다
       expect(() =>
         h.read((store) => evaluateApprovalStep(store, created.run.id, { now: () => at })),
@@ -593,7 +597,8 @@ describe('프로세스 재시작 뒤 run.get이 같은 값 (수용 기준 4, RUN
       projectId: project.id,
       id: created.run.id,
     });
-    expect(afterCreate).toEqual({ run: created.run, steps: created.steps });
+    expect(afterCreate).toMatchObject({ run: created.run, steps: created.steps });
+    expect(afterCreate.usage.run).toMatchObject({ costUsd: null, turns: null, sessionCount: 0 });
     expect(await current.client.call('run.get', { projectId: project.id, id: 'EXE-001' })).toEqual(
       afterCreate,
     );
@@ -602,12 +607,29 @@ describe('프로세스 재시작 뒤 run.get이 같은 값 (수용 기준 4, RUN
     // 2) 승인 단계 종료 · 테스트 작성 종료(커밋 · 비용 · 턴 · 종료 조건 결과)를 저장한 뒤 비정상 종료된 것과 같은 상태
     const approval = engine.evaluateApproval(project.id, created.run.id);
     expect(approval.approved).toBe(true);
+    // 비용 · 턴은 세션 기록에서만 채워진다 (ADR-067): 테스트 작성 시도의 세션 1개를 남긴다
+    const sessionId = newId();
+    withStore((store) => {
+      store.sessions.start({
+        id: sessionId,
+        runId: created.run.id,
+        stepId: stepOf(approval.steps, 'test_writing').id,
+        role: 'test-writer',
+        model: 'test-model',
+        workDir: '/work/session',
+        startedAt: iso(T0),
+      });
+      store.sessions.end(sessionId, {
+        endReason: 'success',
+        totalCostUsd: 0.0123,
+        numTurns: 7,
+        endedAt: iso(T0),
+      });
+    });
     const afterTestWriting = engine.completeStep(project.id, created.run.id, {
       status: 'passed',
       exitDetail: { files: ['bive-acceptance/RULE-001/health.acc.ts'] },
       commit: SHA,
-      costUsd: 0.0123,
-      turns: 7,
       run: { headCommit: SHA },
     });
     expect(afterTestWriting.run).toMatchObject({
@@ -615,6 +637,8 @@ describe('프로세스 재시작 뒤 run.get이 같은 값 (수용 기준 4, RUN
       currentStep: 'red_check',
       lastCompletedStep: 'test_writing',
       headCommit: SHA,
+      costUsd: 0.0123,
+      turns: 7,
     });
 
     // 재기동: running은 interrupted가 되고, 끝난 단계 값은 그대로, 진행 중이던 시도는 끝나고 새 시도가 대기한다

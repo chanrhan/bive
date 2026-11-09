@@ -1,0 +1,95 @@
+# 예산 초과 (architecture.md 8장 "예산 초과 subtype", COST-01, roadmap M1-17 · M1-21).
+# 형식: src/agent/scenario.ts. 테스트 작성은 정상으로 끝나고, 구현 세션이 응답을 고치던 중 결과 subtype
+# error_max_budget_usd로 끝난다(실제 SDK가 세션 USD 한도에 닿아 멈춘 것과 같은 결과, 설정 한도 값과 무관). 실행은 budget_exceeded,
+# 브랜치 · 워크트리 보존, 병합 없음이어야 한다. 구현 세션은 다시 열리지 않는다(예산 초과는 회귀 · 재시도 대상이 아님).
+name: budget-exceeded
+description: 테스트 작성이 데이터베이스 상태 인수 테스트를 쓰고, 구현 세션이 작업 도중 USD 한도에 닿아 끝남
+roles:
+  rule-writer:
+    sessions:
+      - turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답의 데이터베이스 상태
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 db 필드에 데이터베이스 연결 상태 문자열 ok를 담는다
+              kind: business
+              checkKinds: [test]
+              rationale: 요구사항의 '데이터베이스 상태 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+          - message: 규칙 제안 1건을 등록했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0204
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 1700
+              outputTokens: 430
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 5200
+              costUSD: 0.0204
+  test-writer:
+    sessions:
+      - turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-db.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 데이터베이스 상태. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                describe('GET /api/health 데이터베이스 상태', () => {
+                  it('응답 JSON의 db가 문자열 ok다', async () => {
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as { ok?: unknown; db?: unknown };
+                    expect(body.ok).toBe(true);
+                    expect(body.db).toBe('ok');
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0398
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2150
+              outputTokens: 820
+              cacheReadInputTokens: 4100
+              cacheCreationInputTokens: 6050
+              costUSD: 0.0398
+  implementer:
+    sessions:
+      - description: 응답을 고치던 중 USD 한도에 닿아 끝남 (변경은 커밋되지 않고 워크트리에 남는다)
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태를 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true });
+                }
+          - message: 데이터베이스 상태 필드를 추가하는 중입니다.
+        result:
+          subtype: error_max_budget_usd
+          total_cost_usd: 0.0731
+          num_turns: 4
+          modelUsage:
+            model-a:
+              inputTokens: 3900
+              outputTokens: 1410
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0731

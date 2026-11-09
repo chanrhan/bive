@@ -4,7 +4,10 @@
 // - 상태 저장은 `transition` 1회 = 트랜잭션 1회다(RUN-01: 단계 종료마다 저장). 단계 갱신 · 새 시도 추가 · 실행 갱신을
 //   한꺼번에 반영하고, 상태 기계에 없는 전이 · 종료된 실행 · 끝난 단계의 변경은 `ConflictError`로 거부한다
 // - 실행 · 단계는 지우지 않는다. 생성 정보와 끝난 기록은 DB 트리거도 막는다
+// - 비용 · 턴(`costUsd` · `turns`)은 호출한 쪽이 넣지 않는다. 세션 기록에서만 계산해(NFR-03, COST-02, ADR-067)
+//   단계 시도는 끝나는 저장 때, 실행은 저장마다 같은 트랜잭션에서 채운다. 조회 시점의 집계는 `usage`
 import {
+  type AgentRole,
   canTransitionRun,
   compareSteps,
   isFinalStepStatus,
@@ -12,23 +15,27 @@ import {
   Run,
   RUN_STEP_PLANS,
   type RunStatus,
+  type RunUsage,
   Step,
   type StepKind,
   STEP_ROLES,
   type StepStatus,
+  sumSessionUsage,
+  summarizeRunUsage,
   type Ulid,
 } from '@bive/shared';
 
 import { withTransaction, type SqliteDatabase } from '../database.js';
 import { ConflictError, NotFoundError, isUniqueViolation } from '../errors.js';
 import { DisplayIdSequences } from './display-id-sequences.js';
+import { SessionRepository } from './session-repository.js';
 
-/** 새 단계 시도. 비운 필드는 `null`(종료 조건 결과 · 커밋 · 비용 · 턴 · 종료 시각). */
+/** 새 단계 시도. 비운 필드는 `null`(종료 조건 결과 · 커밋 · 종료 시각). 비용 · 턴은 세션 기록에서 채운다. */
 export type StepCreateInput = Pick<
   Step,
   'id' | 'kind' | 'attempt' | 'status' | 'role' | 'startedAt'
 > &
-  Partial<Pick<Step, 'exitDetail' | 'commit' | 'costUsd' | 'turns' | 'endedAt'>>;
+  Partial<Pick<Step, 'exitDetail' | 'commit' | 'endedAt'>>;
 
 /**
  * 새 실행. 상태(`waiting_approval`) · 표시 ID · 진행 필드(회귀 수 0, 나머지 `null` · 빈 목록)는 리포지토리가 채운다.
@@ -55,7 +62,7 @@ export interface RunDetail {
   readonly steps: Step[];
 }
 
-/** 실행에서 바꿀 수 있는 필드. 없는(`undefined`) 키는 그대로 둔다. */
+/** 실행에서 바꿀 수 있는 필드. 없는(`undefined`) 키는 그대로 둔다. 비용 · 턴은 저장소가 세션 기록에서 채운다. */
 export type RunPatch = Partial<
   Pick<
     Run,
@@ -69,17 +76,15 @@ export type RunPatch = Partial<
     | 'baseCommit'
     | 'headCommit'
     | 'mergeCommit'
-    | 'costUsd'
-    | 'turns'
     | 'toolManifest'
     | 'startedAt'
     | 'endedAt'
   >
 >;
 
-/** 단계 시도 1개에서 바꿀 필드. 없는(`undefined`) 키는 그대로 둔다. */
+/** 단계 시도 1개에서 바꿀 필드. 없는(`undefined`) 키는 그대로 둔다. 비용 · 턴은 저장소가 세션 기록에서 채운다. */
 export type StepPatch = { readonly id: Ulid } & Partial<
-  Pick<Step, 'status' | 'exitDetail' | 'commit' | 'costUsd' | 'turns' | 'startedAt' | 'endedAt'>
+  Pick<Step, 'status' | 'exitDetail' | 'commit' | 'startedAt' | 'endedAt'>
 >;
 
 /** 상태 저장 1회(= 트랜잭션 1회)에 반영할 변경. */
@@ -242,8 +247,6 @@ const RUN_PATCH_KEYS = [
   'baseCommit',
   'headCommit',
   'mergeCommit',
-  'costUsd',
-  'turns',
   'toolManifest',
   'startedAt',
   'endedAt',
@@ -253,8 +256,6 @@ const STEP_PATCH_KEYS = [
   'status',
   'exitDetail',
   'commit',
-  'costUsd',
-  'turns',
   'startedAt',
   'endedAt',
 ] as const satisfies readonly (keyof StepPatch)[];
@@ -281,8 +282,8 @@ const newStep = (runId: Ulid, input: StepCreateInput): Step =>
     role: input.role,
     exitDetail: input.exitDetail ?? null,
     commit: input.commit ?? null,
-    costUsd: input.costUsd ?? null,
-    turns: input.turns ?? null,
+    costUsd: null,
+    turns: null,
     startedAt: input.startedAt,
     endedAt: input.endedAt ?? null,
   });
@@ -327,6 +328,7 @@ export class RunRepository {
   readonly #db: SqliteDatabase;
   readonly #projectId: Ulid;
   readonly #sequences: DisplayIdSequences;
+  readonly #sessions: SessionRepository;
   readonly #insertRun;
   readonly #updateRun;
   readonly #insertTarget;
@@ -344,10 +346,12 @@ export class RunRepository {
     db: SqliteDatabase,
     projectId: Ulid,
     sequences: DisplayIdSequences = new DisplayIdSequences(db),
+    sessions: SessionRepository = new SessionRepository(db),
   ) {
     this.#db = db;
     this.#projectId = projectId;
     this.#sequences = sequences;
+    this.#sessions = sessions;
     this.#insertRun = db.prepare<[RunRow]>(
       `INSERT INTO runs (${RUN_COLUMNS}) VALUES (@id, @display_id, @type, @status, @current_step,
        @last_completed_step, @regression_count, @failure_reason, @branch, @worktree_path, @base_branch,
@@ -480,6 +484,17 @@ export class RunRepository {
     return run === null ? null : { run, steps: this.steps(run.id) };
   }
 
+  /**
+   * 실행의 비용 · 턴 집계 (COST-02, ADR-067): 조회 시점의 세션 기록으로 단계 시도 → 역할 → 실행 합계를 만든다.
+   * 역할은 예산 스냅샷의 역할(세션이 없으면 합계 `null`)과 세션이 있는 역할이다. 실행이 없으면 `null`.
+   */
+  usage(runId: string): RunUsage | null {
+    const run = this.get(runId);
+    if (run === null) return null;
+    const roles = Object.keys(run.budgetSnapshot.roles) as AgentRole[];
+    return summarizeRunUsage(roles, this.steps(run.id), this.#sessions.listByRun(run.id));
+  }
+
   /** 실행을 표시 ID 순(= 생성 순)으로. `status`를 주면 그 상태만. */
   list(filter: RunListFilter = {}): Run[] {
     const rows =
@@ -528,7 +543,15 @@ export class RunRepository {
           `상태 기계에 없는 전이입니다 (${current.status} → ${patch.status})`,
         );
       }
-      const next = Run.parse({ ...current, ...patch });
+      // 비용 · 턴은 세션 기록에서만 (ADR-067): 실행은 저장마다 그때까지의 합계, 단계 시도는 끝나는 저장 때의 합계
+      const sessions = this.#sessions.listByRun(runId);
+      const runTotals = sumSessionUsage(sessions);
+      const next = Run.parse({
+        ...current,
+        ...patch,
+        costUsd: runTotals.costUsd,
+        turns: runTotals.turns,
+      });
 
       const existing = new Map(this.steps(runId).map((step) => [step.id, step]));
       const seen = new Set<string>();
@@ -542,9 +565,13 @@ export class RunRepository {
         if (isFinalStepStatus(step.status)) {
           throw new ConflictError(STEP_ENTITY, step.id, `끝난 단계 시도입니다 (${step.status})`);
         }
-        const next = Step.parse({ ...step, ...pickDefined(stepPatch, STEP_PATCH_KEYS) });
-        assertStepStatusChange(step, next.status);
-        return next;
+        const patched = Step.parse({ ...step, ...pickDefined(stepPatch, STEP_PATCH_KEYS) });
+        assertStepStatusChange(step, patched.status);
+        if (!isFinalStepStatus(patched.status)) return patched;
+        const stepTotals = sumSessionUsage(
+          sessions.filter((session) => session.stepId === step.id),
+        );
+        return Step.parse({ ...patched, costUsd: stepTotals.costUsd, turns: stepTotals.turns });
       });
       const added = (change.addSteps ?? []).map((input) => newStep(runId, input));
       added.forEach(assertStepRole);

@@ -46,7 +46,7 @@ import { RpcError } from '../ipc/server.js';
 import type { RunTracker } from '../lifecycle.js';
 import { completeStep, evaluateApprovalStep } from '../runs/run-service.js';
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
-import { sessionLimits } from './session-budget.js';
+import { budgetOverrun, sessionLimits } from './session-budget.js';
 import {
   COMMIT_STEP_KINDS,
   type EngineEvent,
@@ -780,7 +780,7 @@ export class PipelineEngine {
   /**
    * 단계 역할의 세션 1개 (ADR-024 · ADR-049 · ADR-052 · ADR-066): 모델 · 한도는 실행 스냅샷과 남은 예산, 세션 순번은
    * 저장된 (실행, 역할) 세션 수, 도구 호출 · init 보고는 바로 저장한다. 가드 위반 → 실행 `failed`(`guard_violation`),
-   * 예산 소진 · 한도 subtype → `budget_exceeded`(StepHaltError).
+   * 예산 소진 · 한도 subtype · 집계 초과 → `budget_exceeded`(StepHaltError).
    */
   async #runSession(
     projectId: string,
@@ -814,6 +814,7 @@ export class PipelineEngine {
         role,
         model,
         workDir: request.workDir,
+        budget: limits,
         startedAt: this.#timestamp(),
       }),
     );
@@ -893,6 +894,16 @@ export class PipelineEngine {
     }
     if (endReason === 'error_max_budget_usd' || endReason === 'error_max_turns') {
       throw new StepHaltError('budget_exceeded', endReason, { sessionId });
+    }
+    // 집계 초과 (ADR-067): 한도 subtype이 아니어도 끝난 세션까지의 역할 · 실행 합계가 한도를 넘었으면 실행을 끝낸다
+    const overrun = this.#store(projectId, (store) =>
+      budgetOverrun(run.budgetSnapshot, role, store.sessions.listByRun(run.id)),
+    );
+    if (overrun !== null) {
+      throw new StepHaltError('budget_exceeded', 'budget_aggregate_exceeded', {
+        sessionId,
+        ...overrun,
+      });
     }
     return {
       sessionId,

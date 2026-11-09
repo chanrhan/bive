@@ -23,6 +23,7 @@ import {
 } from './domain.js';
 import { AgentRole, JudgmentStatus, ProposalKind, ProposalState, RunStatus } from './enums.js';
 import { displayIdSchema, Ulid } from './id.js';
+import { RunUsage } from './usage.js';
 
 export const JSONRPC_VERSION = '2.0';
 
@@ -501,7 +502,7 @@ export const RunCreateParams = z.strictObject({
 });
 export type RunCreateParams = z.infer<typeof RunCreateParams>;
 
-/** 실행 1건과 단계 목록(파이프라인 순서 → 시도 번호 순). 세션 수치는 해당 이슈가 더한다. */
+/** 실행 1건과 단계 목록(파이프라인 순서 → 시도 번호 순). 비용 · 턴 집계는 `run.get`의 `usage`(ADR-067). */
 export const RunDetailResult = z.strictObject({ run: Run, steps: z.array(Step) });
 export type RunDetailResult = z.infer<typeof RunDetailResult>;
 
@@ -518,6 +519,17 @@ export type RunRef = z.infer<typeof RunRef>;
 
 export const RunGetParams = z.strictObject({ projectId: Ulid, id: RunRef });
 export type RunGetParams = z.infer<typeof RunGetParams>;
+
+/**
+ * `run.get` 결과: 실행 · 단계 + 비용 · 턴 집계 `usage` (COST-02, ADR-067). `usage`는 조회 시점의 세션 기록으로 만든다
+ * (진행 중 세션은 값이 없어 합계에 들어가지 않는다). 값이 없으면 `null`이고 화면은 '없음'으로 보인다.
+ */
+export const RunGetResult = z.strictObject({
+  run: Run,
+  steps: z.array(Step),
+  usage: RunUsage,
+});
+export type RunGetResult = z.infer<typeof RunGetResult>;
 
 /** `run.list`: 표시 ID 순(= 생성 순). `status`로 거른다 (생략하면 전부). */
 export const RunListParams = z.strictObject({ projectId: Ulid, status: RunStatus.optional() });
@@ -563,7 +575,7 @@ export const METHODS = {
   'settings.update': { params: SettingsUpdateParams, result: SettingsResult },
   'settings.validateForRun': { params: SettingsValidateParams, result: SettingsValidateResult },
   'run.create': { params: RunCreateParams, result: RunCreateResult },
-  'run.get': { params: RunGetParams, result: RunDetailResult },
+  'run.get': { params: RunGetParams, result: RunGetResult },
   'run.list': { params: RunListParams, result: RunListResult },
   'run.resume': { params: RunResumeParams, result: RunDetailResult },
 } as const satisfies Record<string, MethodSpec>;

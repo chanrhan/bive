@@ -116,15 +116,16 @@ interface AgentAdapter {
 | **Run** | `id`, `displayId`, `projectId`, `type` (`A` · `B` · `C` · `D`, M1은 A만), `targetRuleIds[]` (요청 순서, 중복 없음) | RUN-01, RUN-07, ADR-061 |
 | | `status` (4장), `currentStep` (진행 · 승인 대기 중인 단계, 모두 끝나면 `null`), `lastCompletedStep`, `regressionCount` (상한 2), `failureReason?` | RUN-01, RUN-02, PRD 5.1 |
 | | `branch?`, `worktreePath?`, `baseCommit?` (워크트리 생성 때 채움, 그 전 `null`), `baseBranch` (생성 때 프로젝트 값 복사), `headCommit?`, `mergeCommit?` | RUN-08, ADR-061 |
-| | `budgetSnapshot {run: {maxBudgetUsd, maxTurns}, roles: {<역할>: {maxBudgetUsd, maxTurns}}}`, `modelSnapshot {<역할>: 모델}` (시작 시 설정 복사, 실행이 쓰는 역할만), `costUsd?`, `turns?` | COST-01, NFR-07, COST-02, ADR-061 |
+| | `budgetSnapshot {run: {maxBudgetUsd, maxTurns}, roles: {<역할>: {maxBudgetUsd, maxTurns}}}`, `modelSnapshot {<역할>: 모델}` (시작 시 설정 복사, 실행이 쓰는 역할만), `costUsd?`, `turns?` (저장마다 세션 기록 합계, 값 없으면 `null`) | COST-01, NFR-07, COST-02, ADR-061, ADR-067 |
 | | `toolManifest` (세션별 도구 목록 · MCP 수) | NFR-02 |
 | | `startedBy` (실행 시작 확인 주체 = 사람), `createdAt`, `startedAt` (승인 단계가 끝나 `running`이 된 시각), `endedAt` | RUN-02, NFR-01, ADR-061 |
 | **Step** | `id`, `runId`, `kind` (`approval` · `test_writing` · `red_check` · `green_check` · `implementation` · `check` · `mutation` · `merge` · `screen_update`), `attempt` (시도 1회 = 행 1개, 회귀 · 재시도는 새 행) | RUN-02, RUN-07, ADR-061 |
 | | `status` (`pending` · `running` · `passed` · `failed` · `skipped`), `role?`, `exitDetail` (JSON), `commit?` | RUN-02, SCR-16 |
-| | `costUsd?`, `turns?`, `startedAt`, `endedAt` | COST-02 |
+| | `costUsd?`, `turns?` (시도가 끝나는 저장 때 그 시도 세션들의 합계, 값 없으면 `null`), `startedAt`, `endedAt` | COST-02, ADR-067 |
 | **Session** | `id`, `runId?` · `stepId?` (실행 세션은 둘 다, 실행 밖 세션은 둘 다 `null`), `requirementId?` (규칙 작성 세션의 대상), `role`, `model`, `sdkSessionId`, `workDir`, `startedAt`, `endedAt?`, `error?` | 기획서 3.2, RUN-04, ADR-066 |
 | | `endReason` (`success` · `error_max_turns` · `error_max_budget_usd` · `error_during_execution` · `aborted` · `guard_violation`) | 기획서 4.5, COST-01 |
 | | `totalCostUsd?` (마지막 `total_cost_usd`), `numTurns?`, `modelUsage` (모델별 입력 · 출력 · 캐시 읽기 · 캐시 쓰기 · costUSD), `firstTurnCacheWrite?` | 기획서 4.5, SCR-16 |
+| | `budget?` (세션에 넘긴 `maxBudgetUsd` · `maxTurns`, 실행 밖 세션은 `null`) | COST-01, ADR-067 |
 | | `tools[]`, `mcpServers[]` (init 메시지 기록) | NFR-02 |
 | **ToolCall** | `id`, `runId?`, `sessionId`, `seq` (세션 안 순번), `at`, `role`, `name`, `argsSummary`, `status` (`ok` · `denied` · `error`), `reason?`, `durationMs` (거부 · 오류 포함 호출마다 1건, 추가만) | NFR-02, ADR-052, ADR-066 |
 | **JudgmentResult** | `id`, `ruleId`, `runId?`, `stepId?`, `commit`, `judgedAt`, `status` (`pass` · `fail` · `unjudged` · `quarantined` · `needs_recheck`) | JDG-01, JDG-02 |
@@ -207,6 +208,7 @@ stateDiagram-v2
 - 병합 절차 (RUN-08 미정 → 보수적 기본, ADR-017): ① 기준 브랜치가 실행 시작 후 바뀌지 않음 → `--no-ff` merge commit ② 바뀜 · 충돌 없음 → merge commit을 임시 워크트리에서 만들고 5단계 검사 재실행, 통과 시에만 기준 브랜치 갱신 ③ 충돌 → `failed`, 브랜치 보존 ④ 프로젝트 폴더 작업 트리가 더러우면(추적 파일의 커밋되지 않은 변경, 미추적 `.bive.json` 무시) 기준 브랜치 체크아웃 여부와 상관없이 병합 보류 → `failed` (사유 기록)
 - 병합 구현 (M1-13, ADR-058): `orchestrator/src/git/worktree-manager.ts`의 `createWorktreeManager` → `create` · `commit` · `merge(run, { check })` · `preserve` · `removeWorktree`. 충돌은 `merge-tree --write-tree`로 먼저 확인하고, 병합 커밋은 `$BIVE_HOME/work/<projectId>/merges/<EXE-ID>`(기준 커밋에서 분리된 임시 워크트리)에서 `merge --no-ff`로 만든다. 갱신 직전에 `worktree list`를 다시 읽어 체크아웃 위치를 새로 정하고(검사 도중 브랜치 변경 대비), 기준 브랜치가 프로젝트 폴더에 체크아웃돼 있으면(HEAD 확인) `merge --ff-only --no-overwrite-ignore`(무시된 파일 · 미추적 파일을 덮어쓰지 않음), 아니면 `update-ref` 비교 후 교체. 갱신 뒤 기준 브랜치가 병합 커밋을 가리킬 때만 `merged`. 같은 저장소의 `merge` · `preserve` · `removeWorktree`는 프로세스 안 대기열로 하나씩 실행한다(오케스트레이터 1개 전제, ADR-041). 다른 워크트리에 체크아웃돼 있거나 병합할 커밋이 없거나 실행 워크트리가 더러워도 `failed`. 실패 사유 값 · 결과 모양 · 커밋 주체(`BIVE <bive@bive.invalid>`)는 ADR-058. 실행 브랜치는 병합 뒤에도 지우지 않는다
 - 예산: 세션마다 `maxBudgetUsd = min(역할 잔여, 실행 잔여)`. SDK `error_max_budget_usd` 또는 집계 초과 → 세션 중단 → `budget_exceeded` (COST-01)
+- 예산 구현 (M1-17, ADR-067): 집계는 `@bive/shared`의 `sumSessionUsage` · `summarizeRunUsage`(세션 → 단계 시도 → 역할 → 실행, 1e-9 USD 정수 합산, 값 없는 세션은 건너뛰고 모두 없으면 `null`). 한도 계산은 `engine/session-budget.ts`의 `chargeSessions`: 값을 모르는 세션은 init 전이면 0, 아니면 그 실행의 아는 세션 최댓값(세션 한도로 자름), 아는 세션이 없으면 세션 한도 전부. 세션이 끝날 때마다 같은 합계가 역할 · 실행 한도를 넘으면 `budget_exceeded`(`budget_aggregate_exceeded`). `Run.costUsd` · `Step.costUsd`는 저장소가 세션 기록에서만 채우고, 조회 시점 집계는 `run.get`의 `usage`
 - 중단 · 재개 (PRD 5.1, ADR-011 · ADR-027 · ADR-066): 오케스트레이터가 연결을 받기 전에 `running` → `interrupted`(진행 중 시도는 `failed`, 같은 단계 새 시도 `pending`, 끝나지 않은 세션은 `aborted`). 자동 재개 없음. `run.resume`(사람, `interrupted`만) → 워크트리를 마지막 완료 단계 커밋(`headCommit`, 없으면 `baseCommit`)으로 `reset --hard` + `clean -ffd`(무시된 파일은 남김) → 지금 단계의 새 시도 · 새 세션. `regressionCount` 유지. 재개 버튼은 SCR-05 파이프라인 영역 (ADR-011)
 - 엔진 구현 (M1-14, ADR-066): `orchestrator/src/engine/`의 `PipelineEngine`. 승인 단계는 `run.create` 응답 뒤 · 규칙 승인 뒤 엔진이 판정하고, 나머지 단계는 주입받은 단계 실행기(`StepExecutors`: 단계 종류 → `StepOutcome` = `passed` · `skipped` · `unmet` · `halt`)가 결과만 낸다. 엔진은 테스트 작성 · 구현 통과 때 커밋, 미충족 시 `UNMET_POLICY`대로 재시도 · 회귀(재시도 · 회귀 전에도 워크트리를 마지막 완료 단계 커밋으로 되돌림), 상한 초과 · `halt`면 실패 저장 뒤 `preserve`, 마지막 단계 뒤 `merged`. 구동 전 승인 기록 `run_start` 대조(`run_without_log`). 세션은 `StepContext.runSession`: 모델 = 실행 스냅샷, 한도 = `min(역할 잔여, 실행 잔여)`(0 이하면 세션 없이 `budget_exceeded`), 세션 가드 위반 → `failed`(`guard_violation`), 세션 순번 = 저장된 (실행, 역할) 세션 수. 기본 실행기는 변이 주입 `skipped` · 화면 갱신 알림뿐이고 나머지는 #28 · #29 · #32가 넣는다
 
@@ -254,7 +256,7 @@ stateDiagram-v2
 | `approvalLog.list` | `{projectId, targetRef?}` → `{entries, chain: {valid, brokenAtSeq}}` (체인 검증은 전체 기록 기준) | NFR-01, ADR-027, ADR-050 | M1 |
 | `verification.summary` | `{projectId}` → 판정 기준 커밋 · 준수(통과/판정 가능) · 분모 목록 | JDG-03, SCR-05 | M1 |
 | `run.create` | `{projectId, ruleIds, author}` → `{run, steps, approvalLog}` (실행 시작 확인, 사람만, 유형 A · `waiting_approval` · 승인 기록 `run_start`. 설정 미비 `-32010` · 없는 규칙 `-32004` · 삭제된 규칙 `-32009`이면 아무것도 만들지 않음) | RUN-01, RUN-02, NFR-07, ADR-061 | M1 |
-| `run.list` · `run.get` | `{projectId, status?}` → `{runs}` (표시 ID 순) / `{projectId, id}`(ULID 또는 `EXE-NNN`) → `{run, steps}`. 세션 수치는 해당 이슈에서 | RUN-01, SCR-05, ADR-061 | M1 |
+| `run.list` · `run.get` | `{projectId, status?}` → `{runs}` (표시 ID 순) / `{projectId, id}`(ULID 또는 `EXE-NNN`) → `{run, steps, usage}` (`usage` = 실행 · 역할 · 에이전트 단계 시도별 비용 · 턴 · 모델별 사용량, 값 없으면 `null`, ADR-067) | RUN-01, SCR-05, COST-02, ADR-061, ADR-067 | M1 |
 | `run.resume` | `{projectId, id, author}` → `{run, steps}` (사람만 -32020, `interrupted`만 · 이미 구동 중 · 되돌리기 실패 -32009, 없음 -32004. 워크트리를 마지막 완료 단계 커밋으로 hard reset + clean 뒤 새 세션) | PRD 5.1, ADR-011, ADR-027, ADR-066 | M1 |
 | `settings.get` · `settings.update` | `{projectId}` / `{projectId, patch, author}` → `{settings}` (사람만, 미설정 저장 허용) | COST-01, NFR-07, ADR-010, ADR-057 | M1 |
 | `settings.validateForRun` | `{projectId, roles?}` → `{ok: true}` 또는 `{ok: false, code: -32010, reason: 'SETTINGS_INCOMPLETE', message, missing[]}` | NFR-07, ADR-057 | M1 |
