@@ -1,0 +1,65 @@
+# test-writer.test.ts 전용 (M1-15). 세션 작업 디렉터리의 입력 사본만 보이고, 쓰기는 대상 규칙 폴더만 되는지 확인한다.
+# 거부돼야 하는 호출: 루트 밖 읽기 · 소스 쓰기 · 다른 규칙 폴더 · bive-acceptance 바로 아래 · 입력 사본 덮어쓰기.
+# 마지막에 대상 규칙 폴더에 인수 테스트 1개(옮겨짐)와 메모 파일 1개(*.acc.ts가 아니라 옮기지 않음)를 쓴다.
+name: test-writer-guard
+description: test-writer가 허용 경로 밖 읽기 · 쓰기를 시도하고 대상 규칙 폴더에만 쓴다
+roles:
+  test-writer:
+    sessions:
+      - turns:
+          - tool: list_files
+            args:
+              path: .
+              recursive: true
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: read_file
+            args:
+              path: ../outside.txt
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: "export const GET = () => Response.json({ ok: true, time: 'x' });\n"
+          - tool: write_file
+            args:
+              path: bive-acceptance/RULE-900/legacy.acc.ts
+              content: "import { it } from 'vitest';\nit('x', () => {});\n"
+          - tool: write_file
+            args:
+              path: bive-acceptance/top.acc.ts
+              content: "import { it } from 'vitest';\nit('x', () => {});\n"
+          - tool: write_file
+            args:
+              path: rules/{{ruleId}}.md
+              content: 진술 변경
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 서버 시각
+                import { describe, expect, inject, it } from 'vitest';
+
+                describe('GET /api/health 서버 시각', () => {
+                  it('응답 JSON에 time 문자열이 있다', async () => {
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+                    const body = (await res.json()) as { time?: unknown };
+                    expect(typeof body.time).toBe('string');
+                  });
+                });
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/notes.md
+              content: 작성 메모
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.04
+          num_turns: 9
+          modelUsage:
+            model-a:
+              inputTokens: 2000
+              outputTokens: 900
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 0
+              costUSD: 0.04

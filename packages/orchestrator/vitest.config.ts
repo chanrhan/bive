@@ -2,7 +2,8 @@ import { defineConfig } from 'vitest/config';
 
 // 판정 러너 테스트는 픽스처를 실제로 next build 하므로 CPU를 오래 쓴다. 다른 테스트(짧은 제한 시간의
 // 프로세스 · 소켓 테스트)와 동시에 돌면 그쪽이 흔들리므로 groupOrder로 나머지가 끝난 뒤 따로 돌린다.
-const JUDGE_TESTS = ['test/judge-runner.test.ts'];
+// 판정 파일끼리도 빌드가 겹치지 않게 파일을 하나씩 돌린다.
+const JUDGE_TESTS = ['test/judge-runner.test.ts', 'test/test-writer.test.ts'];
 
 export default defineConfig({
   // 워크스페이스 패키지(@bive/*)를 빌드 없이 src로 해석한다 (architecture.md 2장 끝).
@@ -16,7 +17,12 @@ export default defineConfig({
       },
       {
         extends: true,
-        test: { name: 'judge', include: JUDGE_TESTS, sequence: { groupOrder: 1 } },
+        test: {
+          name: 'judge',
+          include: JUDGE_TESTS,
+          sequence: { groupOrder: 1 },
+          fileParallelism: false,
+        },
       },
     ],
   },

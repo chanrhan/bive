@@ -13,6 +13,7 @@ import path from 'node:path';
 import { createUlidGenerator, type JudgmentCase, Ulid } from '@bive/shared';
 
 import { resolveBiveHome } from '../run-paths.js';
+import { renderHttpHelper } from './acceptance-env.js';
 import {
   ACCEPTANCE_DIR,
   ACCEPTANCE_SUFFIX,
@@ -75,6 +76,8 @@ export interface JudgeRunPaths {
   /** 수집 단계 설정 (케이스 본문 · 훅 미실행) */
   collectConfig: string;
   globalSetup: string;
+  /** BIVE HTTP 도우미 모듈 (`@bive/http`, ADR-068) */
+  httpHelper: string;
   /** vitest JSON reporter 원본 (실행기가 남긴 경우만 존재) */
   result: string;
   /** 수집 단계 JSON 원본 */
@@ -226,6 +229,7 @@ export class JudgeRunner {
       config: path.join(dir, JUDGE_FILES.config),
       collectConfig: path.join(dir, JUDGE_FILES.collectConfig),
       globalSetup: path.join(dir, JUDGE_FILES.globalSetup),
+      httpHelper: path.join(dir, JUDGE_FILES.httpHelper),
       result: path.join(dir, JUDGE_FILES.result),
       collectResult: path.join(dir, JUDGE_FILES.collectResult),
       collectLog: path.join(dir, JUDGE_FILES.collectLog),
@@ -237,11 +241,13 @@ export class JudgeRunner {
     // 에이전트 접근 불가 영역 (architecture.md 3장 저장소 배치)
     await mkdir(dir, { recursive: true, mode: 0o700 });
     await writeFile(paths.globalSetup, renderGlobalSetup(), { mode: 0o600 });
+    await writeFile(paths.httpHelper, renderHttpHelper(), { mode: 0o600 });
     const configBase: Omit<JudgeConfigInput, 'mode' | 'resultPath'> = {
       worktreeDir,
       judgeDir: dir,
       globalSetupPath: paths.globalSetup,
       cacheDir: path.join(dir, JUDGE_FILES.cacheDir),
+      httpHelperPath: paths.httpHelper,
       ruleIds,
     };
     await writeFile(

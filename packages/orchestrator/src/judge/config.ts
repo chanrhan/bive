@@ -2,6 +2,7 @@
 // 프로젝트의 vitest.config.* · vitest.workspace · package.json 설정은 읽지 않는다:
 // 생성한 설정을 `--config`로 명시하고 `--root`를 워크트리로 준다. 설정 파일은 외부 모듈을 import하지 않는
 // 순수 객체라 워크트리 밖(`$BIVE_HOME/projects/<id>/judge/...`)에 있어도 해석할 것이 없다.
+import { BIVE_HTTP_HELPER_MODULE } from './acceptance-lint.js';
 
 /** 인수 테스트 위치 (ADR-026). 규칙 매핑 = `bive-acceptance/<RULE-ID>/` 디렉터리. */
 export const ACCEPTANCE_DIR = 'bive-acceptance';
@@ -22,6 +23,8 @@ export const JUDGE_FILES = {
   stderr: 'stderr.log',
   profileLog: 'profile.log',
   serverLog: 'server.log',
+  /** BIVE HTTP 도우미 모듈 (`@bive/http`, ADR-068) */
+  httpHelper: 'bive-http.mjs',
   cacheDir: 'vite-cache',
 } as const;
 
@@ -60,6 +63,8 @@ export interface JudgeConfigInput {
   globalSetupPath: string;
   resultPath: string;
   cacheDir: string;
+  /** 판정 폴더의 `@bive/http` 모듈 파일 */
+  httpHelperPath: string;
   ruleIds: readonly string[] | null;
 }
 
@@ -69,6 +74,8 @@ export const buildJudgeConfig = (input: JudgeConfigInput) => ({
   // 프로젝트의 .env 파일을 읽지 않는다
   envDir: input.judgeDir,
   cacheDir: input.cacheDir,
+  // BIVE HTTP 도우미는 프로젝트에 설치하지 않고 판정 폴더의 파일로 연결한다 (ADR-068)
+  resolve: { alias: { [BIVE_HTTP_HELPER_MODULE]: input.httpHelperPath } },
   test: {
     include: includePatterns(input.ruleIds),
     exclude: ['**/node_modules/**'],

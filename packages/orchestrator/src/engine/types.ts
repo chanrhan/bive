@@ -104,6 +104,8 @@ export interface StepSessionRequest {
   readonly vars?: Readonly<Record<string, string>>;
   /** 명령 도구 설정 (`toolchainRoot` · `env` · `installAllowlist`) */
   readonly commands?: Omit<CommandContext, 'cwd' | 'guard'>;
+  /** test-writer가 쓸 수 있는 규칙 폴더 (`bive-acceptance/<이름>/`, ADR-068). 생략하면 아무 규칙 폴더나 */
+  readonly writableRuleDirs?: readonly string[];
   /** 제안 도구 훅 (도구 호출 기록은 엔진이 저장한다) */
   readonly hooks?: Pick<RoleToolsHooks, 'proposeRule'>;
 }

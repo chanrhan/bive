@@ -64,6 +64,8 @@ export interface CreateRoleToolsOptions {
   /** 세션 루트: implementer = 실행 워크트리, test-writer = 세션 디렉터리 (ADR-024) */
   sessionRoot: string;
   biveHome: string;
+  /** test-writer가 쓸 수 있는 규칙 폴더 (`PathGuardOptions.writableRuleDirs`, ADR-068) */
+  writableRuleDirs?: readonly string[];
   hooks?: RoleToolsHooks;
   /** 기록에 남길 세션 ID. init 뒤에 `setSessionId`로 정해도 된다 */
   sessionId?: string;
