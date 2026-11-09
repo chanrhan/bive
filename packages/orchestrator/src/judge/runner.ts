@@ -8,6 +8,7 @@
 // 문법 오류 파일에서 먼저 실패해 collect_error가 runner_error로 바뀌기 때문이다 (ADR-051).
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { createUlidGenerator, type JudgmentCase, Ulid } from '@bive/shared';
@@ -131,6 +132,11 @@ export interface JudgeRunnerOptions {
   biveHome?: string;
   /** 자식 프로세스 환경 변수의 원천 (허용 목록만 넘긴다). 기본 `process.env` */
   env?: NodeJS.ProcessEnv;
+  /**
+   * 판정 임시 파일(임시 DB 폴더 `bive-judge-db-*`)을 만들 상위 폴더 (절대 경로). 기본 `os.tmpdir()`.
+   * 테스트가 다른 판정과 섞이지 않는 폴더를 줄 때 쓴다 (ADR-064)
+   */
+  tempDir?: string;
 }
 
 const PROFILES: Record<JudgeProfileName, StackProfile> = {
@@ -202,11 +208,16 @@ const describeError = (err: unknown): string => (err instanceof Error ? err.mess
 export class JudgeRunner {
   readonly #biveHome: string;
   readonly #env: NodeJS.ProcessEnv;
+  readonly #tempDir: string | undefined;
   readonly #newId = createUlidGenerator();
 
   constructor(options: JudgeRunnerOptions = {}) {
+    if (options.tempDir !== undefined && !path.isAbsolute(options.tempDir)) {
+      throw new TypeError(`tempDir는 절대 경로여야 합니다: ${options.tempDir}`);
+    }
     this.#biveHome = options.biveHome ?? resolveBiveHome();
     this.#env = options.env ?? process.env;
+    this.#tempDir = options.tempDir;
   }
 
   /** 판정 폴더 경로: `$BIVE_HOME/projects/<projectId>/judge/<runId>/<judgeId>/`. */
@@ -372,6 +383,8 @@ export class JudgeRunner {
         env: childEnv,
         profileLog: paths.profileLog,
         serverLog: paths.serverLog,
+        // 지정하지 않으면 판정마다 그때의 os.tmpdir()를 쓴다 (기존 동작)
+        tempDir: this.#tempDir ?? tmpdir(),
         deadline,
         onStep: (step, ms) => (timings[step] = ms),
       });

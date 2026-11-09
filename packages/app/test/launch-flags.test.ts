@@ -1,4 +1,5 @@
 // Electron 실행 인자 (ADR-028, 이슈 #9 수용 기준 4).
+// 제한: pnpm exec tsx로 start 진입점을 띄우는 테스트는 30초(부하 평균 12 이상에서 7.7초가 걸려 기본 5초를 넘었다, #122).
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -100,5 +101,6 @@ describe('launch-flags', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     },
+    30_000,
   );
 });
