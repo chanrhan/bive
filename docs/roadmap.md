@@ -117,9 +117,9 @@ PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 �
 | M1-27 | 승인 대기 목록 · 상세 · 수정 · 거절 · 승인 (SCR-17) | feature | app | M1-10 | `e2e/scr-17.spec.ts`가 `checklists/scr-17.ts`의 기본 상태(카드 1줄 종류 태그와 제목, 2줄 ID와 예외와 시각, 안 읽음 점)와 빈 상태("대기 항목 없음", ADR-029)를 통과 · 상세가 출처, 제안(diff, 근거, 생성 주체), 승인하면과 거절하면 카드 순서이고 오른쪽 아래에 [거절] [수정] [승인]이 떠 있음을 단언 · [수정]과 [거절] 입력이 대화 끝 카드로 열려 자동 스크롤되고 포커스를 받으며 거절 사유가 비면 확인 버튼이 비활성임을 단언 · 필터 칩 4종(처리 상태, 종류, 위험도, 제안자) 중 위험도는 0건 비활성이고(ADR-035) 처리됨 필터에서 승인과 거절 기록(수정 diff, 주체, 사유)이 보임을 단언 | NRM-04 · TODO-01 · SCR-17 · ADR-029 · ADR-035 | #40 |
 | M1-28 | 규칙 상세 (SCR-06) · 테스트 출력 | feature | app | M1-11·M1-16 | `e2e/scr-06-rule.spec.ts`가 `checklists/scr-06.ts`의 규칙 기본 상태(진술, 테스트 실행 결과, 실행 이력)를 통과하고 변경 이력 영역이 미노출임을 단언(ADR-035) · 테스트 출력이 기본 접힘이고 최신 판정이 실패면 자동으로 펼쳐짐을 단언 · 실패 원인에 실행기 출력(실패 케이스 이름, 메시지, `file:line`)이 보임을 단언 | NRM-02 · JDG-02 · SCR-03 · SCR-06 | #41 |
 | M1-29 | 파이프라인 e2e (b): 중단 재개 · 금지 경로 · 추가 MCP · 통과 보고 · 병합 충돌 | chore | ci·orchestrator | M1-20·M1-21·M1-22 | `orchestrator/e2e/pipeline/interrupt-resume.test.ts`가 `pause-implement` 도중 오케스트레이터 SIGKILL, 재기동 뒤 `interrupted`, `run.resume` 뒤 `merged`를 단언 · `forbidden-write`와 `extra-mcp` 시나리오를 추가하고 `forbidden-write.test.ts`가 도구 거부 2건 기록과 인수 테스트 해시 불변을, `extra-mcp.test.ts`가 실행 `failed`를 단언 · `false-pass.test.ts`가 판정 `fail`을, `merge-conflict` 시나리오와 `merge-conflict.test.ts`가 병합 직전 기준 브랜치 충돌 커밋에서 `failed`와 브랜치 보존을 단언 · `pnpm e2e:pipeline`이 architecture.md 8장 시나리오 9개를 각각 테스트 1개로, 그리고 `app-exit.test.ts`를 포함해 `ci`에서 통과 | NFR-01 · NFR-02 · NFR-06 · JDG-01 · RUN-08 | #42 |
-| M1-30 | 기준 브랜치 갱신 경합 창 사후 탐지 · 무시 경로 새 추적 차단 (보조) | feature | orchestrator | M1-13 | `orchestrator/test/worktree.test.ts`가 `update_ref` 뒤 색인이 병합 커밋과 다르면 되돌리고 `base_update_failed`, 기준 브랜치가 무시하던 경로를 새로 추적하면 `ignored_path_tracked`, 동시 `create` · 병합 대기열 · 재진입 · 제한 시간 · 실패 격리를 단언(ADR-065) | RUN-08 · NFR-01 · ADR-017 · ADR-058 · ADR-065 | #129 |
-| M1-31 | 인수 테스트 검사 보강 (보조) | feature | orchestrator | M1-15 | `orchestrator/test/acceptance-lint.test.ts`가 `process` 탈출 수단(`execve` · `loadEnvFile` · `report`) · `import.<이름>`(meta 외) 거부, 매처 인자 · 객체 키 · 타입 자리 오탐 완화, PR #136 거부 사례 회귀, 오케스트레이터 기동 시 파서 미로드를 단언(ADR-068) | JDG-01 · NFR-02 · ADR-068 | #137 |
-| M1-32 | 프로세스 기동 테스트의 부하 시 시간 초과 완화 (보조) | chore | app·orchestrator | — | 프로세스를 띄우는 테스트 파일만 제한 상향 또는 기동 대기 폴링으로 바꿔 부하 평균 12 이상에서 `pnpm test` 3회 연속 통과 · 끄거나 `skip` · `retry`로 숨기지 않음 · 판정 테스트의 공용 `/tmp` 비교 제거(ADR-064) | NFR-05 · ADR-041 · ADR-064 | #122 |
+| M1-30 | 기준 브랜치 갱신 경합 창 사후 탐지 · 무시 경로 새 추적 차단 | feature | orchestrator | M1-13 | `orchestrator/test/worktree.test.ts`가 `update_ref` 뒤 색인이 병합 커밋과 다르면 되돌리고 `base_update_failed`를 돌려줌을 단언 · 기준 브랜치가 무시하던 경로를 새로 추적하면 `ignored_path_tracked`로 병합하지 않음을 단언 · 동시 `create`, 병합 대기열 직렬화, 재진입 거부(`reentrant_call`), 검사 제한 시간(`check_timeout`), 실패 격리를 단언(ADR-065) | RUN-08 · NFR-01 · ADR-017 · ADR-058 · ADR-065 | #129 |
+| M1-31 | 인수 테스트 검사 보강 | feature | orchestrator | M1-15 | `orchestrator/test/acceptance-lint.test.ts`가 `process`의 탈출 수단(`execve`, `loadEnvFile`, `report`)과 `meta`가 아닌 `import.<이름>`을 거부함을 단언 · 매처 인자, 객체 키, 타입 자리에서는 거부 이름을 허용하고 PR #136 거부 사례는 그대로 거부함을 단언 · 오케스트레이터 기동 시 검사 파서를 불러오지 않음을 단언(ADR-068) | JDG-01 · NFR-02 · ADR-068 | #137 |
+| M1-32 | 프로세스 기동 테스트의 부하 시 시간 초과 완화 | chore | app·orchestrator | — | 프로세스를 띄우는 테스트 파일만 제한 상향이나 기동 대기 폴링으로 바꿔 부하 평균 12 이상에서 `pnpm test` 3회 연속 통과 · 끄거나 `skip`, `retry`로 숨기지 않음 · 판정 테스트가 공용 `/tmp` 전체를 비교하지 않고 파일 전용 임시 폴더만 비교함(ADR-064) | NFR-05 · ADR-041 · ADR-064 | #122 |
 
 ### 2.2 M2 측정 시작
 
@@ -310,7 +310,7 @@ PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 �
 | COL-02 | 요구사항 | P1 | M4 | M4-05·M4-16 |  |
 | COL-03 | 요구사항 | P1 | M4 | M4-05·M4-08·M4-15 |  |
 | COL-04 | 요구사항 | P1 | M4 | M4-03 | N은 ADR-022 |
-| NFR-01 | 비기능 | — | M0(부분)·M1(부분)·M5 | M0-04·M1-09·M1-22·M1-29·M5-06 | 에이전트 승인 불가 · 해시 체인 ADR-027 |
+| NFR-01 | 비기능 | — | M0(부분)·M1(부분)·M5 | M0-04·M1-09·M1-22·M1-29·M1-30·M5-06 | 에이전트 승인 불가 · 해시 체인 ADR-027 |
 | NFR-02 | 비기능 | — | M1 | M1-07·M1-15·M1-16·M1-22·M1-26·M1-29·M1-31 | 경로 매트릭스는 ADR-024 (PRD `미정`) |
 | NFR-03 | 비기능 | — | M0(부분)·M4(부분)·M5 | M0-01·M0-07·M4-12·M5-01 | 제품 코드 목 데이터 금지 ESLint 규칙(M0-01) · 화면 문구 검사(M0-07) |
 | NFR-04 | 비기능 | — | M1 | M1-07·M1-22·M1-26 | 네트워크 허용 범위 PRD `미정`, 외부 연결 0건 시험 M1-22 |
@@ -363,4 +363,4 @@ PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 �
 - 2026-10-15 2차 검토 반영: 의존 5곳 추가(M1-20 · M1-22 · M1-25 · M3-12 · M4-01), 변이 주입 · planner · 채팅 역할의 설정 칸(M3-07 · M4-01 · M5-01), M4 흐름 설정 저장을 1단계로, `.bive.json` 미추적 처리(M1-13 · M3 흐름 5), 도구 기록 결과 `denied` + 사유로 통일.
 - 2026-10-15 발행: 마일스톤 7개, 이슈 92개 (GitHub #1~#7 마일스톤, 이슈 #4~#95). `scripts/publish-roadmap.py`로 발행하고 `이슈` 열에 번호를 기록.
 - 2026-10-16 M0 흐름 2의 스크린샷 경로를 ADR-043(SCR-00 · 상태 이름)에 맞게 수정 (#109).
-- 2026-11-10 M1 진행 중 생긴 보조 이슈 3개를 M1 표에 추가: M1-30(#129, PR #123 검토 후속), M1-31(#137, PR #136 검토 후속), M1-32(#122, 시험 안정화). 요약 표 상태 갱신(M0 완료, M1 진행). M1 이슈 29개 → 32개.
+- 2026-11-10 M1 진행 중 생긴 보조 이슈 3개를 M1 표에 추가(보조 이슈): M1-30(#129, PR #123 검토 후속), M1-31(#137, PR #136 검토 후속), M1-32(#122, 시험 안정화). 요약 표 상태 갱신(M0 완료, M1 진행). M1 이슈 29개 → 32개.
