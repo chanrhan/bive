@@ -49,6 +49,8 @@ import { toRpcError, withRegisteredProjectStore } from '../ipc/project-store-acc
 import { RpcError } from '../ipc/server.js';
 import type { RunTracker } from '../lifecycle.js';
 import { completeStep, evaluateApprovalStep } from '../runs/run-service.js';
+import { createRedCheckExecutor } from '../steps/red-check.js';
+import { createTestWritingExecutor } from '../steps/test-writing.js';
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
 import { budgetOverrun, sessionLimits } from './session-budget.js';
 import {
@@ -97,7 +99,7 @@ export interface PipelineEngineOptions {
   biveHome: string;
   /** 세션을 여는 에이전트 어댑터 (`BIVE_AGENT`로 고른 것) */
   agent: AgentAdapter;
-  /** 단계 실행기 (승인 단계 제외). 기본값: 변이 주입 `skipped` · 화면 갱신 알림 */
+  /** 단계 실행기 (승인 단계 제외). 기본값(`DEFAULT_STEP_EXECUTORS`)에 덮어쓴다 */
   executors?: StepExecutors;
   /** git 워크트리 관리자 (기본 `createWorktreeManager({ biveHome })`) */
   worktrees?: WorktreeManager;
@@ -123,7 +125,13 @@ export const notifyScreenUpdateStep: StepExecutor = (context) => {
   return Promise.resolve({ status: 'passed', exitDetail: { notified: true } });
 };
 
+/**
+ * 기본 실행기: 테스트 작성 · Red 확인(#28, ADR-068) · 변이 주입 `skipped` · 화면 갱신 알림. 구현 · 검사 · 병합은 #29가
+ * 넣는다. 유형 A 실행기가 다 있어야 구동하므로 그 전까지 실행은 `step_executor_missing`으로 끝난다 (ADR-066).
+ */
 export const DEFAULT_STEP_EXECUTORS: StepExecutors = {
+  test_writing: createTestWritingExecutor(),
+  red_check: createRedCheckExecutor(),
   mutation: skipMutationStep,
   screen_update: notifyScreenUpdateStep,
 };
@@ -937,6 +945,9 @@ export class PipelineEngine {
       sessionId,
       now: () => new Date(this.#now()),
       ...(request.commands === undefined ? {} : { commands: request.commands }),
+      ...(request.writableRuleDirs === undefined
+        ? {}
+        : { writableRuleDirs: request.writableRuleDirs }),
       hooks: {
         ...request.hooks,
         onToolCall: (record) => this.#recordToolCall(projectId, run.id, sessionId, record),

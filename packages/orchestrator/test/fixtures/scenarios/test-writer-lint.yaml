@@ -1,0 +1,61 @@
+# test-writer.test.ts 전용 (M1-15). 테스트 작성 종료 조건(규칙마다 *.acc.ts 1개 이상 · import 허용 목록)을 확인한다.
+# 세션 0: 소스를 상대 경로로 import (허용 목록 위반)
+# 세션 1: 대상 규칙 폴더에 *.acc.ts 없이 메모만 씀 (파일 없음)
+# 세션 2: vitest · node: 내장 · BIVE HTTP 도우미만 쓰는 테스트 (통과)
+name: test-writer-lint
+description: 테스트 작성이 import 위반 · 파일 없음 뒤 세 번째에 규약을 지킨다
+roles:
+  test-writer:
+    sessions:
+      - description: 0 - 내부 코드 직접 호출
+        turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+              content: |
+                import { expect, it } from 'vitest';
+                import { GET } from '../../src/app/api/health/route';
+
+                it('time이 있다', async () => {
+                  const body = (await (await GET()).json()) as { time?: unknown };
+                  expect(typeof body.time).toBe('string');
+                });
+        result: &result
+          subtype: success
+          total_cost_usd: 0.02
+          num_turns: 1
+          modelUsage:
+            model-a:
+              inputTokens: 1000
+              outputTokens: 300
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 0
+              costUSD: 0.02
+      - description: 1 - 인수 테스트 파일 없음
+        turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/plan.md
+              content: 작성 계획만 남김
+        result: *result
+      - description: 2 - 규약 준수
+        turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 서버 시각. HTTP로만 요청한다.
+                import { strict as assert } from 'node:assert';
+
+                import { request } from '@bive/http';
+                import { describe, expect, it } from 'vitest';
+
+                describe('GET /api/health 서버 시각', () => {
+                  it('응답 JSON의 time이 ISO 8601 UTC 문자열이다', async () => {
+                    const res = await request('/api/health');
+                    assert.equal(res.status, 200);
+                    const body = (await res.json()) as { time?: unknown };
+                    expect(String(body.time)).toMatch(/^\d{4}-\d{2}-\d{2}T[^"']+Z$/);
+                  });
+                });
+        result: *result

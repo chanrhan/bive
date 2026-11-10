@@ -4,7 +4,7 @@
 // - 중간 경로의 링크 · 대상이 없는 링크(쓰면 루트 밖에 생길 수 있음) 거부
 // - 하드 링크(링크 수 2 이상인 파일)는 쓰기 거부, 읽기는 `node_modules` 안(pnpm 저장소 링크)만 허용
 // - 역할별 쓰기 금지: implementer는 `bive-acceptance/**` · `node_modules/**`,
-//   test-writer는 `bive-acceptance/<규칙 폴더>/…` 밖 전부
+//   test-writer는 `bive-acceptance/<규칙 폴더>/…` 밖 전부(규칙 폴더를 지정하면 그 폴더만, ADR-068)
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -36,6 +36,11 @@ export interface PathGuardOptions {
   /** 세션 루트 (implementer = 실행 워크트리, test-writer = 세션 디렉터리) */
   sessionRoot: string;
   biveHome: string;
+  /**
+   * test-writer가 쓸 수 있는 규칙 폴더 이름(`bive-acceptance/<이름>/`, 글자 그대로 비교). 생략하면 아무 규칙 폴더나.
+   * 테스트 작성 단계는 대상 규칙 폴더만 넘겨 다른 규칙의 기존 인수 테스트를 고치지 못하게 한다 (ADR-068)
+   */
+  writableRuleDirs?: readonly string[];
 }
 
 /** `a`가 `b`와 같거나 그 아래인지 (둘 다 절대 · 정규화된 경로). */
@@ -94,9 +99,12 @@ export class PathGuard {
   /** 세션 루트 실경로 */
   readonly root: string;
   private readonly homeAreas: HomeArea[];
+  private readonly writableRuleDirs: readonly string[] | null;
 
   constructor(options: PathGuardOptions) {
     this.role = options.role;
+    this.writableRuleDirs =
+      options.writableRuleDirs === undefined ? null : [...options.writableRuleDirs];
     const root = resolveReal(path.resolve(options.sessionRoot));
     if (root === null || !fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) {
       throw new Error('세션 루트가 폴더가 아님');
@@ -171,6 +179,9 @@ export class PathGuard {
       // 허용 판정은 글자 그대로 비교한다: `bive-acceptance/<규칙 폴더>/<파일…>`만
       if (raw[0] !== ACCEPTANCE_DIR || raw.length < 3) {
         return `${ACCEPTANCE_DIR}/<규칙 폴더>/ 밖 쓰기 불가`;
+      }
+      if (this.writableRuleDirs !== null && !this.writableRuleDirs.includes(raw[1] ?? '')) {
+        return `대상 규칙 폴더(${this.writableRuleDirs.join(', ')}) 밖 쓰기 불가`;
       }
       if (segments.includes(DEPENDENCY_DIR)) return `${DEPENDENCY_DIR} 쓰기 불가`;
       return null;

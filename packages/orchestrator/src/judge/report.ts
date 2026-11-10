@@ -92,24 +92,44 @@ const parseCase = (raw: unknown, file: string, index: number): JudgmentCase => {
 /** 메시지 없이 실패한 파일(스위트 훅 실패 등)의 원인 안내 앞부분. */
 export const SUITE_FAILURE_MESSAGE = '스위트 훅 실패 등 파일 수준 오류 (stderr.log 참고)';
 
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** vitest 기본 reporter의 실패 머리줄 하나: ` FAIL  <file>[:줄] [> <스위트 · 케이스 이름>]`과 그 다음 첫 오류 줄. */
+export interface FailHeader {
+  /** ` > ` 뒤의 이름 (스위트 또는 케이스, 상위 이름을 ` > `로 이은 것). 없으면 `null` */
+  name: string | null;
+  /** 머리줄 다음의 첫 비어 있지 않은 줄 (오류 요약). 없으면 `null` */
+  detail: string | null;
+}
+
+/** 출력에서 `file`의 실패 머리줄을 모두 찾는다. */
+export const failHeadersFor = (output: string, file: string): FailHeader[] => {
+  const lines = stripAnsi(output).split(/\r?\n/);
+  const header = new RegExp(`^\\s*FAIL\\s+${escapeRegExp(file)}(?::\\d+)*(?=\\s|$)(.*)$`);
+  const found: FailHeader[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = header.exec(lines[i] ?? '');
+    if (match === null) continue;
+    let detail: string | null = null;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = (lines[j] ?? '').trim();
+      if (line.length > 0) {
+        detail = line;
+        break;
+      }
+    }
+    const name = /^\s+>\s+(.+?)\s*$/.exec(match[1] ?? '')?.[1] ?? null;
+    found.push({ name, detail });
+  }
+  return found;
+};
+
 /**
  * vitest 기본 reporter 출력에서 `file`의 첫 실패 줄을 찾는다.
  * ` FAIL  <file>[:줄] > <스위트>` 머리줄 다음의 첫 비어 있지 않은 줄(오류 요약)을 돌려준다. 없으면 `null`.
  */
-export const firstErrorLineFor = (output: string, file: string): string | null => {
-  const lines = stripAnsi(output).split(/\r?\n/);
-  const header = new RegExp(
-    `^\\s*FAIL\\s+${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[:\\s]|$)`,
-  );
-  for (let i = 0; i < lines.length; i += 1) {
-    if (!header.test(lines[i] ?? '')) continue;
-    for (let j = i + 1; j < lines.length; j += 1) {
-      const line = (lines[j] ?? '').trim();
-      if (line.length > 0) return line;
-    }
-  }
-  return null;
-};
+export const firstErrorLineFor = (output: string, file: string): string | null =>
+  failHeadersFor(output, file).find((header) => header.detail !== null)?.detail ?? null;
 
 export interface ParseOptions {
   /** 같은 실행의 reporter 출력(stderr). 메시지 없는 파일 실패의 원인 줄을 찾는 데 쓴다 */
@@ -160,6 +180,20 @@ export const parseVitestReport = (
         file,
         message: detail === null ? SUITE_FAILURE_MESSAGE : `${SUITE_FAILURE_MESSAGE}: ${detail}`,
       });
+    } else if (rawFile.status === 'failed' && options.output !== undefined) {
+      // 실패 케이스와 스위트 훅 실패가 한 파일에 섞인 경우: 훅 실패는 JSON에 남지 않고(그 스위트 케이스는 건너뜀)
+      // 출력의 ` FAIL  <file> > <스위트>` 머리줄로만 드러난다. 실패 케이스가 아닌 이름의 머리줄을 파일 수준 오류로
+      // 올린다 (ADR-051 "훅 실패는 위치와 무관하게 파일 수준 오류", ADR-068)
+      const failedNames = new Set(
+        fileCases.filter((c) => c.status === 'failed').map((c) => c.name),
+      );
+      for (const header of failHeadersFor(options.output, file)) {
+        if (header.name === null || failedNames.has(header.name)) continue;
+        collectProblems.push({
+          file,
+          message: `${SUITE_FAILURE_MESSAGE}: ${header.name}${header.detail === null ? '' : ` - ${header.detail}`}`,
+        });
+      }
     }
   }
 

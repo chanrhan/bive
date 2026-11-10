@@ -1,0 +1,37 @@
+# test-writer.test.ts 전용 (M1-15). Red 판정이 깨끗한 체크아웃에서 도는지 재현한다.
+# 인수 테스트는 /api/planted가 200이기를 기대한다. 이 경로는 커밋에 없고, 실행 워크트리에만 무시된 파일
+# (src/app/api/planted/.gitignore = '*' + route.ts)로 심어 둔다. 커밋의 깨끗한 체크아웃에서는 404라 Red가 통과하고,
+# 실행 워크트리에서 판정하면 통과(Red 아님)로 바뀐다. inject('baseUrl') 타입 선언 · BIVE HTTP 도우미도 함께 쓴다.
+name: test-writer-planted
+description: 커밋에 없는 경로를 기대하는 인수 테스트 (깨끗한 체크아웃에서만 Red)
+roles:
+  test-writer:
+    sessions:
+      - turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/planted.acc.ts
+              content: |
+                // {{ruleId}}: 심어 둔 경로 확인 (재현용)
+                import { request, url } from '@bive/http';
+                import { describe, expect, inject, it } from 'vitest';
+
+                describe('GET /api/planted', () => {
+                  it('상태 코드 200을 돌려준다', async () => {
+                    const baseUrl: string = inject('baseUrl');
+                    expect(url('/api/planted').origin).toBe(new URL(baseUrl).origin);
+                    const res = await request('/api/planted');
+                    expect(res.status).toBe(200);
+                  });
+                });
+        result:
+          subtype: success
+          total_cost_usd: 0.03
+          num_turns: 1
+          modelUsage:
+            model-a:
+              inputTokens: 1500
+              outputTokens: 500
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 0
+              costUSD: 0.03
