@@ -1,5 +1,4 @@
 // 프로젝트별 저장소 (`$BIVE_HOME/projects/<projectId>/bive.db`, ADR-005 · ADR-025 · NFR-01).
-// 판정 등은 이후 이슈가 마이그레이션과 리포지토리를 이 저장소에 추가한다.
 import type { Project, Ulid } from '@bive/shared';
 
 import { openDatabase, withTransaction, type SqliteDatabase } from './database.js';
@@ -8,6 +7,7 @@ import { PROJECT_MIGRATIONS } from './migrations/project/index.js';
 import { bivePaths, assertProjectId } from './paths.js';
 import { ApprovalLogRepository } from './repositories/approval-log-repository.js';
 import { DisplayIdSequences } from './repositories/display-id-sequences.js';
+import { JudgmentRepository } from './repositories/judgment-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { ProposalRepository } from './repositories/proposal-repository.js';
 import { RequirementRepository } from './repositories/requirement-repository.js';
@@ -40,6 +40,8 @@ export class ProjectStore {
   readonly runs: RunRepository;
   /** 에이전트 세션 · 도구 호출 기록 (RUN-04, NFR-02, ADR-066). 세션 도중에도 바로 남기는 기록이다. */
   readonly sessions: SessionRepository;
+  /** 규칙 판정 기록 (JDG-01 · JDG-02, ADR-069). 추가만 하고 규칙의 최신 판정은 판정 시각 기준이다. */
+  readonly judgments: JudgmentRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -56,6 +58,7 @@ export class ProjectStore {
     this.settings = new SettingsRepository(db, projectId);
     this.sessions = new SessionRepository(db);
     this.runs = new RunRepository(db, projectId, this.sequences, this.sessions);
+    this.judgments = new JudgmentRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */
