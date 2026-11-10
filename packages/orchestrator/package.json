@@ -34,6 +34,7 @@
     "@bive/shared": "workspace:*",
     "@bive/store": "workspace:*",
     "@modelcontextprotocol/sdk": "1.32.0",
+    "typescript6": "npm:typescript@6.0.3",
     "yaml": "2.9.1",
     "zod": "4.6.7"
   }

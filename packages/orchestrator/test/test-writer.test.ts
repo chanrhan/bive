@@ -550,7 +550,31 @@ describe('acceptance-lint import 허용 목록 (수용 기준 2, JDG-01)', () =>
       "const t = `require ${'x'} ${`import('../z')`}`;",
       "const lazy = await import('node:url');",
       'const meta = import.meta.url;',
-      "it('x', async () => { assert.ok(re && s && t && lazy && meta); await request('/'); expect(inject('baseUrl')).toBeTruthy(); });",
+      // 정규식 본문의 import · require 글자는 코드가 아니다
+      "const words = /import('..\\/src')/.test(s) || /require/u.test(t) || /eval/.test(s);",
+      "type Url = typeof import('node:url');",
+      "it('x', async () => { assert.ok(re && s && t && lazy && meta && words); await request('/'); expect(inject('baseUrl')).toBeTruthy(); });",
+    ].join('\n');
+    expect(lintAcceptanceSource(source)).toEqual([]);
+  });
+
+  it('정규식 · 나눗셈이 섞인 정상 테스트는 통과한다', () => {
+    const source = [
+      "import { expect, it } from 'vitest';",
+      "import { request, url } from '@bive/http';",
+      "it('필수 값 없으면 400', async () => {",
+      "  const res = await request('/api/items', { method: 'POST', body: '{}' });",
+      '  const body = (await res.json()) as { error: string };',
+      '  expect(res.status).toBe(400);',
+      '  expect(body.error).toMatch(/required/);',
+      '  expect(body.error).not.toMatch(/retrieval/);',
+      '  expect(/import/i.test(body.error)).toBe(false);',
+      "  expect(url('/api/items').toString()).toContain('/api/items');",
+      '  const total = 10;',
+      '  const pages = total / 2 / 1;',
+      '  if (pages) {}',
+      '  expect(/\'/.test("\'")).toBe(true);',
+      '});',
     ].join('\n');
     expect(lintAcceptanceSource(source)).toEqual([]);
   });
@@ -574,17 +598,47 @@ describe('acceptance-lint import 허용 목록 (수용 기준 2, JDG-01)', () =>
     ["eval('1');", 'eval'],
     ["const f = new Function('return 1');", 'Function'],
     ["const s = 'unterminated;", '해석할 수 없습니다'],
-    // 나눗셈 · 정규식 오판 재현 (Node로 돌리면 실제로 import된다): 후위 ++ · -- · non-null 단언 · of 변수 · 속성 이름 뒤는 나눗셈
+    ['const x = ;', '해석할 수 없습니다'],
+    // 나눗셈 · 정규식 오판 재현 (tsx로 돌리면 실제로 import된다): 후위 ++ · -- · non-null 단언 · of 변수 · 속성 이름 뒤는 나눗셈
     ["let n = 0; let p; n++ /(p = import('../../src/lib/db'))/ 1;", '상대 · 절대 경로'],
     ["const of = 1; of /import('../../src/lib/db')/ 1;", '상대 · 절대 경로'],
     ["let n = 0; n-- /import('../../src/lib/db')/ 1;", '상대 · 절대 경로'],
     ["let n = 0; n! /import('../../src/lib/db')/ 1;", '상대 · 절대 경로'],
     ["const o = { in: 1 }; o.in /import('../../src/lib/db')/ 1;", '상대 · 절대 경로'],
-    // 이중 방어: 정규식으로 읽힌 본문에 import · require · eval 글자가 있으면 거부
-    ["const re = /import('..\\/src')/;", '정규식에 import'],
-    ['const re = /require/u;', '정규식에 import'],
-    // 식별자 이스케이프로 거부 식별자 숨기기
-    ["\\u0065val('1');", '식별자 이스케이프'],
+    // 반대 방향 오판 재현: 정규식을 나눗셈으로(또는 그 반대로) 읽으면 따옴표 · 백틱이 문자열 경계가 되어 코드가 숨는다
+    ['if (true) {}\n/\'/.test("x"); await import("../../src/lib/db"); // \'', '상대 · 절대 경로'],
+    ['if (1) /\'/.test("x"), await import("../../src/lib/db"); // \'', '상대 · 절대 경로'],
+    [
+      'let i = 0; while (i++ < 1) /\'/.test("x"); await import("../../src/lib/db"); // \'',
+      '상대 · 절대 경로',
+    ],
+    [
+      'for (const m of /\'/.exec("x") ?? []) {} await import("../../src/lib/db"); // \'',
+      '상대 · 절대 경로',
+    ],
+    [
+      "const s = `${/'/.source}`; await import(\"../../src/lib/db\"); const t = '}`'; // '",
+      '상대 · 절대 경로',
+    ],
+    ['if (true) {}\n/`/.test("x"); await import("../../src/lib/db"); // `', '상대 · 절대 경로'],
+    [
+      "const v = n as Array<number> / '/'; await import(\"../../src/lib/db\"); // '",
+      '상대 · 절대 경로',
+    ],
+    // 템플릿 `${}` 안의 import
+    ["const t = `${await import('../../src/lib/db')}`;", '상대 · 절대 경로'],
+    // 타입 자리의 import
+    ["type Db = typeof import('../../src/lib/db');", '상대 · 절대 경로'],
+    // 식별자 이스케이프로 거부 식별자 숨기기 (파서가 이스케이프를 풀어 원래 이름으로 본다)
+    ["\\u0065val('1');", 'eval'],
+    // vitest 실행기 내부 함수로 import 없이 불러오기 (실측: 실제로 모듈이 로드된다)
+    ["const m = await __vite_ssr_dynamic_import__('../../src/lib/db');", '실행기 내부 이름'],
+    ["const w = globalThis['__vitest_worker__'];", '실행기 내부 이름'],
+    // 속성 이름을 문자열 · 구조 분해로 꺼내기
+    ["const fsm = process['getBuiltinModule']('node:fs');", 'getBuiltinModule'],
+    ['const { getBuiltinModule: g } = process;', 'getBuiltinModule'],
+    ["const b = Reflect.get(process, 'binding');", 'process.binding'],
+    ['with (process) { void 0; }', 'with 문'],
     // Function 생성자 우회: .constructor로 꺼내기 · 이름으로 넘기기
     [
       '(async () => {}).constructor(\'return import("../../src/lib/db")\')();',
@@ -593,6 +647,9 @@ describe('acceptance-lint import 허용 목록 (수용 기준 2, JDG-01)', () =>
     ['const F = Object.getPrototypeOf(async () => {}).constructor;', 'constructor로 생성자'],
     ["const g = (() => {})['constructor'];", 'constructor로 생성자'],
     ['const x = (1).constructor.constructor;', 'constructor로 생성자'],
+    ['const { constructor: F } = async () => {};', 'constructor로 생성자'],
+    ["const F = Reflect.get(async () => {}, 'constructor');", 'constructor로 생성자'],
+    ['const g = (() => {})[`constructor`];', 'constructor로 생성자'],
     ["Reflect.construct(Function, ['return 1']);", 'Function 생성자'],
     ["globalThis.Function('return 1')();", 'Function 생성자'],
     // HTTP 밖 내장 모듈 · 네이티브 모듈을 꺼내는 process 함수
@@ -604,7 +661,8 @@ describe('acceptance-lint import 허용 목록 (수용 기준 2, JDG-01)', () =>
     const problems = lintAcceptanceSource(source);
     expect(problems.length).toBeGreaterThan(0);
     expect(problems[0]?.message).toContain(message);
-    expect(problems[0]?.line).toBe(1);
+    // 문제는 마지막 줄(여러 줄 재현은 둘째 줄)에 있다
+    expect(problems[0]?.line).toBe(source.split('\n').length);
     // 기록(JSON)에 사유가 그대로 남는다
     expect(JSON.parse(JSON.stringify(problems))).toEqual(problems);
   });
@@ -924,10 +982,22 @@ describe('red-violation 시나리오 (수용 기준 4)', () => {
 });
 
 describe('판정 보조 (ADR-051 · ADR-068)', () => {
-  it('판정 체크아웃의 worktree add는 관리자와 같은 저장소 잠금 안: 겹친 병합의 worktree list가 반쯤 만든 관리 폴더를 읽지 않는다', async () => {
+  it('판정 체크아웃의 worktree add · remove는 관리자와 같은 저장소 잠금 안: 겹친 병합의 worktree list가 반쯤 만든 관리 폴더를 읽지 않고, 지우기가 관리자의 worktree 명령과 겹치지 않는다', async () => {
     const biveHome = makeBiveHome();
     const repo = copyFixture(temps);
-    const manager = createWorktreeManager({ biveHome });
+    // 관리자의 `worktree` 하위 명령 구간을 기록한다 (지우기 잠금 확인용)
+    const managerWorktreeSpans: { start: number; end: number }[] = [];
+    const recordingGit: GitRunner = async (args, options) => {
+      if (args[0] !== 'worktree') return createGitRunner()(args, options);
+      const span = { start: Date.now(), end: Number.POSITIVE_INFINITY };
+      managerWorktreeSpans.push(span);
+      try {
+        return await createGitRunner()(args, options);
+      } finally {
+        span.end = Date.now();
+      }
+    };
+    const manager = createWorktreeManager({ biveHome, git: recordingGit });
     const projectId = newId();
     const run = await manager.create({
       projectId,
@@ -945,7 +1015,23 @@ describe('판정 보조 (ADR-051 · ADR-068)', () => {
     const started = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
+    let markRemoveStarted = (): void => undefined;
+    const removeStarted = new Promise<void>((resolve) => {
+      markRemoveStarted = resolve;
+    });
+    const removeSpan = { start: 0, end: 0 };
     const slowAdd: GitRunner = async (args, options) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') {
+        // 지우기 창을 벌린다: 잠금 밖이면 관리자의 `worktree` 명령이 이 사이에 시작한다
+        removeSpan.start = Date.now();
+        markRemoveStarted();
+        await sleep(800);
+        try {
+          return await real(args, options);
+        } finally {
+          removeSpan.end = Date.now();
+        }
+      }
       if (args[0] === 'worktree' && args[1] === 'add') {
         const admin = path.join(repo, '.git', 'worktrees', 'bive-half-judge');
         fs.mkdirSync(admin, { recursive: true });
@@ -971,8 +1057,17 @@ describe('판정 보조 (ADR-051 · ADR-068)', () => {
     const checkout = await pending;
     expect(merged).toMatchObject({ status: 'merged', headCommit: commit });
     expect(git(checkout.dir, 'rev-parse', 'HEAD')).toBe(commit);
-    // 지우기(`worktree remove`)도 같은 잠금 안에서, 겹친 관리자 명령과 함께 돈다
-    await Promise.all([checkout.dispose(), manager.removeWorktree(run)]);
+    // 지우기(`worktree remove`)도 같은 잠금 안: 지우기가 도는 동안 시작한 관리자의 `worktree` 명령은 지우기가 끝난
+    // 뒤에야 돈다(잠금을 빼면 관리자의 `worktree remove`가 벌린 창 안에서 시작해 구간이 겹친다)
+    const disposing = checkout.dispose();
+    await removeStarted;
+    const spansBefore = managerWorktreeSpans.length;
+    await Promise.all([disposing, manager.removeWorktree(run)]);
+    const overlapping = managerWorktreeSpans.slice(spansBefore);
+    expect(overlapping.length).toBeGreaterThan(0);
+    for (const span of overlapping) {
+      expect(span.start).toBeGreaterThanOrEqual(removeSpan.end);
+    }
     expect(fs.existsSync(checkout.dir)).toBe(false);
     expect(git(repo, 'worktree', 'list', '--porcelain')).not.toContain('/judge/');
   }, 60_000);
