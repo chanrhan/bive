@@ -24,7 +24,6 @@ import {
   RUN_STEP_PLANS,
   type Step,
   type StepKind,
-  STEP_KIND_LABELS,
   STEP_ROLES,
   type Ulid,
 } from '@bive/shared';
@@ -49,6 +48,9 @@ import { toRpcError, withRegisteredProjectStore } from '../ipc/project-store-acc
 import { RpcError } from '../ipc/server.js';
 import type { RunTracker } from '../lifecycle.js';
 import { completeStep, evaluateApprovalStep } from '../runs/run-service.js';
+import { createCheckExecutor } from '../steps/check.js';
+import { createImplementationExecutor } from '../steps/implementation.js';
+import { createMergeExecutor } from '../steps/merge.js';
 import { createRedCheckExecutor } from '../steps/red-check.js';
 import { createTestWritingExecutor } from '../steps/test-writing.js';
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
@@ -66,6 +68,7 @@ import {
   type StepRunPatch,
   type StepSessionRequest,
   type StepSessionResult,
+  stepCommitMessage,
   UNMET_POLICY,
 } from './types.js';
 
@@ -126,13 +129,16 @@ export const notifyScreenUpdateStep: StepExecutor = (context) => {
 };
 
 /**
- * 기본 실행기: 테스트 작성 · Red 확인(#28, ADR-068) · 변이 주입 `skipped` · 화면 갱신 알림. 구현 · 검사 · 병합은 #29가
- * 넣는다. 유형 A 실행기가 다 있어야 구동하므로 그 전까지 실행은 `step_executor_missing`으로 끝난다 (ADR-066).
+ * 기본 실행기: 유형 A 전체. 테스트 작성 · Red 확인(#28, ADR-068) · 구현 · 검사 · 병합(#29, ADR-069) · 변이 주입 `skipped` ·
+ * 화면 갱신 알림(#32가 교체). 제품 오케스트레이터의 실행은 이 목록으로 유형 A 끝(병합 · 화면 갱신)까지 간다.
  */
 export const DEFAULT_STEP_EXECUTORS: StepExecutors = {
   test_writing: createTestWritingExecutor(),
   red_check: createRedCheckExecutor(),
+  implementation: createImplementationExecutor(),
+  check: createCheckExecutor(),
   mutation: skipMutationStep,
+  merge: createMergeExecutor(),
   screen_update: notifyScreenUpdateStep,
 };
 
@@ -1059,7 +1065,7 @@ export class PipelineEngine {
   // ── 도우미 ────────────────────────────────────────────
 
   #commitMessage(run: Run, step: Step): string {
-    return `BIVE 실행 ${run.displayId} ${STEP_KIND_LABELS[step.kind]} (시도 ${String(step.attempt)})\n\nBive-Run: ${run.displayId}\nBive-Step: ${step.kind}#${String(step.attempt)}`;
+    return stepCommitMessage(run, step);
   }
 
   #timestamp(): string {

@@ -1,0 +1,94 @@
+# implementer.test.ts 전용 (M1-16). 구현 세션이 실행 워크트리에서 인수 테스트 · .git · .bive.json · node_modules 쓰기를
+# 거부당하고(경로 가드, ADR-052) 소스만 고칠 수 있는지 확인한다. 읽기는 인수 테스트도 된다.
+# 테스트 작성은 happy-path와 같다. 마지막에 헬스 체크 응답에 서버 시각을 더한다.
+name: implementer-guard
+description: 구현이 금지 경로 쓰기를 시도하고 소스만 고친다
+roles:
+  test-writer:
+    sessions:
+      - turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 서버 시각. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+
+                describe('GET /api/health 서버 시각', () => {
+                  it('응답 JSON의 time이 ISO 8601 UTC 시각이다', async () => {
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as { time?: unknown };
+                    expect(String(body.time)).toMatch(ISO_UTC);
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.04
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2000
+              outputTokens: 900
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 0
+              costUSD: 0.04
+  implementer:
+    sessions:
+      - turns:
+          - tool: read_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+              content: "import { it } from 'vitest';\nit('항상 통과', () => {});\n"
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/extra.acc.ts
+              content: "import { it } from 'vitest';\nit('항상 통과', () => {});\n"
+          - tool: write_file
+            args:
+              path: .git
+              content: 'gitdir: /tmp/elsewhere'
+          - tool: write_file
+            args:
+              path: .git/hooks/pre-commit
+              content: "#!/bin/sh\nexit 0\n"
+          - tool: write_file
+            args:
+              path: .bive.json
+              content: '{"projectId":"x","schemaVersion":1}'
+          - tool: write_file
+            args:
+              path: node_modules/next/dist/evil.js
+              content: 'module.exports = 1;'
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 서버 시각을 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true, time: new Date().toISOString() });
+                }
+          - message: 헬스 체크 응답에 서버 시각을 추가했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.05
+          num_turns: 9
+          modelUsage:
+            model-a:
+              inputTokens: 3000
+              outputTokens: 1000
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 0
+              costUSD: 0.05
