@@ -19,6 +19,8 @@ export interface ProfileContext {
   /** 임시 파일(임시 DB 폴더)을 만들 상위 폴더 (절대 경로) */
   tempDir: string;
   deadline: Deadline;
+  /** 중단 신호. 중단되면 띄운 프로세스를 끝내고 `JudgeAbortedError`를 던진다 */
+  signal?: AbortSignal;
   /** 단계 소요 시간(ms) 보고 */
   onStep: (step: ProfileStep, ms: number) => void;
 }
@@ -47,6 +49,8 @@ export class ProfileError extends Error {
 
 export interface StackProfile {
   readonly name: JudgeProfileName;
-  /** 서버를 띄운다. 실패하면 띄운 것을 모두 정리한 뒤 `ProfileError` · `JudgeTimeoutError`를 던진다 */
+  /**
+   * 서버를 띄운다. 실패하면 띄운 것을 모두 정리한 뒤 `ProfileError` · `JudgeTimeoutError` · `JudgeAbortedError`를 던진다
+   */
   start: (ctx: ProfileContext) => Promise<StartedServer>;
 }

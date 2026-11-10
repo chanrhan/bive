@@ -133,7 +133,13 @@ export const createJudgeCheckout = async (
 /** 의존성 설치 함수 (`dir`에 설치, 출력은 `logFile`). 시험에서 바꿔 끼운다. */
 export type InstallDependencies = (
   dir: string,
-  options: { logFile: string; timeoutMs: number; env?: NodeJS.ProcessEnv },
+  options: {
+    logFile: string;
+    timeoutMs: number;
+    env?: NodeJS.ProcessEnv;
+    /** 중단 신호 (설치 프로세스 그룹을 끝낸다) */
+    signal?: AbortSignal;
+  },
 ) => Promise<void>;
 
 /**
@@ -156,8 +162,10 @@ export const installDependencies: InstallDependencies = async (dir, options) => 
       env: { ...baseChildEnv(options.env), CI: '1', NO_COLOR: '1' },
       stdoutFile: options.logFile,
       timeoutMs: options.timeoutMs,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     },
   );
+  if (result.aborted) throw new JudgeCheckoutError('install', '의존성 설치 중단');
   if (result.timedOut) throw new JudgeCheckoutError('install', '의존성 설치 시간 초과');
   if (result.code !== 0 || result.error !== null) {
     throw new JudgeCheckoutError(

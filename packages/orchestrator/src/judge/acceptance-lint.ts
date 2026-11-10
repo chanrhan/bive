@@ -98,6 +98,18 @@ const DENIED_NAMES: ReadonlyMap<string, string> = new Map([
   ['binding', 'process.binding으로 내부 모듈을 불러올 수 없습니다'],
   ['_linkedBinding', 'process._linkedBinding으로 내부 모듈을 불러올 수 없습니다'],
   ['dlopen', 'process.dlopen으로 네이티브 모듈을 불러올 수 없습니다'],
+  // 스냅숏 단언: 판정은 HTTP 응답을 직접 단언한다. 첫 판정에서 스냅숏을 새로 쓰면 무조건 통과하고(약한 단언),
+  // `toMatchFileSnapshot`은 판정 환경에 임의 경로의 파일을 만든다 (#29 · ADR-069, 판정 설정도 쓰기를 막는다)
+  ...[
+    'toMatchSnapshot',
+    'toMatchInlineSnapshot',
+    'toMatchFileSnapshot',
+    'toThrowErrorMatchingSnapshot',
+    'toThrowErrorMatchingInlineSnapshot',
+  ].map((name): [string, string] => [
+    name,
+    `스냅숏 단언(${name})은 쓸 수 없습니다 (HTTP 응답 값을 직접 단언)`,
+  ]),
 ]);
 
 /**

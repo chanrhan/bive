@@ -26,7 +26,14 @@ import {
   renderJudgeConfig,
   RULE_DIR_PATTERN,
 } from './config.js';
-import { baseChildEnv, Deadline, describeExit, JudgeTimeoutError, runCommand } from './process.js';
+import {
+  baseChildEnv,
+  Deadline,
+  describeExit,
+  JudgeAbortedError,
+  JudgeTimeoutError,
+  runCommand,
+} from './process.js';
 import { nextPrismaSqliteProfile } from './profiles/next-prisma-sqlite.js';
 import {
   type JudgeProfileName,
@@ -67,6 +74,11 @@ export interface JudgeRunInput {
   ruleIds?: readonly string[];
   /** 서버 기동부터 vitest 종료까지 전체 제한 시간 */
   timeoutMs: number;
+  /**
+   * 중단 신호 (오케스트레이터 종료 · 병합 검사 제한 시간, ADR-065 · ADR-069). 중단되면 띄운 프로세스 그룹을 끝내고
+   * `runner_error`(판정 중단)로 돌려준다
+   */
+  signal?: AbortSignal;
 }
 
 export interface JudgeRunPaths {
@@ -342,6 +354,10 @@ export class JudgeRunner {
       }
 
       const childEnv = baseChildEnv(this.#env);
+      // vitest에만: 스냅숏을 새로 쓰지 않는다(`CI=1` + 생성 설정 `update: 'none'`, #29 · ADR-069). 없는 스냅숏 단언은 실패다
+      const vitestEnv = { ...childEnv, CI: '1', NO_COLOR: '1' };
+      const signal = input.signal;
+      const signalOption = signal === undefined ? {} : { signal };
 
       // 수집 단계: 서버 없이 파일을 불러와 로드 오류 · 테스트 0개 · `.only`를 먼저 가린다
       const collectExit = await runCommand(
@@ -349,12 +365,14 @@ export class JudgeRunner {
         ['run', '--config', paths.collectConfig, '--root', worktreeDir],
         {
           cwd: worktreeDir,
-          env: { ...childEnv, [BASE_URL_ENV]: COLLECT_PLACEHOLDER_BASE_URL, NO_COLOR: '1' },
+          env: { ...vitestEnv, [BASE_URL_ENV]: COLLECT_PLACEHOLDER_BASE_URL },
           stdoutFile: paths.collectLog,
           timeoutMs: deadline.remaining(),
+          ...signalOption,
         },
       );
       timings.collect = collectExit.durationMs;
+      if (collectExit.aborted) return await runnerError(new JudgeAbortedError('collect').message);
       if (collectExit.timedOut) return await runnerError(new JudgeTimeoutError('collect').message);
       if (collectExit.error !== null || collectExit.signal !== null) {
         return await runnerError(`vitest 수집 ${describeExit(collectExit)}`);
@@ -386,6 +404,7 @@ export class JudgeRunner {
         // 지정하지 않으면 판정마다 그때의 os.tmpdir()를 쓴다 (기존 동작)
         tempDir: this.#tempDir ?? tmpdir(),
         deadline,
+        ...signalOption,
         onStep: (step, ms) => (timings[step] = ms),
       });
 
@@ -394,14 +413,16 @@ export class JudgeRunner {
         ['run', '--config', paths.config, '--root', worktreeDir],
         {
           cwd: worktreeDir,
-          env: { ...childEnv, [BASE_URL_ENV]: server.baseUrl, NO_COLOR: '1' },
+          env: { ...vitestEnv, [BASE_URL_ENV]: server.baseUrl },
           stdoutFile: paths.stdout,
           stderrFile: paths.stderr,
           timeoutMs: deadline.remaining(),
+          ...signalOption,
         },
       );
       timings.vitest = exit.durationMs;
       exitCode = exit.code;
+      if (exit.aborted) return await runnerError(new JudgeAbortedError('vitest').message);
       if (exit.timedOut) return await runnerError(new JudgeTimeoutError('vitest').message);
       if (exit.error !== null || exit.signal !== null) {
         return await runnerError(`vitest ${describeExit(exit)}`);
@@ -439,6 +460,7 @@ export class JudgeRunner {
       if (
         err instanceof ProfileError ||
         err instanceof JudgeTimeoutError ||
+        err instanceof JudgeAbortedError ||
         err instanceof ReportFormatError
       ) {
         return await runnerError(err.message);

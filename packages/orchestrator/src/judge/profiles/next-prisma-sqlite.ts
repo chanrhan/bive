@@ -10,6 +10,7 @@ import {
   type Deadline,
   describeExit,
   freePort,
+  JudgeAbortedError,
   JudgeTimeoutError,
   runCommand,
   startProcess,
@@ -37,8 +38,10 @@ const waitForHttp = async (
   url: string,
   server: ChildProcess,
   deadline: Deadline,
+  signal: AbortSignal | undefined,
 ): Promise<void> => {
   for (;;) {
+    if (signal?.aborted === true) throw new JudgeAbortedError('start');
     if (server.exitCode !== null || server.signalCode !== null) {
       throw new ProfileError(
         'start',
@@ -73,8 +76,10 @@ const runStep = async (
     env,
     stdoutFile: ctx.profileLog,
     timeoutMs: ctx.deadline.remaining(),
+    ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
   });
   ctx.onStep(step, result.durationMs);
+  if (result.aborted) throw new JudgeAbortedError(step);
   if (result.timedOut) throw new JudgeTimeoutError(step);
   if (result.code !== 0) {
     throw new ProfileError(step, `${bin} ${args.join(' ')} ${describeExit(result)}`);
@@ -124,7 +129,7 @@ export const nextPrismaSqliteProfile: StackProfile = {
       });
       // 준비 확인이 먼저 끝난 뒤의 거부가 처리되지 않은 거부로 남지 않게 한다
       spawnFailed.catch(() => undefined);
-      await Promise.race([waitForHttp(baseUrl, server, ctx.deadline), spawnFailed]);
+      await Promise.race([waitForHttp(baseUrl, server, ctx.deadline, ctx.signal), spawnFailed]);
       ctx.onStep('start', Date.now() - startedAt);
 
       return { baseUrl, pid: server.pid ?? null, databasePath, stop };

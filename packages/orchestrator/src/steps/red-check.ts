@@ -186,6 +186,8 @@ export const createRedCheckExecutor =
         await (options.installDependencies ?? installDependencies)(checkout.dir, {
           logFile,
           timeoutMs: options.installTimeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS,
+          // 오케스트레이터 종료 · 실행 중단 때 설치 · 판정 프로세스도 멈춘다 (ADR-068 한계 → ADR-069)
+          signal: context.signal,
         });
       } catch (error) {
         if (!(error instanceof JudgeCheckoutError)) throw error;
@@ -199,10 +201,12 @@ export const createRedCheckExecutor =
         profile: options.profile ?? 'next-prisma-sqlite',
         ruleIds: targets,
         timeoutMs: options.judgeTimeoutMs ?? DEFAULT_RED_JUDGE_TIMEOUT_MS,
+        signal: context.signal,
       };
       const result = await (options.judge === undefined
         ? new JudgeRunner({ biveHome: context.biveHome }).run(input)
         : options.judge(input, context));
+      context.signal.throwIfAborted();
       const evaluated = evaluateRed(result, targets);
       const exitDetail = { ...evaluated.exitDetail, commit };
       if (evaluated.status === 'runner_error') return halt(exitDetail);

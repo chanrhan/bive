@@ -449,4 +449,68 @@ describe('훅', () => {
     await expect(runner.run({ ...base, worktreeDir: 'relative' })).rejects.toThrow(TypeError);
     await expect(runner.run({ ...base, timeoutMs: 0 })).rejects.toThrow(TypeError);
   });
+
+  it('중단 신호를 받으면 띄운 프로세스 · 임시 DB를 정리하고 runner_error(판정 중단)', async () => {
+    // 빌드 캐시를 지워 빌드 도중에 중단되게 한다 (느린 환경에서는 앞 단계에서 중단될 수 있다)
+    rmSync(path.join(fixtureDir, '.next'), { recursive: true, force: true });
+    const dbDirsBefore = tempDbDirs();
+    const result = await runner.run({
+      projectId,
+      runId,
+      worktreeDir: fixtureDir,
+      profile: 'next-prisma-sqlite',
+      timeoutMs: JUDGE_TIMEOUT_MS,
+      signal: AbortSignal.timeout(2_000),
+    });
+    expect(result.status).toBe('runner_error');
+    expect(result.message).toMatch(/^판정 중단 \((collect|migrate|build|start|vitest) 단계\)$/);
+    await expectNoLeftovers(result, dbDirsBefore);
+  }, 30_000);
+
+  it(
+    '스냅숏을 새로 쓰지 않는다: 없는 스냅숏 단언은 실패하고 판정 환경에 파일을 만들지 않는다 (#29 재현)',
+    async () => {
+      write(
+        'bive-acceptance/RULE-020/snap.acc.ts',
+        `import { expect, it } from 'vitest';
+
+it('파일 스냅숏', async () => {
+  await expect('export const pwned = true;\\n').toMatchFileSnapshot('../../src/lib/pwned.ts');
+});
+
+it('스냅숏', () => {
+  expect({ ok: true }).toMatchSnapshot();
+});
+`,
+      );
+      try {
+        const result = await runner.run({
+          projectId,
+          runId,
+          worktreeDir: fixtureDir,
+          profile: 'next-prisma-sqlite',
+          ruleIds: ['RULE-020'],
+          timeoutMs: JUDGE_TIMEOUT_MS,
+        });
+        expect(result.status).toBe('completed');
+        expect(result.cases.map((c) => [c.name, c.status])).toEqual([
+          ['파일 스냅숏', 'failed'],
+          ['스냅숏', 'failed'],
+        ]);
+        expect(existsSync(path.join(fixtureDir, 'src', 'lib', 'pwned.ts'))).toBe(false);
+        expect(
+          existsSync(path.join(fixtureDir, 'bive-acceptance', 'RULE-020', '__snapshots__')),
+        ).toBe(false);
+        // 생성 설정에 스냅숏 갱신 금지가 들어 있다
+        expect(readFileSync(result.paths.config, 'utf8')).toContain('"update": "none"');
+      } finally {
+        rmSync(path.join(fixtureDir, 'bive-acceptance', 'RULE-020'), {
+          recursive: true,
+          force: true,
+        });
+        rmSync(path.join(fixtureDir, 'src', 'lib', 'pwned.ts'), { force: true });
+      }
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
 });
