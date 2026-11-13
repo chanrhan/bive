@@ -1,7 +1,7 @@
 // 테스트용 임시 BIVE_HOME · 실제 오케스트레이터 · 가짜 오케스트레이터(소켓 서버) 도우미.
 // 테스트가 끝나면 cleanup()으로 남은 오케스트레이터 프로세스 · 서버 · 임시 폴더를 정리한다.
-import { type ChildProcess, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -156,7 +156,29 @@ export const writeRunFiles = (biveHome: string, files: { pid?: number; token?: s
   if (files.token !== undefined) writeFileSync(paths.token, files.token);
 };
 
-/** 남은 서버 · 자식 · 잠금 파일이 가리키는 오케스트레이터를 정리하고 임시 폴더를 지운다. */
+/**
+ * `pid`가 이 테스트가 만든 `home`의 오케스트레이터인지 (환경 변수 `BIVE_HOME`이 그 폴더인 프로세스).
+ * 잠금 파일의 pid는 테스트가 지어낸 숫자이거나 다른 프로세스가 다시 쓰는 번호일 수 있어, 확인된 것만 죽인다.
+ * 확인할 수 없으면(권한 없음 · Windows) 거짓: 남은 오케스트레이터는 유휴 종료로 스스로 끝난다.
+ */
+export const isOrchestratorOf = (pid: number, home: string): boolean => {
+  const wanted = `BIVE_HOME=${home}`;
+  try {
+    if (process.platform === 'linux') {
+      return readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').includes(wanted);
+    }
+    if (process.platform === 'win32') return false;
+    // macOS · BSD: `ps e`는 명령줄 뒤에 환경 변수를 붙여 보여 준다
+    const shown = execFileSync('ps', ['eww', '-o', 'command=', '-p', String(pid)], {
+      encoding: 'utf8',
+    });
+    return shown.split(/\s+/).includes(wanted);
+  } catch {
+    return false;
+  }
+};
+
+/** 남은 서버 · 자식 · 잠금 파일이 가리키는 이 테스트의 오케스트레이터를 정리하고 임시 폴더를 지운다. */
 export const cleanup = async (): Promise<void> => {
   // 열린 연결이 남아 있으면 server.close가 끝나지 않으므로 먼저 끊는다
   for (const socket of fakeSockets) socket.destroy();
@@ -165,7 +187,7 @@ export const cleanup = async (): Promise<void> => {
   servers.clear();
   for (const home of homes) {
     const pid = readPidFile(appRunPaths(home).orchestratorPid);
-    if (pid !== null && pid !== process.pid && isProcessAlive(pid)) {
+    if (pid !== null && pid !== process.pid && isProcessAlive(pid) && isOrchestratorOf(pid, home)) {
       try {
         process.kill(pid, 'SIGKILL');
       } catch {

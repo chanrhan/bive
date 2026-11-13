@@ -375,3 +375,30 @@ describe('OrchestratorLink', () => {
     expect(link.state).toBe('disconnected');
   });
 });
+
+describe('cleanup (테스트 도우미)', () => {
+  const unixOnly = process.platform === 'win32' ? it.skip : it;
+
+  unixOnly('잠금 파일의 pid가 이 테스트의 오케스트레이터가 아니면 죽이지 않는다', async () => {
+    const home = makeBiveHome();
+    // 환경 변수 BIVE_HOME이 없는, 테스트와 무관한 프로세스
+    const env = { ...process.env };
+    delete env.BIVE_HOME;
+    const bystander = nodeSpawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      env,
+      stdio: 'ignore',
+    });
+    const exited = new Promise((resolve) => bystander.once('exit', resolve));
+    try {
+      writeRunFiles(home, { pid: bystander.pid ?? -1 });
+      await cleanup();
+      // 신호를 받았다면 종료가 드러날 시간을 준다
+      await sleep(300);
+      expect(bystander.exitCode).toBeNull();
+      expect(bystander.signalCode).toBeNull();
+    } finally {
+      bystander.kill('SIGKILL');
+      await exited;
+    }
+  });
+});
