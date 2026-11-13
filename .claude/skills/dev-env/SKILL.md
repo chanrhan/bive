@@ -23,7 +23,7 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 
 ## 명령
 
-2026-11-13 `main`(`224e914`)에서 실행해 확인했다.
+2026-11-13 `main`(`224e914`)에서 실행해 확인했다(`--open` 포함).
 
 | 작업 | 명령 | 기대 결과 |
 |---|---|---|
@@ -41,6 +41,7 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 
 ## 자주 겪는 문제
 
+- **`pnpm test`를 돌리면 세션(컨테이너)이 죽는다**: 커밋 `97b4d86`(main `1d4864f`, PR #145) 이전의 `packages/orchestrator/test/lock.test.ts`는 잠금 파일에 지어낸 pid 111 · 222를 적고, 정리 단계가 그 번호의 살아 있는 프로세스에 SIGKILL을 보냈다. 테스트가 root로 도는 이 VM에서는 그 번호가 세션을 받치는 실제 프로세스일 수 있다. 오래된 브랜치나 작업 공간에서는 `git merge-base --is-ancestor 97b4d86 HEAD`로 수정이 들어 있는지 먼저 확인하고, 없으면 main을 병합한 뒤에 테스트를 돌린다. 2026-11-13에 이 문제로 컨테이너가 여러 번 재시작됐다.
 - **빌드 스크립트가 돌지 않는다** (`better-sqlite3` 네이티브 모듈 · Electron 바이너리 없음): pnpm 10은 postinstall을 기본 차단한다. 루트 `package.json`의 `pnpm.onlyBuiltDependencies`에 패키지를 넣고 `pnpm install`을 다시 실행한다 (ADR-028).
 - **Electron이 root에서 기동 실패한다**: Chromium 샌드박스 때문이다. 직접 `electron`을 실행할 때만 손으로 `--no-sandbox`를 붙인다.
 - **Playwright가 브라우저 실행 파일(chromium 1248)을 찾지 못한다**: 위 표의 환경 변수를 주고 `playwright install`은 쓰지 않는다.

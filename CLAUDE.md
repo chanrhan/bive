@@ -34,14 +34,14 @@ pnpm 워크스페이스 · TypeScript strict · ESM. 패키지 5개(`packages/sh
 <!-- KICKOFF -->
 ## 5. 완료 조건 명령 (이 VM에서 실제로 실행해 확인한 것만 적는다)
 
-구현 PR은 아래를 모두 통과해야 한다. 2026-11-13 `main`(`224e914`)에서 순서대로 실행해 종료 코드 0을 확인했다. 실측 시간 · 테스트 개수는 금방 낡으므로 적지 않는다.
+구현 PR은 아래를 모두 통과해야 한다. 단위 테스트를 뺀 7개는 2026-11-13 `main`(`224e914`)에서 순서대로 실행해 종료 코드 0을 확인했다. 단위 테스트는 같은 트리에서 2026-11-10에 종료 코드 0을 확인했고 CI(`ci`)가 매 커밋 확인한다. 실측 시간 · 테스트 개수는 금방 낡으므로 적지 않는다.
 
 | 작업 | 명령 |
 |---|---|
 | 설치 | `pnpm install --frozen-lockfile` |
 | 린트 | `pnpm lint` |
 | 타입 검사 | `pnpm typecheck` |
-| 단위 테스트 | `pnpm test` |
+| 단위 테스트 | `pnpm test` (작업 트리가 커밋 `97b4d86`을 포함할 때만. 이유는 `dev-env` 스킬) |
 | 빌드 | `pnpm build` |
 | 형식 검사 | `pnpm format:check` (`*.md` · `docs/` · `scripts/` · `fixtures/`는 대상 아님) |
 | 화면 e2e (헤드리스) | `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome pnpm e2e` |
