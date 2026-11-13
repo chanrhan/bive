@@ -220,11 +220,12 @@ export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
 | `BIVE_NODE_PATH` | `source` 방식에서 쓸 Node 실행 파일. 기본 PATH의 `node` |
 | `BIVE_NO_SANDBOX` | `1`이면 Electron에 `--no-sandbox`를 붙인다 (개발 · 테스트 한정, root는 자동) |
 | `BIVE_E2E_PORT` | 화면 e2e의 Vite 서버 포트. 기본은 worktree 경로 해시로 자동 결정(5179 + hash % 500) |
-| `BIVE_AGENT` | 에이전트 어댑터 선택(`scripted` · `claude`). M1에서 추가 예정이라 아직 동작하지 않는다 |
+| `BIVE_AGENT` | 에이전트 어댑터 선택. `claude`(실제 SDK, 기본) · `scripted`(가짜 에이전트). 빈 값은 미설정과 같고 그 밖의 값은 기동 오류 |
+| `BIVE_SCENARIO` | `BIVE_AGENT=scripted`일 때 재생할 시나리오 이름. 기본 `happy-path`. `scripted`가 아니면 읽지 않는다 |
 
 ## 7. 테스트
 
-모든 자동 테스트는 실제 Claude API 없이 돈다. 에이전트는 **ScriptedAdapter**(시나리오 파일로 턴을 재생하는 가짜 에이전트)가 대신하고, 실제 SDK 완주는 사람이 확인한다 (ADR-016). ScriptedAdapter 자체는 M1에서 들어온다.
+모든 자동 테스트는 실제 Claude API 없이 돈다. 에이전트는 **ScriptedAdapter**(시나리오 파일로 턴을 재생하는 가짜 에이전트)가 대신하고, 실제 SDK 완주는 사람이 확인한다 (ADR-016). `BIVE_AGENT=scripted`로 고르고 시나리오는 `BIVE_SCENARIO`로 정한다 (ADR-049).
 
 | 종류 | 명령 | 내용 |
 |---|---|---|

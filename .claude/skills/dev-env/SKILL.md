@@ -1,6 +1,6 @@
 ---
 name: dev-env
-description: 이 VM에서 화면 e2e · Electron 스모크 · 앱이나 오케스트레이터 기동 · CLI · 픽스처 설치와 초기화를 직접 실행할 때 쓴다. 다음 오류를 만났을 때도 쓴다. Playwright가 chromium 실행 파일을 찾지 못함, Electron이 root에서 기동 실패, "소켓 경로가 너무 김", Vite 포트 충돌(`--strictPort`), 네이티브 모듈 빌드 스크립트 미실행, 테스트의 git 커밋이 서명 오류로 실패, 병렬 worktree에서 테스트 · e2e가 서로 간섭함.
+description: 이 VM에서 화면 e2e · Electron 스모크 · 앱이나 오케스트레이터 기동 · CLI · 픽스처 설치와 초기화를 직접 실행할 때, 오래된 브랜치나 작업 공간에서 단위 테스트를 돌리기 전에 쓴다. 다음 오류를 만났을 때도 쓴다. Playwright가 chromium 실행 파일을 찾지 못함, Electron이 root에서 기동 실패, "소켓 경로가 너무 김", Vite 포트 충돌(`--strictPort`), 네이티브 모듈 빌드 스크립트 미실행, 테스트의 git 커밋이 서명 오류로 실패, 병렬 worktree에서 테스트 · e2e가 서로 간섭함.
 ---
 
 # dev-env
@@ -13,7 +13,7 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 
 | 항목 | 사실 |
 |---|---|
-| Node · pnpm | Node 22, pnpm 10 (루트 `package.json`의 `packageManager`로 고정) |
+| Node · pnpm · Python | Node 22, pnpm 10 (루트 `package.json`의 `packageManager`로 고정), `python3` 있음 (`scripts/publish-roadmap.py`가 쓴다) |
 | 가상 디스플레이 | Electron 창은 `xvfb-run -a <명령>`으로 띄운다. 화면 e2e는 헤드리스라 `xvfb`가 필요 없다 |
 | 브라우저 | `/opt/pw-browsers/chromium-1194`만 있다. `playwright install` 금지. `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome`을 준다 (ADR-028 · ADR-043) |
 | Electron | root라서 `--no-sandbox`가 필요하다. 스모크 · 앱 기동 코드는 root(uid 0)이거나 `BIVE_NO_SANDBOX=1`이면 스스로 붙인다 (ADR-028). 바이너리는 설치 때가 아니라 첫 `require('electron')` 때 내려받으므로 새 worktree의 첫 `pnpm smoke`는 그만큼 오래 걸린다 |
