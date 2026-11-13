@@ -715,11 +715,15 @@ describe('판정 체크아웃 의존성 설치 (검토 1회차)', () => {
 
         // ② 에이전트가 lockfile의 pnpmfileChecksum을 맞춰 둔 경우: frozen 설치가 거부되어 설치 실패(판정하지 않음)
         rmSync(path.join(app, 'node_modules'), { recursive: true, force: true });
-        execFileSync('pnpm', ['install', '--lockfile-only', '--offline', '--ignore-scripts'], {
-          cwd: app,
-          stdio: 'pipe',
-          env: { ...process.env, CI: '1' },
-        });
+        execFileSync(
+          'pnpm',
+          ['install', '--lockfile-only', '--prefer-offline', '--ignore-scripts'],
+          {
+            cwd: app,
+            stdio: 'pipe',
+            env: { ...process.env, CI: '1' },
+          },
+        );
         rmSync(marker, { force: true });
         expect(readFileSync(path.join(app, 'pnpm-lock.yaml'), 'utf8')).toContain(
           'pnpmfileChecksum',
