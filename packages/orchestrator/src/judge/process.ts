@@ -57,6 +57,14 @@ export class Deadline {
   }
 }
 
+/** 중단 신호로 멈춘 판정. 러너가 `runner_error`로 바꾼다. */
+export class JudgeAbortedError extends Error {
+  constructor(readonly step: string) {
+    super(`판정 중단 (${step} 단계)`);
+    this.name = 'JudgeAbortedError';
+  }
+}
+
 /** 마감 시각을 넘긴 단계. 러너가 `runner_error`로 바꾼다. */
 export class JudgeTimeoutError extends Error {
   constructor(readonly step: string) {
@@ -247,32 +255,47 @@ export const stopProcess = async (child: ChildProcess, graceMs = 5_000): Promise
 
 export interface CommandResult extends ExitInfo {
   timedOut: boolean;
+  /** 중단 신호(`signal`)로 프로세스 그룹을 끝냈는지 */
+  aborted: boolean;
   durationMs: number;
 }
 
-/** 명령을 끝까지 실행한다. `timeoutMs`가 지나면 프로세스 그룹을 SIGKILL하고 `timedOut`을 돌려준다. */
+/**
+ * 명령을 끝까지 실행한다. `timeoutMs`가 지나면 프로세스 그룹을 SIGKILL하고 `timedOut`을, 중단 신호가 오면 같은 방법으로
+ * 끝내고 `aborted`를 돌려준다(오케스트레이터 종료 · 병합 검사 제한 시간, ADR-065 · ADR-069).
+ */
 export const runCommand = async (
   cmd: string,
   args: string[],
-  options: StartOptions & { timeoutMs: number },
+  options: StartOptions & { timeoutMs: number; signal?: AbortSignal },
 ): Promise<CommandResult> => {
   const started = Date.now();
+  if (options.signal?.aborted === true) {
+    return { code: null, signal: null, error: null, timedOut: false, aborted: true, durationMs: 0 };
+  }
   if (options.timeoutMs <= 0) {
-    return { code: null, signal: null, error: null, timedOut: true, durationMs: 0 };
+    return { code: null, signal: null, error: null, timedOut: true, aborted: false, durationMs: 0 };
   }
   const child = startProcess(cmd, args, options);
   let timedOut = false;
+  let aborted = false;
   let killed: ProcInfo[] = [];
   const timer = setTimeout(() => {
     timedOut = true;
     killed = signalTree(child, 'SIGKILL');
   }, options.timeoutMs);
+  const onAbort = (): void => {
+    aborted = true;
+    killed = signalTree(child, 'SIGKILL');
+  };
+  options.signal?.addEventListener('abort', onAbort, { once: true });
   const exit = await waitExit(child);
   clearTimeout(timer);
+  options.signal?.removeEventListener('abort', onAbort);
   // 정상 종료여도 그룹에 남은 하위 프로세스를 정리한다
   if (child.pid !== undefined && !isWindows) trySignal(-child.pid, 'SIGKILL');
   signalSnapshot(killed, 'SIGKILL');
-  return { ...exit, timedOut, durationMs: Date.now() - started };
+  return { ...exit, timedOut, aborted, durationMs: Date.now() - started };
 };
 
 /** 종료 정보를 한 줄로. */

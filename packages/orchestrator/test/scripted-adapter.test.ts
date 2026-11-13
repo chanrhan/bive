@@ -24,7 +24,13 @@ import {
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { waitFor } from './helpers/process.js';
 
-const REQUIRED_SCENARIOS = ['budget-exceeded', 'fail-check', 'happy-path', 'pause-implement'];
+const REQUIRED_SCENARIOS = [
+  'budget-exceeded',
+  'fail-check',
+  'false-pass',
+  'happy-path',
+  'pause-implement',
+];
 
 const tempDirs: string[] = [];
 const tempDir = (): string => {
@@ -95,7 +101,7 @@ const adapterFor = (name: string, biveHome = '/tmp/bive-home'): ScriptedAdapter 
   new ScriptedAdapter({ scenario: loadScenario(name), biveHome, pollIntervalMs: 10 });
 
 describe('시나리오 파일 스키마', () => {
-  it('필수 시나리오 4개가 scenarios/에 있고 모두 스키마 검증을 통과한다', () => {
+  it('필수 시나리오 5개가 scenarios/에 있고 모두 스키마 검증을 통과한다', () => {
     const names = listScenarios();
     for (const name of REQUIRED_SCENARIOS) {
       expect(names).toContain(name);

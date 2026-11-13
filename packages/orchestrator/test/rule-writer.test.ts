@@ -354,6 +354,7 @@ describe('propose_rule 검증 (제목 · EARS 진술 · 검사 종류 · 부모 
     const scenarioStatements = [
       'happy-path',
       'fail-check',
+      'false-pass',
       'pause-implement',
       'budget-exceeded',
     ].flatMap((name) =>

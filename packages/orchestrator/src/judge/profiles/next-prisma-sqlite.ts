@@ -1,5 +1,5 @@
 // 스택 프로필 `next-prisma-sqlite` (ADR-026).
-// 임시 SQLite 파일 → prisma migrate deploy → next build → next start(127.0.0.1, 빈 포트) → HTTP 응답 대기.
+// 임시 SQLite 파일 → prisma generate → prisma migrate deploy → next build → next start(127.0.0.1, 빈 포트) → HTTP 응답 대기.
 // next dev는 쓰지 않는다. 명령은 워크트리의 node_modules/.bin만 쓰고 셸 없이 실행한다.
 import type { ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -10,6 +10,7 @@ import {
   type Deadline,
   describeExit,
   freePort,
+  JudgeAbortedError,
   JudgeTimeoutError,
   runCommand,
   startProcess,
@@ -37,8 +38,10 @@ const waitForHttp = async (
   url: string,
   server: ChildProcess,
   deadline: Deadline,
+  signal: AbortSignal | undefined,
 ): Promise<void> => {
   for (;;) {
+    if (signal?.aborted === true) throw new JudgeAbortedError('start');
     if (server.exitCode !== null || server.signalCode !== null) {
       throw new ProfileError(
         'start',
@@ -73,8 +76,10 @@ const runStep = async (
     env,
     stdoutFile: ctx.profileLog,
     timeoutMs: ctx.deadline.remaining(),
+    ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
   });
   ctx.onStep(step, result.durationMs);
+  if (result.aborted) throw new JudgeAbortedError(step);
   if (result.timedOut) throw new JudgeTimeoutError(step);
   if (result.code !== 0) {
     throw new ProfileError(step, `${bin} ${args.join(' ')} ${describeExit(result)}`);
@@ -107,6 +112,8 @@ export const nextPrismaSqliteProfile: StackProfile = {
     };
 
     try {
+      // 설치는 프로젝트 수명 주기 스크립트(postinstall)를 돌리지 않으므로 Prisma 클라이언트 생성을 여기서 한다 (ADR-069)
+      await runStep(ctx, 'generate', 'prisma', ['generate'], env);
       await runStep(ctx, 'migrate', 'prisma', ['migrate', 'deploy'], env);
       await runStep(ctx, 'build', 'next', ['build'], prodEnv);
 
@@ -124,7 +131,7 @@ export const nextPrismaSqliteProfile: StackProfile = {
       });
       // 준비 확인이 먼저 끝난 뒤의 거부가 처리되지 않은 거부로 남지 않게 한다
       spawnFailed.catch(() => undefined);
-      await Promise.race([waitForHttp(baseUrl, server, ctx.deadline), spawnFailed]);
+      await Promise.race([waitForHttp(baseUrl, server, ctx.deadline, ctx.signal), spawnFailed]);
       ctx.onStep('start', Date.now() - startedAt);
 
       return { baseUrl, pid: server.pid ?? null, databasePath, stop };

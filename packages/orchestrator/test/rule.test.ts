@@ -231,24 +231,41 @@ describe('최신 판정 결합 지점', () => {
     quarantineReason: null,
   });
 
-  it('판정 기록 저장소가 생기기 전(#29)에는 어떤 규칙도 판정 기록이 없다', async () => {
+  it('결합 지점은 판정 기록 테이블에서 규칙별 최신 기록(판정 시각 기준)을 읽고, 기록이 없는 규칙은 null이다', async () => {
     const req = await createRequirement();
-    const rule = await approveRule(req.id, '중복 이메일 가입 거부');
-    expect(h.read((store) => storedLatestJudgments(store)(rule.id))).toBeNull();
+    const judged = await approveRule(req.id, '중복 이메일 가입 거부');
+    const fresh = await approveRule(req.id, '판정 전 규칙');
+    // 실행 밖 판정 기록(실행 · 단계 없음)으로 저장소 결합만 본다
+    const older = { ...record(judged.id, 'pass'), runId: null, judgedAt: iso(T0 + 1_000) };
+    const latest = { ...record(judged.id, 'fail'), runId: null };
+    h.read((store) => store.judgments.record([latest, older]));
+    expect(h.read((store) => storedLatestJudgments(store)(judged.id))).toEqual(latest);
+    expect(h.read((store) => storedLatestJudgments(store)(fresh.id))).toBeNull();
+
+    // 기본 처리기(결합 지점 주입 없음)도 같은 최신 판정을 싣는다
+    expect(
+      (await h.client.call('rule.get', { projectId: h.project.id, id: judged.id })).judgment,
+    ).toEqual({
+      status: 'fail',
+      latest,
+    });
+    expect(
+      (await h.client.call('rule.get', { projectId: h.project.id, id: fresh.id })).judgment,
+    ).toEqual(UNJUDGED);
   });
 
-  it('가드: 프로젝트 DB에 판정 기록 테이블이 아직 없다 (생기면 storedLatestJudgments를 그 테이블에 연결하고 이 테스트를 고친다)', () => {
-    // 결합 지점은 지금 늘 기록 없음을 돌려준다. 판정 테이블(#29)이 생겼는데 결합 지점을 고치지 않으면
-    // 모든 규칙이 조용히 미판정으로 보이므로, 테이블이 생기는 순간 여기서 실패하게 한다
+  it('가드: 프로젝트 DB의 판정 기록 테이블은 judgments 하나다 (다른 판정 테이블이 생기면 storedLatestJudgments를 함께 고친다)', () => {
+    // 결합 지점은 judgments만 읽는다. 판정을 담는 다른 테이블 · 뷰가 생겼는데 결합 지점을 고치지 않으면
+    // 그 기록이 화면에 보이지 않으므로, 그런 테이블이 생기는 순간 여기서 실패하게 한다
     const tables = h.read(
       (store) =>
         store.db
           .prepare(
-            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND (name LIKE '%judg%' OR name LIKE '%verdict%')",
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND (name LIKE '%judg%' OR name LIKE '%verdict%') ORDER BY name",
           )
           .all() as { name: string }[],
     );
-    expect(tables).toEqual([]);
+    expect(tables).toEqual([{ name: 'judgments' }]);
   });
 
   it('기록이 없으면 미판정, 있으면 기록의 상태와 기록(커밋 · 시각 · 실행 링크)을 싣는다', () => {

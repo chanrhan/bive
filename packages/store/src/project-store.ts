@@ -1,13 +1,14 @@
 // 프로젝트별 저장소 (`$BIVE_HOME/projects/<projectId>/bive.db`, ADR-005 · ADR-025 · NFR-01).
-// 판정 등은 이후 이슈가 마이그레이션과 리포지토리를 이 저장소에 추가한다.
 import type { Project, Ulid } from '@bive/shared';
 
 import { openDatabase, withTransaction, type SqliteDatabase } from './database.js';
 import { migrate, type MigrateOptions } from './migrate.js';
+import { observeStoreState, trustStoreState } from './norm-snapshot.js';
 import { PROJECT_MIGRATIONS } from './migrations/project/index.js';
 import { bivePaths, assertProjectId } from './paths.js';
 import { ApprovalLogRepository } from './repositories/approval-log-repository.js';
 import { DisplayIdSequences } from './repositories/display-id-sequences.js';
+import { JudgmentRepository } from './repositories/judgment-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { ProposalRepository } from './repositories/proposal-repository.js';
 import { RequirementRepository } from './repositories/requirement-repository.js';
@@ -40,6 +41,8 @@ export class ProjectStore {
   readonly runs: RunRepository;
   /** 에이전트 세션 · 도구 호출 기록 (RUN-04, NFR-02, ADR-066). 세션 도중에도 바로 남기는 기록이다. */
   readonly sessions: SessionRepository;
+  /** 규칙 판정 기록 (JDG-01 · JDG-02, ADR-069). 추가만 하고 규칙의 최신 판정은 판정 시각 기준이다. */
+  readonly judgments: JudgmentRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -56,6 +59,7 @@ export class ProjectStore {
     this.settings = new SettingsRepository(db, projectId);
     this.sessions = new SessionRepository(db);
     this.runs = new RunRepository(db, projectId, this.sequences, this.sessions);
+    this.judgments = new JudgmentRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */
@@ -68,8 +72,38 @@ export class ProjectStore {
     return this.projects.get(this.projectId);
   }
 
+  /** 열 때(장부 대조 직전) 읽은 `PRAGMA data_version`. 다른 연결이 커밋하면 바뀐다 */
+  #dataVersion: number | null = null;
+
+  /** 장부 대조 직전의 `data_version`을 기록한다 (`openProjectStore`가 부른다). */
+  markDataVersion(): void {
+    this.#dataVersion = this.#readDataVersion();
+  }
+
+  #readDataVersion(): number {
+    return Number(this.db.pragma('data_version', { simple: true }));
+  }
+
+  /**
+   * 닫는다. 이 연결이 무언가를 썼으면 지금 상태를 쓰기 장부의 믿는 상태로 남긴다(`norm-snapshot.ts`, ADR-069).
+   * 열 때 장부와 대조했고, 연 뒤 다른 연결의 커밋이 없으면(`data_version` 그대로) 연 뒤의 변경은 이 연결의 쓰기다.
+   * 다른 연결의 커밋이 있었으면 믿지 않고 사건으로 남긴다(그 위조가 이 연결의 정상 쓰기와 함께 흡수되지 않게).
+   */
   close(): void {
-    this.db.close();
+    try {
+      if (this.db.open) {
+        const changes = this.db.prepare<[], { n: number }>('SELECT total_changes() AS n').get();
+        if (changes !== undefined && changes.n > 0) {
+          if (this.#dataVersion !== null && this.#readDataVersion() === this.#dataVersion) {
+            trustStoreState(this);
+          } else {
+            observeStoreState(this);
+          }
+        }
+      }
+    } finally {
+      this.db.close();
+    }
   }
 }
 
@@ -88,7 +122,12 @@ export const openProjectStore = (
   const db = openDatabase(path, { create: options.create });
   try {
     migrate(db, PROJECT_MIGRATIONS, options);
-    return new ProjectStore(projectId, path, db);
+    const store = new ProjectStore(projectId, path, db);
+    // 쓰기 장부와 대조한다: 이 프로세스 밖의 변경은 사건으로 남는다 (ADR-069). data_version은 대조 직전에 읽는다:
+    // 그 사이 다른 연결의 커밋은 대조에 들어가고, 닫을 때 바뀐 것으로 보여 믿지 않는 쪽(실패 쪽)으로 닫힌다
+    store.markDataVersion();
+    observeStoreState(store);
+    return store;
   } catch (error) {
     db.close();
     throw error;

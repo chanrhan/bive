@@ -216,6 +216,42 @@ describe('오탐 완화: 코드가 아닌 자리의 거부 이름 (#137)', () =>
   });
 });
 
+describe('스냅숏 단언 거부 (#29, ADR-069)', () => {
+  it.each([
+    ['expect({ ok: true }).toMatchSnapshot();', 'toMatchSnapshot'],
+    ['expect({ ok: true }).toMatchInlineSnapshot();', 'toMatchInlineSnapshot'],
+    ["await expect('x').toMatchFileSnapshot('../../src/lib/pwned.ts');", 'toMatchFileSnapshot'],
+    [
+      "await expect(Promise.resolve('x')).resolves.toMatchFileSnapshot('a.txt');",
+      'toMatchFileSnapshot',
+    ],
+    ['expect(() => 1).not.toThrowErrorMatchingSnapshot();', 'toThrowErrorMatchingSnapshot'],
+    ['expect(() => 1).toThrowErrorMatchingInlineSnapshot();', 'toThrowErrorMatchingInlineSnapshot'],
+    [
+      "(expect(1) as unknown as Record<string, () => void>)['toMatchSnapshot']();",
+      'toMatchSnapshot',
+    ],
+    ['const { toMatchSnapshot } = expect(1);', 'toMatchSnapshot'],
+  ])('%s → 거부', (source, name) => {
+    expectRejected(source, `스냅숏 단언(${name})`);
+  });
+
+  it('매처의 문자열 인자 · 객체 키 · 타입 자리의 같은 이름은 허용한다 (스냅숏을 쓰지 않음)', () => {
+    const source = [
+      "import { expect, it } from 'vitest';",
+      "import { request } from '@bive/http';",
+      'type Body = { toMatchSnapshot: string };',
+      "it('스냅숏 이름이 든 응답', async () => {",
+      "  const res = await request('/api/items');",
+      '  const body = (await res.json()) as Body;',
+      "  expect(body).toHaveProperty('toMatchFileSnapshot');",
+      "  expect(body).toEqual({ toMatchSnapshot: 'x' });",
+      '});',
+    ].join('\n');
+    expect(lintAcceptanceSource(source)).toEqual([]);
+  });
+});
+
 describe('파서 지연 로드 (#137)', () => {
   it('오케스트레이터 기동 모듈을 불러와도 typescript6을 읽지 않고, 첫 검사 때 읽는다', () => {
     // 기동 진입점(orchestrator.ts)과 패키지 전체 공개 모듈(index.ts: 검사 모듈 · 테스트 작성 단계 포함)을 불러온 뒤

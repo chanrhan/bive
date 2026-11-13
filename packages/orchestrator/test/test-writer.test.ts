@@ -180,6 +180,7 @@ const judgeResult = (
     problems,
     message: status === 'completed' ? null : `${status} 원인`,
     reporterPath: null,
+    tampered: null,
     paths: {
       dir,
       config: dir,
@@ -971,8 +972,11 @@ describe('red-violation 시나리오 (수용 기준 4)', () => {
       'test-writer',
     ]);
     expect(scenario.roles['test-writer']?.sessions).toHaveLength(1);
-    // 기본 실행기 목록에 테스트 작성 · Red 확인이 등록돼 있다 (구현 · 검사 · 병합은 #29)
+    // 기본 실행기 목록에 유형 A 전체가 등록돼 있다 (구현 · 검사 · 병합은 #29)
     expect(Object.keys(DEFAULT_STEP_EXECUTORS).sort()).toEqual([
+      'check',
+      'implementation',
+      'merge',
       'mutation',
       'red_check',
       'screen_update',

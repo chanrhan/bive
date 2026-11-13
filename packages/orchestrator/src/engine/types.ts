@@ -2,7 +2,16 @@
 // 엔진은 상태 기계 · 단계 진행 · 회귀 · 중단 · 재개 · 세션 실행 틀을 맡고, 단계별 종료 조건 판단은 주입받은
 // 단계 실행기(단계 종류 → 함수)가 맡는다: 테스트 작성 · Red 확인(#28), 구현 · 검사 · 병합(#29), 화면 갱신(#32).
 // 실행기는 상태를 직접 저장하지 않고 결과(`StepOutcome`)만 돌려준다. 저장은 엔진이 단계 종료마다 트랜잭션 1회로 한다.
-import type { AgentRole, Project, Run, RunStatus, Step, StepKind, Ulid } from '@bive/shared';
+import {
+  type AgentRole,
+  type Project,
+  type Run,
+  type RunStatus,
+  type Step,
+  type StepKind,
+  STEP_KIND_LABELS,
+  type Ulid,
+} from '@bive/shared';
 import type { ProjectStore, RunDetail, RunPatch } from '@bive/store';
 
 import type { SessionResultEvent } from '../agent/adapter.js';
@@ -18,6 +27,16 @@ export type EngineStepKind = Exclude<StepKind, 'approval'>;
  * 엔진이 실행 워크트리의 변경을 `WorktreeManager.commit`으로 커밋하고 단계 · 실행(`headCommit`)에 저장한다.
  */
 export const COMMIT_STEP_KINDS: readonly StepKind[] = ['test_writing', 'implementation'];
+
+/**
+ * 단계 종료 커밋 메시지 (BIVE 주체, ADR-058 · ADR-066). 엔진의 단계 커밋과, 판정 전에 먼저 커밋하는 구현 실행기가 같이 쓴다
+ * (구현 실행기가 커밋한 뒤 엔진의 커밋은 바뀐 것이 없어 같은 커밋을 돌려준다).
+ */
+export const stepCommitMessage = (
+  run: Pick<Run, 'displayId'>,
+  step: Pick<Step, 'kind' | 'attempt'>,
+): string =>
+  `BIVE 실행 ${run.displayId} ${STEP_KIND_LABELS[step.kind]} (시도 ${String(step.attempt)})\n\nBive-Run: ${run.displayId}\nBive-Step: ${step.kind}#${String(step.attempt)}`;
 
 /** 테스트 작성 · Red 확인 재시도 상한 (ADR-026: 2회, 초과 시 `failed`). */
 export const MAX_TEST_RETRY_COUNT = 2;

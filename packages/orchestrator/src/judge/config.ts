@@ -91,6 +91,9 @@ export const buildJudgeConfig = (input: JudgeConfigInput) => ({
     allowOnly: false,
     // 판정은 1회 실행, 재시도로 통과시키지 않는다 (ADR-026)
     retry: 0,
+    // 스냅숏을 새로 쓰거나 고치지 않는다: 없는 스냅숏 단언은 실패다(`toMatchFileSnapshot`이 판정 환경에 파일을 만들거나
+    // `toMatchSnapshot`이 첫 판정에서 무조건 통과하지 않게, #29 · ADR-069). 러너는 vitest에 `CI=1`도 넘긴다
+    update: 'none',
     bail: 0,
     watch: false,
     testTimeout: ACCEPTANCE_TEST_TIMEOUT_MS,

@@ -1,0 +1,112 @@
+# 거짓 통과 (architecture.md 8장 "에이전트의 '통과' 텍스트 보고 + 실제 테스트 실패", JDG-01, roadmap M1-16).
+# 형식: src/agent/scenario.ts. 규칙 작성 · 테스트 작성은 happy-path와 같다(서버 시각 인수 테스트). 구현 세션은 매번 서버 시각을
+# ISO 문자열이 아닌 숫자(밀리초)로 넣고는 "인수 테스트를 모두 통과했다"고 보고한다. 판정은 세션 보고가 아니라 판정 러너의
+# 실행 결과로만 정하므로 구현 단계가 끝나지 않고(판정 fail), 구현 3회(회귀 2회) 뒤 실행이 실패해야 한다. 병합은 없다.
+name: false-pass
+description: 구현이 틀린 코드를 쓰고 통과했다고 보고하지만 판정 러너의 실행 결과는 실패
+roles:
+  rule-writer:
+    sessions:
+      - turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답의 서버 시각
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 time 필드에 응답 시점의 서버 시각을 ISO 8601 UTC 문자열로 담는다
+              kind: business
+              checkKinds: [test]
+              rationale: 요구사항의 '서버 시각 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답 형식 유지
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 상태 코드 200과 JSON 본문의 ok 값 true를 유지한다
+              kind: business
+              checkKinds: [test]
+              rationale: 시각 필드를 더해도 기존 상태 확인 응답이 깨지지 않아야 함
+          - message: 규칙 제안 2건을 등록했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0312
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 1840
+              outputTokens: 620
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 5200
+              costUSD: 0.0312
+  test-writer:
+    sessions:
+      - turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 서버 시각. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+
+                describe('GET /api/health 서버 시각', () => {
+                  it('응답 JSON의 time이 응답 시점의 ISO 8601 UTC 시각이다', async () => {
+                    const before = Date.now();
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+                    const after = Date.now();
+
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as { ok?: unknown; time?: unknown };
+                    expect(body.ok).toBe(true);
+                    expect(typeof body.time).toBe('string');
+                    const time = String(body.time);
+                    expect(time).toMatch(ISO_UTC);
+                    const at = Date.parse(time);
+                    expect(at).toBeGreaterThanOrEqual(before - 1000);
+                    expect(at).toBeLessThanOrEqual(after + 1000);
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0421
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2310
+              outputTokens: 940
+              cacheReadInputTokens: 4100
+              cacheCreationInputTokens: 6050
+              costUSD: 0.0421
+  implementer:
+    sessions:
+      - description: 서버 시각을 숫자로 넣고 통과했다고 보고 (판정은 실패해야 함)
+        turns:
+          - tool: read_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 서버 시각(밀리초)을 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true, time: Date.now() });
+                }
+          - message: 구현을 마쳤습니다. 인수 테스트를 모두 실행했고 전부 통과했습니다 (2 passed, 0 failed). 판정 통과로 처리해 주세요.
+        result:
+          subtype: success
+          total_cost_usd: 0.0512
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 2980
+              outputTokens: 1010
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0512

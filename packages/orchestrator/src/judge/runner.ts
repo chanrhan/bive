@@ -14,6 +14,11 @@ import path from 'node:path';
 import { createUlidGenerator, type JudgmentCase, Ulid } from '@bive/shared';
 
 import { resolveBiveHome } from '../run-paths.js';
+import {
+  fingerprintChanges,
+  type JudgeInputFingerprint,
+  judgeInputFingerprint,
+} from './fingerprint.js';
 import { renderHttpHelper } from './acceptance-env.js';
 import {
   ACCEPTANCE_DIR,
@@ -26,7 +31,14 @@ import {
   renderJudgeConfig,
   RULE_DIR_PATTERN,
 } from './config.js';
-import { baseChildEnv, Deadline, describeExit, JudgeTimeoutError, runCommand } from './process.js';
+import {
+  baseChildEnv,
+  Deadline,
+  describeExit,
+  JudgeAbortedError,
+  JudgeTimeoutError,
+  runCommand,
+} from './process.js';
 import { nextPrismaSqliteProfile } from './profiles/next-prisma-sqlite.js';
 import {
   type JudgeProfileName,
@@ -67,6 +79,24 @@ export interface JudgeRunInput {
   ruleIds?: readonly string[];
   /** 서버 기동부터 vitest 종료까지 전체 제한 시간 */
   timeoutMs: number;
+  /**
+   * 중단 신호 (오케스트레이터 종료 · 병합 검사 제한 시간, ADR-065 · ADR-069). 중단되면 띄운 프로세스 그룹을 끝내고
+   * `runner_error`(판정 중단)로 돌려준다
+   */
+  signal?: AbortSignal;
+  /**
+   * 판정할 인수 테스트 해시 (`bive-acceptance/` 상대 경로 → SHA-256, 체크아웃 직후 값). 주면 러너가 시작할 때 같은지
+   * 대조한다(설치 중 변경 차단). 주지 않으면 시작 때 값을 기준으로 삼는다
+   */
+  acceptanceHashes?: Readonly<Record<string, string>>;
+}
+
+/** 판정 입력 변조 (검토 1회차, ADR-069): 판정 중 인수 테스트 · 테스트 실행기 · 판정 설정이 바뀌었다. */
+export interface JudgeTampering {
+  /** `start`: 러너 시작 때 넘겨받은 인수 테스트 해시와 다름 · `before_vitest`: 서버 빌드 · 기동 뒤 · `after_vitest`: 실행 뒤 */
+  moment: 'start' | 'before_vitest' | 'after_vitest';
+  /** 바뀐 항목 (`bive-acceptance/…` · `runner:…` · `judge:…`) */
+  changed: string[];
 }
 
 export interface JudgeRunPaths {
@@ -119,6 +149,8 @@ export interface JudgeRunResult {
   message: string | null;
   /** 원본 JSON 경로. JudgmentResult.reporterPath에 쓴다. 결과 파일이 없으면 `null` */
   reporterPath: string | null;
+  /** 판정 입력 변조 (있으면 `runner_error`이고 케이스는 비운다. 호출자는 통과로 세지 않고 실행을 끝낸다) */
+  tampered: JudgeTampering | null;
   paths: JudgeRunPaths;
   /** 판정 서버 정보 (기동 전에 끝났으면 `null`) */
   server: JudgeRunServerInfo | null;
@@ -275,6 +307,7 @@ export class JudgeRunner {
     const timings: Partial<Record<JudgeTimingStep, number>> = {};
     let server: StartedServer | undefined;
     let exitCode: number | null = null;
+    let tampered: JudgeTampering | null = null;
 
     const finish = async (
       partial: Pick<JudgeRunResult, 'status' | 'cases' | 'summary' | 'problems'>,
@@ -299,6 +332,7 @@ export class JudgeRunner {
                 .map((p) => (p.file === null ? p.message : `${p.file}: ${p.message}`))
                 .join('\n'),
         reporterPath: existsSync(paths.result) ? paths.result : null,
+        tampered,
         paths,
         server:
           server === undefined
@@ -313,10 +347,30 @@ export class JudgeRunner {
       finish({ status: 'runner_error', cases, summary, problems: [{ file: null, message }] });
     const collectError = (problems: JudgeProblem[]) =>
       finish({ status: 'collect_error', cases: [], summary: emptySummary(), problems });
+    // 판정 입력 지문: 프로젝트 코드(생성 · 빌드 · 서버)가 돌기 전에 만들고 vitest 앞뒤로 대조한다 (ADR-069)
+    const judgeFiles = [paths.config, paths.collectConfig, paths.globalSetup, paths.httpHelper];
+    let baseline: JudgeInputFingerprint = {};
+    const tamper = (moment: JudgeTampering['moment'], changed: string[]) => {
+      tampered = { moment, changed: changed.slice(0, 200) };
+      return runnerError(
+        `판정 입력이 바뀌었습니다 (${moment}): ${changed.slice(0, 20).join(', ')}`,
+      );
+    };
+    const changedSinceBaseline = (): string[] =>
+      fingerprintChanges(baseline, judgeInputFingerprint(worktreeDir, judgeFiles));
 
     try {
       const vitestBin = path.join(worktreeDir, 'node_modules', '.bin', 'vitest');
       if (!existsSync(vitestBin)) return await runnerError(`실행 파일 없음: ${vitestBin}`);
+
+      baseline = judgeInputFingerprint(worktreeDir, judgeFiles);
+      if (input.acceptanceHashes !== undefined) {
+        const current = Object.fromEntries(
+          Object.entries(baseline).filter(([key]) => key.startsWith(`${ACCEPTANCE_DIR}/`)),
+        );
+        const changed = fingerprintChanges(input.acceptanceHashes, current);
+        if (changed.length > 0) return await tamper('start', changed);
+      }
 
       // 인수 테스트 파일이 하나도 없으면 서버를 띄우지 않고 끝낸다 (0개 수집 = collect_error)
       const acceptanceRoot = path.join(worktreeDir, ACCEPTANCE_DIR);
@@ -342,6 +396,10 @@ export class JudgeRunner {
       }
 
       const childEnv = baseChildEnv(this.#env);
+      // vitest에만: 스냅숏을 새로 쓰지 않는다(`CI=1` + 생성 설정 `update: 'none'`, #29 · ADR-069). 없는 스냅숏 단언은 실패다
+      const vitestEnv = { ...childEnv, CI: '1', NO_COLOR: '1' };
+      const signal = input.signal;
+      const signalOption = signal === undefined ? {} : { signal };
 
       // 수집 단계: 서버 없이 파일을 불러와 로드 오류 · 테스트 0개 · `.only`를 먼저 가린다
       const collectExit = await runCommand(
@@ -349,12 +407,14 @@ export class JudgeRunner {
         ['run', '--config', paths.collectConfig, '--root', worktreeDir],
         {
           cwd: worktreeDir,
-          env: { ...childEnv, [BASE_URL_ENV]: COLLECT_PLACEHOLDER_BASE_URL, NO_COLOR: '1' },
+          env: { ...vitestEnv, [BASE_URL_ENV]: COLLECT_PLACEHOLDER_BASE_URL },
           stdoutFile: paths.collectLog,
           timeoutMs: deadline.remaining(),
+          ...signalOption,
         },
       );
       timings.collect = collectExit.durationMs;
+      if (collectExit.aborted) return await runnerError(new JudgeAbortedError('collect').message);
       if (collectExit.timedOut) return await runnerError(new JudgeTimeoutError('collect').message);
       if (collectExit.error !== null || collectExit.signal !== null) {
         return await runnerError(`vitest 수집 ${describeExit(collectExit)}`);
@@ -386,22 +446,34 @@ export class JudgeRunner {
         // 지정하지 않으면 판정마다 그때의 os.tmpdir()를 쓴다 (기존 동작)
         tempDir: this.#tempDir ?? tmpdir(),
         deadline,
+        ...signalOption,
         onStep: (step, ms) => (timings[step] = ms),
       });
+
+      // 서버 빌드 · 기동(프로젝트 코드 실행) 뒤, vitest를 띄우기 직전
+      const beforeVitest = changedSinceBaseline();
+      if (beforeVitest.length > 0) return await tamper('before_vitest', beforeVitest);
 
       const exit = await runCommand(
         vitestBin,
         ['run', '--config', paths.config, '--root', worktreeDir],
         {
           cwd: worktreeDir,
-          env: { ...childEnv, [BASE_URL_ENV]: server.baseUrl, NO_COLOR: '1' },
+          env: { ...vitestEnv, [BASE_URL_ENV]: server.baseUrl },
           stdoutFile: paths.stdout,
           stderrFile: paths.stderr,
           timeoutMs: deadline.remaining(),
+          ...signalOption,
         },
       );
       timings.vitest = exit.durationMs;
       exitCode = exit.code;
+      // vitest가 끝나면 서버(프로젝트 코드)를 먼저 멈춘 뒤 대조하고 결과를 읽는다 (대조 뒤 서버가 바꾸지 못하게)
+      await server.stop();
+      // vitest가 끝난 직후 (실행 중 서버 코드가 바꿨는지)
+      const afterVitest = changedSinceBaseline();
+      if (afterVitest.length > 0) return await tamper('after_vitest', afterVitest);
+      if (exit.aborted) return await runnerError(new JudgeAbortedError('vitest').message);
       if (exit.timedOut) return await runnerError(new JudgeTimeoutError('vitest').message);
       if (exit.error !== null || exit.signal !== null) {
         return await runnerError(`vitest ${describeExit(exit)}`);
@@ -439,6 +511,7 @@ export class JudgeRunner {
       if (
         err instanceof ProfileError ||
         err instanceof JudgeTimeoutError ||
+        err instanceof JudgeAbortedError ||
         err instanceof ReportFormatError
       ) {
         return await runnerError(err.message);
