@@ -202,11 +202,21 @@ export const createRedCheckExecutor =
         ruleIds: targets,
         timeoutMs: options.judgeTimeoutMs ?? DEFAULT_RED_JUDGE_TIMEOUT_MS,
         signal: context.signal,
+        acceptanceHashes,
       };
       const result = await (options.judge === undefined
         ? new JudgeRunner({ biveHome: context.biveHome }).run(input)
         : options.judge(input, context));
       context.signal.throwIfAborted();
+      if (result.tampered !== null) {
+        // 판정 중 인수 테스트 · 테스트 실행기 · 판정 설정이 바뀌었다 (ADR-069): 결과를 쓰지 않고 끝낸다
+        return {
+          status: 'halt',
+          runStatus: 'failed',
+          reason: 'guard_violation',
+          exitDetail: { stage: 'judge_inputs', commit, ...result.tampered },
+        };
+      }
       const evaluated = evaluateRed(result, targets);
       const exitDetail = { ...evaluated.exitDetail, commit };
       if (evaluated.status === 'runner_error') return halt(exitDetail);

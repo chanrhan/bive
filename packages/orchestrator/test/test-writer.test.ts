@@ -180,6 +180,7 @@ const judgeResult = (
     problems,
     message: status === 'completed' ? null : `${status} 원인`,
     reporterPath: null,
+    tampered: null,
     paths: {
       dir,
       config: dir,

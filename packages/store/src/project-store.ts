@@ -3,6 +3,7 @@ import type { Project, Ulid } from '@bive/shared';
 
 import { openDatabase, withTransaction, type SqliteDatabase } from './database.js';
 import { migrate, type MigrateOptions } from './migrate.js';
+import { observeStoreState, trustStoreState } from './norm-snapshot.js';
 import { PROJECT_MIGRATIONS } from './migrations/project/index.js';
 import { bivePaths, assertProjectId } from './paths.js';
 import { ApprovalLogRepository } from './repositories/approval-log-repository.js';
@@ -71,8 +72,19 @@ export class ProjectStore {
     return this.projects.get(this.projectId);
   }
 
+  /**
+   * 닫는다. 이 연결이 무언가를 썼으면 지금 상태를 쓰기 장부의 믿는 상태로 남긴다(`norm-snapshot.ts`, ADR-069).
+   * 열 때 장부와 대조했으므로 연 뒤의 변경은 이 연결의 쓰기다.
+   */
   close(): void {
-    this.db.close();
+    try {
+      if (this.db.open) {
+        const changes = this.db.prepare<[], { n: number }>('SELECT total_changes() AS n').get();
+        if (changes !== undefined && changes.n > 0) trustStoreState(this);
+      }
+    } finally {
+      this.db.close();
+    }
   }
 }
 
@@ -91,7 +103,10 @@ export const openProjectStore = (
   const db = openDatabase(path, { create: options.create });
   try {
     migrate(db, PROJECT_MIGRATIONS, options);
-    return new ProjectStore(projectId, path, db);
+    const store = new ProjectStore(projectId, path, db);
+    // 쓰기 장부와 대조한다: 이 프로세스 밖의 변경은 사건으로 남는다 (ADR-069)
+    observeStoreState(store);
+    return store;
   } catch (error) {
     db.close();
     throw error;

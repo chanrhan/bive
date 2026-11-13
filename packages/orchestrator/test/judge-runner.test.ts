@@ -12,6 +12,7 @@ import {
   readlinkSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -21,6 +22,8 @@ import { fileURLToPath } from 'node:url';
 import { createUlidGenerator } from '@bive/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { installDependencies } from '../src/judge/checkout.js';
+import { fingerprintChanges, judgeInputFingerprint } from '../src/judge/fingerprint.js';
 import { JudgeRunner, type JudgeRunResult } from '../src/judge/index.js';
 
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -205,7 +208,7 @@ describe('JudgeRunner · next-prisma-sqlite', () => {
         `$ ${path.join(bin, 'next')} start -H 127.0.0.1 -p ${port}`,
       );
       expect(Object.keys(result.timings).sort()).toEqual(
-        ['build', 'collect', 'migrate', 'start', 'total', 'vitest'].sort(),
+        ['build', 'collect', 'generate', 'migrate', 'start', 'total', 'vitest'].sort(),
       );
 
       // ③ 케이스: 이름 · 파일 · 줄 · 상태 · 메시지. 헬스 체크 통과는 마이그레이션된 임시 DB 조회까지 포함
@@ -513,4 +516,150 @@ it('스냅숏', () => {
     },
     BUILD_TEST_TIMEOUT_MS,
   );
+
+  it(
+    '빌드 중 에이전트 코드(next.config.ts)가 인수 테스트를 바꾸면 vitest를 돌리기 전에 잡아 runner_error(판정 입력 변조)',
+    async () => {
+      const config = path.join(fixtureDir, 'next.config.ts');
+      const original = readFileSync(config, 'utf8');
+      write(
+        'bive-acceptance/RULE-030/t.acc.ts',
+        "import { expect, it } from 'vitest';\n\nit('실패해야 하는 케이스', () => {\n  expect(1).toBe(2);\n});\n",
+      );
+      // 검토 1회차 재현: 빌드 · 기동 때 실행되는 설정 파일이 인수 테스트를 통과하는 내용으로 바꾼다
+      writeFileSync(
+        config,
+        `import { writeFileSync } from 'node:fs';\n` +
+          `writeFileSync('bive-acceptance/RULE-030/t.acc.ts', "import { it } from 'vitest';\\nit('실패해야 하는 케이스', () => {});\\n");\n` +
+          original,
+      );
+      try {
+        const result = await runner.run({
+          projectId,
+          runId,
+          worktreeDir: fixtureDir,
+          profile: 'next-prisma-sqlite',
+          ruleIds: ['RULE-030'],
+          timeoutMs: JUDGE_TIMEOUT_MS,
+        });
+        expect(result.status).toBe('runner_error');
+        expect(result.tampered).toEqual({
+          moment: 'before_vitest',
+          changed: ['bive-acceptance/RULE-030/t.acc.ts'],
+        });
+        expect(result.cases).toEqual([]);
+        expect(result.message).toContain('판정 입력이 바뀌었습니다');
+      } finally {
+        writeFileSync(config, original);
+        rmSync(path.join(fixtureDir, 'bive-acceptance', 'RULE-030'), {
+          recursive: true,
+          force: true,
+        });
+      }
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('판정 체크아웃 의존성 설치 (검토 1회차)', () => {
+  it(
+    '프로젝트의 설치 수명 주기 스크립트(postinstall · prepare)는 실행하지 않고, 허용된 의존성의 빌드 스크립트만 돌린다',
+    async () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-install-fx-'));
+      // 픽스처의 추적 파일만 복사한다 (설치 없음)
+      const files = execFileSync('git', ['ls-files', '-z', '--', 'fixtures/sample-next-app'], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+      })
+        .split('\0')
+        .filter((file) => file !== '');
+      for (const file of files) {
+        const target = path.join(dir, 'app', path.relative('fixtures/sample-next-app', file));
+        mkdirSync(path.dirname(target), { recursive: true });
+        writeFileSync(target, readFileSync(path.join(REPO_ROOT, file)));
+      }
+      const app = path.join(dir, 'app');
+      try {
+        const pkg = JSON.parse(readFileSync(path.join(app, 'package.json'), 'utf8')) as {
+          scripts: Record<string, string>;
+        };
+        pkg.scripts.postinstall =
+          "node -e \"require('fs').writeFileSync('PWNED_POSTINSTALL', '')\"";
+        pkg.scripts.prepare = "node -e \"require('fs').writeFileSync('PWNED_PREPARE', '')\"";
+        writeFileSync(path.join(app, 'package.json'), JSON.stringify(pkg, null, 2));
+        await installDependencies(app, {
+          logFile: path.join(dir, 'install.log'),
+          timeoutMs: JUDGE_TIMEOUT_MS,
+        });
+        expect(existsSync(path.join(app, 'PWNED_POSTINSTALL'))).toBe(false);
+        expect(existsSync(path.join(app, 'PWNED_PREPARE'))).toBe(false);
+        // 허용 목록(pnpm-workspace.yaml onlyBuiltDependencies)의 의존성 빌드는 돈다 (better-sqlite3 네이티브 모듈)
+        const native = execFileSync(
+          'find',
+          [path.join(app, 'node_modules', '.pnpm'), '-name', 'better_sqlite3.node'],
+          { encoding: 'utf8' },
+        );
+        expect(native.trim()).not.toBe('');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('판정 입력 지문 (검토 1회차)', () => {
+  it('인수 테스트 · vitest와 그 의존성(pnpm 배치) · .bin/vitest · 판정 설정이 바뀌면 바뀐 항목을 돌려준다', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-fingerprint-'));
+    try {
+      const put = (rel: string, body: string): void => {
+        mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+        writeFileSync(path.join(dir, rel), body);
+      };
+      // pnpm 배치 흉내: .pnpm/<id>/node_modules/<이름> 실제 폴더, 의존성은 형제 링크, 최상위는 링크
+      const store = 'node_modules/.pnpm';
+      put(
+        `${store}/vitest@5/node_modules/vitest/package.json`,
+        JSON.stringify({ name: 'vitest', version: '5', dependencies: { chai: '1' } }),
+      );
+      put(`${store}/vitest@5/node_modules/vitest/dist/index.js`, 'export const expect = 1;\n');
+      put(
+        `${store}/chai@1/node_modules/chai/package.json`,
+        JSON.stringify({ name: 'chai', version: '1' }),
+      );
+      put(`${store}/chai@1/node_modules/chai/index.js`, 'export const assert = 1;\n');
+      symlinkSync(
+        '../../chai@1/node_modules/chai',
+        path.join(dir, store, 'vitest@5/node_modules/chai'),
+      );
+      symlinkSync('.pnpm/vitest@5/node_modules/vitest', path.join(dir, 'node_modules/vitest'));
+      put('node_modules/.bin/vitest', '#!/bin/sh\nexec node vitest.mjs "$@"\n');
+      put('bive-acceptance/RULE-001/a.acc.ts', "it('a', () => {});\n");
+      put('judge/vitest.config.mjs', 'export default {};\n');
+      const files = [path.join(dir, 'judge/vitest.config.mjs')];
+      const before = judgeInputFingerprint(dir, files);
+      expect(Object.keys(before).sort()).toEqual([
+        'bive-acceptance/RULE-001/a.acc.ts',
+        'judge:vitest.config.mjs',
+        'runner:.bin/vitest',
+        'runner:chai@1/index.js',
+        'runner:chai@1/package.json',
+        'runner:vitest@5/dist/index.js',
+        'runner:vitest@5/package.json',
+      ]);
+      expect(fingerprintChanges(before, judgeInputFingerprint(dir, files))).toEqual([]);
+      put(`${store}/chai@1/node_modules/chai/index.js`, 'export const assert = () => true;\n');
+      put('node_modules/.bin/vitest', '#!/bin/sh\nexit 0\n');
+      put('bive-acceptance/RULE-001/b.acc.ts', "it('b', () => {});\n");
+      put('judge/vitest.config.mjs', 'export default { test: { include: [] } };\n');
+      expect(fingerprintChanges(before, judgeInputFingerprint(dir, files))).toEqual([
+        'bive-acceptance/RULE-001/b.acc.ts',
+        'judge:vitest.config.mjs',
+        'runner:.bin/vitest',
+        'runner:chai@1/index.js',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

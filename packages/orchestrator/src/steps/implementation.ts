@@ -200,7 +200,7 @@ export const createImplementationExecutor =
         message: 'Red 확인 통과 기록(인수 테스트 해시)이 없습니다',
       });
     }
-    // 세션 전 규범 저장소 스냅숏 (메모리에만 둔다)
+    // 쓰기 장부 감시 시작 (메모리에만 둔다). 단계 사이에 생긴 보고되지 않은 변경도 대상이다
     const norms = createNormGuard(context);
     const worktree = context.git.worktreePath;
 
@@ -221,28 +221,43 @@ export const createImplementationExecutor =
       });
     }
     context.signal.throwIfAborted();
+    const beforeSession = norms.verify();
+    if (beforeSession.length > 0) return normHalt('before_session', beforeSession);
 
     // 2. implementer 세션
     const acceptanceFiles = Object.keys(expectedHashes).filter((file) =>
       ruleIds.some((id) => file.startsWith(`bive-acceptance/${id}/`)),
     );
     const installAllowlist = context.read((store) => store.settings.get().installAllowlist);
-    const session = await context.runSession({
-      workDir: worktree,
-      systemPrompt: IMPLEMENTER_SYSTEM_PROMPT,
-      prompt: implementerTaskPrompt({
-        runDisplayId: context.run.displayId,
-        rules,
-        acceptanceFiles,
-        feedback: previousImplementationFeedback(context.steps, context.step),
-      }),
-      vars: {
-        ruleId: ruleIds[0] ?? '',
-        ruleIds: ruleIds.join(','),
-        runId: context.run.displayId,
-      },
-      commands: { toolchainRoot: worktree, installAllowlist },
-    });
+    let session;
+    try {
+      session = await context.runSession({
+        workDir: worktree,
+        systemPrompt: IMPLEMENTER_SYSTEM_PROMPT,
+        prompt: implementerTaskPrompt({
+          runDisplayId: context.run.displayId,
+          rules,
+          acceptanceFiles,
+          feedback: previousImplementationFeedback(context.steps, context.step),
+        }),
+        vars: {
+          ruleId: ruleIds[0] ?? '',
+          ruleIds: ruleIds.join(','),
+          runId: context.run.displayId,
+        },
+        commands: { toolchainRoot: worktree, installAllowlist },
+      });
+    } catch (error) {
+      // 가드 위반 · 예산 초과로 세션이 실행을 끝내도(StepHaltError) 에이전트 코드가 돌았을 수 있으므로 먼저 대조한다
+      if (context.signal.aborted) throw error;
+      const afterHalt = norms.verify();
+      if (afterHalt.length > 0) {
+        return normHalt('after_session', afterHalt, {
+          sessionError: error instanceof Error ? error.message : String(error),
+        });
+      }
+      throw error;
+    }
 
     // 3. 세션 뒤 규범 저장소 확인 (세션 결과와 무관하게: 에이전트 코드가 돌았을 수 있다)
     const afterSession = norms.verify();
@@ -288,8 +303,12 @@ export const createImplementationExecutor =
       case 'acceptance_changed':
         return halt('guard_violation', {
           ...base,
-          stage: 'acceptance_hash',
-          message: 'Red 확인 뒤 인수 테스트가 바뀌었습니다',
+          stage: judged.stage,
+          ...(judged.moment === undefined ? {} : { moment: judged.moment }),
+          message:
+            judged.stage === 'acceptance_hash'
+              ? 'Red 확인 뒤 인수 테스트가 바뀌었습니다'
+              : '판정 중 인수 테스트 · 테스트 실행기 · 판정 설정이 바뀌었습니다',
           changed: judged.changed.slice(0, MAX_LISTED),
         });
       case 'norm_mismatch':

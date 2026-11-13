@@ -17,6 +17,7 @@ export type {
   JudgeRunResult,
   JudgeRunServerInfo,
   JudgeRunStatus,
+  JudgeTampering,
   JudgeTimingStep,
 } from './runner.js';
 export { JudgeRunner } from './runner.js';

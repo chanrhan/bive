@@ -134,6 +134,7 @@ export const judgeResult = (call: JudgeCall, decision: JudgeDecision): JudgeRunR
     problems: status === 'completed' ? [] : [{ file: null, message: `${status} 원인` }],
     message: status === 'completed' ? null : `${status} 원인`,
     reporterPath: status === 'completed' ? `${dir}/result.json` : null,
+    tampered: null,
     paths: {
       dir,
       config: dir,

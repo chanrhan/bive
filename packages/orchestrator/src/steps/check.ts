@@ -100,8 +100,12 @@ export const createCheckExecutor =
       case 'acceptance_changed':
         return halt('guard_violation', {
           ...base,
-          stage: 'acceptance_hash',
-          message: 'Red 확인 뒤 인수 테스트가 바뀌었습니다',
+          stage: judged.stage,
+          ...(judged.moment === undefined ? {} : { moment: judged.moment }),
+          message:
+            judged.stage === 'acceptance_hash'
+              ? 'Red 확인 뒤 인수 테스트가 바뀌었습니다'
+              : '판정 중 인수 테스트 · 테스트 실행기 · 판정 설정이 바뀌었습니다',
           changed: judged.changed.slice(0, MAX_LISTED),
         });
       case 'norm_mismatch':

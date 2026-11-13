@@ -15,7 +15,7 @@ import {
   type Step,
   type StepKind,
 } from '@bive/shared';
-import { captureNormSnapshot, compareNormSnapshots, type NormMismatch } from '@bive/store';
+import { beginNormWatch, type NormMismatch, verifyNormWatch } from '@bive/store';
 
 import type { StepContext, StepOutcome } from '../engine/types.js';
 import type { GitRunner } from '../git/git-exec.js';
@@ -105,14 +105,12 @@ export interface NormGuard {
 }
 
 export const createNormGuard = (context: StepContext): NormGuard => {
-  const before = context.read((store) => captureNormSnapshot(store, context.run.id));
+  // 쓰기 장부 감시(store/norm-snapshot.ts): 오케스트레이터 저장소를 거치지 않은 변경은 어느 테이블이든 불일치다
+  const watch = context.read((store) => beginNormWatch(store));
   return {
     verify: () => {
       try {
-        return compareNormSnapshots(
-          before,
-          context.read((store) => captureNormSnapshot(store, context.run.id)),
-        );
+        return context.read((store) => verifyNormWatch(store, watch));
       } catch (error) {
         return [
           {
@@ -127,7 +125,7 @@ export const createNormGuard = (context: StepContext): NormGuard => {
 
 /** 규범 저장소 불일치: 판정을 믿을 수 없으므로 판정하지 않고 실행을 끝낸다 (재시도 없음). */
 export const normHalt = (
-  moment: 'after_session' | 'before_judge' | 'after_judge',
+  moment: 'before_session' | 'after_session' | 'before_judge' | 'after_judge',
   mismatches: readonly NormMismatch[],
   extra: Record<string, unknown> = {},
 ): StepOutcome => ({
@@ -139,7 +137,7 @@ export const normHalt = (
     stage: NORM_INTEGRITY_STAGE,
     moment,
     message:
-      '규범 저장소(승인 기록 · 규칙 · 실행 기록)가 판정 전후로 바뀌어 판정을 믿을 수 없습니다',
+      '규범 저장소가 오케스트레이터 밖에서 바뀌어(승인 기록 · 규칙 · 실행 · 판정 기록 등) 판정을 믿을 수 없습니다',
     mismatches: mismatches.slice(0, MAX_LISTED),
   },
 });
@@ -149,7 +147,13 @@ export const normHalt = (
 export type CommitJudgeOutcome =
   | { readonly kind: 'checkout_error'; readonly message: string }
   | { readonly kind: 'install_error'; readonly message: string; readonly logFile: string }
-  | { readonly kind: 'acceptance_changed'; readonly changed: string[] }
+  | {
+      readonly kind: 'acceptance_changed';
+      readonly changed: string[];
+      /** `acceptance_hash`: 판정 전 Red 기록과 다름 · `judge_inputs`: 판정 러너가 판정 중 입력 변조를 잡음 */
+      readonly stage: 'acceptance_hash' | 'judge_inputs';
+      readonly moment?: string;
+    }
   | {
       readonly kind: 'norm_mismatch';
       readonly moment: 'before_judge' | 'after_judge';
@@ -200,7 +204,8 @@ export const judgeCommit = async (
     const acceptanceHashes = hashAcceptanceFiles(checkout.dir);
     if (input.expectedAcceptanceHashes !== undefined) {
       const changed = changedAcceptanceFiles(input.expectedAcceptanceHashes, acceptanceHashes);
-      if (changed.length > 0) return { kind: 'acceptance_changed', changed };
+      if (changed.length > 0)
+        return { kind: 'acceptance_changed', changed, stage: 'acceptance_hash' };
     }
     const ruleIds = input.selectRules(ruleDirsOf(acceptanceHashes));
     if (ruleIds.length === 0) return { kind: 'no_rules', ruleDirs: ruleDirsOf(acceptanceHashes) };
@@ -228,11 +233,22 @@ export const judgeCommit = async (
       ruleIds,
       timeoutMs: options.judgeTimeoutMs ?? DEFAULT_JUDGE_TIMEOUT_MS,
       signal: input.signal,
+      // 설치 전 체크아웃 그대로의 인수 테스트 해시. 러너가 시작 · vitest 앞뒤로 지문을 대조한다 (ADR-069)
+      acceptanceHashes,
     };
     const result = await (options.judge === undefined
       ? new JudgeRunner({ biveHome: context.biveHome }).run(judgeInput)
       : options.judge(judgeInput, context));
     input.signal.throwIfAborted();
+    // 판정 중 인수 테스트 · 테스트 실행기 · 판정 설정이 바뀌었으면 결과를 쓰지 않는다 (fail closed)
+    if (result.tampered !== null) {
+      return {
+        kind: 'acceptance_changed',
+        changed: result.tampered.changed,
+        stage: 'judge_inputs',
+        moment: result.tampered.moment,
+      };
+    }
     // 판정 뒤: 판정은 프로젝트 코드(빌드 · 서버)를 실행하므로 그 결과를 쓰기 전에 다시 본다
     const after = input.norms.verify();
     if (after.length > 0)

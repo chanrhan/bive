@@ -1,5 +1,5 @@
 // 스택 프로필 `next-prisma-sqlite` (ADR-026).
-// 임시 SQLite 파일 → prisma migrate deploy → next build → next start(127.0.0.1, 빈 포트) → HTTP 응답 대기.
+// 임시 SQLite 파일 → prisma generate → prisma migrate deploy → next build → next start(127.0.0.1, 빈 포트) → HTTP 응답 대기.
 // next dev는 쓰지 않는다. 명령은 워크트리의 node_modules/.bin만 쓰고 셸 없이 실행한다.
 import type { ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -112,6 +112,8 @@ export const nextPrismaSqliteProfile: StackProfile = {
     };
 
     try {
+      // 설치는 프로젝트 수명 주기 스크립트(postinstall)를 돌리지 않으므로 Prisma 클라이언트 생성을 여기서 한다 (ADR-069)
+      await runStep(ctx, 'generate', 'prisma', ['generate'], env);
       await runStep(ctx, 'migrate', 'prisma', ['migrate', 'deploy'], env);
       await runStep(ctx, 'build', 'next', ['build'], prodEnv);
 

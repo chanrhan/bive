@@ -5,7 +5,7 @@ import type { Deadline } from '../process.js';
 export type JudgeProfileName = 'next-prisma-sqlite';
 
 /** 프로필 단계 이름. 소요 시간 · 실패 위치 표시에 쓴다. */
-export type ProfileStep = 'migrate' | 'build' | 'start';
+export type ProfileStep = 'generate' | 'migrate' | 'build' | 'start';
 
 export interface ProfileContext {
   /** 실행 워크트리 (명령은 이 안의 `node_modules/.bin`만 쓴다) */

@@ -8,8 +8,9 @@
 //   검사 함수는 관리자의 검사 신호로 설치 · 판정 프로세스를 멈춘다
 // - 병합 성공 → `passed`(`run.mergeCommit`), 실패 → `failed`(사유는 ADR-058 값 그대로), 브랜치 · 워크트리는 엔진이 보존
 // - 재개(ADR-066 한계): 병합 단계 도중 비정상 종료로 기준 브랜치가 이미 갱신된 뒤 다시 병합하면 `no_changes`가 된다.
-//   그때 기준 브랜치에 이 실행의 BIVE 병합 커밋(트레일러 `Bive-Run` · `Bive-Project`, 둘째 부모 = 검사한 커밋)이 있으면
-//   그 커밋으로 `passed`(`recovered: true`)로 마무리한다
+//   직전 병합 시도가 재기동 중단(`interrupted`)일 때만, 기준 브랜치에 이 실행의 BIVE 병합 커밋(트레일러 `Bive-Run` ·
+//   `Bive-Project`, 둘째 부모 = 검사한 커밋)이 있고 그 트리가 첫 부모와 검사한 커밋의 병합 결과(`git merge-tree`)와 같으면
+//   그 커밋으로 `passed`(`recovered: true`)로 마무리한다. 첫 시도 · 트리가 다르면(검사하지 않은 파일) 복구하지 않는다(검토 1회차)
 import type { Rule } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
@@ -54,7 +55,7 @@ export const findRecordedMerge = async (
   git: GitRunner,
   context: Pick<StepContext, 'git' | 'run' | 'project'>,
   headCommit: string,
-): Promise<string | null> => {
+): Promise<{ hash: string; firstParent: string } | null> => {
   const result = await git(
     [
       'log',
@@ -72,16 +73,64 @@ export const findRecordedMerge = async (
     const [hash, parents, body] = record.replace(/^\n/u, '').split('\0');
     if (hash === undefined || parents === undefined || body === undefined) continue;
     const lines = body.split('\n').map((line) => line.trim());
+    const [firstParent, secondParent, ...rest] = parents.split(' ');
     if (
-      parents.split(' ')[1] === headCommit &&
+      firstParent !== undefined &&
+      rest.length === 0 &&
+      secondParent === headCommit &&
       lines.includes(`Bive-Run: ${context.run.displayId}`) &&
       lines.includes(`Bive-Project: ${context.project.id}`)
     ) {
-      return hash;
+      return { hash, firstParent };
     }
   }
   return null;
 };
+
+/**
+ * 병합 커밋의 트리가 첫 부모와 검사한 커밋을 병합한 결과(`git merge-tree --write-tree`, 관리자의 `merge --no-ff`와 같은
+ * 병합 방식)와 같은지. 같지 않으면(병합에 검사하지 않은 변경이 섞임) 사유를 돌려준다.
+ */
+export const verifyRecordedMergeTree = async (
+  git: GitRunner,
+  repoPath: string,
+  merge: { hash: string; firstParent: string },
+  headCommit: string,
+): Promise<
+  | { ok: true }
+  | {
+      ok: false;
+      reason: 'tree_mismatch' | 'conflict';
+      expectedTree: string | null;
+      actualTree: string;
+    }
+> => {
+  const actual = (
+    await git(['rev-parse', '--verify', `${merge.hash}^{tree}`], { cwd: repoPath })
+  ).stdout.trim();
+  const expected = await git(['merge-tree', '--write-tree', merge.firstParent, headCommit], {
+    cwd: repoPath,
+    okCodes: [0, 1],
+  });
+  if (expected.code !== 0) {
+    return { ok: false, reason: 'conflict', expectedTree: null, actualTree: actual };
+  }
+  const expectedTree = expected.stdout.split('\n')[0]?.trim() ?? '';
+  return expectedTree === actual
+    ? { ok: true }
+    : { ok: false, reason: 'tree_mismatch', expectedTree, actualTree: actual };
+};
+
+/** 이 병합 단계의 앞 시도가 재기동 중단으로 끝났는지 (재개 뒤의 새 시도). */
+const resumedAfterInterruption = (context: StepContext): boolean =>
+  context.steps.some(
+    (step) =>
+      step.kind === 'merge' &&
+      step.id !== context.step.id &&
+      typeof step.exitDetail === 'object' &&
+      step.exitDetail !== null &&
+      (step.exitDetail as { interrupted?: unknown }).interrupted === true,
+  );
 
 /** 병합 단계 실행기를 만든다 (기본 실행기 목록에 등록된다). */
 export const createMergeExecutor =
@@ -119,6 +168,7 @@ export const createMergeExecutor =
     let integrity: { moment: 'before_judge' | 'after_judge'; mismatches: NormMismatch[] } | null =
       null;
     let recheck: Record<string, unknown> | null = null;
+    let tamperedInputs: { changed: string[]; moment: string | null } | null = null;
 
     // 기준 브랜치가 바뀐 경우에만 관리자가 부른다 (병합 커밋의 깨끗한 체크아웃에서 승인된 규칙 전체 판정)
     const check: MergeCheck = async (merge) => {
@@ -139,8 +189,12 @@ export const createMergeExecutor =
           recheck = { stage: judged.kind, message: judged.message };
           return { passed: false, detail: `${judged.kind}: ${judged.message}` };
         case 'acceptance_changed':
-          // 해시를 지정하지 않으므로 생기지 않는다
-          return { passed: false, detail: 'acceptance_changed' };
+          // 판정 러너가 판정 중 입력 변조를 잡았다 (해시를 지정하지 않으므로 판정 전 대조로는 생기지 않는다)
+          tamperedInputs = { changed: judged.changed, moment: judged.moment ?? null };
+          return {
+            passed: false,
+            detail: `judge_inputs: ${judged.changed.slice(0, 5).join(', ')}`,
+          };
         case 'norm_mismatch':
           integrity = { moment: judged.moment, mismatches: judged.mismatches };
           return { passed: false, detail: `norm_integrity: ${judged.moment}` };
@@ -206,6 +260,17 @@ export const createMergeExecutor =
         ...(result.status === 'failed' ? { mergeReason: result.reason } : {}),
       });
     }
+    const inputs = tamperedInputs as { changed: string[]; moment: string | null } | null;
+    if (inputs !== null) {
+      // 판정 입력 변조: 검사 실패가 아니라 가드 위반으로 끝낸다 (병합은 검사가 통과하지 않아 일어나지 않았다)
+      return halt('guard_violation', {
+        stage: 'judge_inputs',
+        moment: inputs.moment,
+        message: '병합 재검사 중 인수 테스트 · 테스트 실행기 · 판정 설정이 바뀌었습니다',
+        changed: inputs.changed.slice(0, 50),
+        mergeStatus: result.status,
+      });
+    }
     if (result.status === 'merged') {
       return {
         status: 'passed',
@@ -221,17 +286,30 @@ export const createMergeExecutor =
         run: { mergeCommit: result.mergeCommit },
       };
     }
-    if (result.reason === 'no_changes') {
-      const recovered = await findRecordedMerge(git, context, headCommit);
-      if (recovered !== null) {
-        return {
-          status: 'passed',
-          exitDetail: { mergeCommit: recovered, headCommit, recovered: true },
-          run: { mergeCommit: recovered },
+    let recovery: Record<string, unknown> | null = null;
+    if (result.reason === 'no_changes' && resumedAfterInterruption(context)) {
+      const recorded = await findRecordedMerge(git, context, headCommit);
+      if (recorded === null) {
+        recovery = { reason: 'not_found' };
+      } else {
+        const tree = await verifyRecordedMergeTree(git, context.git.repoPath, recorded, headCommit);
+        if (tree.ok) {
+          return {
+            status: 'passed',
+            exitDetail: { mergeCommit: recorded.hash, headCommit, recovered: true },
+            run: { mergeCommit: recorded.hash },
+          };
+        }
+        recovery = {
+          mergeCommit: recorded.hash,
+          reason: tree.reason,
+          expectedTree: tree.expectedTree,
+          actualTree: tree.actualTree,
         };
       }
     }
     return halt(result.reason, {
+      ...(recovery === null ? {} : { recovery }),
       message: result.message,
       branch: result.branch,
       headCommit: result.headCommit,

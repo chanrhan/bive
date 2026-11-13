@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { CommitSha, createUlidGenerator } from '@bive/shared';
+import { parse as parseYaml } from 'yaml';
 
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import { withGitWorktreeLock } from '../git/worktree-manager.js';
@@ -142,10 +143,57 @@ export type InstallDependencies = (
   },
 ) => Promise<void>;
 
+/** npm 패키지 이름 (범위 포함). 빌드 허용 목록에서 이 모양이 아닌 값은 거부한다. */
+const PACKAGE_NAME = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u;
+
 /**
- * lockfile 기준 의존성 설치. M1은 pnpm(`pnpm-lock.yaml`)만 지원한다: `pnpm install --frozen-lockfile --prefer-offline`.
+ * 의존성 빌드 스크립트를 허용할 패키지 (pnpm 10 `onlyBuiltDependencies`: `pnpm-workspace.yaml` · `package.json`의
+ * `pnpm.onlyBuiltDependencies`). 프로젝트 코드가 아니라 lockfile로 고정된 의존성의 스크립트만 돌리려고 쓴다.
+ * @throws {JudgeCheckoutError} (`install`) 형식이 틀린 이름
+ */
+export const builtDependencyNames = (dir: string): string[] => {
+  const names = new Set<string>();
+  const add = (value: unknown): void => {
+    if (!Array.isArray(value)) return;
+    for (const name of value) {
+      if (typeof name !== 'string' || !PACKAGE_NAME.test(name)) {
+        throw new JudgeCheckoutError(
+          'install',
+          `빌드 허용 목록의 패키지 이름 형식 오류: ${String(name)}`,
+        );
+      }
+      names.add(name);
+    }
+  };
+  const workspace = path.join(dir, 'pnpm-workspace.yaml');
+  if (fs.existsSync(workspace)) {
+    const parsed: unknown = parseYaml(fs.readFileSync(workspace, 'utf8'));
+    if (typeof parsed === 'object' && parsed !== null) {
+      add((parsed as { onlyBuiltDependencies?: unknown }).onlyBuiltDependencies);
+    }
+  }
+  const pkg = path.join(dir, 'package.json');
+  if (fs.existsSync(pkg)) {
+    const parsed: unknown = JSON.parse(fs.readFileSync(pkg, 'utf8'));
+    if (typeof parsed === 'object' && parsed !== null) {
+      const pnpm = (parsed as { pnpm?: unknown }).pnpm;
+      if (typeof pnpm === 'object' && pnpm !== null) {
+        add((pnpm as { onlyBuiltDependencies?: unknown }).onlyBuiltDependencies);
+      }
+    }
+  }
+  return [...names].sort();
+};
+
+/**
+ * lockfile 기준 의존성 설치. M1은 pnpm(`pnpm-lock.yaml`)만 지원한다.
+ * 1. `pnpm install --frozen-lockfile --prefer-offline --ignore-scripts`: 프로젝트의 설치 수명 주기 스크립트
+ *    (`preinstall` · `postinstall` · `prepare` 등)는 에이전트가 고칠 수 있는 코드라 돌리지 않는다(검토 1회차, ADR-069)
+ * 2. `pnpm rebuild <허용 목록>`: 빌드 허용 목록(`onlyBuiltDependencies`)에 있는 의존성의 빌드 스크립트만 돌린다
+ *    (네이티브 모듈 · 엔진 내려받기. 이름을 지정한 rebuild는 프로젝트 스크립트를 돌리지 않음을 확인했다)
+ * 프로젝트가 설치 때 하던 생성 단계(`prisma generate`)는 스택 프로필이 따로 한다.
  * 셸 없이 PATH의 `pnpm`을 실행하고 환경 변수는 판정 러너와 같은 허용 목록 + `CI=1`만 넘긴다.
- * @throws {JudgeCheckoutError} (`install`) lockfile 없음 · 설치 실패 · 시간 초과
+ * @throws {JudgeCheckoutError} (`install`) lockfile 없음 · 설치 실패 · 시간 초과 · 중단
  */
 export const installDependencies: InstallDependencies = async (dir, options) => {
   if (!fs.existsSync(path.join(dir, 'pnpm-lock.yaml'))) {
@@ -154,24 +202,37 @@ export const installDependencies: InstallDependencies = async (dir, options) => 
       '지원하는 lockfile이 없습니다 (M1은 pnpm-lock.yaml만 지원)',
     );
   }
-  const result = await runCommand(
-    'pnpm',
-    ['install', '--frozen-lockfile', '--prefer-offline', '--reporter=append-only'],
-    {
+  const started = Date.now();
+  const run = async (args: string[], what: string): Promise<void> => {
+    const result = await runCommand('pnpm', args, {
       cwd: dir,
       env: { ...baseChildEnv(options.env), CI: '1', NO_COLOR: '1' },
       stdoutFile: options.logFile,
-      timeoutMs: options.timeoutMs,
+      timeoutMs: Math.max(0, options.timeoutMs - (Date.now() - started)),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-    },
-  );
-  if (result.aborted) throw new JudgeCheckoutError('install', '의존성 설치 중단');
-  if (result.timedOut) throw new JudgeCheckoutError('install', '의존성 설치 시간 초과');
-  if (result.code !== 0 || result.error !== null) {
-    throw new JudgeCheckoutError(
+    });
+    if (result.aborted) throw new JudgeCheckoutError('install', `${what} 중단`);
+    if (result.timedOut) throw new JudgeCheckoutError('install', `${what} 시간 초과`);
+    if (result.code !== 0 || result.error !== null) {
+      throw new JudgeCheckoutError(
+        'install',
+        `${what} 실패 (${describeExit(result)}, ${options.logFile})`,
+      );
+    }
+  };
+  await run(
+    [
       'install',
-      `의존성 설치 실패 (${describeExit(result)}, ${options.logFile})`,
-    );
+      '--frozen-lockfile',
+      '--prefer-offline',
+      '--ignore-scripts',
+      '--reporter=append-only',
+    ],
+    '의존성 설치',
+  );
+  const built = builtDependencyNames(dir);
+  if (built.length > 0) {
+    await run(['rebuild', '--reporter=append-only', ...built], '의존성 빌드');
   }
 };
 

@@ -28,8 +28,14 @@ interface JudgmentRow {
 const COLUMNS = `id, rule_id, run_id, step_id, commit_sha, judged_at, status, runner, exit_code,
   reporter_path, cases, quarantine_reason`;
 
-/** 최신 판정 순서: 판정 시각 → ID (둘 다 사전순 = 시간순). */
+/** 최신 판정 순서: 판정 시각 → ID (둘 다 사전순 = 시간순, 판정 시각은 밀리초 3자리 UTC로 저장한다). */
 const LATEST_FIRST = 'ORDER BY judged_at DESC, id DESC';
+
+/** 미래 시각 기록은 최신 판정으로 보지 않는다 (직접 쓴 위조 행 방어, 트리거와 이중). */
+const NOT_FUTURE = "judged_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 minutes')";
+
+/** 판정 시각을 지금보다 이만큼 넘게 미래로 쓰지 않는다. */
+const FUTURE_LIMIT_MS = 60_000;
 
 const toRow = (result: JudgmentResult): JudgmentRow => ({
   id: result.id,
@@ -79,12 +85,12 @@ export class JudgmentRepository {
     );
     this.#exists = db.prepare<[string], { id: string }>('SELECT id FROM judgments WHERE id = ?');
     this.#latest = db.prepare<[string], JudgmentRow>(
-      `SELECT ${COLUMNS} FROM judgments WHERE rule_id = ? ${LATEST_FIRST} LIMIT 1`,
+      `SELECT ${COLUMNS} FROM judgments WHERE rule_id = ? AND ${NOT_FUTURE} ${LATEST_FIRST} LIMIT 1`,
     );
     // 규칙마다 최신 1건: 같은 규칙에서 더 늦은 기록이 없는 행
     this.#latestAll = db.prepare<[], JudgmentRow>(
-      `SELECT ${COLUMNS} FROM judgments AS j WHERE NOT EXISTS (
-         SELECT 1 FROM judgments AS later WHERE later.rule_id = j.rule_id
+      `SELECT ${COLUMNS} FROM judgments AS j WHERE ${NOT_FUTURE} AND NOT EXISTS (
+         SELECT 1 FROM judgments AS later WHERE later.rule_id = j.rule_id AND later.${NOT_FUTURE}
            AND (later.judged_at > j.judged_at OR (later.judged_at = j.judged_at AND later.id > j.id))
        ) ORDER BY rule_id`,
     );
@@ -103,7 +109,16 @@ export class JudgmentRepository {
    * @throws {SqliteError} 없는 규칙 · 실행 · 단계를 가리킬 때 (외래 키)
    */
   record(results: readonly JudgmentResult[]): JudgmentResult[] {
-    const parsed = results.map((result) => JudgmentResult.parse(result));
+    const limit = Date.now() + FUTURE_LIMIT_MS;
+    const parsed = results.map((result) => {
+      const checked = JudgmentResult.parse(result);
+      const at = Date.parse(checked.judgedAt);
+      if (at > limit) {
+        throw new ConflictError(ENTITY, checked.id, `판정 시각이 미래입니다 (${checked.judgedAt})`);
+      }
+      // 문자열 비교가 시간 순서와 같도록 밀리초 3자리 UTC로 맞춘다
+      return { ...checked, judgedAt: new Date(at).toISOString() };
+    });
     return withTransaction(this.#db, () => {
       for (const result of parsed) {
         if (this.#exists.get(result.id) !== undefined) {

@@ -6,7 +6,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { JudgmentResult } from '@bive/shared';
+import { APPROVAL_LOG_GENESIS_HASH, type JudgmentResult } from '@bive/shared';
+import {
+  bivePaths,
+  canonicalJson,
+  computeApprovalLogHash,
+  openDatabase,
+  type SqliteDatabase,
+} from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
@@ -66,11 +73,23 @@ const isLocked = (h: PipelineHarness, worktree: string): boolean =>
 
 const ACC_FILE = 'bive-acceptance/RULE-001/health-time.acc.ts';
 
-/** 같은 사용자 권한의 다른 프로세스 흉내: 트리거를 지우고 승인 기록 · 규칙을 직접 고친다. */
+/**
+ * 같은 사용자 권한의 다른 프로세스 흉내: 오케스트레이터의 저장소(`ProjectStore`)를 거치지 않는 별도 연결로 DB를 직접 고친다
+ * (에이전트 코드가 `run_tests` · 판정 서버에서 `bive.db`를 여는 경우, #117).
+ */
+const rawDb = <T>(h: PipelineHarness, fn: (db: SqliteDatabase) => T): T => {
+  const db = openDatabase(bivePaths(h.biveHome).projectDb(h.project.id), { create: false });
+  try {
+    return fn(db);
+  } finally {
+    db.close();
+  }
+};
+
 const tamper = (h: PipelineHarness, sql: string, ...args: unknown[]): void => {
-  withProject(h.biveHome, h.project.id, (store) => {
-    store.db.exec('DROP TRIGGER IF EXISTS approval_log_no_update;');
-    store.db.prepare(sql).run(...args);
+  rawDb(h, (db) => {
+    db.exec('DROP TRIGGER IF EXISTS approval_log_no_update;');
+    db.prepare(sql).run(...args);
   });
 };
 
@@ -539,7 +558,6 @@ describe('규범 저장소 무결성: 세션 뒤 · 판정 직전 · 판정 뒤 
       detail: {
         stage: NORM_INTEGRITY_STAGE,
         moment: 'after_session',
-        mismatches: [{ kind: 'approval_chain_broken' }],
       },
     });
     expect(judgeKinds(h)).toEqual(['red_check']);
@@ -563,14 +581,121 @@ describe('규범 저장소 무결성: 세션 뒤 · 판정 직전 · 판정 뒤 
       detail: {
         stage: NORM_INTEGRITY_STAGE,
         moment: 'after_judge',
-        mismatches: [{ kind: 'rule_changed', detail: '규칙이 바뀌었습니다: RULE-001' }],
+        mismatches: [
+          {
+            kind: 'untrusted_change',
+            detail: expect.stringContaining('rules') as unknown as string,
+          },
+        ],
       },
     });
     // 구현 판정 기록만 있고 검사 판정 기록은 없다
     expect(judgmentsOf(h).map((r) => r.stepId)).toEqual([stepOf(done, 'implementation').id]);
   }, 60_000);
 
+  // 검토 1회차: 좁힌 대조가 놓친 직접 SQL 위조. 오케스트레이터 저장소를 거치지 않은 변경은 무엇이든 불일치다
+  const forgeries: [string, (h: PipelineHarness) => void, string][] = [
+    [
+      '승인된 규칙 행 INSERT',
+      (h) =>
+        rawDb(h, (db) => {
+          db.prepare(
+            `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
+             parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
+             updated_at, deleted_at) VALUES (?, 'RULE-777', '위조', 'WHEN x THE SYSTEM SHALL y', 'business', '["test"]',
+             ?, NULL, 0, '[]', NULL, NULL, '{"kind":"human"}', 'approved', ?, ?, NULL)`,
+          ).run(
+            newId(),
+            h.rule.parentRequirementId,
+            new Date().toISOString(),
+            new Date().toISOString(),
+          );
+        }),
+      'rules',
+    ],
+    [
+      '체인을 맞춘 승인 기록 꼬리 추가',
+      (h) =>
+        rawDb(h, (db) => {
+          const last = db
+            .prepare('SELECT seq, hash FROM approval_log ORDER BY seq DESC LIMIT 1')
+            .get() as { seq: number; hash: string } | undefined;
+          const entry = {
+            seq: (last?.seq ?? 0) + 1,
+            at: new Date().toISOString(),
+            action: 'approve' as const,
+            actor: { kind: 'human' as const },
+            targetRef: { entity: 'Proposal' as const, id: newId() },
+            clientId: 'pipe-1',
+            detail: { appliedRef: { entity: 'Rule' as const, id: newId() } },
+            prevHash: last?.hash ?? APPROVAL_LOG_GENESIS_HASH,
+          };
+          db.prepare(
+            'INSERT INTO approval_log (seq, at, action, actor, target_ref, client_id, detail, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          ).run(
+            entry.seq,
+            entry.at,
+            entry.action,
+            canonicalJson(entry.actor),
+            canonicalJson(entry.targetRef),
+            entry.clientId,
+            canonicalJson(entry.detail),
+            entry.prevHash,
+            computeApprovalLogHash(entry),
+          );
+        }),
+      'approval_log',
+    ],
+    [
+      '규칙 열 UPDATE (대상 블록)',
+      (h) =>
+        rawDb(h, (db) => {
+          db.prepare(`UPDATE rules SET target_block_ids = '["blk"]' WHERE id = ?`).run(h.rule.id);
+        }),
+      'rules',
+    ],
+    [
+      '미래 시각의 pass 판정 행',
+      (h) =>
+        rawDb(h, (db) => {
+          db.exec('DROP TRIGGER IF EXISTS judgments_no_future;');
+          db.prepare(
+            `INSERT INTO judgments (id, rule_id, run_id, step_id, commit_sha, judged_at, status, runner, exit_code,
+             reporter_path, cases, quarantine_reason) VALUES (?, ?, NULL, NULL, ?, '2999-01-01T00:00:00.000Z',
+             'pass', 'vitest', 0, NULL, '[]', NULL)`,
+          ).run(newId(), h.rule.id, 'f'.repeat(40));
+        }),
+      'judgments',
+    ],
+  ];
+
+  it.each(forgeries)(
+    '구현 세션 동안 별도 연결로 %s → 판정하지 않고 failed(norm_integrity)',
+    async (_name, forge, table) => {
+      const h = setup({
+        wrapAdapter: (adapter, harness) =>
+          hookAdapter(adapter, {
+            beforeResult: (spec) => {
+              if (spec.role === 'implementer') forge(harness());
+            },
+          }),
+      });
+      const done = await runToEnd(h);
+      expect(done.run).toMatchObject({ status: 'failed', failureReason: 'judge_runner_error' });
+      const detail = exitOf(done, 'implementation').detail as Record<string, unknown>;
+      expect(detail).toMatchObject({ stage: NORM_INTEGRITY_STAGE, moment: 'after_session' });
+      expect(JSON.stringify(detail.mismatches)).toContain(table);
+      expect(judgeKinds(h)).toEqual(['red_check']);
+      // 위조한 미래 판정 행은 최신 판정으로 보이지 않는다
+      const latest = withProject(h.biveHome, h.project.id, (store) => storedLatestJudgments(store));
+      expect(latest(h.rule.id)).toBeNull();
+    },
+    60_000,
+  );
+
   it('실행 중 사람의 승인 · 실행 시작(승인 기록 추가 · 새 규칙)은 불일치가 아니다', async () => {
+    // 오케스트레이터 프로세스의 저장소(ProjectStore)를 거친 쓰기는 쓰기 장부에 남아 믿는 상태가 된다. 사람의 승인 RPC ·
+    // 실행 생성이 같은 경로다(같은 프로세스의 withProject). 별도 연결의 쓰기는 위 위조 시험처럼 불일치다
     const h = setup({
       wrapAdapter: (adapter, harness) =>
         hookAdapter(adapter, {

@@ -2,7 +2,10 @@
 import { type Author, type JudgmentResult, RUN_STEP_PLANS, STEP_ROLES } from '@bive/shared';
 import { describe, expect, it } from 'vitest';
 
-import { captureNormSnapshot, compareNormSnapshots } from '../src/norm-snapshot.js';
+import { canonicalJson, computeApprovalLogHash } from '../src/approval-chain.js';
+import { openDatabase } from '../src/database.js';
+import { beginNormWatch, verifyNormWatch } from '../src/norm-snapshot.js';
+import { bivePaths } from '../src/paths.js';
 import { ConflictError } from '../src/errors.js';
 import { openProjectStore, type ProjectStore } from '../src/project-store.js';
 import { newId, useTempHome } from './support/temp-home.js';
@@ -185,7 +188,29 @@ describe('judgments', () => {
   });
 });
 
-describe('규범 저장소 스냅숏 (#117 기본 조치)', () => {
+describe('규범 저장소 쓰기 장부 (#117 기본 조치, 검토 1회차)', () => {
+  /** 같은 프로젝트 저장소를 여러 번 연다 (오케스트레이터의 요청마다 열고 닫기). */
+  const project = () => {
+    const id = newId();
+    const open = <T>(fn: (store: ProjectStore) => T): T => {
+      const store = openProjectStore(id, { home: home() });
+      try {
+        return fn(store);
+      } finally {
+        store.close();
+      }
+    };
+    /** 다른 프로세스 흉내: ProjectStore를 거치지 않는 별도 연결 */
+    const raw = (fn: (db: ReturnType<typeof openDatabase>) => void): void => {
+      const db = openDatabase(bivePaths(home()).projectDb(id), { create: false });
+      try {
+        fn(db);
+      } finally {
+        db.close();
+      }
+    };
+    return { open, raw };
+  };
   const approve = (store: ProjectStore) =>
     store.approvalLog.append({
       at: T1,
@@ -196,73 +221,138 @@ describe('규범 저장소 스냅숏 (#117 기본 조치)', () => {
       detail: { appliedRef: { entity: 'Rule', id: newId() } },
     });
 
-  it('사람의 정상 활동(승인 기록 추가 · 새 규칙 · 부모 해제 · 다른 실행의 판정)은 불일치가 아니다', () => {
-    withStore((store) => {
-      const { requirement, run } = seed(store);
+  it('ProjectStore를 거친 쓰기(승인 기록 · 새 규칙 · 부모 해제 · 판정 기록)는 불일치가 아니다', () => {
+    const p = project();
+    const { requirement, first } = p.open((store) => seed(store));
+    const watch = p.open((store) => beginNormWatch(store));
+    p.open((store) => {
       approve(store);
-      const before = captureNormSnapshot(store, run.id);
-      approve(store);
-      store.rules.create({
-        id: newId(),
-        title: '새 규칙',
-        statement: 'WHEN GET /a THE SYSTEM SHALL 응답한다',
-        kind: 'business',
-        checkKinds: ['test'],
-        parentRequirementId: requirement.id,
-        builtin: false,
-        targetBlockIds: [],
-        risk: null,
-        contractId: null,
-        author: { kind: 'agent', role: 'rule-writer' },
-        normState: 'approved',
-        createdAt: T1,
-      });
       store.rules.detachFromParent(requirement.id, T2);
-      expect(compareNormSnapshots(before, captureNormSnapshot(store, run.id))).toEqual([]);
+      store.judgments.record([judgment({ ruleId: first.id })]);
     });
+    expect(p.open((store) => verifyNormWatch(store, watch))).toEqual([]);
   });
 
-  it('승인 기록 변조 · 규칙 변경 · 삭제 · 이 실행의 기록 변경은 불일치다', () => {
-    withStore((store) => {
-      const { first, second, run, check } = seed(store);
-      approve(store);
-      approve(store);
-      const before = captureNormSnapshot(store, run.id);
-      // 같은 사용자 권한의 다른 프로세스 흉내: 트리거를 지우고 직접 고친다
-      store.db.exec(
-        'DROP TRIGGER approval_log_no_update; DROP TRIGGER steps_final; DROP TRIGGER steps_identity_immutable;',
-      );
-      store.db.prepare("UPDATE approval_log SET client_id = 'x' WHERE seq = 1").run();
-      store.db
-        .prepare("UPDATE rules SET statement = 'WHEN x THE SYSTEM SHALL y' WHERE id = ?")
-        .run(first.id);
-      store.db.prepare('UPDATE rules SET deleted_at = ? WHERE id = ?').run(T2, second.id);
-      store.db.prepare("UPDATE steps SET exit_detail = '{}' WHERE id = ?").run(check.id);
-      const kinds = compareNormSnapshots(before, captureNormSnapshot(store, run.id)).map(
-        (m) => m.kind,
-      );
-      // 내용만 고친 승인 기록은 저장된 해시가 그대로라 체인 검증이 잡는다
-      expect(kinds).toEqual([
-        'approval_chain_broken',
-        'rule_changed',
-        'rule_changed',
-        'run_records_changed',
-      ]);
-
-      // 승인 기록 끝을 잘라 내면 체인은 유효해도 앞부분이 사라진 것으로 잡는다
-      const fresh = captureNormSnapshot(store, run.id);
-      store.db.exec('DROP TRIGGER approval_log_no_delete;');
-      store.db.prepare('DELETE FROM approval_log WHERE seq = 2').run();
+  it('별도 연결의 변경은 어느 테이블이든 불일치다: 규칙 행 추가 · 규칙 열 변경 · 체인을 맞춘 승인 기록 추가 · 트리거 삭제', () => {
+    const p = project();
+    const { first } = p.open((store) => seed(store));
+    p.open((store) => approve(store));
+    const cases: [string, (db: ReturnType<typeof openDatabase>) => void, string][] = [
+      [
+        '규칙 열',
+        (db) =>
+          db.prepare(`UPDATE rules SET target_block_ids = '["x"]' WHERE id = ?`).run(first.id),
+        'rules',
+      ],
+      [
+        '승인 기록 꼬리',
+        (db) => {
+          const last = db
+            .prepare('SELECT seq, hash FROM approval_log ORDER BY seq DESC LIMIT 1')
+            .get() as { seq: number; hash: string };
+          const entry = {
+            seq: last.seq + 1,
+            at: T2,
+            action: 'approve' as const,
+            actor: human,
+            targetRef: { entity: 'Proposal' as const, id: newId() },
+            clientId: 'pipe-1',
+            detail: {},
+            prevHash: last.hash,
+          };
+          db.prepare(
+            'INSERT INTO approval_log (seq, at, action, actor, target_ref, client_id, detail, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          ).run(
+            entry.seq,
+            entry.at,
+            entry.action,
+            canonicalJson(entry.actor),
+            canonicalJson(entry.targetRef),
+            entry.clientId,
+            canonicalJson(entry.detail),
+            entry.prevHash,
+            computeApprovalLogHash(entry),
+          );
+        },
+        'approval_log',
+      ],
+      ['트리거 삭제', (db) => db.exec('DROP TRIGGER judgments_no_update;'), '#schema'],
+    ];
+    for (const [name, forge, table] of cases) {
+      const watch = p.open((store) => beginNormWatch(store));
+      p.raw(forge);
+      // 그 뒤 오케스트레이터가 다른 기록을 써도 위조가 믿는 상태로 흡수되지 않는다 (열 때 먼저 대조)
+      p.open((store) => approve(store));
+      const mismatches = p.open((store) => verifyNormWatch(store, watch));
       expect(
-        compareNormSnapshots(fresh, captureNormSnapshot(store, run.id)).map((m) => m.kind),
-      ).toContain('approval_log_rewritten');
-
-      // 이 실행의 판정 기록이 끼어들어도 불일치다 (체인은 위에서 이미 깨진 상태)
-      const again = captureNormSnapshot(store, run.id);
-      store.judgments.record([judgment({ ruleId: first.id, runId: run.id, stepId: check.id })]);
+        mismatches.map((m) => m.kind),
+        name,
+      ).toEqual(['untrusted_change']);
+      expect(mismatches[0]?.detail, name).toContain(table);
+      // 보고한 사건은 다음 감시의 대상이 아니다
+      const next = p.open((store) => beginNormWatch(store));
       expect(
-        compareNormSnapshots(again, captureNormSnapshot(store, run.id)).map((m) => m.kind),
-      ).toEqual(['approval_chain_broken', 'run_records_changed']);
+        p.open((store) => verifyNormWatch(store, next)),
+        name,
+      ).toEqual([]);
+    }
+  });
+
+  it('감시 시작 전 단계 사이에 생긴 보고되지 않은 변경도 다음 감시가 잡는다', () => {
+    const p = project();
+    p.open((store) => seed(store));
+    p.open(() => undefined);
+    p.raw((db) => db.prepare("UPDATE rules SET title = '바뀐 제목'").run());
+    const watch = p.open((store) => beginNormWatch(store));
+    expect(p.open((store) => verifyNormWatch(store, watch)).map((m) => m.kind)).toEqual([
+      'untrusted_change',
+    ]);
+  });
+
+  it('미래 시각 판정 기록은 저장 · 트리거가 거부하고, 직접 넣어도 최신 판정으로 보지 않으며 대조가 잡는다', () => {
+    const p = project();
+    const { first } = p.open((store) => seed(store));
+    const future = new Date(Date.now() + 10 * 60_000).toISOString();
+    expect(() =>
+      p.open((store) => store.judgments.record([judgment({ ruleId: first.id, judgedAt: future })])),
+    ).toThrow(/미래/);
+    const watch = p.open((store) => beginNormWatch(store));
+    expect(() =>
+      p.raw((db) =>
+        db
+          .prepare(
+            "INSERT INTO judgments (id, rule_id, commit_sha, judged_at, status, runner, cases) VALUES (?, ?, ?, ?, 'pass', 'vitest', '[]')",
+          )
+          .run(newId(), first.id, COMMIT_A, future),
+      ),
+    ).toThrow(/미래/);
+    p.raw((db) => {
+      db.exec('DROP TRIGGER judgments_no_future;');
+      db.prepare(
+        "INSERT INTO judgments (id, rule_id, commit_sha, judged_at, status, runner, cases) VALUES (?, ?, ?, ?, 'pass', 'vitest', '[]')",
+      ).run(newId(), first.id, COMMIT_A, future);
     });
+    expect(p.open((store) => store.judgments.latestByRule(first.id))).toBeNull();
+    expect(p.open((store) => store.judgments.latestForRules())).toEqual(new Map());
+    const kinds = p.open((store) => verifyNormWatch(store, watch)).map((m) => m.kind);
+    expect(kinds).toEqual(['untrusted_change', 'future_judgment']);
+  });
+
+  it('판정 시각은 밀리초 3자리 UTC로 맞춰 저장하고 그 밖 형식은 DB가 거부한다', () => {
+    const p = project();
+    const { first } = p.open((store) => seed(store));
+    const [saved] = p.open((store) =>
+      store.judgments.record([judgment({ ruleId: first.id, judgedAt: '2026-10-16T01:00:00Z' })]),
+    );
+    expect(saved?.judgedAt).toBe('2026-10-16T01:00:00.000Z');
+    expect(() =>
+      p.raw((db) =>
+        db
+          .prepare(
+            "INSERT INTO judgments (id, rule_id, commit_sha, judged_at, status, runner, cases) VALUES (?, ?, ?, '2026-10-16T01:00:00Z', 'pass', 'vitest', '[]')",
+          )
+          .run(newId(), first.id, COMMIT_A),
+      ),
+    ).toThrow(/CHECK/);
   });
 });

@@ -276,6 +276,90 @@ describe('병합 단계 중단 뒤 재개 (코멘트 기준, ADR-066 한계)', (
     expect(done.run).toMatchObject({ status: 'failed', failureReason: 'no_changes' });
     expect(mergeCount(h)).toBe(0);
   }, 60_000);
+
+  // 검토 1회차: 트레일러만 흉내 낸 병합 커밋(검사하지 않은 파일 포함)을 복구로 인정하면 안 된다
+  const forgeMerge = (h: PipelineHarness, repo: string, branch: string): void => {
+    userGit(repo, 'merge', '-q', '--no-ff', '--no-commit', branch);
+    fs.writeFileSync(path.join(repo, 'UNCHECKED.ts'), 'export const unchecked = true;\n');
+    userGit(repo, 'add', 'UNCHECKED.ts');
+    userGit(
+      repo,
+      'commit',
+      '-q',
+      '-m',
+      `BIVE 실행 EXE-001 병합\n\nBive-Run: EXE-001\nBive-Project: ${h.project.id}\nBive-Branch: ${branch}`,
+    );
+  };
+
+  it('첫 병합 시도(중단 뒤 재개 아님)의 no_changes는 BIVE 병합 커밋처럼 보여도 복구하지 않고 failed', async () => {
+    const ref: { harness?: PipelineHarness } = {};
+    const h = setup({
+      executors: (defaults) => ({
+        ...defaults,
+        merge: before(defaults.merge, (context) => {
+          if (ref.harness !== undefined) {
+            forgeMerge(ref.harness, context.git.repoPath, context.git.branch);
+          }
+        }),
+      }),
+    });
+    ref.harness = h;
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'no_changes',
+      mergeCommit: null,
+    });
+    expect(attempts(done, 'merge')).toEqual(['merge#1:failed']);
+  }, 60_000);
+
+  it('재개 뒤에도 병합 커밋의 트리가 기대 병합 결과(merge-tree)와 다르면 복구하지 않고 failed', async () => {
+    let stopped = false;
+    const ref: { harness?: PipelineHarness } = {};
+    const h = setup({
+      worktrees: (biveHome) => {
+        const inner = createWorktreeManager({ biveHome });
+        return {
+          ...inner,
+          merge: (run, options) => {
+            // 첫 병합은 하지 않고, 누군가 트레일러만 흉내 낸 병합 커밋을 만든 뒤 오케스트레이터가 죽은 것처럼 멈춘다
+            if (!stopped && ref.harness !== undefined) {
+              stopped = true;
+              forgeMerge(ref.harness, run.repoPath, run.branch);
+              void ref.harness.engine.stop();
+              return Promise.resolve({
+                status: 'failed',
+                reason: 'aborted',
+                message: '중단',
+                branch: run.branch,
+                headCommit: null,
+              });
+            }
+            return inner.merge(run, options);
+          },
+        };
+      },
+    });
+    ref.harness = h;
+    expect(h.engine.evaluateApproval(h.project.id, h.runId)).toBe(true);
+    await h.engine.settled();
+    expect(detailOf(h).run).toMatchObject({ status: 'running', currentStep: 'merge' });
+
+    const engine = h.newEngine();
+    expect(engine.recoverInterruptedRuns().map((r) => r.runId)).toEqual([h.runId]);
+    await engine.resume(h.project.id, h.runId, human);
+    await engine.settled();
+    const done = detailOf(h);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'no_changes',
+      mergeCommit: null,
+    });
+    expect(exitOf(done, 'merge', 2)).toMatchObject({
+      reason: 'no_changes',
+      detail: { recovery: { mergeCommit: mainTip(h), reason: 'tree_mismatch' } },
+    });
+  }, 60_000);
 });
 
 describe('실제 판정: 유형 A 완주 (픽스처 · 실제 설치 · 판정 러너)', () => {
