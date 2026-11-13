@@ -153,7 +153,7 @@ bive/
 │   ├── roadmap.md      마일스톤 · 이슈 · 수용 기준
 │   └── prototype-map.md 프로토타입 → 화면(SCR) → 렌더러 모듈 대응표
 ├── scripts/            gh-rest.sh (GitHub REST 래퍼) · publish-roadmap.py · reset-fixture.sh · test-reset-fixture.sh
-├── .claude/skills/     pr-reviewer · publish-roadmap · run-milestone
+├── .claude/skills/     dev-env · pr-reviewer · publish-roadmap · run-milestone
 ├── CLAUDE.md           개발 규칙 (운영 방식)
 └── eslint.config.js    패키지 경계 · 테스트 전용 모듈 import 금지 규칙
 ```
@@ -220,11 +220,12 @@ export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
 | `BIVE_NODE_PATH` | `source` 방식에서 쓸 Node 실행 파일. 기본 PATH의 `node` |
 | `BIVE_NO_SANDBOX` | `1`이면 Electron에 `--no-sandbox`를 붙인다 (개발 · 테스트 한정, root는 자동) |
 | `BIVE_E2E_PORT` | 화면 e2e의 Vite 서버 포트. 기본은 worktree 경로 해시로 자동 결정(5179 + hash % 500) |
-| `BIVE_AGENT` | 에이전트 어댑터 선택(`scripted` · `claude`). M1에서 추가 예정이라 아직 동작하지 않는다 |
+| `BIVE_AGENT` | 에이전트 어댑터 선택. `claude`(실제 SDK, 기본) · `scripted`(가짜 에이전트). 빈 값은 미설정과 같고 그 밖의 값은 기동 오류 |
+| `BIVE_SCENARIO` | `BIVE_AGENT=scripted`일 때 재생할 시나리오 이름. 기본 `happy-path`. `scripted`가 아니면 읽지 않는다 |
 
 ## 7. 테스트
 
-모든 자동 테스트는 실제 Claude API 없이 돈다. 에이전트는 **ScriptedAdapter**(시나리오 파일로 턴을 재생하는 가짜 에이전트)가 대신하고, 실제 SDK 완주는 사람이 확인한다 (ADR-016). ScriptedAdapter 자체는 M1에서 들어온다.
+모든 자동 테스트는 실제 Claude API 없이 돈다. 에이전트는 **ScriptedAdapter**(시나리오 파일로 턴을 재생하는 가짜 에이전트)가 대신하고, 실제 SDK 완주는 사람이 확인한다 (ADR-016). `BIVE_AGENT=scripted`로 고르고 시나리오는 `BIVE_SCENARIO`로 정한다 (ADR-049).
 
 | 종류 | 명령 | 내용 |
 |---|---|---|
@@ -237,7 +238,7 @@ export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
 | 픽스처 초기화 | `scripts/reset-fixture.sh <dir> [--verify]` | 픽스처의 추적 파일을 `<dir>`로 복사해 설치하고 git 저장소(커밋 1개)로 만든다. `--verify`는 끝에 픽스처 테스트까지 실행한다 |
 | 초기화 스크립트 검사 | `scripts/test-reset-fixture.sh` | 지우면 안 되는 경로를 거부하는지 검사 |
 
-이 VM(Chromium 1194만 설치)에서의 e2e 실행 방법과 각 명령의 실측 결과는 [`CLAUDE.md`](CLAUDE.md) 6장에 있다. 같은 VM의 worktree 여러 개에서 e2e를 동시에 돌려도 기본 포트가 worktree 경로 해시로 정해져 보통 겹치지 않는다. 겹치면 `BIVE_E2E_PORT`로 지정한다.
+모든 PR이 통과해야 하는 완료 조건 명령은 [`CLAUDE.md`](CLAUDE.md) 5장에, 이 VM(Chromium 1194만 설치)의 제약 · 기동 방법 · 자주 겪는 오류는 [`dev-env` 스킬](.claude/skills/dev-env/SKILL.md)에 있다. 같은 VM의 worktree 여러 개에서 e2e를 동시에 돌려도 기본 포트가 worktree 경로 해시로 정해져 보통 겹치지 않는다. 겹치면 `BIVE_E2E_PORT`로 지정한다.
 
 ## 8. 개발 규칙
 
