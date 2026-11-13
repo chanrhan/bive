@@ -5,8 +5,9 @@
 //   DB에 두지 않는다(같은 경로로 고칠 수 있다)
 // - `ProjectStore`를 열 때(`observeStoreState`) 지금 상태가 장부와 다르면 이 프로세스 밖의 변경이므로 사건으로 남기고
 //   장부를 지금 상태로 맞춘다(같은 변경을 한 번만 남긴다). 장부가 없으면(프로세스 시작 뒤 처음) 지금 상태로 만든다
-// - `ProjectStore`가 쓰고 닫을 때(`trustStoreState`) 지금 상태를 믿는 상태로 기록한다. 열 때 대조했으므로, 연 뒤의
-//   변경은 이 연결의 쓰기다(better-sqlite3는 동기라 같은 프로세스의 다른 쓰기가 끼어들지 않는다)
+// - `ProjectStore`가 쓰고 닫을 때(`trustStoreState`) 지금 상태를 믿는 상태로 기록한다. 단, 연 뒤 다른 연결이 커밋했으면
+//   (`PRAGMA data_version`이 바뀜: 자기 연결의 쓰기로는 바뀌지 않고 다른 연결의 커밋으로만 바뀜을 실측) 믿지 않고
+//   `observeStoreState`로 사건을 남긴다(열려 있는 동안 끼어든 위조가 흡수되지 않게, 검토 2회차)
 // - 감시(`beginNormWatch` · `verifyNormWatch`): 단계 실행기가 시작할 때 아직 보고되지 않은 사건부터 대조 대상으로 잡고,
 //   대조할 때마다 다시 관찰해 그 뒤의 사건 · 깨진 승인 기록 체인 · 미래 시각 판정 기록을 불일치로 돌려준다
 // 어느 테이블이든(규칙 행 추가 · 승인 기록 꼬리 추가 · 규칙 열 변경 · 판정 행 · 트리거 삭제) 오케스트레이터 밖에서 바뀌면
@@ -49,7 +50,11 @@ const ledgers = new Map<string, Ledger>();
 const keyOf = (store: ProjectStore): string => path.resolve(store.path);
 
 /** 테이블마다 모든 행(rowid 순)의 해시와 스키마(테이블 · 인덱스 · 트리거 정의) 해시. 행은 검증 없이 그대로 읽는다. */
-export const tableDigests = (db: SqliteDatabase): Map<string, string> => {
+export const tableDigests = (db: SqliteDatabase): Map<string, string> =>
+  // 읽기 트랜잭션 하나 안에서 읽는다: 테이블마다 따로 읽으면 해시하는 도중 다른 연결의 커밋이 섞인다 (검토 2회차)
+  db.transaction(() => readDigests(db))();
+
+const readDigests = (db: SqliteDatabase): Map<string, string> => {
   const digests = new Map<string, string>();
   const schema = db
     .prepare<[], { type: string; name: string; tbl_name: string; sql: string | null }>(

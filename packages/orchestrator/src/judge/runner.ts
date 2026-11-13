@@ -468,6 +468,8 @@ export class JudgeRunner {
       );
       timings.vitest = exit.durationMs;
       exitCode = exit.code;
+      // vitest가 끝나면 서버(프로젝트 코드)를 먼저 멈춘 뒤 대조하고 결과를 읽는다 (대조 뒤 서버가 바꾸지 못하게)
+      await server.stop();
       // vitest가 끝난 직후 (실행 중 서버 코드가 바꿨는지)
       const afterVitest = changedSinceBaseline();
       if (afterVitest.length > 0) return await tamper('after_vitest', afterVitest);

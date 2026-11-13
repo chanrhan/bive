@@ -5,7 +5,7 @@
 // 띄우기 직전과 끝난 직후에 다시 만들어 대조한다(다르면 판정 결과를 쓰지 않는다, fail closed).
 // - 인수 테스트: `bive-acceptance/` 아래 일반 파일 (`hashAcceptanceFiles`)
 // - 테스트 실행기: `node_modules/.bin/vitest`(링크면 대상 문자열, 파일이면 내용)와 `node_modules/vitest` 패키지의 의존성
-//   닫힘(pnpm 배치: 의존성은 패키지 폴더의 형제 링크)에 있는 패키지들의 파일 (중첩 `node_modules` 제외)
+//   닫힘(pnpm 배치: 의존성은 패키지 폴더의 형제 링크)에 있는 패키지들의 파일 (패키지 안 `node_modules` 포함)
 // - 판정 폴더의 BIVE 생성 파일 (설정 · 수집 설정 · globalSetup · HTTP 도우미)
 // 한계: 같은 OS 사용자라 대조 사이에 바꿨다가 되돌리거나, 실행기가 쓰는 결과 파일(`result.json`)을 바꾸는 것은 막지 못한다(#117).
 import { createHash } from 'node:crypto';
@@ -82,7 +82,9 @@ const hashTree = (root: string, label: string, into: JudgeInputFingerprint): voi
       const full = path.join(dir, entry.name);
       const rel = `${label}/${path.relative(root, full).split(path.sep).join('/')}`;
       if (entry.isDirectory()) {
-        if (entry.name !== 'node_modules') walk(full);
+        // 패키지 안 `node_modules`(`.bin` 포함)도 걷는다: Node는 맨 이름 import를 형제 링크보다 이 자리에서 먼저
+        // 찾으므로, 심은 사본이 새 항목으로 드러나야 한다 (검토 2회차)
+        walk(full);
       } else if (entry.isSymbolicLink()) {
         into[rel] = sha256(`link:${fs.readlinkSync(full)}`);
       } else if (entry.isFile()) {

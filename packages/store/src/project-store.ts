@@ -72,15 +72,34 @@ export class ProjectStore {
     return this.projects.get(this.projectId);
   }
 
+  /** 열 때(장부 대조 직전) 읽은 `PRAGMA data_version`. 다른 연결이 커밋하면 바뀐다 */
+  #dataVersion: number | null = null;
+
+  /** 장부 대조 직전의 `data_version`을 기록한다 (`openProjectStore`가 부른다). */
+  markDataVersion(): void {
+    this.#dataVersion = this.#readDataVersion();
+  }
+
+  #readDataVersion(): number {
+    return Number(this.db.pragma('data_version', { simple: true }));
+  }
+
   /**
    * 닫는다. 이 연결이 무언가를 썼으면 지금 상태를 쓰기 장부의 믿는 상태로 남긴다(`norm-snapshot.ts`, ADR-069).
-   * 열 때 장부와 대조했으므로 연 뒤의 변경은 이 연결의 쓰기다.
+   * 열 때 장부와 대조했고, 연 뒤 다른 연결의 커밋이 없으면(`data_version` 그대로) 연 뒤의 변경은 이 연결의 쓰기다.
+   * 다른 연결의 커밋이 있었으면 믿지 않고 사건으로 남긴다(그 위조가 이 연결의 정상 쓰기와 함께 흡수되지 않게).
    */
   close(): void {
     try {
       if (this.db.open) {
         const changes = this.db.prepare<[], { n: number }>('SELECT total_changes() AS n').get();
-        if (changes !== undefined && changes.n > 0) trustStoreState(this);
+        if (changes !== undefined && changes.n > 0) {
+          if (this.#dataVersion !== null && this.#readDataVersion() === this.#dataVersion) {
+            trustStoreState(this);
+          } else {
+            observeStoreState(this);
+          }
+        }
       }
     } finally {
       this.db.close();
@@ -104,7 +123,9 @@ export const openProjectStore = (
   try {
     migrate(db, PROJECT_MIGRATIONS, options);
     const store = new ProjectStore(projectId, path, db);
-    // 쓰기 장부와 대조한다: 이 프로세스 밖의 변경은 사건으로 남는다 (ADR-069)
+    // 쓰기 장부와 대조한다: 이 프로세스 밖의 변경은 사건으로 남는다 (ADR-069). data_version은 대조 직전에 읽는다:
+    // 그 사이 다른 연결의 커밋은 대조에 들어가고, 닫을 때 바뀐 것으로 보여 믿지 않는 쪽(실패 쪽)으로 닫힌다
+    store.markDataVersion();
     observeStoreState(store);
     return store;
   } catch (error) {

@@ -187,10 +187,15 @@ export const builtDependencyNames = (dir: string): string[] => {
 
 /**
  * lockfile 기준 의존성 설치. M1은 pnpm(`pnpm-lock.yaml`)만 지원한다.
- * 1. `pnpm install --frozen-lockfile --prefer-offline --ignore-scripts`: 프로젝트의 설치 수명 주기 스크립트
- *    (`preinstall` · `postinstall` · `prepare` 등)는 에이전트가 고칠 수 있는 코드라 돌리지 않는다(검토 1회차, ADR-069)
- * 2. `pnpm rebuild <허용 목록>`: 빌드 허용 목록(`onlyBuiltDependencies`)에 있는 의존성의 빌드 스크립트만 돌린다
- *    (네이티브 모듈 · 엔진 내려받기. 이름을 지정한 rebuild는 프로젝트 스크립트를 돌리지 않음을 확인했다)
+ * 1. `pnpm install --frozen-lockfile --prefer-offline --ignore-scripts --ignore-pnpmfile --package-import-method=copy`
+ *    - 프로젝트의 설치 수명 주기 스크립트(`preinstall` · `postinstall` · `prepare` 등)와 `.pnpmfile.cjs`는 에이전트가
+ *      고칠 수 있는 코드라 돌리지 않는다(검토 1 · 2회차, ADR-069). lockfile에 `pnpmfileChecksum`이 있으면 frozen 설치가
+ *      설정 불일치로 실패한다(실측) → 설치 실패로 닫힌다
+ *    - 전역 pnpm 저장소와 하드 링크하지 않고 복사한다: 판정 중 코드가 의존성 파일을 고쳐도 저장소 · 다른 프로젝트로
+ *      번지지 않게 (픽스처 기준 약 5초 · 855MB)
+ * 2. `pnpm rebuild --config.ignore-pnpmfile=true <허용 목록>`: 빌드 허용 목록(`onlyBuiltDependencies`)에 있는 의존성의
+ *    빌드 스크립트만 돌린다(네이티브 모듈 · 엔진 내려받기). 이름을 지정한 rebuild는 프로젝트 스크립트를 돌리지 않고,
+ *    `rebuild`는 `--ignore-pnpmfile` 옵션을 모르며 설정 값으로 줘야 pnpmfile을 건너뛴다(실측)
  * 프로젝트가 설치 때 하던 생성 단계(`prisma generate`)는 스택 프로필이 따로 한다.
  * 셸 없이 PATH의 `pnpm`을 실행하고 환경 변수는 판정 러너와 같은 허용 목록 + `CI=1`만 넘긴다.
  * @throws {JudgeCheckoutError} (`install`) lockfile 없음 · 설치 실패 · 시간 초과 · 중단
@@ -226,18 +231,23 @@ export const installDependencies: InstallDependencies = async (dir, options) => 
       '--frozen-lockfile',
       '--prefer-offline',
       '--ignore-scripts',
+      '--ignore-pnpmfile',
+      '--package-import-method=copy',
       '--reporter=append-only',
     ],
     '의존성 설치',
   );
   const built = builtDependencyNames(dir);
   if (built.length > 0) {
-    await run(['rebuild', '--reporter=append-only', ...built], '의존성 빌드');
+    await run(
+      ['rebuild', '--config.ignore-pnpmfile=true', '--reporter=append-only', ...built],
+      '의존성 빌드',
+    );
   }
 };
 
 /**
- * `bive-acceptance/` 아래 일반 파일(링크 · `node_modules` 제외)의 SHA-256 (상대 경로 `/` 구분 → 16진수).
+ * `bive-acceptance/` 아래 일반 파일 · 링크(대상 문자열)의 SHA-256 (상대 경로 `/` 구분 → 16진수, `node_modules` 포함).
  * Red 확인 통과 때 기록하고, 검사 단계(#29)가 판정 직전 같은 값인지 대조한다(architecture.md 4장 인수 테스트 보호).
  */
 export const hashAcceptanceFiles = (dir: string): Record<string, string> => {
@@ -252,10 +262,15 @@ export const hashAcceptanceFiles = (dir: string): Record<string, string> => {
     }
     for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
       const full = path.join(current, entry.name);
+      const rel = path.relative(dir, full).split(path.sep).join('/');
       if (entry.isDirectory()) {
-        if (entry.name !== 'node_modules') walk(full);
+        // `node_modules`도 걷는다: 인수 테스트의 맨 이름 import(`vitest`)는 그 자리를 먼저 찾는다 (검토 2회차)
+        walk(full);
+      } else if (entry.isSymbolicLink()) {
+        hashes[rel] = createHash('sha256')
+          .update(`link:${fs.readlinkSync(full)}`)
+          .digest('hex');
       } else if (entry.isFile()) {
-        const rel = path.relative(dir, full).split(path.sep).join('/');
         hashes[rel] = createHash('sha256').update(fs.readFileSync(full)).digest('hex');
       }
     }

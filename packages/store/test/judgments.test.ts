@@ -298,6 +298,20 @@ describe('규범 저장소 쓰기 장부 (#117 기본 조치, 검토 1회차)', 
     }
   });
 
+  it('저장소가 열려 있는 동안 별도 연결이 쓴 위조는 그 연결의 정상 쓰기와 함께 믿는 상태로 흡수되지 않는다 (검토 2회차)', () => {
+    const p = project();
+    const { first } = p.open((store) => seed(store));
+    const watch = p.open((store) => beginNormWatch(store));
+    // 열기(장부 대조) → 별도 연결의 위조 커밋 → 같은 연결의 정상 쓰기 → 닫기
+    p.open((store) => {
+      p.raw((db) => db.prepare("UPDATE requirements SET text = '위조'").run());
+      store.judgments.record([judgment({ ruleId: first.id })]);
+    });
+    const mismatches = p.open((store) => verifyNormWatch(store, watch));
+    expect(mismatches.map((m) => m.kind)).toEqual(['untrusted_change']);
+    expect(mismatches[0]?.detail).toContain('requirements');
+  });
+
   it('감시 시작 전 단계 사이에 생긴 보고되지 않은 변경도 다음 감시가 잡는다', () => {
     const p = project();
     p.open((store) => seed(store));
