@@ -2,7 +2,9 @@
 // - 목록: rule.list 결과(승인된 규칙 + 최신 판정)만 그린다(NFR-03). 카드 · 필터 규칙은 rulesView.ts
 // - 상세(SCR-06 규범 상세, norm-detail/RuleDetail): 카드를 고르면 진술 · 테스트 실행 결과 · 테스트 출력(접힘) · 실행 이력.
 //   고른 항목이 없으면 "선택 항목 없음"
-// - [실행]은 실행 시작 확인 이슈(#32)가 연다. 그 전에는 미노출 (ADR-035)
+// - [실행](RunStart): 고른 규칙의 상세 머리에 있다. 누르면 실행 시작 확인 대화 → [시작]이면 run.create (ADR-076).
+//   고른 항목이 없으면 없다
+// - 실행 알림(event.run.updated · event.step.updated)을 받으면 목록을 다시 읽는다(useRules, ADR-076)
 // - 상태(ADR-060, ADR-053과 같음): 프로젝트 조회 중 = 비움 · 프로젝트 없음 = "프로젝트 없음" ·
 //   로딩 = 목록 자리 비움(문구 · 스켈레톤 없음) · 불러오기 실패 = "규칙 불러오기 실패" · 0건 = "규칙 없음"(ADR-029)
 import './RulesScreen.css';
@@ -14,6 +16,7 @@ import { ListView } from '../../components/ListView/ListView.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { useProject } from '../../project/ProjectContext.js';
 import { RuleDetail } from '../norm-detail/RuleDetail.js';
+import { RunStart } from './RunStart.js';
 import {
   RULE_CRITERIA,
   RULES_LIST_ID,
@@ -87,7 +90,12 @@ const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => 
           <EmptyState text={TEXT.noSelection} />
         ) : (
           // 규칙이 바뀌면 접힘 상태 · 불러온 이력을 새로 시작한다
-          <RuleDetail key={selected.rule.id} projectId={projectId} item={selected} />
+          <RuleDetail
+            key={selected.rule.id}
+            projectId={projectId}
+            item={selected}
+            actions={<RunStart projectId={projectId} rule={selected.rule} />}
+          />
         )}
       </section>
     </div>

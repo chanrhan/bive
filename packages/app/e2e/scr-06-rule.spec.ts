@@ -57,7 +57,7 @@ const callsOf = async (bive: BiveMock, method: string): Promise<MockCall[]> =>
 const outputToggle = (page: Page) => page.getByRole('button', { name: '테스트 출력' });
 
 test.describe('체크리스트 (수용 기준 1)', () => {
-  test('기본: 진술 · 테스트 실행 결과 · 실행 이력, 변경 이력 · 변이 · [실행] 미노출', async ({
+  test('기본: 진술 · 테스트 실행 결과 · 실행 이력 · [실행], 변경 이력 · 변이 미노출', async ({
     page,
   }) => {
     const bive = await openRules(page);

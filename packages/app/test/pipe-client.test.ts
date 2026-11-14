@@ -162,10 +162,22 @@ describe('pipe-client', () => {
     const socket = net.sockets[0];
     socket?.push('not json\n');
     socket?.send({ jsonrpc: '2.0', id: 999, result: {} });
-    // NOTIFICATIONS가 아직 비어 있으므로 어떤 알림도 전달되지 않는다
+    // 등록되지 않은 알림 · 스키마가 맞지 않는 알림은 전달하지 않는다
     socket?.send({ jsonrpc: '2.0', method: 'event.unknown', params: {} });
+    socket?.send({ jsonrpc: '2.0', method: 'event.run.updated', params: { projectId: 'x' } });
+    // 등록된 실행 알림은 검증한 값 그대로 전달한다 (ADR-076)
+    const runUpdated = {
+      projectId: '01JA0000000000000000000001',
+      runId: '01JE0000000000000000000001',
+      displayId: 'EXE-001',
+      status: 'running',
+      currentStep: 'check',
+      regressionCount: 0,
+      costUsd: 0.1,
+    };
+    socket?.send({ jsonrpc: '2.0', method: 'event.run.updated', params: runUpdated });
     await expect(client.call('ping')).resolves.toMatchObject({ pong: true });
-    expect(received).toEqual([]);
+    expect(received).toEqual([{ event: 'event.run.updated', params: runUpdated }]);
     await client.close();
   });
 });

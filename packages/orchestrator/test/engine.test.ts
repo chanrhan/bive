@@ -23,7 +23,7 @@ import type { AgentAdapter, SessionEvent } from '../src/agent/adapter.js';
 import { loadScenario } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { INTERRUPTED_EXIT_DETAIL, PipelineEngine } from '../src/engine/pipeline-engine.js';
-import type { StepExecutors } from '../src/engine/types.js';
+import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
 import { runPaths } from '../src/run-paths.js';
 import { createRun } from '../src/runs/run-service.js';
 import { connect, RpcCallError, type TestClient } from './helpers/client.js';
@@ -973,4 +973,168 @@ describe('상태 기계', () => {
     );
     expect([...seen].sort()).toEqual([...all].sort());
   }, 120_000);
+});
+
+describe('화면 갱신 단계 (M1-19 수용 기준 4, RUN-02 8단계, ADR-076)', () => {
+  /** 검사 대역: 판정 기록 1건을 저장하고 통과 (판정 결과 저장은 검사 · 병합 재검사가 한다, ADR-069). */
+  const judgingCheck: StepExecutor = (context) => {
+    context.read((store) =>
+      store.judgments.record([
+        {
+          id: newId(),
+          ruleId: context.run.targetRuleIds[0] ?? '',
+          runId: context.run.id,
+          stepId: context.step.id,
+          commit: context.git.baseCommit,
+          judgedAt: new Date().toISOString(),
+          status: 'pass',
+          runner: 'vitest',
+          exitCode: 0,
+          reporterPath: null,
+          cases: [],
+          quarantineReason: null,
+        },
+      ]),
+    );
+    return Promise.resolve({ status: 'passed' });
+  };
+
+  interface NotifyProbe {
+    /** notify가 불린 순간의 저장 상태 */
+    seen: { judgments: number; screenUpdate: string; run: string }[];
+    release: (error?: Error) => void;
+  }
+
+  const probedEngine = (h: Harness): { engine: PipelineEngine; probe: NotifyProbe } => {
+    const probe: NotifyProbe = { seen: [], release: () => undefined };
+    const engine = new PipelineEngine({
+      biveHome: h.biveHome,
+      agent: h.adapter,
+      executors: { ...h.executors, check: judgingCheck },
+      onEvent: (event) => {
+        if (event.type === 'run.saved') {
+          h.saves.push(`${event.detail.run.status}:${String(event.detail.run.currentStep)}`);
+          return undefined;
+        }
+        if (event.topic !== 'screen_update') return undefined;
+        const detail = detailOf(h);
+        probe.seen.push({
+          judgments: withProject(h.biveHome, h.project.id, (store) =>
+            store.judgments.listByRun(h.runId),
+          ).length,
+          screenUpdate: stepOf(detail, 'screen_update').status,
+          run: `${detail.run.status}:${String(detail.run.currentStep)}`,
+        });
+        // 알림 송신이 언제 끝나는지는 시험이 정한다
+        return new Promise<void>((resolve, reject) => {
+          probe.release = (error) => {
+            if (error === undefined) resolve();
+            else reject(error);
+          };
+        });
+      },
+    });
+    engines.push(engine);
+    return { engine, probe };
+  };
+
+  it('판정 결과 저장 뒤 event.run.updated를 보내고, 송신이 끝나야 완료(passed) · merged로 저장한다', async () => {
+    const h = setup();
+    const { engine, probe } = probedEngine(h);
+    h.engine = engine;
+    expect(engine.evaluateApproval(h.project.id, h.runId)).toBe(true);
+    await waitFor(() => probe.seen.length === 1, 30_000, '화면 갱신 알림');
+
+    // 알림을 보내는 순간: 판정 결과는 이미 저장됐고 화면 갱신 단계는 아직 진행 중이다
+    expect(probe.seen).toEqual([
+      { judgments: 1, screenUpdate: 'running', run: 'running:screen_update' },
+    ]);
+    // 송신이 끝나지 않으면 완료로 저장하지 않는다
+    await sleep(300);
+    expect(stepOf(detailOf(h), 'screen_update').status).toBe('running');
+    expect(detailOf(h).run.status).toBe('running');
+    expect(h.saves.at(-1)).toBe('running:screen_update');
+
+    probe.release();
+    await engine.settled();
+    const done = detailOf(h);
+    expect(stepOf(done, 'screen_update')).toMatchObject({
+      status: 'passed',
+      exitDetail: { notified: true, judgments: 1 },
+    });
+    expect(done.run).toMatchObject({
+      status: 'merged',
+      currentStep: null,
+      lastCompletedStep: 'screen_update',
+    });
+    expect(h.saves.slice(-2)).toEqual(['running:screen_update', 'merged:null']);
+  }, 60_000);
+
+  it('송신이 실패하면 화면 갱신 단계를 완료로 저장하지 않고 실행 failed (step_error)', async () => {
+    const h = setup();
+    const { engine, probe } = probedEngine(h);
+    h.engine = engine;
+    expect(engine.evaluateApproval(h.project.id, h.runId)).toBe(true);
+    await waitFor(() => probe.seen.length === 1, 30_000, '화면 갱신 알림');
+    probe.release(new Error('송신 실패'));
+    await engine.settled();
+    const done = detailOf(h);
+    expect(stepOf(done, 'screen_update')).toMatchObject({
+      status: 'failed',
+      exitDetail: { reason: 'step_error', detail: { message: '송신 실패' } },
+    });
+    expect(done.run).toMatchObject({ status: 'failed', failureReason: 'step_error' });
+    expect(done.run.lastCompletedStep).toBe('merge');
+  }, 60_000);
+
+  it('송신을 기다리는 중 엔진을 멈추면 바로 끝나고(저장 없음), 재기동 뒤 재개하면 병합을 다시 하지 않고 화면 갱신만 다시 해 merged (검토 1회차)', async () => {
+    const h = setup();
+    const { engine, probe } = probedEngine(h);
+    h.engine = engine;
+    expect(engine.evaluateApproval(h.project.id, h.runId)).toBe(true);
+    await waitFor(() => probe.seen.length === 1, 30_000, '화면 갱신 알림');
+    const merged = detailOf(h);
+    const mergeCommit = merged.run.mergeCommit;
+    expect(mergeCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(mainTip(h)).toBe(mergeCommit);
+
+    // 송신이 끝나지 않아도 stop()은 중단 신호로 풀린다. 중단은 저장하지 않는다 (ADR-066)
+    const outcome = await Promise.race([
+      engine.stop().then(() => 'stopped'),
+      sleep(5_000).then(() => 'timeout'),
+    ]);
+    expect(outcome).toBe('stopped');
+    expect(detailOf(h).run).toMatchObject({ status: 'running', currentStep: 'screen_update' });
+
+    // 재기동: running → interrupted (진행 중 시도 failed + 같은 단계 새 시도 pending)
+    const notified: string[] = [];
+    const second = new PipelineEngine({
+      biveHome: h.biveHome,
+      agent: h.adapter,
+      executors: { ...h.executors, check: judgingCheck },
+      onEvent: (event) => {
+        if (event.type === 'notify') notified.push(event.topic);
+      },
+    });
+    engines.push(second);
+    expect(second.recoverInterruptedRuns()).toHaveLength(1);
+    expect(attempts(detailOf(h), 'screen_update')).toEqual([
+      'screen_update#1:failed',
+      'screen_update#2:pending',
+    ]);
+    expect(detailOf(h).run.status).toBe('interrupted');
+
+    await second.resume(h.project.id, h.runId, human);
+    await second.settled();
+    const done = detailOf(h);
+    expect(done.run).toMatchObject({ status: 'merged', currentStep: null, mergeCommit });
+    // 병합은 1번뿐이고 기준 브랜치도 그대로, 화면 갱신만 새 시도로 다시 했다
+    expect(attempts(done, 'merge')).toEqual(['merge#1:passed']);
+    expect(attempts(done, 'screen_update')).toEqual([
+      'screen_update#1:failed',
+      'screen_update#2:passed',
+    ]);
+    expect(mainTip(h)).toBe(mergeCommit);
+    expect(notified).toEqual(['screen_update']);
+  }, 60_000);
 });

@@ -2,11 +2,13 @@
 // 규칙 목록 + 상세 2단의 상세 영역에 들어간다(별도 화면 아님). 요구사항 상세(#38)가 자식 규칙을 펼칠 때 다시 쓴다.
 // - 순서: 제목 · ID · 판정 → 진술 · 종류 · 검사 · 부모 요구사항 · 생성 주체 → 테스트 실행 결과 → 테스트 출력(접힘) → 실행 이력
 // - 테스트 출력은 기본 접힘, 최신 판정이 실패면 자동 펼침. 안에 실패 원인(케이스 이름 · `file:line` · 메시지) · 전체 케이스
-// - 변경 이력(P1) · 변이 상태 · 대상 블록 · 위험도 · [실행] · 코드 열기 링크는 해당 이슈 전 미노출 (ADR-035)
+// - 변경 이력(P1) · 변이 상태 · 대상 블록 · 위험도 · 코드 열기 링크는 해당 이슈 전 미노출 (ADR-035)
+// - 머리 오른쪽 동작(`actions`)은 놓는 화면이 정한다: 규칙 화면은 [실행] (M1-19, ADR-076)
 // - 값은 rule.list 항목 · judgment.list · requirement.get 결과에서만 (NFR-03)
 import './RuleDetail.css';
 
 import type { JudgmentCase, RuleWithJudgment } from '@bive/shared';
+import type { ReactNode } from 'react';
 
 import { AuthorMark } from '../../components/AuthorMark/AuthorMark.js';
 import { CollapsibleDetail } from '../../components/CollapsibleDetail/CollapsibleDetail.js';
@@ -30,13 +32,15 @@ import { type RuleHistoryLoad, useRuleHistory, useRuleParent } from './useRuleDe
 export interface RuleDetailProps {
   projectId: string;
   item: RuleWithJudgment;
+  /** 머리 오른쪽에 둘 동작 (규칙 화면의 [실행]) */
+  actions?: ReactNode;
 }
 
 /** 규칙이 바뀌면 접힘 상태 · 불러온 값을 새로 시작하도록 호출하는 쪽이 `key={rule.id}`를 준다. */
-export const RuleDetail = ({ projectId, item }: RuleDetailProps): React.JSX.Element => {
+export const RuleDetail = ({ projectId, item, actions }: RuleDetailProps): React.JSX.Element => {
   const { rule, judgment } = item;
   const latest = judgment.latest;
-  const history = useRuleHistory(projectId, rule.id);
+  const history = useRuleHistory(projectId, rule.id, latest?.id ?? null);
   const parent = useRuleParent(projectId, rule.parentRequirementId);
   const entries = history.state === 'ready' ? history.entries : null;
   const runId = latestRunDisplayId(latest, entries);
@@ -52,6 +56,7 @@ export const RuleDetail = ({ projectId, item }: RuleDetailProps): React.JSX.Elem
           {rule.displayId}
         </span>
         <StatusBadge kind="judgment" status={judgment.status} />
+        {actions}
       </header>
 
       <dl className="rule-fields">
