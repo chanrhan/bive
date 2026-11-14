@@ -70,7 +70,7 @@ export const parentsOf = (e: PipelineE2e, commit: string): string[] =>
   git(e.repo, 'rev-list', '--parents', '-n', '1', commit).split(' ').slice(1);
 
 /** `scripts/reset-fixture.sh`로 픽스처 복사본을 만든다 (roadmap M1 완료 기준 흐름의 준비와 같다). */
-const resetFixture = (): string => {
+export const resetFixture = (): string => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'bive-fx.'));
   fixtureDirs.push(base);
   const repo = path.join(base, 'fx');
