@@ -696,7 +696,8 @@ export type VerificationSummaryResult = z.infer<typeof VerificationSummaryResult
 // - `codeOpen.record`는 사람이 `file:line` 링크에서 사유를 골라 열 때 앱(main)이 IDE를 열기 전에 1건 남긴다. 주체 `author`를
 //   싣고 사람(`human`)만 받는다(에이전트 주체 -32020). 역할 세션의 도구(MCP)에는 없고, 토큰 인증된 파이프 연결에서만 처리된다
 // - 시각은 오케스트레이터 시계로 정한다(요청에 싣지 않는다). 파일은 프로젝트 루트 기준 상대 경로만(`CodeFilePath`)
-// - 기록은 추가만 한다(수정 · 삭제 RPC 없음, DB 트리거로도 막음). `codeOpen.list`는 조회 전용으로 최신부터 상한까지
+// - 기록은 추가만 한다(수정 · 삭제 RPC 없음, DB 트리거로도 막음). `codeOpen.list`는 조회 전용으로 최신부터 상한까지,
+//   `codeOpen.summary`는 조회 전용으로 전체 기록의 사유별 건수 (M2-02, ADR-088)
 
 /** `codeOpen.list`가 한 번에 돌려주는 기록 상한. 넘으면 최신부터 이만큼과 `truncated: true`. */
 export const CODE_OPEN_LIST_LIMIT = 500;
@@ -726,6 +727,35 @@ export const CodeOpenListResult = z.strictObject({
   truncated: z.boolean(),
 });
 export type CodeOpenListResult = z.infer<typeof CodeOpenListResult>;
+
+/**
+ * `codeOpen.summary`: 프로젝트의 열람 기록 전체를 사유별로 센다 (M2-02, ADR-088). 조회 전용.
+ * `reasons`는 사유 3종을 고정 순서(`CodeOpenReason` 순서 = 사유 선택 모달 순서)로 모두 싣고(0건 포함),
+ * `total`은 그 합이다. 목록 상한(`CODE_OPEN_LIST_LIMIT`)과 무관하게 전체를 센다.
+ */
+export const CodeOpenSummaryParams = z.strictObject({ projectId: Ulid });
+export type CodeOpenSummaryParams = z.infer<typeof CodeOpenSummaryParams>;
+export const CodeOpenReasonCount = z.strictObject({
+  reason: CodeOpenReason,
+  count: z.number().int().nonnegative(),
+});
+export type CodeOpenReasonCount = z.infer<typeof CodeOpenReasonCount>;
+export const CodeOpenSummaryResult = z
+  .strictObject({
+    reasons: z.array(CodeOpenReasonCount),
+    total: z.number().int().nonnegative(),
+  })
+  .refine(
+    ({ reasons }) =>
+      reasons.length === CodeOpenReason.options.length &&
+      reasons.every(({ reason }, i) => reason === CodeOpenReason.options[i]),
+    { message: '사유 3종을 고정 순서로 모두 실어야 합니다', path: ['reasons'] },
+  )
+  .refine(({ reasons, total }) => reasons.reduce((sum, { count }) => sum + count, 0) === total, {
+    message: '합계가 사유별 건수의 합과 다릅니다',
+    path: ['total'],
+  });
+export type CodeOpenSummaryResult = z.infer<typeof CodeOpenSummaryResult>;
 
 /**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
@@ -768,6 +798,7 @@ export const METHODS = {
   },
   'codeOpen.record': { params: CodeOpenRecordParams, result: CodeOpenRecordResult },
   'codeOpen.list': { params: CodeOpenListParams, result: CodeOpenListResult },
+  'codeOpen.summary': { params: CodeOpenSummaryParams, result: CodeOpenSummaryResult },
 } as const satisfies Record<string, MethodSpec>;
 
 export type MethodName = keyof typeof METHODS;

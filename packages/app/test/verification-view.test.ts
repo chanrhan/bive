@@ -1,12 +1,20 @@
 // 검증 화면 표시 규칙 (이슈 #31, screens.md SCR-05 · 1.1, COST-02 · ADR-029 · ADR-072).
 // renderer는 shared를 import type으로만 쓰므로 표시명을 다시 적는다. 여기서 shared 원본과 대조한다.
-import { RUN_STATUS_LABELS, STEP_KIND_LABELS, STEP_STATUS_LABELS } from '@bive/shared';
+import {
+  CODE_OPEN_REASON_LABELS,
+  CodeOpenReason,
+  CodeOpenSummaryResult,
+  RUN_STATUS_LABELS,
+  STEP_KIND_LABELS,
+  STEP_STATUS_LABELS,
+} from '@bive/shared';
 import { describe, expect, it } from 'vitest';
 
 import { complianceGroup } from '../src/renderer/src/screens/rules/rulesView.js';
 import {
   basisText,
   canResume,
+  codeOpenRows,
   COMPLIANCE_FILTER,
   complianceText,
   formatTurns,
@@ -91,5 +99,38 @@ describe('값 표시', () => {
       judgment: { status: 'pass' },
     } as Parameters<typeof complianceGroup>[0]);
     expect(COMPLIANCE_FILTER.selected['compliance']).toEqual([value]);
+  });
+});
+
+describe('코드 열람 영역 (M2-02, ADR-088)', () => {
+  const summary = (screenError: number, infoLacking: number, debugging: number) =>
+    CodeOpenSummaryResult.parse({
+      reasons: [
+        { reason: 'screen_error', count: screenError },
+        { reason: 'info_lacking', count: infoLacking },
+        { reason: 'debugging', count: debugging },
+      ],
+      total: screenError + infoLacking + debugging,
+    });
+
+  it('기록이 하나도 없으면 null (영역 값 "없음")', () => {
+    expect(codeOpenRows(summary(0, 0, 0))).toBeNull();
+  });
+
+  it('기록이 있으면 사유 3종을 화면 오류 · 정보 부족 · 디버깅 순서로, 0건도 0으로', () => {
+    expect(codeOpenRows(summary(0, 0, 1))).toEqual([
+      { reason: 'screen_error', label: '화면 오류', count: 0 },
+      { reason: 'info_lacking', label: '정보 부족', count: 0 },
+      { reason: 'debugging', label: '디버깅', count: 1 },
+    ]);
+  });
+
+  it('표시명 · 순서가 shared의 사유 열거형 · 표시명과 같다', () => {
+    const rows = codeOpenRows(summary(2, 3, 4)) ?? [];
+    expect(rows.map((r) => r.reason)).toEqual(CodeOpenReason.options);
+    expect(rows.map((r) => r.label)).toEqual(
+      CodeOpenReason.options.map((reason) => CODE_OPEN_REASON_LABELS[reason]),
+    );
+    expect(rows.map((r) => r.count)).toEqual([2, 3, 4]);
   });
 });

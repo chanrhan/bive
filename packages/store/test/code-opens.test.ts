@@ -2,6 +2,7 @@
 // - 기록은 추가만 한다: 같은 ID 다시 쓰기 · 수정 · 삭제 · `INSERT OR REPLACE`는 거부(리포지토리 + DB 트리거)
 // - 형식(프로젝트 루트 기준 상대 경로 · 1 이상 줄 · 화면 ID · 사유)은 스키마로, 직접 쓴 행은 DB CHECK로 막는다
 // - 조회는 최신부터 건수 제한까지
+// - 집계(`countByReason`)는 전체 기록의 사유별 건수, 고정 순서 · 0건 포함 (M2-02, ADR-088)
 import type { CodeOpenRecord } from '@bive/shared';
 import { describe, expect, it } from 'vitest';
 
@@ -111,5 +112,52 @@ describe('CodeOpenRepository', () => {
       }
       expect(store.codeOpens.listLatest(10)).toEqual([]);
     });
+  });
+});
+
+describe('CodeOpenRepository.countByReason (M2-02, ADR-088)', () => {
+  const ZERO = [
+    { reason: 'screen_error', count: 0 },
+    { reason: 'info_lacking', count: 0 },
+    { reason: 'debugging', count: 0 },
+  ];
+
+  it('기록이 없으면 사유 3종 모두 0 (고정 순서)', () => {
+    withStore((store) => {
+      expect(store.codeOpens.countByReason()).toEqual(ZERO);
+    });
+  });
+
+  it('사유별로 세고, 순서는 기록 순서와 무관하게 화면 오류 · 정보 부족 · 디버깅', () => {
+    withStore((store) => {
+      for (const reason of ['debugging', 'debugging', 'info_lacking'] as const) {
+        store.codeOpens.record(record({ reason }));
+      }
+      expect(store.codeOpens.countByReason()).toEqual([
+        { reason: 'screen_error', count: 0 },
+        { reason: 'info_lacking', count: 1 },
+        { reason: 'debugging', count: 2 },
+      ]);
+    });
+  });
+
+  it('조회 건수 제한(listLatest)과 무관하게 전체를 센다', () => {
+    withStore((store) => {
+      for (let i = 0; i < 1_001; i += 1) {
+        store.codeOpens.record(
+          record({ reason: i === 0 ? 'screen_error' : 'debugging', line: i + 1 }),
+        );
+      }
+      expect(store.codeOpens.countByReason()).toEqual([
+        { reason: 'screen_error', count: 1 },
+        { reason: 'info_lacking', count: 0 },
+        { reason: 'debugging', count: 1_000 },
+      ]);
+    });
+  });
+
+  it('다른 프로젝트 저장소의 기록은 세지 않는다', () => {
+    withStore((store) => store.codeOpens.record(record()));
+    withStore((store) => expect(store.codeOpens.countByReason()).toEqual(ZERO));
   });
 });

@@ -2,6 +2,8 @@
 // - `codeOpen.record`: 사람이 `file:line` 링크에서 사유를 골라 연 1회를 남긴다. 주체는 사람만(에이전트 주체 -32020).
 //   앱 main(`app.openInIde`)이 IDE를 열기 전에 부르고, 기록이 실패하면 main은 열지 않는다
 // - `codeOpen.list`: 조회 전용. 최신부터 상한(`CODE_OPEN_LIST_LIMIT`)까지, 넘으면 `truncated`
+// - `codeOpen.summary`: 조회 전용. 전체 기록의 사유별 건수(고정 순서, 0건 포함)와 합계 (M2-02, ADR-088).
+//   검증 화면(SCR-05) "코드 열람" 영역이 부른다. 저장소가 SQL로 세므로 목록 상한과 무관하다
 // - 역할 세션의 도구(MCP)에는 없다. 파이프 서버가 토큰 인증된 연결에서만 처리한다 (ADR-041)
 // - 시각은 오케스트레이터 시계로 정한다. 파일 경로 형식(프로젝트 루트 기준 상대 경로)은 파라미터 스키마가 이미 검증했고
 //   리포지토리가 저장 전에 한 번 더 검증한다
@@ -18,7 +20,10 @@ export interface CodeOpenHandlerDeps {
   now: () => number;
 }
 
-type CodeOpenMethods = Pick<MethodHandlers, 'codeOpen.record' | 'codeOpen.list'>;
+type CodeOpenMethods = Pick<
+  MethodHandlers,
+  'codeOpen.record' | 'codeOpen.list' | 'codeOpen.summary'
+>;
 
 const assertHuman: (author: Author) => asserts author is { kind: 'human' } = (author) => {
   if (author.kind !== 'human') {
@@ -54,6 +59,11 @@ export const createCodeOpenHandlers = ({ biveHome, now }: CodeOpenHandlerDeps): 
           records: rows.slice(0, CODE_OPEN_LIST_LIMIT),
           truncated: rows.length > CODE_OPEN_LIST_LIMIT,
         };
+      }),
+    'codeOpen.summary': ({ projectId }) =>
+      withProjectStore(biveHome, projectId, (store) => {
+        const reasons = store.codeOpens.countByReason();
+        return { reasons, total: reasons.reduce((sum, { count }) => sum + count, 0) };
       }),
   };
 };

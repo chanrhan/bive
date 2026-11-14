@@ -3,13 +3,16 @@
 //    규칙별 최신 판정과 실행 링크의 비용 합계 · 턴) · 빈("실행 없음") 상태
 // 3) 잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드 미노출, 실행당 비용 · 실행 링크 비용은 값이 없으면 '없음'
 // 4) 준수 카드 → 규칙 화면 `준수 집계: 판정 가능`, 최근 실행이 중단이면 [재개] → run.resume
-// 데이터는 가짜 브리지의 project.current · verification.summary · rule.list 응답으로만 만든다.
+// 이슈 #44(M2-02) 수용 기준 1 · 2: "코드 열람" 영역의 사유별 건수, 기록이 없으면 영역 값 '없음' (MET-01, ADR-088)
+// 데이터는 가짜 브리지의 project.current · verification.summary · codeOpen.summary · rule.list 응답으로만 만든다.
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
 import { expect, type Page, test } from '@playwright/test';
 
 import {
+  CODE_OPEN_SUMMARY,
+  EMPTY_CODE_OPEN_SUMMARY,
   EMPTY_SUMMARY,
   LINK_1,
   PROJECT,
@@ -28,6 +31,7 @@ import {
   findForbiddenText,
   SCREENSHOT_DIR,
 } from './support/expectScreen.js';
+import { horizontalOverflow, textClipping } from './support/overflow.js';
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
@@ -41,6 +45,7 @@ const openScreen = async (
       'system.status': { result: STATUS },
       'project.current': { result: { project: project ? PROJECT : null } },
       'verification.summary': { result: SUMMARY },
+      'codeOpen.summary': { result: CODE_OPEN_SUMMARY },
       'rule.list': { result: { rules: RULES } },
       ...responses,
     },
@@ -70,7 +75,10 @@ test.describe('체크리스트 (수용 기준 2)', () => {
   });
 
   test('빈: 실행이 없으면 "실행 없음", 판정 기준 · 실행당 비용은 없음', async ({ page }) => {
-    await openScreen(page, { 'verification.summary': { result: EMPTY_SUMMARY } });
+    await openScreen(page, {
+      'verification.summary': { result: EMPTY_SUMMARY },
+      'codeOpen.summary': { result: EMPTY_CODE_OPEN_SUMMARY },
+    });
     await expectScreen(page, 'SCR-05', '빈');
     await expect(page.getByTestId('pipeline').getByTestId('empty-state')).toHaveText('실행 없음');
   });
@@ -240,6 +248,136 @@ test.describe('미노출 · 값 없음 (수용 기준 3)', () => {
   });
 });
 
+test.describe('코드 열람 영역 (#44 수용 기준 1 · 2, MET-01 · ADR-088)', () => {
+  const area = (page: Page) => page.getByTestId('code-open');
+  const debuggingOnce: typeof CODE_OPEN_SUMMARY = {
+    reasons: [
+      { reason: 'screen_error', count: 0 },
+      { reason: 'info_lacking', count: 0 },
+      { reason: 'debugging', count: 1 },
+    ],
+    total: 1,
+  };
+
+  test('사유별 건수: 화면 오류 · 정보 부족 · 디버깅 순서, 0건도 0', async ({ page }) => {
+    const bive = await openScreen(page);
+    const items = area(page).getByTestId('code-open-reason');
+    await expect(items).toHaveText(['화면 오류 2', '정보 부족 0', '디버깅 5']);
+    expect(
+      await items.evaluateAll((els) => els.map((el) => el.getAttribute('data-reason'))),
+    ).toEqual(['screen_error', 'info_lacking', 'debugging']);
+    await expect(area(page).getByTestId('code-open-count')).toHaveText(['2', '0', '5']);
+    await expect(area(page).getByTestId('code-open-none')).toHaveCount(0);
+    const calls = await callsOf(bive, 'codeOpen.summary');
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) expect(call.params).toEqual({ projectId: PROJECT.id });
+  });
+
+  test('"디버깅"으로 1번 연 기록이면 "디버깅 1" (로드맵 2.2 흐름 2)', async ({ page }) => {
+    await openScreen(page, { 'codeOpen.summary': { result: debuggingOnce } });
+    await expect(area(page).getByText('디버깅 1', { exact: true })).toBeVisible();
+    await expect(area(page).getByTestId('code-open-reason')).toHaveText([
+      '화면 오류 0',
+      '정보 부족 0',
+      '디버깅 1',
+    ]);
+  });
+
+  test('기록이 없으면 영역 값 "없음", 사유 칸 없음', async ({ page }) => {
+    await openScreen(page, { 'codeOpen.summary': { result: EMPTY_CODE_OPEN_SUMMARY } });
+    await expect(area(page).getByTestId('code-open-none')).toHaveText('없음');
+    await expect(area(page).getByTestId('code-open-reason')).toHaveCount(0);
+    // 다른 영역은 그대로
+    await expect(page.getByTestId('verification-basis')).toHaveText('판정 기준 main@a1f26b1');
+  });
+
+  test('영역 순서: 지표 카드 → 코드 열람 → 파이프라인 → 규칙별 최신 판정', async ({ page }) => {
+    await openScreen(page);
+    await expect(area(page)).toBeVisible();
+    const order = await page
+      .locator('.verification-content > section')
+      .evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')));
+    expect(order).toEqual(['지표', '코드 열람', '파이프라인', '규칙별 최신 판정']);
+  });
+
+  test('영역 조회가 실패하면 영역에만 "코드 열람 불러오기 실패", 나머지 영역은 그대로', async ({
+    page,
+  }) => {
+    await openScreen(page, {
+      'codeOpen.summary': { error: { code: -32603, message: '내부 오류' } },
+    });
+    const error = area(page).getByTestId('code-open-load-error');
+    await expect(error).toHaveText('코드 열람 불러오기 실패');
+    await expect(error).toHaveAttribute('role', 'alert');
+    await expect(area(page).getByTestId('code-open-reason')).toHaveCount(0);
+    await expect(page.getByTestId('verification-screen')).toHaveAttribute('data-state', 'ready');
+    await expect(page.getByTestId('verification-load-error')).toHaveCount(0);
+    await expect(page.getByTestId('metric-label')).toHaveText(['준수', '실행당 비용']);
+    await expect(page.getByTestId('pipeline-stage')).toHaveCount(STAGE_LABELS.length);
+    await expect(page.getByTestId('verification-rule')).toHaveCount(5);
+  });
+
+  test('영역 조회 중에는 영역 자리만 문구 없이 대기, 나머지 영역은 보인다', async ({ page }) => {
+    await openScreen(page, { 'codeOpen.summary': { pending: true } });
+    const loading = area(page).getByTestId('code-open-loading');
+    await expect(loading).toHaveAttribute('aria-busy', 'true');
+    await expect(loading).toHaveText('');
+    await expect(page.getByTestId('pipeline-stage')).toHaveCount(STAGE_LABELS.length);
+    await expect(area(page).getByTestId('code-open-none')).toHaveCount(0);
+  });
+
+  test('검증 화면에 다시 들어오면 새 건수를 다시 읽는다 (기록 없음 → 디버깅 1)', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page, {
+      'codeOpen.summary': { result: EMPTY_CODE_OPEN_SUMMARY },
+    });
+    await expect(area(page).getByTestId('code-open-none')).toHaveText('없음');
+    const before = (await callsOf(bive, 'codeOpen.summary')).length;
+    await bive.setResponse('codeOpen.summary', { result: debuggingOnce });
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await page.getByRole('button', { name: '검증', exact: true }).click();
+    await expect(area(page).getByTestId('code-open-reason').nth(2)).toHaveText('디버깅 1');
+    await expect(area(page).getByTestId('code-open-none')).toHaveCount(0);
+    expect((await callsOf(bive, 'codeOpen.summary')).length).toBeGreaterThan(before);
+  });
+
+  test('오케스트레이터에 다시 붙으면 영역도 다시 읽어 조회 실패가 풀린다 (구독은 화면당 1개)', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page, {
+      'codeOpen.summary': { error: { code: -32603, message: '내부 오류' } },
+    });
+    await expect(area(page).getByTestId('code-open-load-error')).toBeVisible();
+    await bive.setResponse('codeOpen.summary', { result: debuggingOnce });
+    await bive.emit('system.connection', { state: 'disconnected' });
+    await bive.emit('system.connection', { state: 'connected', status: STATUS });
+    await expect(area(page).getByTestId('code-open-reason').nth(2)).toHaveText('디버깅 1');
+    await expect(area(page).getByTestId('code-open-load-error')).toHaveCount(0);
+  });
+
+  test('1280×800에서 영역이 잘리거나 가로 스크롤을 만들지 않는다', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const bigger: typeof CODE_OPEN_SUMMARY = {
+      reasons: [
+        { reason: 'screen_error', count: 12_345 },
+        { reason: 'info_lacking', count: 67_890 },
+        { reason: 'debugging', count: 1_234_567 },
+      ],
+      total: 1_314_802,
+    };
+    await openScreen(page, { 'codeOpen.summary': { result: bigger } });
+    await expect(area(page).getByTestId('code-open-reason')).toHaveCount(3);
+    const screen = page.getByTestId('verification-screen');
+    expect(await horizontalOverflow(screen, '[data-testid="code-open-reason"]')).toEqual([]);
+    for (const reason of ['screen_error', 'info_lacking', 'debugging']) {
+      const item = area(page).locator(`[data-reason="${reason}"]`);
+      expect(await textClipping(item, ['code-open-label', 'code-open-count']), reason).toEqual([]);
+    }
+    expect(await textClipping(area(page), ['code-open-reason'])).toEqual([]);
+  });
+});
+
 test.describe('이동 · 재개 (수용 기준 4)', () => {
   test('준수 카드를 누르면 규칙 화면이 "준수 집계: 판정 가능" 필터로 열리고 분모 목록만 보인다', async ({
     page,
@@ -319,12 +457,14 @@ test.describe('화면 문구', () => {
     await expect(page.getByTestId('pipeline-resume')).toBeVisible();
     await expectCleanText(page);
 
-    for (const response of [
-      { result: SUMMARY },
-      { result: EMPTY_SUMMARY },
-      { error: { code: -32603, message: '내부 오류' } },
+    for (const [response, codeOpen] of [
+      [{ result: SUMMARY }, { result: CODE_OPEN_SUMMARY }],
+      [{ result: EMPTY_SUMMARY }, { result: EMPTY_CODE_OPEN_SUMMARY }],
+      [{ result: SUMMARY }, { error: { code: -32603, message: '내부 오류' } }],
+      [{ error: { code: -32603, message: '내부 오류' } }, { result: CODE_OPEN_SUMMARY }],
     ] as const) {
       await bive.setResponse('verification.summary', response);
+      await bive.setResponse('codeOpen.summary', codeOpen);
       await page.getByRole('button', { name: '규칙', exact: true }).click();
       await page.getByRole('button', { name: '검증', exact: true }).click();
       await expect(page.getByTestId('verification-screen')).not.toHaveAttribute(
