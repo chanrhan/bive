@@ -6,6 +6,8 @@ import path from 'node:path';
 import {
   createUlidGenerator,
   ErrorCode,
+  RUN_STEP_PLANS,
+  STEP_ROLES,
   type Author,
   type JudgmentResult,
   type Proposal,
@@ -303,6 +305,116 @@ describe('최신 판정 결합 지점', () => {
       rule: judged,
       judgment: { status: 'needs_recheck', latest },
     });
+  });
+});
+
+describe('judgment.list: 규칙 상세의 실행 이력 (M1-28, ADR-073)', () => {
+  const failingCase = {
+    name: 'RULE-001 > 중복 이메일이면 409',
+    file: 'bive-acceptance/RULE-001/signup.acc.ts',
+    line: 12,
+    status: 'failed',
+    message: 'expected 201 to be 409',
+  } as const;
+
+  const record = (
+    ruleId: string,
+    patch: Partial<JudgmentResult> & Pick<JudgmentResult, 'judgedAt' | 'status'>,
+  ): JudgmentResult => ({
+    id: newId(),
+    ruleId,
+    runId: null,
+    stepId: null,
+    commit: 'c'.repeat(40),
+    runner: 'vitest',
+    exitCode: patch.status === 'pass' ? 0 : 1,
+    reporterPath: null,
+    cases: [],
+    quarantineReason: null,
+    ...patch,
+  });
+
+  /** 실행 1건을 저장소에 바로 만든다 (판정 기록의 실행 링크용, 실행 생성 경로는 run.test.ts). */
+  const createRun = (ruleId: string) =>
+    h.read((store) =>
+      store.runs.create({
+        id: newId(),
+        type: 'A',
+        targetRuleIds: [ruleId],
+        currentStep: 'approval',
+        baseBranch: 'main',
+        budgetSnapshot: { run: { maxBudgetUsd: 5, maxTurns: 200 }, roles: {} },
+        modelSnapshot: {},
+        startedBy: human,
+        createdAt: iso(T0),
+        steps: RUN_STEP_PLANS.A.map((kind) => ({
+          id: newId(),
+          kind,
+          attempt: 1,
+          status: 'pending' as const,
+          role: STEP_ROLES[kind],
+          startedAt: null,
+        })),
+      }),
+    );
+
+  it('판정 기록이 없으면 빈 이력', async () => {
+    const req = await createRequirement();
+    const rule = await approveRule(req.id, '중복 이메일 가입 거부');
+    expect(
+      await h.client.call('judgment.list', { projectId: h.project.id, ruleId: rule.id }),
+    ).toEqual({ judgments: [] });
+  });
+
+  it('그 규칙의 판정 기록만 최신부터, 실행 표시 ID와 실행기 출력(케이스 이름 · 메시지 · 파일 · 줄)을 그대로 싣는다', async () => {
+    const req = await createRequirement();
+    const rule = await approveRule(req.id, '중복 이메일 가입 거부');
+    const other = await approveRule(req.id, '다른 규칙');
+    const { run, steps } = createRun(rule.id);
+    const older = record(rule.id, { judgedAt: iso(T0 + 1_000), status: 'pass' });
+    const latest = record(rule.id, {
+      judgedAt: iso(T0 + 2_000),
+      status: 'fail',
+      runId: run.id,
+      stepId: steps.find((step) => step.kind === 'implementation')?.id ?? null,
+      cases: [failingCase],
+    });
+    const elsewhere = record(other.id, { judgedAt: iso(T0 + 3_000), status: 'pass' });
+    h.read((store) => store.judgments.record([older, latest, elsewhere]));
+
+    expect(
+      await h.client.call('judgment.list', { projectId: h.project.id, ruleId: rule.id }),
+    ).toEqual({
+      judgments: [
+        { judgment: latest, runDisplayId: run.displayId },
+        { judgment: older, runDisplayId: null },
+      ],
+    });
+    expect(run.displayId).toBe('EXE-001');
+    // 최신 판정(rule.get)과 이력의 첫 항목은 같은 기록이다
+    expect(
+      (await h.client.call('rule.get', { projectId: h.project.id, id: rule.id })).judgment.latest,
+    ).toEqual(latest);
+  });
+
+  it('삭제된 규칙도 돌려주고, 없는 규칙 · 제안 ID · 등록되지 않은 프로젝트는 -32004', async () => {
+    const req = await createRequirement();
+    const rule = await approveRule(req.id, '삭제된 규칙');
+    markDeleted(rule.id, iso(T0 + 9_000));
+    expect(
+      await h.client.call('judgment.list', { projectId: h.project.id, ruleId: rule.id }),
+    ).toEqual({ judgments: [] });
+
+    const pending = submitRule(req.id, '승인 대기 규칙');
+    for (const params of [
+      { projectId: h.project.id, ruleId: newId() },
+      { projectId: h.project.id, ruleId: pending.id },
+      { projectId: newId(), ruleId: rule.id },
+    ]) {
+      await expect(h.client.call('judgment.list', params)).rejects.toMatchObject({
+        code: ErrorCode.NotFound,
+      });
+    }
   });
 });
 
