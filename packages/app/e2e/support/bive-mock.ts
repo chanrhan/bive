@@ -18,11 +18,15 @@
 //
 // 계약은 실제 브리지(src/common/bridge.ts, ADR-042)와 같다: 키는 invoke · on 두 개, invoke는 결과로 풀리거나
 // `{ code, message, data? }`로 거부, on은 해제 함수를 돌려준다(구독마다 독립). 응답 표에 없는 메서드는 -32601,
-// main 전용 메서드(system.hello)는 -32020으로 거부한다. 한 페이지에 한 번만 부른다.
+// main 전용 메서드(MAIN_ONLY_METHODS: system.hello · codeOpen.record)는 -32020으로 거부한다. 한 페이지에 한 번만 부른다.
 import type { JsonRpcErrorObject } from '@bive/shared';
 import type { Page } from '@playwright/test';
 
-import type { RendererMethodName, RendererMethodResult } from '../../src/common/bridge.js';
+import {
+  MAIN_ONLY_METHODS,
+  type RendererMethodName,
+  type RendererMethodResult,
+} from '../../src/common/bridge.js';
 
 /** 메서드 하나의 가짜 응답. 값은 브라우저로 직렬화되므로 JSON으로 표현 가능한 값만 쓴다. */
 export type MockResponse<R = unknown> =
@@ -176,7 +180,7 @@ export const mockBive = async (page: Page, options: MockBiveOptions = {}): Promi
   const state: MockState = {
     responses: { ...(options.responses ?? {}) } as Record<string, MockResponse>,
     events: options.events ?? [],
-    mainOnly: ['system.hello'],
+    mainOnly: [...MAIN_ONLY_METHODS],
     globalName: MOCK_GLOBAL,
   };
   await page.addInitScript(installMock, state);

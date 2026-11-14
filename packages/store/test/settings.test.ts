@@ -72,6 +72,7 @@ describe('settings 테이블 · 리포지토리', () => {
       expect(Object.keys(JSON.parse(row.body) as object).sort()).toEqual([
         'approvalQueueLimit',
         'autoMode',
+        'ide',
         'installAllowlist',
         'provisionalPolicy',
         'roles',
@@ -99,6 +100,63 @@ describe('settings 테이블 · 리포지토리', () => {
       expect(store.settings.get()).toEqual(defaultSettings(projectId));
     });
   });
+
+  it('IDE 선택(ADR-087): 기본 미설정, 패치로 고르고 다시 열어도 같으며 IDE 키가 없는 이전 본문은 미설정으로 읽는다', () => {
+    const projectId = newId();
+    withStore(projectId, (store) => {
+      expect(store.settings.get().ide).toBeNull();
+      // M2-03 이전에 저장된 본문(ide 키 없음)
+      store.settings.update({ run: { maxTurns: 10 } }, { by: human, at: T0 });
+      const row = store.db.prepare('SELECT body FROM settings').get() as { body: string };
+      const legacy = JSON.parse(row.body) as Record<string, unknown>;
+      delete legacy.ide;
+      store.db.prepare('UPDATE settings SET body = ?').run(JSON.stringify(legacy));
+      expect(store.settings.get().ide).toBeNull();
+      const saved = store.settings.update({ ide: { kind: 'cursor' } }, { by: human, at: T1 });
+      expect(saved.ide).toEqual({ kind: 'cursor' });
+      expect(saved.run.maxTurns).toBe(10);
+      expect(() =>
+        store.settings.update(
+          { ide: { kind: 'custom', template: 'https://example.com/{path}?l={line}' } },
+          { by: human, at: T1 },
+        ),
+      ).toThrow();
+    });
+    withStore(projectId, (store) => {
+      expect(store.settings.get().ide).toEqual({ kind: 'cursor' });
+    });
+  });
+
+  it.each([
+    [
+      '예전에 받던 중첩 틀',
+      { kind: 'custom', template: 'subl://open?url=file:///{path}&line={line}' },
+    ],
+    ['직접 고친 금지 틀', { kind: 'custom', template: 'file:///{path}#{line}' }],
+    ['모르는 종류', { kind: 'idea' }],
+  ])(
+    '저장된 IDE 선택이 허용 범위가 아니면(%s) 미설정으로 읽고 나머지 설정은 그대로이며, 다시 고르면 저장된다 (#184 검토 1회차)',
+    (_label, ide) => {
+      const projectId = newId();
+      withStore(projectId, (store) => {
+        const saved = store.settings.update(
+          { run: { maxBudgetUsd: 5, maxTurns: 200 }, ide: { kind: 'vscode' } },
+          { by: human, at: T0 },
+        );
+        const row = store.db.prepare('SELECT body FROM settings').get() as { body: string };
+        const body = JSON.parse(row.body) as Record<string, unknown>;
+        body.ide = ide;
+        store.db.prepare('UPDATE settings SET body = ?').run(JSON.stringify(body));
+        const read = store.settings.get();
+        expect(read.ide).toBeNull();
+        expect(read).toEqual({ ...saved, ide: null });
+        const next = store.settings.update({ ide: { kind: 'cursor' } }, { by: human, at: T1 });
+        expect(next.ide).toEqual({ kind: 'cursor' });
+        expect(next.run).toEqual({ maxBudgetUsd: 5, maxTurns: 200 });
+        expect(store.settings.get().ide).toEqual({ kind: 'cursor' });
+      });
+    },
+  );
 
   it('행은 1개만 둘 수 있다 (singleton = 1)', () => {
     withStore(newId(), (store) => {

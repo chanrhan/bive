@@ -21,10 +21,23 @@ export const CODE_LINK_TEXT = {
   cancel: '취소',
   /** 기록 · 열기 실패 (prototype-map.md `CodeOpenLink` 에러 상태) */
   failed: 'IDE 열기 실패',
+  /** IDE 설정을 읽지 못함 */
+  loadFailed: '설정 불러오기 실패',
+  /** 첫 IDE 선택 저장 실패 · 틀 거부 */
+  saveFailed: '저장 실패',
+  invalid: '입력 오류',
 } as const;
 
 /** 경로 최대 길이 (shared `CODE_FILE_PATH_MAX_LENGTH`와 같음). */
 const MAX_LENGTH = 1024;
+
+/** 양방향 제어 문자 (shared `isBidiControl`과 같음): U+061C, U+200E · U+200F, U+202A ~ U+202E, U+2066 ~ U+2069. */
+const isBidiControl = (code: number): boolean =>
+  code === 0x061c ||
+  code === 0x200e ||
+  code === 0x200f ||
+  (code >= 0x202a && code <= 0x202e) ||
+  (code >= 0x2066 && code <= 0x2069);
 
 /**
  * 프로젝트 루트 기준 상대 경로인지 (shared `isProjectRelativePath`와 같은 기준). 아니면 링크를 붙이지 않고 글자만 보인다
@@ -34,9 +47,9 @@ export const isLinkableFile = (value: string): boolean => {
   if (value.length === 0 || value.length > MAX_LENGTH) return false;
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
-    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return false;
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || isBidiControl(code)) return false;
   }
-  if (value.includes('\\') || value.includes(':')) return false;
+  if (value.includes('\\') || value.includes(':') || value.includes('%')) return false;
   return value.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
 };
 
