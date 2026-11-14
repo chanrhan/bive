@@ -17,7 +17,7 @@
 | 마일스톤 | 목표 | PRD 단계 | 이슈 수 | 상태 |
 |---|---|---|---|---|
 | M0 기반 | 모노레포 · CI · 3층 뼈대 · 테스트 하네스 · 픽스처 | — | 10 | 완료 |
-| M1 첫 슬라이스 | 요구사항 1개 → 규칙 → 승인 → 파이프라인 A → 판정 → 병합 → 화면 | M1 | 35 | 진행 |
+| M1 첫 슬라이스 | 요구사항 1개 → 규칙 → 승인 → 파이프라인 A → 판정 → 병합 → 화면 | M1 | 36 | 진행 |
 | M2 측정 시작 | 코드 열람 기록(MET-01) | M1 직후 | 3 | 대기 |
 | M3 판정 확장 | 구조 · 계약 검사, 변이, 유형 B·C·D, 검토 대기열, 계약 변경 승인, 결함 · 이력 · 상한, PostgreSQL | M2 (1/3) | 19 | 대기 |
 | M4 설계 화면 · 수집 | 동기화, 파서, 수집 COL-01~04, 아키텍처 · L0 · L1 · 흐름도 · ERD · 변경 로그 · ADR | M2 (2/3) | 16 | 대기 |
@@ -61,26 +61,30 @@
 ```sh
 export BIVE_AGENT=scripted BIVE_HOME=$(mktemp -d) BIVE_IDLE_SHUTDOWN_MS=1000 FX=$(mktemp -d)/fx
 scripts/reset-fixture.sh $FX
-app()  { BIVE_SCENARIO=${1:-happy-path} xvfb-run -a pnpm --filter @bive/app start -- --open $FX --remote-debugging-port=9222 & sleep 5; }
+app()  { BIVE_SCENARIO=${1:-happy-path} xvfb-run -a pnpm --filter @bive/app start -- --open $FX --remote-debugging-port=9222 &
+         for i in $(seq 60); do [ -s $BIVE_HOME/run/app.pid ] && [ -s $FX/.bive.json ] && break; sleep 1; done; sleep 3
+         PRJ=$(node -p "require('$FX/.bive.json').projectId"); }   # 앱 기동 · 프로젝트 열림(최대 60초)을 기다리고 PRJ = 프로젝트 ID
 quit() { kill $(cat $BIVE_HOME/run/app.pid); sleep 2; }   # 진행 중 실행이 없으면 오케스트레이터도 1초 뒤 종료
 cli()  { pnpm --silent --filter @bive/app cli "$@"; }
+fresh() { quit; FX=$(mktemp -d)/fx; scripts/reset-fixture.sh $FX; }   # 10~13번: 새 픽스처 복사본 = 새 프로젝트
 ```
-"새 규칙 실행(R)" = SCR-02에서 [+ 새 요구사항] → 문장 R 입력 → Ctrl+Enter(⌘↵) → 승인 대기에서 새 제안 [승인] → SCR-03에서 그 규칙 선택 → [실행] → 확인. 시나리오 이름은 `packages/orchestrator/scenarios/<이름>.yaml`.
+"새 규칙 실행(R)" = SCR-02에서 [+ 새 요구사항] → 문장 R 입력 → Ctrl+Enter(⌘↵) → 승인 대기에서 새 제안 [승인] → SCR-03에서 그 규칙 선택 → [실행] → 확인. 시나리오 이름은 `packages/orchestrator/scenarios/<이름>.yaml`. 조회 명령 `cli rpc <메서드> '<json>'`은 모든 요청에 `projectId`가 필수다(없으면 `-32602`). 흐름은 `app`이 정한 `$PRJ`를 `'{"projectId":"'$PRJ'"}'`처럼 넣는다.
 1. `app` → `cat $FX/.bive.json` → 키가 `projectId` · `schemaVersion` 둘뿐. 창은 SCR-02, 목록은 빈 상태 "요구사항 없음"(ADR-029), [BIVE 동기화] 없음(비어 있지 않은 미연결 폴더, ADR-036). `T=$(stat -c %Y $FX/.bive.json); quit; app` → `stat -c %Y $FX/.bive.json`이 `$T`와 같고 다시 SCR-02로 들어간다.
 2. 설정(사이드바 하단 톱니) → 예산 · 모델에서 rule-writer 역할만 모델 `test-model` · 한도 USD 1 · 턴 20, 실행 전체 한도 USD 5 · 턴 200을 [저장] → Esc. (rule-writer 세션도 모델 · 예산이 필수, ADR-024)
 3. SCR-02 [+ 새 요구사항] → "헬스 체크 응답에 서버 시각 포함" → Ctrl+Enter → 카드 1줄에 그 문장, 생성 주체 아이콘 사람 → 알림 배지 `2`(`happy-path`의 rule-writer가 제안 2개).
-4. 알림 아이콘 → 할 일(탭은 승인 대기 하나) → 카드 2개(종류 태그 "신규", 생성 주체 에이전트). 첫 카드 상세: 제목 · EARS 진술 · 검사 종류 · 부모 요구사항 · 근거 → [수정] → 제목 끝에 "됨" 추가 → [승인]. 둘째 카드 [거절] → 사유 칸이 비어 있으면 확인 버튼 비활성 → 사유 "중복" → 확인. 처리됨 필터 → 승인 기록(수정 diff, 주체 사람)과 거절 기록(사유 "중복"). 배지 사라짐. `cli rpc approvalLog.list` → 2건(`approve_edited` · `reject`), 둘째 항목의 `prevHash`가 첫째 `hash`와 같다.
-5. 설정 미비 거부: SCR-03에서 승인된 규칙 선택 → [실행] → 확인 → 오류 문구 "예산 · 모델 미설정", `cli rpc run.list` → 0건.
-6. 설정 → test-writer · implementer 모델 `test-model` · 한도 USD 2 · 턴 100 [저장] → SCR-03 [실행] → 확인 → SCR-05 파이프라인 영역에 단계 8개(승인 · 테스트 작성 · Red 확인 · 구현 · 검사 · 변이 주입 "생략" · 병합 · 화면 갱신)가 이 순서로 보인다. 120초 안에 `cli rpc run.list`의 그 실행 상태가 `merged`이고, `cli rpc run.get '{"id":"EXE-001"}'`의 단계 상태가 변이 주입만 `skipped`, 나머지는 `passed`.
+4. 알림 아이콘 → 할 일(탭은 승인 대기 하나) → 카드 2개(종류 태그 "신규", 생성 주체 에이전트). 첫 카드 상세: 제목 · EARS 진술 · 검사 종류 · 부모 요구사항 · 근거 → [수정] → 제목 끝에 "됨" 추가 → [승인]. 둘째 카드 [거절] → 사유 칸이 비어 있으면 확인 버튼 비활성 → 사유 "중복" → 확인. 처리됨 필터 → 승인 기록(수정 diff, 주체 사람)과 거절 기록(사유 "중복"). 배지 사라짐. `cli rpc approvalLog.list '{"projectId":"'$PRJ'"}'` → 2건(`approve_edited` · `reject`), 둘째 항목의 `prevHash`가 첫째 `hash`와 같다.
+5. 설정 미비 거부: SCR-03에서 승인된 규칙 선택 → [실행] → 확인 → 오류 문구 "예산 · 모델 미설정", `cli rpc run.list '{"projectId":"'$PRJ'"}'` → 0건.
+6. 설정 → test-writer · implementer 모델 `test-model` · 한도 USD 2 · 턴 100 [저장] → SCR-03 [실행] → 확인 → SCR-05 파이프라인 영역에 단계 8개(승인 · 테스트 작성 · Red 확인 · 구현 · 검사 · 변이 주입 "생략" · 병합 · 화면 갱신)가 이 순서로 보인다. 120초 안에 `cli rpc run.list '{"projectId":"'$PRJ'"}'`의 그 실행 상태가 `merged`이고, `cli rpc run.get '{"projectId":"'$PRJ'","id":"EXE-001"}'`의 단계 상태가 변이 주입만 `skipped`, 나머지는 `passed`.
 7. 완료 뒤 SCR-05 머리줄 "판정 기준 main@<커밋>"의 커밋 = `git -C $FX rev-parse --short main`, 준수 카드 "1 / 1", 규칙 목록에 통과(흐린 점) · 실행 링크의 비용 = `happy-path.yaml`에서 실행 세션(test-writer · implementer)의 `total_cost_usd` 합(화면 자릿수로 반올림) · 턴 = 같은 세션들의 `num_turns` 합. `git -C $FX log main --merges --oneline | wc -l` → `1`, `git -C $FX branch --list 'bive/run-*' | wc -l` → `1`.
 8. 실패 경로: `quit; app fail-check` → 새 규칙 실행("헬스 체크 응답에 버전 포함") → 구현 3회(회귀 2회) 뒤 실행 '실패', SCR-03 그 규칙 카드 2줄째 "실패", 상세의 테스트 출력이 펼쳐져 있다. `git -C $FX log main --merges --oneline | wc -l` → `1`(변화 없음), `git -C $FX branch --list 'bive/run-*' | wc -l` → `2`.
 9. 예산 초과: `quit; app` → 설정 실행 전체 한도 USD 0.01 [저장] → 새 규칙 실행("헬스 체크 응답에 호스트 이름 포함") → 실행 상태 '예산 초과', `git -C $FX branch --list 'bive/run-*' | wc -l` → `3`, merge 수 `1` 그대로. 설정 한도를 USD 5로 되돌린다.
-10. 끊김 복구: `quit; app pause-implement` → 새 규칙 실행("헬스 체크 응답에 가동 시간 포함") → SCR-05 현재 단계 '구현', `test -f $BIVE_HOME/run/pause` 성공 → `kill -9 $(cat $BIVE_HOME/run/orchestrator.pid)` → 사이드바 "연결 끊김" → `BIVE_SCENARIO=pause-implement pnpm --filter @bive/orchestrator start &` → "연결됨" → SCR-05 실행 상태 '중단', [재개] 노출 → [재개] → 구현부터 새 세션(첫 구현 세션에서만 멈추는 시나리오라 그대로 진행) → '통과'. `rm -f $BIVE_HOME/run/pause`.
-11. 앱 종료 후 유지(NFR-06): 새 규칙 실행("헬스 체크 응답에 요청 ID 포함") → 단계 '구현'에서 `quit` → `kill -0 $(cat $BIVE_HOME/run/orchestrator.pid) && echo alive` → `alive` → `M=$(git -C $FX rev-parse main); rm $BIVE_HOME/run/pause` → 60초 안에 `git -C $FX log main --merges -1 --format=%H`가 `$M`과 다른 새 merge commit → `app` → SCR-05에서 그 실행 '통과'.
-12. 금지 경로(NFR-02): `quit; app forbidden-write` → 새 규칙 실행("헬스 체크 응답에 지역 포함") → `cli rpc run.get '{"id":"<EXE-ID>"}'`의 도구 호출 기록에 결과 `denied` 2건(인수 테스트 파일 쓰기, `$BIVE_HOME/projects` 쓰기) → 실행 '통과', `git -C $FX log --format=%H main -- bive-acceptance/<RULE-ID> | wc -l` → `1`(테스트 작성 단계 커밋뿐).
-13. 승인 호출 거부(NFR-01): `quit; app agent-approve` → SCR-02 새 요구사항("헬스 체크 응답에 빌드 시각 포함") → 제안 2개 중 첫째만 [승인] → 그 규칙 [실행] → test-writer 세션이 `proposal.approve`를 호출 → `cli rpc run.get`의 도구 호출 기록에 그 호출이 결과 `denied` · 사유 `unknown_tool` → 둘째 제안은 승인 대기에 '대기'로 남고 `cli rpc approvalLog.list`에 둘째 제안 대상 항목 0건.
-14. `pnpm e2e:pipeline` → architecture.md 8장 시나리오 9개 + `app-exit` 테스트 통과. `pnpm --filter @bive/orchestrator test -- integrity` 통과.
-15. Windows(NFR-10): `scripts/gh-rest.sh GET "repos/chanrhan/bive/issues?labels=needs-human&state=all"`에서 M1-23이 만든 "Windows 완주" 이슈에 사람의 결과 코멘트가 있어야 M1을 닫는다(QA는 이슈 상태만 확인).
+10~13번은 단계마다 `fresh`로 새 픽스처 복사본(새 프로젝트)에서 시작한다. 세 시나리오(`pause-implement` · `forbidden-write` · `agent-approve`)가 `happy-path`와 같은 인수 테스트(응답의 `time` 필드)를 쓰므로, 6번에서 `time`이 병합된 프로젝트에서는 Red 확인을 통과할 수 없다(ADR-083). 새 프로젝트이므로 `app <시나리오>` 뒤 설정을 2 · 6번 값(rule-writer 모델 `test-model` · USD 1 · 턴 20, test-writer · implementer 모델 `test-model` · USD 2 · 턴 100, 실행 전체 USD 5 · 턴 200)으로 다시 [저장]하고, 실행 · 규칙 표시 ID는 단계마다 `EXE-001` · `RULE-001`이다.
+10. 끊김 복구: `fresh; app pause-implement` → 설정 [저장] → 새 규칙 실행("헬스 체크 응답에 가동 시간 포함") → SCR-05 현재 단계 '구현', `test -f $BIVE_HOME/run/pause` 성공 → `kill -9 $(cat $BIVE_HOME/run/orchestrator.pid)` → 사이드바 "연결 끊김" → `BIVE_SCENARIO=pause-implement pnpm --filter @bive/orchestrator start &` → "연결됨" → SCR-05 실행 상태 '중단', [재개] 노출 → [재개] → 구현부터 새 세션(첫 구현 세션에서만 멈추는 시나리오라 그대로 진행) → 실행 상태 '병합 완료'. `git -C $FX log main --merges --oneline | wc -l` → `1`. `rm -f $BIVE_HOME/run/pause`.
+11. 앱 종료 후 유지(NFR-06): `fresh; app pause-implement` → 설정 [저장] → 새 규칙 실행("헬스 체크 응답에 요청 ID 포함") → 단계 '구현'에서 `quit` → `kill -0 $(cat $BIVE_HOME/run/orchestrator.pid) && echo alive` → `alive` → `M=$(git -C $FX rev-parse main); rm $BIVE_HOME/run/pause` → 60초 안에 `git -C $FX log main --merges -1 --format=%H`가 `$M`과 다른 새 merge commit → `app` → SCR-05에서 그 실행 '병합 완료'.
+12. 금지 경로(NFR-02): `fresh; app forbidden-write` → 설정 [저장] → 새 규칙 실행("헬스 체크 응답에 지역 포함") → 실행 '병합 완료' → `cli rpc toolCall.list '{"projectId":"'$PRJ'","runId":"EXE-001"}'`(실행의 도구 호출 기록)에서 `status`가 `denied`인 호출이 2건: 둘 다 역할 `implementer` · 도구 `write_file` · 사유 `path_denied`이고 `path`가 `$BIVE_HOME/projects/forbidden-write.txt`(규범 저장소 쓰기)와 `bive-acceptance/RULE-001/health-time.acc.ts`(인수 테스트 파일 쓰기) → `test -e $BIVE_HOME/projects/forbidden-write.txt` 실패, `git -C $FX log --format=%H main -- bive-acceptance/RULE-001 | wc -l` → `1`(테스트 작성 단계 커밋뿐).
+13. 승인 호출 거부(NFR-01): `fresh; app agent-approve` → 설정 [저장] → SCR-02 새 요구사항("헬스 체크 응답에 빌드 시각 포함") → 제안 2개 중 첫째만 [승인] → 그 규칙 [실행] → test-writer 세션이 `proposal.approve`를 호출 → `cli rpc toolCall.list '{"projectId":"'$PRJ'","runId":"EXE-001"}'`에 역할 `test-writer`의 `proposal.approve` 호출이 `status` `denied` · `reason` `unknown_tool` → 둘째 제안은 승인 대기에 '대기'로 남고 `cli rpc approvalLog.list '{"projectId":"'$PRJ'"}'`에 둘째 제안 대상 항목 0건.
+14. `pnpm e2e:pipeline` → architecture.md 8장 시나리오 9개 + `app-exit` 테스트 통과. `pnpm --filter @bive/orchestrator exec vitest run integrity` → `test/integrity.test.ts` 한 파일만 돌고 통과.
+15. Windows(NFR-10): `scripts/gh-rest.sh GET "repos/chanrhan/bive/issues?labels=needs-human&state=all"`에서 M1-23이 만든 "Windows 완주" 이슈(#158)에 사람의 결과 코멘트가 있어야 M1을 닫는다(QA는 이슈 상태만 확인).
 
 PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 제한 → 12 · 14 · NFR-01 에이전트 승인 불가 → 4(해시 체인) · 13 · 14 · NFR-10 Windows 완주 → 15 · NFR-06 앱 종료 후 유지 → 11.
 
@@ -123,6 +127,7 @@ PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 �
 | M1-33 | 판정 입력 보호 보강 (file: 의존성 빌드 · bin shim · 닫기 흡수 창) | bug | orchestrator·store | M1-16 | `orchestrator/test/judge-runner.test.ts`가 빌드 허용 목록 이름과 그 의존성 닫힘, 판정 실행기 vitest와 그 의존성 닫힘 중 lockfile 해상도가 레지스트리(`resolution.integrity`만)가 아니거나 패치, override, `file:`, `link:`, git, tarball, 작업 공간 패키지인 것이 있으면 판정 설치 실패로 닫고(lockfile은 엄격 YAML로 읽고 hoist 설정을 고정하며 빌드 스크립트 PATH의 bin 실경로가 레지스트리 패키지 안인지 확인) `file:` 의존성의 `postinstall`과 override된 `prebuild-install`과 hoist된 `node-gyp`가 돌지 않음을 단언 · 같은 테스트가 빌드 중 심은 `node_modules/.bin/node` 래퍼가 실행되지 않고 vitest가 `process.execPath`로 `package.json` `bin`의 진입 파일을 직접 실행함을 단언 · `store/test/judgments.test.ts`가 `ProjectStore.close`의 `data_version` 비교와 장부 갱신 사이에 다른 연결이 커밋한 위조가 흡수되지 않고, 미래 시각 판정 행이 규칙 이력(`listByRule`)에서도 빠짐을 단언 · `orchestrator/test/worktree.test.ts`가 재검사 없는 병합에서 병합 결과 트리가 검사한 커밋의 트리와 다르면 `unchecked_tree_mismatch`로 병합하지 않음을 단언(ADR-072) | JDG-01 · NFR-01 · NFR-02 · RUN-08 · ADR-069 · ADR-072 | #146 |
 | M1-34 | 알림 송신 · 요청 처리 견고함 보강 (느린 시험 · 송신 상한 판단 · 요청 몰림) | bug | orchestrator | M1-19 | `orchestrator/test/events.test.ts`의 읽지 않는 연결 시험 2개가 응답이 큰 요청 몇 건으로 버퍼를 채워 각각 3초 안에 끝남 · `sendFlushed`가 총 시간이 아니라 진척 없음으로 판단해 이벤트 루프가 상한보다 오래 막힌 뒤에도 읽던 연결을 끊지 않음을 `orchestrator/test/transport.test.ts`가 단언 · 한 연결의 연속 요청 사이에 이벤트 루프를 양보해 요청 3000건 처리 중 다른 연결의 `system.status` 응답이 1초 안에 옴을 `orchestrator/test/pipe.test.ts`가 단언 · ADR-076 결과에 끊긴 연결의 대기 요청 오류와 송신 예외로 `failed`가 된 병합 실행의 표시 방침을 적음 | NFR-06 · RUN-02 · ADR-027 · ADR-076 | #153 |
 | M1-36 | 화면 갱신 누락: 제안 생성 뒤 할 일 배지 · 재접속 뒤 검증 화면 | bug | app·orchestrator·shared | M1-19 | 제안이 생기거나 처리되면 오케스트레이터가 `event.proposal.changed`를 보내고 할 일 배지가 화면 이동 없이 갱신됨을 `orchestrator/test/events.test.ts`와 `app/e2e/todo-badge.spec.ts`가 단언 · 연결이 끊겼다 다시 붙으면 규칙 화면과 검증 화면과 할 일 배지가 다시 조회함을 `app/e2e/reconnect.spec.ts`가 단언 · 다시 조회는 기존 합치기 규칙(동시 조회 1개, 뒤따르는 조회 최대 1개)을 따르고 다른 프로젝트의 알림은 무시함을 같은 두 e2e와 `app/test/refresh-coalescer.test.ts`가 단언 · ADR-076에 제안 알림과 재접속 다시 조회를 적음 | NRM-02 · RUN-02 · NFR-06 · SCR-02 · SCR-05 · ADR-076 | #164 |
+| M1-38 | M1 완료 기준 흐름 정정 · 도구 호출 기록 조회 | bug | orchestrator·shared·store·docs | M1-21·M1-29 | 실행의 도구 호출 기록(역할, 단계, 도구 이름, 결과, 거부 사유, 파일 도구의 경로)을 돌려주는 조회 전용 `toolCall.list`가 있고 `cli rpc`로 부를 수 있으며 없는 실행과 다른 프로젝트의 실행은 `-32004`이고 상한 500건을 넘으면 `truncated`임을 `orchestrator/test/run.test.ts`가 단언 · `toolCall.*` 이름 공간에 `list`만 있고 역할 세션 도구에 없으며 역할이 부르면 `unknown_tool`로 거부됨을 `orchestrator/test/proposal-guard.test.ts`가 단언 · `forbidden-write` 시나리오의 첫 금지 쓰기 대상이 `$BIVE_HOME/projects` 아래이고 `e2e/pipeline/forbidden-write.test.ts`가 그 경로와 인수 테스트 경로의 `path_denied` 거부를 기록과 `toolCall.list`로 단언 · 2.1 흐름이 `projectId`를 넣은 `cli rpc` 예시와 10~13번의 단계별 새 프로젝트와 `toolCall.list` 확인과 파일을 거르는 14번 명령으로 고쳐지고 ADR-083에 판단을 적음 | NFR-01 · NFR-02 · RUN-08 · ADR-038 · ADR-071 · ADR-083 | #166 |
 
 ### 2.2 M2 측정 시작
 
@@ -287,7 +292,7 @@ PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 �
 | RUN-05 | 요구사항 | P2 | M6 | M6-02 | ADR-023 |
 | RUN-06 | 요구사항 | P2 | M6 | M6-03·M6-07 | 토큰은 M6-07 수치 줄 |
 | RUN-07 | 요구사항 | P1 `미정` | M0(부분)·M3(부분)·M5(부분)·M6 | M0-03·M3-06·M5-03·M6-01 | `미정` ADR-020 (M0-03은 유형 enum) |
-| RUN-08 | 요구사항 | P0 | M1 | M1-13·M1-16·M1-21·M1-29·M1-30·M1-33 | 병합 시 기준 브랜치 변경 ADR-017 |
+| RUN-08 | 요구사항 | P0 | M1 | M1-13·M1-16·M1-21·M1-29·M1-30·M1-33·M1-38 | 병합 시 기준 브랜치 변경 ADR-017 |
 | JDG-01 | 요구사항 | P0 | M1(부분)·M3 | M1-15·M1-16·M1-24·M1-29·M1-31·M1-33·M3-18 | 판정 러너 ADR-026 |
 | JDG-02 | 요구사항 | P0 | M0(부분)·M1(부분)·M3 | M0-03·M1-11·M1-16·M1-28·M3-14 |  |
 | JDG-03 | 요구사항 | P0 | M1(부분)·M3 | M1-18·M3-17 |  |
@@ -313,8 +318,8 @@ PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 �
 | COL-02 | 요구사항 | P1 | M4 | M4-05·M4-16 |  |
 | COL-03 | 요구사항 | P1 | M4 | M4-05·M4-08·M4-15 |  |
 | COL-04 | 요구사항 | P1 | M4 | M4-03 | N은 ADR-022 |
-| NFR-01 | 비기능 | — | M0(부분)·M1(부분)·M5 | M0-04·M1-09·M1-22·M1-29·M1-30·M1-33·M5-06 | 에이전트 승인 불가 · 해시 체인 ADR-027 |
-| NFR-02 | 비기능 | — | M1 | M1-07·M1-15·M1-16·M1-22·M1-26·M1-29·M1-31·M1-33 | 경로 매트릭스는 ADR-024 (PRD `미정`) |
+| NFR-01 | 비기능 | — | M0(부분)·M1(부분)·M5 | M0-04·M1-09·M1-22·M1-29·M1-30·M1-33·M1-38·M5-06 | 에이전트 승인 불가 · 해시 체인 ADR-027 |
+| NFR-02 | 비기능 | — | M1 | M1-07·M1-15·M1-16·M1-22·M1-26·M1-29·M1-31·M1-33·M1-38 | 경로 매트릭스는 ADR-024 (PRD `미정`) |
 | NFR-03 | 비기능 | — | M0(부분)·M4(부분)·M5 | M0-01·M0-07·M4-12·M5-01 | 제품 코드 목 데이터 금지 ESLint 규칙(M0-01) · 화면 문구 검사(M0-07) |
 | NFR-04 | 비기능 | — | M1 | M1-07·M1-22·M1-26 | 네트워크 허용 범위 PRD `미정`, 외부 연결 0건 시험 M1-22 |
 | NFR-05 | 비기능 | — | M1(부분)·M3 | M1-32·M3-14 | 시험 안정화 ADR-064 |
@@ -371,3 +376,4 @@ PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 �
 - 2026-11-14 M1 보조 이슈 M1-33(#146, PR #139 3차 검토 후속: 판정 입력 보호 보강)을 M1 표에 추가하고 커버리지 표의 RUN-08 · JDG-01 · NFR-01 · NFR-02에 더함. M1 이슈 33개 → 34개.
 - 2026-11-14 M1 검수 결함 M1-36(#164, 화면 갱신 누락: 제안 생성 뒤 할 일 배지 · 재접속 뒤 검증 화면)을 M1 표에 추가하고 커버리지 표의 NRM-02 · RUN-02 · NFR-06 · SCR-02 · SCR-05에 더함. M1 이슈 34개 → 35개.
 - 2026-11-14 머리 상태 줄의 ADR 범위를 "작성 당시"로 고치고, M1-31 제목을 GitHub #137 제목에 맞춤. 4장 needs-human 후보 중 M1 끝 4개에 이슈 번호를 적음(#126 · #158 · #159 · #160) (#36).
+- 2026-11-14 M1 검수 결함 M1-38(#166, 완료 기준 흐름 정정 · 도구 호출 기록 조회)을 M1 표에 추가하고 커버리지 표의 RUN-08 · NFR-01 · NFR-02에 더함. 2.1 흐름의 준비 블록(`app` 대기 · `PRJ` · `fresh`), `cli rpc` 예시의 `projectId`, 10~13번의 단계별 새 프로젝트, 12 · 13번의 `toolCall.list` 확인, 14번 명령, 15번 이슈 번호를 고침(ADR-083). M1 이슈 35개 → 36개.

@@ -57,7 +57,13 @@ describe('cli 본체', () => {
   });
 
   it('rpc는 .list · .get · .status · .summary로 끝나는 메서드만 허용한다', () => {
-    for (const ok of ['project.list', 'rule.get', 'system.status', 'verification.summary']) {
+    for (const ok of [
+      'project.list',
+      'rule.get',
+      'system.status',
+      'verification.summary',
+      'toolCall.list',
+    ]) {
       expect(isReadOnlyMethod(ok), ok).toBe(true);
     }
     for (const no of [
