@@ -31,7 +31,17 @@ import {
   findForbiddenText,
   SCREENSHOT_DIR,
 } from './support/expectScreen.js';
-import { textClipping } from './support/overflow.js';
+import {
+  DETAIL_PANE_MIN,
+  hitProblems,
+  LIST_PANE_MAX,
+  LIST_PANE_MIN,
+  listPaneOverflow,
+  NARROW_WIDTHS,
+  paneWidths,
+  textClipping,
+  WIDE_WIDTH,
+} from './support/overflow.js';
 
 const PROJECT_ID = '01JBVE0000000000000000000P';
 const PROJECT = {
@@ -386,182 +396,237 @@ test.describe('상세 (수용 기준 2)', () => {
   });
 });
 
+/** 스크린샷 이름. 기본 창은 상태 이름 그대로, 좁은 창은 폭을 붙인다 (#179). */
+type Shot = (name: string) => string;
+const asIs: Shot = (name) => name;
+
+/**
+ * [수정] 흐름 (수용 기준 3): 대화 끝 카드 · 자동 스크롤 · 포커스, 빈 문장은 문구와 확인 비활성, 수정 후 승인 1회.
+ * 창 폭은 `width`, 높이는 상세가 화면보다 길어 스크롤이 필요한 560px.
+ */
+const editFlow = async (page: Page, width: number, shot: Shot): Promise<void> => {
+  // 상세가 화면보다 길어 스크롤이 필요한 높이
+  await page.setViewportSize({ width, height: 560 });
+  const bive = await setup(page);
+  await card(page, 'PRP-001').click();
+  await expect(page.getByTestId('detail-if-reject')).toBeVisible();
+  const scroller = page.getByTestId('proposal-detail');
+  expect(await scroller.evaluate((el) => el.scrollTop)).toBe(0);
+
+  await action(page, 'edit').click();
+  const editCard = page.getByTestId('edit-card');
+  await expect(editCard).toBeVisible();
+  await expect(action(page, 'edit')).toHaveAttribute('aria-pressed', 'true');
+  // 대화 끝 카드: 상세 내용의 마지막 요소
+  expect(await editCard.evaluate((el) => el.parentElement?.lastElementChild === el)).toBe(true);
+  await expect(editCard).toBeInViewport({ ratio: 1 });
+  expect(await scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+  // 자동 스크롤은 카드 끝을 떠 있는 버튼 위에 둔다 (카드의 확인 버튼이 가려지지 않음)
+  const cardBox = await editCard.boundingBox();
+  const barBox = await page.getByTestId('floating-actions').boundingBox();
+  if (cardBox === null || barBox === null) throw new Error('카드 · 버튼 영역 없음');
+  expect(cardBox.y + cardBox.height).toBeLessThanOrEqual(barBox.y);
+  const title = page.getByTestId('edit-title');
+  await expect(title).toBeFocused();
+  await expect(title).toHaveValue(String(P1_PAYLOAD.title));
+  await expect(page.getByTestId('edit-statement')).toHaveValue(String(P1_PAYLOAD.statement));
+  await snapshot(page, shot('수정'));
+
+  // 빈 문장: 화면 문구 + 확인 비활성
+  const confirm = page.getByTestId('edit-confirm');
+  await title.fill('   ');
+  await expect(page.getByTestId('edit-error')).toHaveText('제목 비어 있음');
+  await expect(title).toHaveAttribute('aria-invalid', 'true');
+  await expect(confirm).toBeDisabled();
+  await title.fill('헬스 응답에 UTC 서버 시각 포함');
+  await expect(page.getByTestId('edit-error')).toHaveCount(0);
+  await expect(confirm).toBeEnabled();
+
+  // 고친 진술이 EARS 형식이 아니면 화면 문구 + 확인 비활성 (조건 안 낱말 shall · 여러 줄 · 형식 없음)
+  const statement = page.getByTestId('edit-statement');
+  for (const bad of [
+    'WHEN A PAYMENT THAT THE BUYER SHALL CONFIRM EXPIRES THE SYSTEM SHALL CANCEL',
+    'WHEN 결제\n취소 THE SYSTEM SHALL 환불',
+    '헬스 요청을 받으면 시스템은 시각을 응답한다',
+  ]) {
+    await statement.fill(bad);
+    await expect(page.getByTestId('edit-error')).toHaveText(
+      '진술 형식 오류 (WHEN 조건 THE SYSTEM SHALL 응답)',
+    );
+    await expect(statement).toHaveAttribute('aria-invalid', 'true');
+    await expect(confirm).toBeDisabled();
+    await statement.press('Control+Enter');
+  }
+  expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
+  await statement.fill(String(P1_PAYLOAD.statement));
+  await expect(page.getByTestId('edit-error')).toHaveCount(0);
+  await expect(confirm).toBeEnabled();
+
+  // 처리 뒤 목록 · 배지 응답
+  const approved: Proposal = {
+    ...P1,
+    readAt: '2026-10-16T05:00:00.000Z',
+    state: 'approved',
+    decision: {
+      at: '2026-10-16T05:00:00.000Z',
+      by: HUMAN,
+      appliedRef: { entity: 'Rule', id: ID.rule },
+    },
+  };
+  await bive.setResponse('proposal.amend', {
+    result: {
+      proposal: approved,
+      applied: { entity: 'Rule', rule: RULE },
+      approvalLog: LOG_APPROVE,
+    },
+    delayMs: 1500,
+  });
+  await bive.setResponse('proposal.list', { result: { proposals: [approved, P3, P4, P5] } });
+  await bive.setResponse('proposal.count', { result: countOf([approved, P3, P4, P5]) });
+  const listCalls = (await callsOf(bive, 'proposal.list')).length;
+  const countCalls = (await callsOf(bive, 'proposal.count')).length;
+
+  // 저장 중 재전송 없음: 두 번 눌러도 1회
+  await confirm.click();
+  await expect(page.getByTestId('floating-actions-busy')).toHaveText('처리 중');
+  await expect(action(page, 'approve')).toBeDisabled();
+  await confirm.click({ force: true });
+  await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
+  expect(await callsOf(bive, 'proposal.amend')).toEqual([
+    {
+      projectId: PROJECT_ID,
+      id: ID.p1,
+      author: HUMAN,
+      edited: { ...P1_PAYLOAD, title: '헬스 응답에 UTC 서버 시각 포함' },
+    },
+  ]);
+  expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
+
+  // 처리된 항목은 대기 필터에서 빠지고 목록 · 배지를 다시 읽는다
+  await expect(page.getByTestId('card-id')).toHaveText(['PRP-003']);
+  await expect(page.getByTestId('todo-badge')).toHaveText('1');
+  expect((await callsOf(bive, 'proposal.list')).length).toBeGreaterThan(listCalls);
+  expect((await callsOf(bive, 'proposal.count')).length).toBeGreaterThan(countCalls);
+  await expect(detail(page).getByTestId('empty-state')).toHaveText('선택 항목 없음');
+};
+
+/** [거절] 흐름 (수용 기준 3): 대화 끝 카드 · 포커스, 사유가 비면 확인 비활성, 조합 중 키는 가로채지 않음, 거절 1회. */
+const rejectFlow = async (page: Page, shot: Shot): Promise<void> => {
+  const bive = await setup(page);
+  await card(page, 'PRP-001').click();
+  await action(page, 'reject').click();
+
+  const rejectCard = page.getByTestId('reject-card');
+  await expect(rejectCard).toBeVisible();
+  expect(await rejectCard.evaluate((el) => el.parentElement?.lastElementChild === el)).toBe(true);
+  await expect(rejectCard).toBeInViewport();
+  const reason = page.getByTestId('reject-reason');
+  await expect(reason).toBeFocused();
+  const confirm = page.getByTestId('reject-confirm');
+  await expect(confirm).toBeDisabled();
+  await reason.fill('  \n ');
+  await expect(confirm).toBeDisabled();
+  // 공백만이면 단축키로도 보내지 않는다
+  await reason.press('Control+Enter');
+  expect(await callsOf(bive, 'proposal.reject')).toEqual([]);
+  await snapshot(page, shot('거절'));
+
+  await reason.fill('헬스 응답 범위 밖');
+  await expect(confirm).toBeEnabled();
+
+  // 한글 조합 중의 Enter · Esc는 조합 확정용이라 확인 · 닫기로 쓰지 않는다
+  const composing = (key: string, ctrlKey: boolean): Promise<void> =>
+    reason.evaluate(
+      (el, init) =>
+        void el.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            ...init,
+            bubbles: true,
+            cancelable: true,
+            isComposing: true,
+          }),
+        ),
+      { key, ctrlKey },
+    );
+  await composing('Enter', true);
+  await composing('Escape', false);
+  await expect(rejectCard).toBeVisible();
+  expect(await callsOf(bive, 'proposal.reject')).toEqual([]);
+
+  const rejected: Proposal = {
+    ...P1,
+    state: 'rejected',
+    decision: { at: '2026-10-16T05:00:00.000Z', by: HUMAN, rejectReason: '헬스 응답 범위 밖' },
+  };
+  await bive.setResponse('proposal.reject', {
+    result: {
+      proposal: rejected,
+      approvalLog: { ...LOG_APPROVE, action: 'reject', detail: { reason: '헬스 응답 범위 밖' } },
+    },
+    delayMs: 1500,
+  });
+  await bive.setResponse('proposal.list', { result: { proposals: [rejected, P3, P4, P5] } });
+  await bive.setResponse('proposal.count', { result: countOf([rejected, P3, P4, P5]) });
+  // 단축키 확인 + 버튼 재클릭: 1회만
+  await reason.press('Control+Enter');
+  await confirm.click({ force: true });
+  await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
+  expect(await callsOf(bive, 'proposal.reject')).toEqual([
+    { projectId: PROJECT_ID, id: ID.p1, author: HUMAN, reason: '헬스 응답 범위 밖' },
+  ]);
+  await expect(page.getByTestId('card-id')).toHaveText(['PRP-003']);
+  await expect(page.getByTestId('todo-badge')).toHaveText('1');
+};
+
+/** Esc로 입력 카드 닫기, [승인]은 바로 사람 주체 승인 1회 (수용 기준 3). */
+const escApproveFlow = async (page: Page): Promise<void> => {
+  const bive = await setup(page);
+  await card(page, 'PRP-003').click();
+  await action(page, 'edit').click();
+  await expect(page.getByTestId('edit-text')).toBeFocused();
+  await page.getByTestId('edit-text').press('Escape');
+  await expect(page.getByTestId('edit-card')).toHaveCount(0);
+
+  const approved: Proposal = {
+    ...P3,
+    state: 'approved',
+    decision: {
+      at: '2026-10-16T05:00:00.000Z',
+      by: HUMAN,
+      appliedRef: { entity: 'Requirement', id: ID.req },
+    },
+  };
+  await bive.setResponse('proposal.approve', {
+    result: {
+      proposal: approved,
+      applied: { entity: 'Requirement', requirement: REQUIREMENT },
+      approvalLog: { ...LOG_APPROVE, targetRef: { entity: 'Proposal', id: ID.p3 } },
+    },
+    delayMs: 1500,
+  });
+  await bive.setResponse('proposal.list', { result: { proposals: [P1, approved, P4, P5] } });
+  await bive.setResponse('proposal.count', { result: countOf([P1, approved, P4, P5]) });
+  await action(page, 'approve').click();
+  await action(page, 'approve').click({ force: true });
+  await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
+  expect(await callsOf(bive, 'proposal.approve')).toEqual([
+    { projectId: PROJECT_ID, id: ID.p3, author: HUMAN },
+  ]);
+  await expect(page.getByTestId('card-id')).toHaveText(['PRP-001']);
+  await expect(page.getByTestId('todo-badge')).toHaveText('1');
+};
+
 test.describe('수정 · 거절 입력 카드 (수용 기준 3)', () => {
   test('[수정]: 대화 끝 카드 · 자동 스크롤 · 포커스, 빈 문장은 문구와 확인 비활성, 수정 후 승인 1회', async ({
     page,
   }) => {
-    // 상세가 화면보다 길어 스크롤이 필요한 높이
-    await page.setViewportSize({ width: 1440, height: 560 });
-    const bive = await setup(page);
-    await card(page, 'PRP-001').click();
-    await expect(page.getByTestId('detail-if-reject')).toBeVisible();
-    const scroller = page.getByTestId('proposal-detail');
-    expect(await scroller.evaluate((el) => el.scrollTop)).toBe(0);
-
-    await action(page, 'edit').click();
-    const editCard = page.getByTestId('edit-card');
-    await expect(editCard).toBeVisible();
-    await expect(action(page, 'edit')).toHaveAttribute('aria-pressed', 'true');
-    // 대화 끝 카드: 상세 내용의 마지막 요소
-    expect(await editCard.evaluate((el) => el.parentElement?.lastElementChild === el)).toBe(true);
-    await expect(editCard).toBeInViewport({ ratio: 1 });
-    expect(await scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
-    // 자동 스크롤은 카드 끝을 떠 있는 버튼 위에 둔다 (카드의 확인 버튼이 가려지지 않음)
-    const cardBox = await editCard.boundingBox();
-    const barBox = await page.getByTestId('floating-actions').boundingBox();
-    if (cardBox === null || barBox === null) throw new Error('카드 · 버튼 영역 없음');
-    expect(cardBox.y + cardBox.height).toBeLessThanOrEqual(barBox.y);
-    const title = page.getByTestId('edit-title');
-    await expect(title).toBeFocused();
-    await expect(title).toHaveValue(String(P1_PAYLOAD.title));
-    await expect(page.getByTestId('edit-statement')).toHaveValue(String(P1_PAYLOAD.statement));
-    await snapshot(page, '수정');
-
-    // 빈 문장: 화면 문구 + 확인 비활성
-    const confirm = page.getByTestId('edit-confirm');
-    await title.fill('   ');
-    await expect(page.getByTestId('edit-error')).toHaveText('제목 비어 있음');
-    await expect(title).toHaveAttribute('aria-invalid', 'true');
-    await expect(confirm).toBeDisabled();
-    await title.fill('헬스 응답에 UTC 서버 시각 포함');
-    await expect(page.getByTestId('edit-error')).toHaveCount(0);
-    await expect(confirm).toBeEnabled();
-
-    // 고친 진술이 EARS 형식이 아니면 화면 문구 + 확인 비활성 (조건 안 낱말 shall · 여러 줄 · 형식 없음)
-    const statement = page.getByTestId('edit-statement');
-    for (const bad of [
-      'WHEN A PAYMENT THAT THE BUYER SHALL CONFIRM EXPIRES THE SYSTEM SHALL CANCEL',
-      'WHEN 결제\n취소 THE SYSTEM SHALL 환불',
-      '헬스 요청을 받으면 시스템은 시각을 응답한다',
-    ]) {
-      await statement.fill(bad);
-      await expect(page.getByTestId('edit-error')).toHaveText(
-        '진술 형식 오류 (WHEN 조건 THE SYSTEM SHALL 응답)',
-      );
-      await expect(statement).toHaveAttribute('aria-invalid', 'true');
-      await expect(confirm).toBeDisabled();
-      await statement.press('Control+Enter');
-    }
-    expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
-    await statement.fill(String(P1_PAYLOAD.statement));
-    await expect(page.getByTestId('edit-error')).toHaveCount(0);
-    await expect(confirm).toBeEnabled();
-
-    // 처리 뒤 목록 · 배지 응답
-    const approved: Proposal = {
-      ...P1,
-      readAt: '2026-10-16T05:00:00.000Z',
-      state: 'approved',
-      decision: {
-        at: '2026-10-16T05:00:00.000Z',
-        by: HUMAN,
-        appliedRef: { entity: 'Rule', id: ID.rule },
-      },
-    };
-    await bive.setResponse('proposal.amend', {
-      result: {
-        proposal: approved,
-        applied: { entity: 'Rule', rule: RULE },
-        approvalLog: LOG_APPROVE,
-      },
-      delayMs: 1500,
-    });
-    await bive.setResponse('proposal.list', { result: { proposals: [approved, P3, P4, P5] } });
-    await bive.setResponse('proposal.count', { result: countOf([approved, P3, P4, P5]) });
-    const listCalls = (await callsOf(bive, 'proposal.list')).length;
-    const countCalls = (await callsOf(bive, 'proposal.count')).length;
-
-    // 저장 중 재전송 없음: 두 번 눌러도 1회
-    await confirm.click();
-    await expect(page.getByTestId('floating-actions-busy')).toHaveText('처리 중');
-    await expect(action(page, 'approve')).toBeDisabled();
-    await confirm.click({ force: true });
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
-    expect(await callsOf(bive, 'proposal.amend')).toEqual([
-      {
-        projectId: PROJECT_ID,
-        id: ID.p1,
-        author: HUMAN,
-        edited: { ...P1_PAYLOAD, title: '헬스 응답에 UTC 서버 시각 포함' },
-      },
-    ]);
-    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
-
-    // 처리된 항목은 대기 필터에서 빠지고 목록 · 배지를 다시 읽는다
-    await expect(page.getByTestId('card-id')).toHaveText(['PRP-003']);
-    await expect(page.getByTestId('todo-badge')).toHaveText('1');
-    expect((await callsOf(bive, 'proposal.list')).length).toBeGreaterThan(listCalls);
-    expect((await callsOf(bive, 'proposal.count')).length).toBeGreaterThan(countCalls);
-    await expect(detail(page).getByTestId('empty-state')).toHaveText('선택 항목 없음');
+    await editFlow(page, 1440, asIs);
   });
 
   test('[거절]: 대화 끝 카드 · 포커스, 사유가 비면 확인 비활성, 조합 중 키는 가로채지 않음, 거절 1회', async ({
     page,
   }) => {
-    const bive = await setup(page);
-    await card(page, 'PRP-001').click();
-    await action(page, 'reject').click();
-
-    const rejectCard = page.getByTestId('reject-card');
-    await expect(rejectCard).toBeVisible();
-    expect(await rejectCard.evaluate((el) => el.parentElement?.lastElementChild === el)).toBe(true);
-    await expect(rejectCard).toBeInViewport();
-    const reason = page.getByTestId('reject-reason');
-    await expect(reason).toBeFocused();
-    const confirm = page.getByTestId('reject-confirm');
-    await expect(confirm).toBeDisabled();
-    await reason.fill('  \n ');
-    await expect(confirm).toBeDisabled();
-    // 공백만이면 단축키로도 보내지 않는다
-    await reason.press('Control+Enter');
-    expect(await callsOf(bive, 'proposal.reject')).toEqual([]);
-    await snapshot(page, '거절');
-
-    await reason.fill('헬스 응답 범위 밖');
-    await expect(confirm).toBeEnabled();
-
-    // 한글 조합 중의 Enter · Esc는 조합 확정용이라 확인 · 닫기로 쓰지 않는다
-    const composing = (key: string, ctrlKey: boolean): Promise<void> =>
-      reason.evaluate(
-        (el, init) =>
-          void el.dispatchEvent(
-            new KeyboardEvent('keydown', {
-              ...init,
-              bubbles: true,
-              cancelable: true,
-              isComposing: true,
-            }),
-          ),
-        { key, ctrlKey },
-      );
-    await composing('Enter', true);
-    await composing('Escape', false);
-    await expect(rejectCard).toBeVisible();
-    expect(await callsOf(bive, 'proposal.reject')).toEqual([]);
-
-    const rejected: Proposal = {
-      ...P1,
-      state: 'rejected',
-      decision: { at: '2026-10-16T05:00:00.000Z', by: HUMAN, rejectReason: '헬스 응답 범위 밖' },
-    };
-    await bive.setResponse('proposal.reject', {
-      result: {
-        proposal: rejected,
-        approvalLog: { ...LOG_APPROVE, action: 'reject', detail: { reason: '헬스 응답 범위 밖' } },
-      },
-      delayMs: 1500,
-    });
-    await bive.setResponse('proposal.list', { result: { proposals: [rejected, P3, P4, P5] } });
-    await bive.setResponse('proposal.count', { result: countOf([rejected, P3, P4, P5]) });
-    // 단축키 확인 + 버튼 재클릭: 1회만
-    await reason.press('Control+Enter');
-    await confirm.click({ force: true });
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
-    expect(await callsOf(bive, 'proposal.reject')).toEqual([
-      { projectId: PROJECT_ID, id: ID.p1, author: HUMAN, reason: '헬스 응답 범위 밖' },
-    ]);
-    await expect(page.getByTestId('card-id')).toHaveText(['PRP-003']);
-    await expect(page.getByTestId('todo-badge')).toHaveText('1');
+    await rejectFlow(page, asIs);
   });
 
   test('처리 중 다른 카드를 골라도 그 선택은 유지되고, 돌아와도 같은 제안을 다시 보내지 않는다', async ({
@@ -616,40 +681,7 @@ test.describe('수정 · 거절 입력 카드 (수용 기준 3)', () => {
   });
 
   test('Esc로 입력 카드 닫기, [승인]은 바로 사람 주체 승인 1회', async ({ page }) => {
-    const bive = await setup(page);
-    await card(page, 'PRP-003').click();
-    await action(page, 'edit').click();
-    await expect(page.getByTestId('edit-text')).toBeFocused();
-    await page.getByTestId('edit-text').press('Escape');
-    await expect(page.getByTestId('edit-card')).toHaveCount(0);
-
-    const approved: Proposal = {
-      ...P3,
-      state: 'approved',
-      decision: {
-        at: '2026-10-16T05:00:00.000Z',
-        by: HUMAN,
-        appliedRef: { entity: 'Requirement', id: ID.req },
-      },
-    };
-    await bive.setResponse('proposal.approve', {
-      result: {
-        proposal: approved,
-        applied: { entity: 'Requirement', requirement: REQUIREMENT },
-        approvalLog: { ...LOG_APPROVE, targetRef: { entity: 'Proposal', id: ID.p3 } },
-      },
-      delayMs: 1500,
-    });
-    await bive.setResponse('proposal.list', { result: { proposals: [P1, approved, P4, P5] } });
-    await bive.setResponse('proposal.count', { result: countOf([P1, approved, P4, P5]) });
-    await action(page, 'approve').click();
-    await action(page, 'approve').click({ force: true });
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
-    expect(await callsOf(bive, 'proposal.approve')).toEqual([
-      { projectId: PROJECT_ID, id: ID.p3, author: HUMAN },
-    ]);
-    await expect(page.getByTestId('card-id')).toHaveText(['PRP-001']);
-    await expect(page.getByTestId('todo-badge')).toHaveText('1');
+    await escApproveFlow(page);
   });
 
   test('이미 처리된 제안(-32009): 문구를 보이고 목록 · 배지를 다시 읽어 처리 기록을 보인다', async ({
@@ -974,6 +1006,88 @@ test.describe('1280×800 창의 버튼 문구 (#175)', () => {
     await expectOneLine(page, [...FLOATING, 'floating-actions-busy']);
     await expectCardAboveBar(page, 'reject-card');
     await snapshot(page, '1280-처리-중');
+  });
+});
+
+test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
+  const FLOATING = ['action-reject', 'action-edit', 'action-approve'] as const;
+  const listPane = (page: Page): Locator => page.getByTestId('todo-list-pane');
+
+  /** 상세에 가로 스크롤이 없고, 받은 버튼이 한 줄 · 잘림 없음 · 상세 안이며, 가운데를 누르면 그 버튼에 닿는다. */
+  const expectDetailLayout = async (page: Page, testIds: readonly string[]): Promise<void> => {
+    for (const id of ['todo-detail', 'proposal-detail']) {
+      const { scroll, client } = await page
+        .getByTestId(id)
+        .evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
+      expect(scroll, `${id} 가로 스크롤`).toBeLessThanOrEqual(client);
+    }
+    expect(await textClipping(detail(page), testIds)).toEqual([]);
+    expect(await hitProblems(detail(page), testIds)).toEqual([]);
+  };
+
+  for (const width of NARROW_WIDTHS) {
+    test.describe(`${width}×800`, () => {
+      test.use({ viewport: { width, height: 800 } });
+      const shot: Shot = (name) => `좁은-${width}-${name}`;
+
+      test('상세 칸은 최소 폭 이상이고 목록 칸은 넘치지 않는다, 떠 있는 버튼 · 입력 카드 버튼은 상세 안에서 눌린다', async ({
+        page,
+      }) => {
+        await setup(page);
+        await card(page, 'PRP-001').click();
+        await expect(page.getByTestId('detail-if-reject')).toBeVisible();
+
+        // 칸 폭: 목록은 최대 400px에서 줄어들고, 상세는 최소 폭을 지킨다
+        const widths = await paneWidths(listPane(page), detail(page));
+        expect(widths.list).toBeGreaterThanOrEqual(LIST_PANE_MIN);
+        expect(widths.list).toBeLessThanOrEqual(LIST_PANE_MAX);
+        expect(widths.detail).toBeGreaterThanOrEqual(DETAIL_PANE_MIN);
+        expect(await listPaneOverflow(listPane(page))).toEqual([]);
+        await expectDetailLayout(page, FLOATING);
+
+        // 수정 중: 떠 있는 버튼 + "수정 중", 수정 카드의 [취소] · [수정 후 승인]
+        await action(page, 'edit').click();
+        await page.getByTestId('edit-title').fill(`${String(P1_PAYLOAD.title)}됨`);
+        await expect(page.getByTestId('floating-actions-note')).toHaveText('수정 중');
+        await expectDetailLayout(page, [
+          ...FLOATING,
+          'floating-actions-note',
+          'edit-cancel',
+          'edit-confirm',
+        ]);
+        await page.getByTestId('edit-card').scrollIntoViewIfNeeded();
+        await snapshot(page, shot('수정-중'));
+
+        // 버리기 확인 줄 → 버리고 거절 카드
+        await page.getByTestId('edit-cancel').click();
+        await expectDetailLayout(page, [...FLOATING, 'edit-keep', 'edit-discard-confirm']);
+        await page.getByTestId('edit-discard-confirm').click();
+        await action(page, 'reject').click();
+        await expect(page.getByTestId('reject-reason')).toBeFocused();
+        await expectDetailLayout(page, [...FLOATING, 'reject-cancel', 'reject-confirm']);
+      });
+
+      test('[수정] 흐름: 수정 후 승인 1회', async ({ page }) => {
+        await editFlow(page, width, shot);
+      });
+
+      test('[거절] 흐름: 거절 1회', async ({ page }) => {
+        await rejectFlow(page, shot);
+      });
+
+      test('[승인] 흐름: Esc로 입력 카드 닫고 승인 1회', async ({ page }) => {
+        await escApproveFlow(page);
+      });
+    });
+  }
+
+  test(`${WIDE_WIDTH}px 창: 목록 칸은 ${LIST_PANE_MAX}px 그대로다`, async ({ page }) => {
+    await page.setViewportSize({ width: WIDE_WIDTH, height: 900 });
+    await setup(page);
+    await card(page, 'PRP-001').click();
+    const widths = await paneWidths(listPane(page), detail(page));
+    expect(widths.list).toBe(LIST_PANE_MAX);
+    expect(widths.detail).toBe(WIDE_WIDTH - 232 - 360 - LIST_PANE_MAX);
   });
 });
 

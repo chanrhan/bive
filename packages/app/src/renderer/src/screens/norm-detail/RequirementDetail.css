@@ -80,6 +80,8 @@
 
 .requirement-editor-hint {
   margin-right: auto;
+  /* 좁은 상세에서 줄이 바뀌어도 낱말 중간("취 / 소")에서 끊지 않는다 (#179) */
+  word-break: keep-all;
   color: var(--color-text-muted);
   font-size: var(--font-size-1);
 }

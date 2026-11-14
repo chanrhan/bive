@@ -19,8 +19,24 @@ import {
   UNJUDGED_RULE,
 } from './checklists/scr-06.js';
 import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
-import { collectVisibleText, expectScreen, findForbiddenText } from './support/expectScreen.js';
-import { horizontalOverflow } from './support/overflow.js';
+import {
+  collectVisibleText,
+  expectScreen,
+  findForbiddenText,
+  SCREENSHOT_DIR,
+} from './support/expectScreen.js';
+import {
+  DETAIL_PANE_MIN,
+  hitProblems,
+  horizontalOverflow,
+  LIST_PANE_MAX,
+  LIST_PANE_MIN,
+  listPaneOverflow,
+  NARROW_WIDTHS,
+  paneWidths,
+  textClipping,
+  WIDE_WIDTH,
+} from './support/overflow.js';
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
@@ -273,6 +289,57 @@ test.describe('1280px 창의 상세 폭 (#165)', () => {
     const row = page.getByTestId('history-row').first();
     await expect(row.getByTestId('history-run')).toHaveText('EXE-002');
     await expect(row).toContainText('b2c3d4e');
+  });
+});
+
+test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
+  const listPane = (page: Page) => page.getByTestId('rules-list-pane');
+  const detailPane = (page: Page) => page.getByTestId('rule-detail');
+
+  for (const width of NARROW_WIDTHS) {
+    test(`${width}×800: 상세 칸은 최소 폭 이상이고 목록 칸은 넘치지 않는다, 규칙 상세에 가로 스크롤이 없고 [실행] · 코드 열기 링크는 상세 안에서 눌린다`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      const bive = await openRules(page);
+      await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+      await expect(page.getByTestId('history-row')).toHaveCount(FAILING_HISTORY.length);
+      await expect(page.getByTestId('failure-case')).toBeVisible();
+
+      const widths = await paneWidths(listPane(page), detailPane(page));
+      expect(widths.list).toBeGreaterThanOrEqual(LIST_PANE_MIN);
+      expect(widths.list).toBeLessThanOrEqual(LIST_PANE_MAX);
+      expect(widths.detail).toBeGreaterThanOrEqual(DETAIL_PANE_MIN);
+      expect(await listPaneOverflow(listPane(page))).toEqual([]);
+
+      const pane = detailPane(page);
+      expect(await horizontalOverflow(pane, '[data-testid="history-row"]')).toEqual([]);
+      expect(
+        await horizontalOverflow(
+          pane,
+          '[data-testid="test-case"], [data-testid="failure-case"] > :not(pre)',
+        ),
+      ).toEqual([]);
+      expect(await horizontalOverflow(pane, '[data-testid="code-link"]')).toEqual([]);
+      expect(await textClipping(pane, ['run-start'])).toEqual([]);
+      expect(await hitProblems(pane, ['run-start', 'code-link'])).toEqual([]);
+      await pane.evaluate((el) => {
+        el.scrollTop = 0;
+      });
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}SCR-06/규칙-좁은-${width}.png`,
+        fullPage: true,
+      });
+    });
+  }
+
+  test(`${WIDE_WIDTH}px 창: 목록 칸은 ${LIST_PANE_MAX}px 그대로다`, async ({ page }) => {
+    await page.setViewportSize({ width: WIDE_WIDTH, height: 900 });
+    const bive = await openRules(page);
+    await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+    const widths = await paneWidths(listPane(page), detailPane(page));
+    expect(widths.list).toBe(LIST_PANE_MAX);
+    expect(widths.detail).toBe(WIDE_WIDTH - 232 - 360 - LIST_PANE_MAX);
   });
 });
 

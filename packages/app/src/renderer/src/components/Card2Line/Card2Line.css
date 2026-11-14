@@ -66,9 +66,13 @@ button.card:hover {
   text-overflow: ellipsis;
 }
 
+/* 좁은 목록 칸(ADR-090)에서는 시각이 줄 밖으로 잘리지 않고 말줄임된다. 전체 문구는 2줄의 툴팁 (1.4) */
 .card-time {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .card-tag {

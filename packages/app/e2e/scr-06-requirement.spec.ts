@@ -26,7 +26,19 @@ import {
   findForbiddenText,
   SCREENSHOT_DIR,
 } from './support/expectScreen.js';
-import { horizontalOverflow, textClipping } from './support/overflow.js';
+import {
+  brokenWords,
+  DETAIL_PANE_MIN,
+  hitProblems,
+  horizontalOverflow,
+  LIST_PANE_MAX,
+  LIST_PANE_MIN,
+  listPaneOverflow,
+  NARROW_WIDTHS,
+  paneWidths,
+  textClipping,
+  WIDE_WIDTH,
+} from './support/overflow.js';
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
@@ -427,6 +439,74 @@ test.describe('1280×800 창의 버튼 문구 (#175)', () => {
       path: `${SCREENSHOT_DIR}SCR-06/요구사항-1280-저장-실패.png`,
       fullPage: true,
     });
+  });
+});
+
+test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
+  const listPane = (page: Page) => page.getByTestId('requirements-list-pane');
+  const detailPane = (page: Page) => page.getByTestId('requirement-detail');
+
+  /** 상세에 가로 스크롤이 없고, 받은 버튼이 한 줄 · 잘림 없음 · 상세 안이며, 가운데를 누르면 그 버튼에 닿는다. */
+  const expectDetailLayout = async (page: Page, testIds: readonly string[]): Promise<void> => {
+    const pane = detailPane(page);
+    const { scroll, client } = await pane.evaluate((el) => ({
+      scroll: el.scrollWidth,
+      client: el.clientWidth,
+    }));
+    expect(scroll, '요구사항 상세 가로 스크롤').toBeLessThanOrEqual(client);
+    expect(await textClipping(pane, testIds)).toEqual([]);
+    expect(await hitProblems(pane, testIds)).toEqual([]);
+  };
+
+  for (const width of NARROW_WIDTHS) {
+    test(`${width}×800: 상세 칸은 최소 폭 이상이고 목록 칸은 넘치지 않는다, [편집] · [삭제] · 편집 줄 버튼은 상세 안에서 눌리고 단축키 안내는 낱말 중간에서 끊기지 않는다`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      const bive = await openRequirement(page, {
+        'requirement.update': { error: { code: -32009, message: '삭제된 요구사항' } },
+      });
+
+      const widths = await paneWidths(listPane(page), detailPane(page));
+      expect(widths.list).toBeGreaterThanOrEqual(LIST_PANE_MIN);
+      expect(widths.list).toBeLessThanOrEqual(LIST_PANE_MAX);
+      expect(widths.detail).toBeGreaterThanOrEqual(DETAIL_PANE_MIN);
+      expect(await listPaneOverflow(listPane(page))).toEqual([]);
+      await expectDetailLayout(page, ['requirement-edit', 'requirement-delete']);
+
+      // 펼친 자식 규칙의 실행 이력 줄 · 실패 원인 줄도 상세 안
+      await bive.setResponse('judgment.list', {
+        result: { judgments: HISTORY[FAILING_RULE.id] ?? [] },
+      });
+      const row = childRule(page, FAILING_RULE.displayId);
+      await row.getByTestId('child-rule-toggle').click();
+      await expect(row.getByTestId('history-row')).toHaveCount(FAILING_HISTORY.length);
+      expect(await horizontalOverflow(detailPane(page), '[data-testid="history-row"]')).toEqual([]);
+      await row.getByTestId('child-rule-toggle').click();
+
+      // 편집 줄: [취소] · [저장], 단축키 안내
+      await page.getByTestId('requirement-edit').click();
+      await page.getByTestId('requirement-edit-input').fill(EDITED_TEXT);
+      await expectDetailLayout(page, ['requirement-cancel', 'requirement-save']);
+      expect(await brokenWords(page.getByTestId('requirement-editor-hint'))).toEqual([]);
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}SCR-06/요구사항-좁은-${width}-편집.png`,
+        fullPage: true,
+      });
+
+      // 저장 거부 문구와 함께
+      await page.getByTestId('requirement-save').click();
+      await expect(page.getByTestId('requirement-action-error')).toHaveText('요구사항 저장 실패');
+      await expectDetailLayout(page, ['requirement-cancel', 'requirement-save']);
+    });
+  }
+
+  test(`${WIDE_WIDTH}px 창: 목록 칸은 ${LIST_PANE_MAX}px 그대로다`, async ({ page }) => {
+    await page.setViewportSize({ width: WIDE_WIDTH, height: 900 });
+    await openRequirement(page);
+    const widths = await paneWidths(listPane(page), detailPane(page));
+    expect(widths.list).toBe(LIST_PANE_MAX);
+    expect(widths.detail).toBe(WIDE_WIDTH - 232 - 360 - LIST_PANE_MAX);
   });
 });
 
