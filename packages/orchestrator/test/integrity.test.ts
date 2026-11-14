@@ -8,6 +8,7 @@
 // - 네트워크 감시 도구의 자체 점검 (실제 happy-path 실행 동안의 단언은 `e2e/pipeline/network.test.ts`, ADR-075)
 // 실제 Unix 소켓 · 임시 BIVE_HOME · 실제 SQLite · 실제 git · ScriptedAdapter(실제 고정 도구 · 경로 가드 · 세션 가드).
 // 판정 · 의존성 설치만 주입한다(test/helpers/pipeline-harness.ts). 제한: 엔진 · git을 띄우는 테스트는 60초(ADR-064).
+import dgram from 'node:dgram';
 import dns from 'node:dns';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -15,6 +16,7 @@ import type { AddressInfo } from 'node:net';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import tls from 'node:tls';
 
 import { AgentRole, type EntityRef, METHOD_NAMES, type RoleSettings } from '@bive/shared';
 import { bivePaths } from '@bive/store';
@@ -39,6 +41,7 @@ import { normalizeToolName, REQUIRED_PERMISSION_MODE } from '../src/tools/sessio
 import type { TestClient } from './helpers/client.js';
 import { human, withProject } from './helpers/engine-harness.js';
 import {
+  describeAttempt,
   installNetWatch,
   isExternalAttempt,
   type NetAttempt,
@@ -83,19 +86,63 @@ const tempDir = (): string => {
 
 // ── 금지 도구 판별 ─────────────────────────────────────────
 
-/** 고정 도구 전체 (정의의 원본 목록). 역할 도구는 모두 이 안에 있어야 한다 */
+/**
+ * 역할별 허용 도구 (리터럴 고정, ADR-075). 제품의 역할 도구 목록은 이것과 정확히 같아야 한다.
+ * 도구가 늘거나 역할에 더해지면 이 표를 같이 고쳐야 하므로 검토를 거친다. 역할 목록 자체는 원본(`AgentRole`)에서
+ * 가져오고, 이 표에 없는 역할이 생기면 시험이 실패한다.
+ */
+const EXPECTED_ROLE_TOOLS: Readonly<Record<string, readonly string[]>> = {
+  'rule-writer': ['propose_rule'],
+  planner: [],
+  'test-writer': ['read_file', 'write_file', 'list_files', 'search_files', 'run_tests'],
+  implementer: [
+    'read_file',
+    'write_file',
+    'list_files',
+    'search_files',
+    'run_tests',
+    'prisma_generate',
+    'prisma_migrate',
+    'install_package',
+  ],
+  chat: [],
+};
+
+/** 고정 도구 전체 (리터럴 고정). 제품의 파일 · 명령 · 제안 도구 정의를 합친 목록과 정확히 같아야 한다 */
 const FIXED_TOOLS: readonly string[] = [
-  ...FILE_TOOL_NAMES,
-  ...COMMAND_TOOL_NAMES,
-  ...PROPOSAL_TOOL_NAMES,
+  'read_file',
+  'write_file',
+  'list_files',
+  'search_files',
+  'run_tests',
+  'prisma_generate',
+  'prisma_migrate',
+  'install_package',
+  'propose_rule',
 ];
 
+/** 규범 엔터티 낱말 (순서와 상관없이 쓰기 동사와 함께 나오면 규범 쓰기) */
+const NORM_ENTITY =
+  '(rule|requirement|contract|norm|block|adr|approval|proposal|judg|verdict|baseline)';
+/** 쓰기 동사 */
+const WRITE_VERB =
+  '(create|update|delete|remove|write|set|edit|save|put|upsert|patch|insert|commit|apply|amend|merge|accept|confirm|finalize|publish|resolve|override)';
+
 /**
- * 승인 · 잠정 승인 · 규범 쓰기 · 셸 도구로 볼 이름. 파이프 RPC 이름(`proposal.approve` 등)이나 SDK 내장 도구가 아니어도
- * 이름에 승인 · 셸 · 실행 · 규범 엔터티 쓰기 동사가 들어가면 걸린다. 규칙 제안(`propose_rule`)은 제안만 만든다(상태 `pending`).
+ * 승인 · 잠정 승인 · 규범 쓰기 · 셸 도구로 볼 이름 (보조 검사, 주 검사는 위 리터럴 허용 목록).
+ * - 승인 · 잠정 승인 낱말: approv · accept · confirm · grant · ratify · provisional
+ * - 셸 · 실행 낱말: bash · shell · exec · spawn · terminal · command
+ * - 규범 쓰기: 규범 엔터티 낱말과 쓰기 동사가 순서와 상관없이 함께 있음 (`update_rule` · `rule_update` 모두)
+ * 규칙 제안(`propose_rule`)은 제안만 만든다(상태 `pending`)이라 걸리지 않아야 한다.
  */
-const FORBIDDEN_TOOL =
-  /approv|provisional|bash|shell|exec|spawn|terminal|command|(rule|requirement|contract|norm|block|adr|approval|proposal|judg)[._-]?(create|update|delete|write|set|edit|apply|amend|accept)/i;
+const FORBIDDEN_TOOL = new RegExp(
+  [
+    'approv|accept|confirm|grant|ratify|provisional',
+    'bash|shell|exec|spawn|terminal|command',
+    `^(?=.*${NORM_ENTITY})(?=.*${WRITE_VERB})`,
+  ].join('|'),
+  'i',
+);
 
 /** SDK 내장 도구 중 셸 · 파일 쓰기 · 서브 에이전트 (`tools: []`로 모두 꺼져야 한다, ADR-059) */
 const SDK_BUILTIN_TOOLS = [
@@ -116,12 +163,10 @@ const isForbiddenTool = (name: string): boolean =>
   (METHOD_NAMES as readonly string[]).includes(name) ||
   SDK_BUILTIN_TOOLS.includes(name);
 
+/** 주 검사: 리터럴 허용 목록과 정확히 같음. 보조 검사: 금지 판별에 걸리는 이름 없음. */
 const expectSafeTools = (role: AgentRole, names: readonly string[]): void => {
+  expect([...names], role).toEqual(EXPECTED_ROLE_TOOLS[role]);
   expect(names.filter(isForbiddenTool), role).toEqual([]);
-  expect(
-    names.filter((name) => !FIXED_TOOLS.includes(name)),
-    role,
-  ).toEqual([]);
 };
 
 const SESSION_SETTINGS = {
@@ -152,12 +197,40 @@ describe('모든 역할 세션의 도구 목록에 승인 · 잠정 승인 · �
       'exec_command',
       'rule_update',
       'contract.write',
+      // 동사가 앞에 오는 이름 (이 저장소 도구 이름 형식)
+      'update_rule',
+      'create_rule',
+      'create_requirement',
+      'delete_contract',
+      'save_rule',
+      'upsert_requirement',
+      'accept_proposal',
+      'confirm_proposal',
+      'grant_approval',
+      'ratify_rule',
+      'commit_norm',
       'Write',
       'Task',
     ]) {
       expect(isForbiddenTool(name), name).toBe(true);
     }
+    // 보조 검사가 허용된 고정 도구를 막지 않는다
     expect(FIXED_TOOLS.filter(isForbiddenTool)).toEqual([]);
+  });
+
+  it('리터럴 허용 목록: 고정 도구 전체와 역할 표가 제품 정의와 정확히 같고, 표에 없는 역할이 없다', () => {
+    expect([...FILE_TOOL_NAMES, ...COMMAND_TOOL_NAMES, ...PROPOSAL_TOOL_NAMES]).toEqual(
+      FIXED_TOOLS,
+    );
+    // 원본 역할 목록과 표의 역할이 같다 (역할이 늘면 표를 고쳐야 통과)
+    expect([...ROLES].sort()).toEqual(Object.keys(EXPECTED_ROLE_TOOLS).sort());
+    for (const role of ROLES) {
+      expect([...roleToolNames(role)], role).toEqual(EXPECTED_ROLE_TOOLS[role]);
+      expect(
+        (EXPECTED_ROLE_TOOLS[role] ?? []).filter((name) => !FIXED_TOOLS.includes(name)),
+        role,
+      ).toEqual([]);
+    }
     // 파이프의 승인 · 처리 RPC가 판별에 들어 있다 (이름을 시험에 복사하지 않고 레지스트리에서 확인)
     expect(METHOD_NAMES.filter((name) => /approve|amend|reject/.test(name))).not.toEqual([]);
   });
@@ -377,6 +450,8 @@ describe('agent-approve: 세션의 승인 호출 거부 (수용 기준 2, NFR-01
       [APPROVE_METHOD, 'denied', 'unknown_tool'],
     ]);
     expect(record.proposalIds).toHaveLength(2);
+    // 시나리오 인자는 제안 ID가 아니라 요구사항 ID라, 아래 "pending 유지 · 승인 기록 0건"만으로는 승인 경로가 막혔는지
+    // 가릴 수 없다. 위의 `denied`(`unknown_tool`) 단언이 그 구멍을 막는다(이름만 보고 거부, 인자를 보기 전).
 
     h.read((store) => {
       // 제안은 승인 대기 그대로, 규칙은 생기지 않았다
@@ -457,7 +532,7 @@ describe('agent-approve: 세션의 승인 호출 거부 (수용 기준 2, NFR-01
 // ── 네트워크 감시 자체 점검 ─────────────────────────────────
 
 describe('네트워크 감시 도구 자체 (수용 기준 4의 대조군, 실제 단언은 e2e/pipeline/network.test.ts)', () => {
-  it('net · dns 호출을 연결 전에 기록하고, 로컬 소켓과 127.0.0.1만 외부가 아니다', async () => {
+  it('net(fetch · http · tls 포함) · dns · dgram 호출을 연결 전에 기록하고, 로컬 소켓과 127.0.0.1만 외부가 아니다', async () => {
     const records: NetWatchRecord[] = [];
     const server = http.createServer((_req, res) => res.end('ok'));
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -498,27 +573,55 @@ describe('네트워크 감시 도구 자체 (수용 기준 4의 대조군, 실�
       await attempt('lookup', () => dns.lookup('bive-probe.invalid', () => undefined));
       await attempt('promises', () => dns.promises.resolve4('bive-probe.invalid'));
       await attempt('resolver', () => new dns.promises.Resolver().resolveTxt('bive-probe.invalid'));
+      // http.get: 막힌 연결은 동기 예외 또는 요청의 error 이벤트로 끝난다
+      await attempt(
+        'http',
+        () =>
+          new Promise<void>((resolve, reject) => {
+            const req = http.get('http://192.0.2.1:80/');
+            req.once('error', reject);
+            req.once('response', () => resolve());
+          }),
+      );
+      await attempt('tls', () => tls.connect(443, '192.0.2.1'));
+      const udp = dgram.createSocket('udp4');
+      try {
+        await attempt('udp-send', () => udp.send(Buffer.from('x'), 9, '192.0.2.1'));
+        await attempt('udp-connect', () => udp.connect(9, '192.0.2.1'));
+      } finally {
+        udp.close();
+      }
     } finally {
       restore();
       server.close();
       local.close();
     }
-    expect(blocked).toEqual(['fetch', 'net', 'localhost', 'lookup', 'promises', 'resolver']);
+    expect(blocked).toEqual([
+      'fetch',
+      'net',
+      'localhost',
+      'lookup',
+      'promises',
+      'resolver',
+      'http',
+      'tls',
+      'udp-send',
+      'udp-connect',
+    ]);
 
     expect(records[0]).toMatchObject({ kind: 'installed', pid: process.pid });
     const attempts = records.filter((record): record is NetAttempt => record.kind !== 'installed');
-    const external = attempts
-      .filter(isExternalAttempt)
-      .map((a) =>
-        a.kind === 'dns' ? `dns ${a.api} ${a.hostname}` : 'path' in a ? a.path : `net ${a.host}`,
-      );
-    expect(external).toEqual([
-      'net bive-probe.invalid',
-      'net 192.0.2.1',
-      'net localhost',
-      'dns dns.lookup bive-probe.invalid',
-      'dns dns.promises.resolve4 bive-probe.invalid',
-      'dns dns.promises.Resolver.resolveTxt bive-probe.invalid',
+    expect(attempts.filter(isExternalAttempt).map(describeAttempt)).toEqual([
+      'net bive-probe.invalid:80',
+      'net 192.0.2.1:443',
+      'net localhost:80',
+      'dns dns.lookup(bive-probe.invalid)',
+      'dns dns.promises.resolve4(bive-probe.invalid)',
+      'dns dns.promises.Resolver.resolveTxt(bive-probe.invalid)',
+      'net 192.0.2.1:80',
+      'net 192.0.2.1:443',
+      'udp dgram.send 192.0.2.1:9',
+      'udp dgram.connect 192.0.2.1:9',
     ]);
     // 허용: 127.0.0.1 HTTP · Unix 소켓
     expect(attempts.filter((a) => !isExternalAttempt(a))).toEqual(

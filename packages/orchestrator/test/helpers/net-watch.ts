@@ -1,8 +1,10 @@
 // 시험 전용 네트워크 감시 (M1-22, NFR-04 · ADR-075). 감시를 건 프로세스 안의 연결 시도를 `net` · `dns` 호출 지점에서 기록한다.
 // - `net`: `net.Socket.prototype.connect` (net.connect · tls.connect · http · fetch(undici)가 모두 이것을 거친다)
 // - `dns`: `dns` · `dns.promises` 모듈의 `lookup` · `lookupService` · `resolve*` · `reverse`와 두 `Resolver` 원형의 같은 메서드
+// - `dgram`(UDP): `dgram.Socket.prototype.connect` · `send` (연결된 소켓의 대상 없는 `send`는 `connect`에서 이미 기록)
 // 기록은 호출 시점(실제 연결 · 질의 전)에 남긴다. 감시는 그 프로세스에만 걸리고 하위 프로세스(git · pnpm · next)에는 없다.
 // 허용(외부 아님): 로컬 소켓(경로 연결: Unix 소켓 · Windows named pipe)과 127.0.0.1. 그 밖은 모두 외부 연결 시도다.
+import dgram from 'node:dgram';
 import dns from 'node:dns';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
@@ -12,7 +14,8 @@ import net from 'node:net';
 export type NetAttempt =
   | { kind: 'net'; pid: number; at: string; path: string }
   | { kind: 'net'; pid: number; at: string; host: string; port: number | null }
-  | { kind: 'dns'; pid: number; at: string; api: string; hostname: string };
+  | { kind: 'dns'; pid: number; at: string; api: string; hostname: string }
+  | { kind: 'udp'; pid: number; at: string; api: string; host: string; port: number | null };
 
 /** 기록 파일 한 줄: 감시 설치 표시 또는 연결 시도. */
 export type NetWatchRecord = { kind: 'installed'; pid: number; at: string } | NetAttempt;
@@ -34,8 +37,17 @@ export const ALLOWED_HOST = '127.0.0.1';
 /** 외부 연결 시도인지: 로컬 소켓 경로와 127.0.0.1이 아니면 모두 외부다. */
 export const isExternalAttempt = (attempt: NetAttempt): boolean => {
   if (attempt.kind === 'dns') return attempt.hostname !== ALLOWED_HOST;
-  if ('path' in attempt) return false;
+  if (attempt.kind === 'net' && 'path' in attempt) return false;
   return attempt.host !== ALLOWED_HOST;
+};
+
+/** 단언 메시지용 한 줄 설명: `net 호스트:포트` · `net 경로` · `udp api 호스트:포트` · `dns api(이름)`. */
+export const describeAttempt = (attempt: NetAttempt): string => {
+  if (attempt.kind === 'dns') return `dns ${attempt.api}(${attempt.hostname})`;
+  if (attempt.kind === 'udp') {
+    return `udp ${attempt.api} ${attempt.host}:${String(attempt.port)}`;
+  }
+  return 'path' in attempt ? `net ${attempt.path}` : `net ${attempt.host}:${String(attempt.port)}`;
 };
 
 /** 기록 파일(JSON 한 줄씩)을 읽는다. 없으면 빈 목록. */
@@ -130,6 +142,37 @@ export const installNetWatch = (options: NetWatchOptions): (() => void) => {
     at: now(),
     ...connectTarget(args),
   }));
+
+  // UDP: connect(port[, address][, cb]) · send(msg[, offset, length][, port][, address][, cb]). 주소를 생략하면 Node 기본값
+  // `localhost`(외부로 센다). 연결된 소켓의 send(포트 없음)는 connect에서 기록했으므로 건너뛴다
+  const udpSocket = dgram.Socket.prototype as unknown as Record<string, unknown>;
+  const udpTarget = (port: unknown, address: unknown): { host: string; port: number | null } => ({
+    host: typeof address === 'string' && address.length > 0 ? address : 'localhost',
+    port: toPort(port),
+  });
+  patch(udpSocket, 'connect', (args) => ({
+    kind: 'udp',
+    pid: process.pid,
+    at: now(),
+    api: 'dgram.connect',
+    ...udpTarget(args[0], args[1]),
+  }));
+  patch(udpSocket, 'send', (args) => {
+    const rest = args.slice(1).filter((arg) => typeof arg !== 'function');
+    // 앞의 두 인자가 숫자면 offset · length (뒤에 포트가 없으면 연결된 소켓)
+    const [port, address] =
+      typeof rest[0] === 'number' && typeof rest[1] === 'number'
+        ? [rest[2], rest[3]]
+        : [rest[0], rest[1]];
+    if (port === undefined) return null;
+    return {
+      kind: 'udp',
+      pid: process.pid,
+      at: now(),
+      api: 'dgram.send',
+      ...udpTarget(port, address),
+    };
+  });
 
   const dnsTargets: [Record<string, unknown>, string][] = [
     [dns as unknown as Record<string, unknown>, 'dns'],

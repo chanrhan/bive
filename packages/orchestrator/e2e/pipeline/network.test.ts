@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { readPidFile } from '../../src/lock.js';
 import { runPaths } from '../../src/run-paths.js';
 import {
+  describeAttempt,
   isExternalAttempt,
   type NetAttempt,
   readNetWatchLog,
@@ -32,13 +33,6 @@ afterEach(async () => {
   await cleanupPipeline();
   for (const dir of logDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
-
-const describeAttempt = (attempt: NetAttempt): string =>
-  attempt.kind === 'dns'
-    ? `dns ${attempt.api}(${attempt.hostname})`
-    : 'path' in attempt
-      ? `net ${attempt.path}`
-      : `net ${attempt.host}:${String(attempt.port)}`;
 
 describe('happy-path 실행 동안 오케스트레이터 프로세스의 외부 연결 시도 0건', () => {
   it('net · dns 감시 기록에 로컬 소켓 · 127.0.0.1 밖 연결 시도가 없고 실행은 merged다', async () => {
