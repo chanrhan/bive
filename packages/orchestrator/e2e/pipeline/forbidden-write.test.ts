@@ -1,6 +1,6 @@
 // 파이프라인 e2e: 금지 경로 쓰기 (M1-29, architecture.md 8장 "금지 경로 쓰기 (`~/.bive`, 인수 테스트 디렉터리)", NFR-01 · NFR-02).
-// 구현 세션이 BIVE 저장소($BIVE_HOME) 아래 파일과 인수 테스트 파일(판정을 약하게 바꾼 내용)에 쓰려 한다. 경로 가드가 둘 다
-// 거부하고 도구 호출 기록에 남기며, 세션은 거부 결과를 받아 이어서 정상 구현한다. 인수 테스트는 Red 확인 때 기록한 해시
+// 구현 세션이 규범 저장소($BIVE_HOME/projects) 아래 파일과 인수 테스트 파일(판정을 약하게 바꾼 내용)에 쓰려 한다. 경로 가드가
+// 둘 다 거부하고 도구 호출 기록에 남기며(조회 RPC `toolCall.list`로도 확인, ADR-083), 세션은 거부 결과를 받아 이어서 정상 구현한다. 인수 테스트는 Red 확인 때 기록한 해시
 // 그대로 판정 · 병합되어야 한다(실행은 merged).
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,10 +28,10 @@ import {
 afterEach(cleanupPipeline);
 
 describe('forbidden-write: 금지 경로 쓰기는 거부 · 기록되고 인수 테스트는 바뀌지 않는다', () => {
-  it('BIVE 저장소 · 인수 테스트 쓰기 거부 2건 기록, 인수 테스트 해시 불변, 정상 구현은 merged', async () => {
+  it('규범 저장소($BIVE_HOME/projects) · 인수 테스트 쓰기 거부 2건 기록, 인수 테스트 해시 불변, 정상 구현은 merged', async () => {
     const e = await startPipeline('forbidden-write');
     const base = mainTip(e);
-    const planted = path.join(e.biveHome, 'forbidden-write.txt');
+    const planted = path.join(e.biveHome, 'projects', 'forbidden-write.txt');
 
     const { proposals } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 2);
     const [first, second] = proposals;
@@ -72,14 +72,28 @@ describe('forbidden-write: 금지 경로 쓰기는 거부 · 기록되고 인수
       ['implementer', 'write_file', 'path_denied'],
       ['implementer', 'write_file', 'path_denied'],
     ]);
-    expect(denied[0]?.argsSummary).toContain(planted);
-    expect(denied[1]?.argsSummary).toContain(acceptanceFile);
+    expect(denied[0]?.argsSummary).toBe(planted);
+    expect(denied[1]?.argsSummary).toBe(acceptanceFile);
     expect(
       calls
         .filter((call) => call.role === 'implementer')
         .map((call) => `${call.name}:${call.status}`),
     ).toEqual(['write_file:denied', 'write_file:denied', 'read_file:ok', 'write_file:ok']);
-    // BIVE 저장소에는 아무것도 생기지 않았다
+    // 사람의 조회 RPC(`cli rpc toolCall.list`와 같은 경로)로도 같은 거부 2건이 보인다 (M1-38, ADR-083)
+    const listed = await e.client.call('toolCall.list', {
+      projectId: e.projectId,
+      runId: String(done.run.displayId),
+    });
+    expect(listed.truncated).toBe(false);
+    expect(
+      listed.calls
+        .filter((call) => call.status === 'denied')
+        .map((call) => [call.role, call.step?.kind, call.name, call.reason, call.path]),
+    ).toEqual([
+      ['implementer', 'implementation', 'write_file', 'path_denied', planted],
+      ['implementer', 'implementation', 'write_file', 'path_denied', acceptanceFile],
+    ]);
+    // 규범 저장소에는 아무것도 생기지 않았다
     expect(fs.existsSync(planted)).toBe(false);
 
     // 인수 테스트 해시 불변: Red 확인이 기록한 `bive-acceptance/` 해시 전부가 테스트 작성 커밋 · 병합 커밋의 내용과 같다
