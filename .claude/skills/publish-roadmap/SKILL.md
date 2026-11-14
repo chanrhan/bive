@@ -5,26 +5,31 @@ description: docs/roadmap.md 를 GitHub 라벨 · 마일스톤 · 이슈로 발�
 
 # publish-roadmap
 
-서브에이전트(모델 sonnet)에게 맡길 수 있는 기계적 작업. GitHub 호출은 전부 `scripts/gh-rest.sh`(= `gh api`)로 한다. 형식은 `docs/roadmap-format.md`.
+서브에이전트(모델 sonnet)에게 맡길 수 있는 기계적 작업. GitHub 호출은 전부 `scripts/gh-rest.sh`(= `gh api`)로 한다. 형식은 `docs/roadmap-format.md`. 실제로는 `scripts/publish-roadmap.py`가 아래 절차를 그대로 한다(먼저 `--dry-run`으로 계획을 보고, `--dry-run`은 GET 말고는 호출하지 않는다).
+
+목록 조회(라벨 · 마일스톤 · 이슈)는 `--paginate`를 쓰지 않는다. 이 환경의 프록시가 다음 페이지 링크(`repositories/<id>/...`)를 거부하므로 `per_page=100&page=1, 2, …`로 100개보다 적은 페이지가 나올 때까지 읽는다.
 
 ## 절차
 
-1. **라벨**: 아래 목록을 `GET repos/chanrhan/bive/labels --paginate`로 대조하고 없는 것만 `POST`.
+1. **라벨**: 아래 목록을 `GET repos/chanrhan/bive/labels`로 대조하고 없는 것만 `POST`.
    - `type:feature` `#1d76db` · `type:bug` `#d73a4a` · `type:chore` `#6a737d` · `type:docs` `#0075ca`
    - `area:app` `area:orchestrator` `area:store` `area:parser` `area:shared` `area:ci` `area:docs` (색 `#bfd4f2`)
    - `needs-human` `#d93f0b`
-2. **마일스톤**: `GET repos/chanrhan/bive/milestones?state=all --paginate`. 로드맵 2.x 절의 `Mn 이름`과 제목이 같은 것이 없으면 `POST repos/chanrhan/bive/milestones -f title='Mn 이름' -f description='<목표 + 완료 기준 흐름>'`. 번호를 기억한다.
-3. **이슈**: 마일스톤 순서, 표의 행 순서대로. `GET repos/chanrhan/bive/issues?state=all&milestone=<번호>&per_page=100 --paginate`에서 제목 `[Mn] 제목`이 이미 있으면 건너뛰고 번호만 기록. 없으면 `POST repos/chanrhan/bive/issues --input <json>` (title, body, labels, milestone). 본문 틀은 roadmap-format 4절. 의존 키는 이미 발행된 이슈 번호로 바꿔 적는다 (아직 번호가 없으면 키 그대로).
+2. **마일스톤**: `GET repos/chanrhan/bive/milestones?state=all`. 로드맵 2.x 절의 `Mn 이름`과 제목이 같은 것이 없으면 `POST repos/chanrhan/bive/milestones -f title='Mn 이름' -f description='<목표 + 완료 기준 흐름>'`. 번호를 기억한다.
+3. **이슈**: 마일스톤 순서, 표의 행 순서대로. `GET repos/chanrhan/bive/issues?state=all&milestone=<번호>`의 이슈(열림 · 닫힘 모두, 풀 리퀘스트 제외)와 대조한다(ADR-085 · ADR-086).
+   - 행의 `이슈` 열에 `#번호`가 있으면 그 번호가 기존 이슈다(제목이 달라도 쓰고 제목 차이를 출력). 그 번호가 마일스톤 목록에 없으면 원인(GitHub에 없는 번호 · 풀 리퀘스트 번호 · 다른 마일스톤의 이슈 · 마일스톤이 없는 이슈)을 실패로 보고하고 만들지 않는다. 두 행이 같은 번호를 쓰면 "중복 대응" 실패.
+   - 행에 번호가 없으면 제목 `[Mn] 제목`으로 찾는다. 다른 행이 이미 잡은 번호는 빼고, 열린 것 먼저 · 그 안에서 번호가 가장 작은 것을 쓴다. 닫힌 이슈(계획 없음으로 닫은 것 포함)도 기존으로 보고 번호만 기록한다. 같은 제목 이슈가 모두 다른 행의 것이면 "중복 대응" 실패로 보고하고 만들지 않는다.
+   - 찾지 못한 행만 `POST repos/chanrhan/bive/issues --input <json>` (title, body, labels, milestone). 본문 틀은 roadmap-format 4절. 의존 키는 이미 발행된 이슈 번호로 바꿔 적는다 (아직 번호가 없으면 키 그대로).
    - 한 번에 많이 만들면 2차 제한에 걸린다. 요청 사이에 1초 쉬고, 403 · 429가 오면 60초 뒤 재시도 1회.
 4. **되써 넣기**: 로드맵 표의 `이슈` 열을 `#번호`로 채우고, 의존 열의 키 옆에 번호를 병기하지 않는다(키 유지). 커버리지 표의 `이슈 키`는 그대로.
-5. **검증**: 마일스톤별 열린 이슈 수가 표의 행 수와 같은지 `GET .../milestones/<번호>`의 `open_issues`로 확인. 다르면 차이를 보고.
+5. **검증**(`--dry-run`에서도 돈다): 마일스톤마다 표의 모든 행에 그 마일스톤의 대응 이슈(열림 · 닫힘)가 있고 두 행이 한 이슈를 함께 쓰지 않는지 확인한다. "대응 없음" · "중복 대응"은 실패이고 종료 코드 1이다(`--dry-run`의 생성 예정 행은 실패가 아니다). 표에 없는 마일스톤 이슈(needs-human 등)는 "표 밖 이슈"로 번호 · 상태 · 제목을 나열만 한다.
 6. 변경 이력에 "발행: 마일스톤 n개, 이슈 m개" 한 줄을 추가하고 `docs(roadmap): 이슈 번호 기록` 으로 커밋 · push.
 
 ## 다시 실행할 때
 
-로드맵에 이슈가 추가되거나 수용 기준이 바뀌면 같은 절차를 다시 돈다. 기존 이슈는 제목으로 찾고 본문이 달라졌으면 `PATCH repos/chanrhan/bive/issues/<번호>`로 갱신한다. 삭제된 행의 이슈는 닫지 않고 보고만 한다(사람이 판단).
+로드맵에 이슈가 추가되거나 수용 기준이 바뀌면 같은 절차를 다시 돈다. 기존 이슈는 3단계 규칙으로 찾고, 본문은 아래 규칙으로만 `PATCH repos/chanrhan/bive/issues/<번호>`한다. 삭제된 행의 이슈는 닫지 않고 보고만 한다(사람이 판단).
 
-재발행 동작(`scripts/publish-roadmap.py`, ADR-085): 행의 `이슈` 열 번호로(없으면 같은 제목, 열린 것 우선) 열림 · 닫힘 이슈를 모두 기존으로 잡아 새로 만들지 않고, 닫힌 이슈 본문은 고치지 않고 차이만 출력하며, 검증(`--dry-run` 포함)은 표 행마다 그 마일스톤에 대응 이슈가 있는지 본다.
+재발행 동작(`scripts/publish-roadmap.py`, ADR-085 · ADR-086): 행의 `이슈` 열 번호로(없으면 같은 제목, 열린 것 우선) 열림 · 닫힘 이슈를 모두 기존으로 잡아 새로 만들지 않고, 열린 이슈는 로드맵이 만드는 절(수용 기준 · 관련 ID · 의존 · 로드맵 키)이 달라졌을 때 그 절만 바꾸며(꼬리말 · 줄 끝 공백은 무시, 사람이 더한 절 · 꼬리말 · 같은 문장 항목의 체크 표시는 그대로, 목표 문장과 로드맵 키 뒤의 덧붙임은 고치지 않음), 절이 없거나 둘 이상이거나 구조를 알아볼 수 없으면 "본문 수동 확인 필요"로 남기고, 닫힌 이슈 본문은 고치지 않고 차이만 출력한다.
 
 ## 출력
 
