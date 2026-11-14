@@ -2,6 +2,8 @@
 // - 순서: 출처 → 에이전트 제안(변경 내용 · 근거 · 생성 주체) → 승인하면 / 거절하면 카드. 처리된 제안은 승인하면 /
 //   거절하면 대신 처리 기록(처리 · 주체 · 시각 · 사유 · 수정 내용). 예상 비용은 보이지 않는다
 // - 오른쪽 아래 떠 있는 [거절] [수정] [승인] (대기 제안만). [수정] · [거절] 입력은 상세 끝 카드로 열린다
+// - 수정 입력이 열려 있는 동안 떠 있는 [승인] · [거절]은 막고 "수정 중"을 보인다. 처리는 입력 카드의 [수정 후 승인]으로만
+//   한다. 고친 내용은 제안별 초안(editDraftStore)으로 기억해 상세가 다시 그려져도 남는다 (#165, ADR-082)
 // - 처리는 사람 주체로만 `proposal.approve` · `proposal.amend` · `proposal.reject`를 부른다 (NFR-01).
 //   요청은 목록(ApprovalTab)에 맡긴다: 같은 제안의 재전송 방지 · 처리 중 · 실패 문구를 제안 ID별로 기억한다
 import type { Proposal } from '@bive/shared';
@@ -13,6 +15,7 @@ import { type FloatingAction, FloatingActions } from '../../components/FloatingA
 import { ExceptionLabel } from '../../components/StatusBadge/StatusBadge.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { EditCard, RejectCard } from './DecisionInputs.js';
+import { clearEditDraft, getEditDraft, setEditDraft } from './editDraftStore.js';
 import { kindTag, proposalTitle } from './proposalCard.js';
 import {
   authorName,
@@ -25,6 +28,8 @@ import {
   decisionActionLabel,
   editedPayload,
   type EditValues,
+  enabledActions,
+  initialEditValues,
   isActionableKind,
   type RequirementLabel,
   sourceRows,
@@ -88,7 +93,10 @@ const DetailBody = ({
 }: ProposalDetailProps & { proposal: Proposal }): React.JSX.Element => {
   const parent = useParentRequirement(projectId, proposal);
   const record = useDecisionRecord(projectId, proposal);
-  const [input, setInput] = useState<InputMode>('none');
+  // 기억해 둔 수정 초안이 있으면 수정 입력이 열린 채로 시작한다 (#165)
+  const [input, setInput] = useState<InputMode>(() =>
+    getEditDraft(projectId, proposal.id) === null ? 'none' : 'edit',
+  );
   // [수정] · [거절]을 다시 누르면 카드로 다시 스크롤 · 포커스한다
   const [focusKey, setFocusKey] = useState(0);
 
@@ -117,10 +125,24 @@ const DetailBody = ({
     );
 
   const open = (mode: Exclude<InputMode, 'none'>): void => {
+    // 수정 입력이 이미 열려 있으면 고친 내용을 그대로 두고 다시 스크롤 · 포커스만 한다
+    if (
+      mode === 'edit' &&
+      isActionableKind(proposal.kind) &&
+      getEditDraft(projectId, proposal.id) === null
+    ) {
+      setEditDraft(projectId, proposal.id, initialEditValues(proposal.kind, proposal.payload));
+    }
     setInput(mode);
     setFocusKey((n) => n + 1);
   };
-  const close = (): void => setInput('none');
+  const close = (): void => {
+    if (input === 'edit') clearEditDraft(projectId, proposal.id);
+    setInput('none');
+  };
+  const pending = proposal.state === 'pending';
+  const editing = pending && input === 'edit' && isActionableKind(proposal.kind);
+  const enabled = enabledActions(editing);
 
   const actionDefs: Record<DetailAction, FloatingAction> = {
     reject: {
@@ -128,6 +150,7 @@ const DetailBody = ({
       label: DETAIL_TEXT.reject,
       onClick: () => open('reject'),
       pressed: input === 'reject',
+      disabled: !enabled.has('reject'),
     },
     edit: {
       id: 'edit',
@@ -135,10 +158,15 @@ const DetailBody = ({
       onClick: () => open('edit'),
       pressed: input === 'edit',
     },
-    approve: { id: 'approve', label: DETAIL_TEXT.approve, onClick: approve, primary: true },
+    approve: {
+      id: 'approve',
+      label: DETAIL_TEXT.approve,
+      onClick: approve,
+      primary: true,
+      disabled: !enabled.has('approve'),
+    },
   };
   const actions = availableActions(proposal).map((action) => actionDefs[action]);
-  const pending = proposal.state === 'pending';
   const diff = diffRows(proposal.kind, proposal.diff.before, proposal.diff.after, requirementLabel);
   const outcome = consequences(proposal.kind);
 
@@ -212,12 +240,17 @@ const DetailBody = ({
           </DetailSection>
         )}
 
-        {pending && input === 'edit' && isActionableKind(proposal.kind) && (
+        {editing && isActionableKind(proposal.kind) && (
           <EditCard
             kind={proposal.kind}
             payload={proposal.payload}
+            initialValues={
+              getEditDraft(projectId, proposal.id) ??
+              initialEditValues(proposal.kind, proposal.payload)
+            }
             busy={busy}
             focusKey={focusKey}
+            onChange={(values) => setEditDraft(projectId, proposal.id, values)}
             onConfirm={amend}
             onCancel={close}
           />
@@ -237,6 +270,7 @@ const DetailBody = ({
           actions={actions}
           busy={busy}
           busyText={DETAIL_TEXT.busy}
+          note={editing ? DETAIL_TEXT.editing : null}
         />
       )}
     </>

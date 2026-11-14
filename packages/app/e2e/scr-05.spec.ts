@@ -4,6 +4,9 @@
 // 3) 잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드 미노출, 실행당 비용 · 실행 링크 비용은 값이 없으면 '없음'
 // 4) 준수 카드 → 규칙 화면 `준수 집계: 판정 가능`, 최근 실행이 중단이면 [재개] → run.resume
 // 데이터는 가짜 브리지의 project.current · verification.summary · rule.list 응답으로만 만든다.
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
+
 import { expect, type Page, test } from '@playwright/test';
 
 import {
@@ -12,12 +15,19 @@ import {
   PROJECT,
   RULES,
   run,
+  SKIPPED_SUMMARY,
   STAGE_LABELS,
   stages,
   SUMMARY,
+  verificationSkippedChecklist,
 } from './checklists/scr-05.js';
 import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
-import { collectVisibleText, expectScreen, findForbiddenText } from './support/expectScreen.js';
+import {
+  collectVisibleText,
+  expectScreen,
+  findForbiddenText,
+  SCREENSHOT_DIR,
+} from './support/expectScreen.js';
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
@@ -108,6 +118,67 @@ test.describe('파이프라인 · 목록 (수용 기준 2)', () => {
     await expect(current).toHaveAttribute('title', '구현 · 진행 중');
     await expect(stagesEl.nth(2)).toHaveAttribute('data-status', 'passed');
     await expect(stagesEl.nth(4)).toHaveAttribute('data-status', 'pending');
+  });
+
+  test('생략 단계: 흐림 + 보이는 문구 "생략" (툴팁만이 아님), 다른 단계에는 없음 (#165)', async ({
+    page,
+  }) => {
+    await openScreen(page, { 'verification.summary': { result: SKIPPED_SUMMARY } });
+    await expectScreen(page, 'SCR-05', '기본', {
+      checklist: verificationSkippedChecklist,
+      screenshot: false,
+    });
+    const stagesEl = page.getByTestId('pipeline-stage');
+    await expect(stagesEl).toHaveCount(STAGE_LABELS.length);
+    const skipped = page.locator('[data-testid="pipeline-stage"][data-status="skipped"]');
+    await expect(skipped).toHaveCount(1);
+    await expect(skipped).toHaveAttribute('data-kind', 'mutation');
+    // 보이는 글자: 단계 이름 아래 "생략"
+    const note = skipped.getByTestId('pipeline-skip');
+    await expect(note).toBeVisible();
+    await expect(note).toHaveText('생략');
+    await expect(skipped.locator('.pipeline-label')).toHaveText('변이 주입');
+    await expect(skipped).toHaveAttribute('title', '변이 주입 · 생략');
+    // 흐림
+    expect(Number(await skipped.evaluate((el) => getComputedStyle(el).opacity))).toBeLessThan(1);
+    // 생략 아닌 단계에는 문구가 없다
+    await expect(page.getByTestId('pipeline-skip')).toHaveCount(1);
+    await expect(
+      page.locator('[data-testid="pipeline-stage"]:not([data-status="skipped"])'),
+    ).not.toContainText(['생략']);
+    const file = path.join(SCREENSHOT_DIR, 'SCR-05', '생략-단계.png');
+    await mkdir(path.dirname(file), { recursive: true });
+    await page.screenshot({ path: file, fullPage: true });
+  });
+
+  test('좁은 창에서도 단계 8개의 이름 · "생략"이 각 칸 안에 있고 칸끼리 겹치지 않는다 (#165)', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await openScreen(page, { 'verification.summary': { result: SKIPPED_SUMMARY } });
+    await expect(page.getByTestId('pipeline-skip')).toBeVisible();
+    const problems = await page.getByTestId('pipeline-stepper').evaluate((list) => {
+      const out: string[] = [];
+      const cells = [...list.querySelectorAll('[data-testid="pipeline-stage"]')];
+      if (cells.length !== 8) out.push(`단계 ${cells.length}개`);
+      let prevRight = -Infinity;
+      for (const cell of cells) {
+        const box = cell.getBoundingClientRect();
+        const kind = cell.getAttribute('data-kind');
+        if (box.left < prevRight - 0.5) out.push(`${kind}: 앞 칸과 겹침`);
+        prevRight = box.right;
+        for (const part of cell.querySelectorAll(
+          '.pipeline-label, [data-testid="pipeline-skip"]',
+        )) {
+          const p = part.getBoundingClientRect();
+          if (p.left < box.left - 0.5 || p.right > box.right + 0.5)
+            out.push(`${kind}: 글자가 칸 밖`);
+          if (part.scrollWidth > part.clientWidth + 0.5) out.push(`${kind}: 글자 잘림`);
+        }
+      }
+      return out;
+    });
+    expect(problems).toEqual([]);
   });
 
   test('규칙별 최신 판정과 실행 링크: 기준 실행에서 판정되지 않은 규칙은 미판정 · 실행 링크 없음', async ({

@@ -15,6 +15,7 @@ import {
 } from '../../components/ListView/index.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { useProposalCount } from '../../proposals/ProposalCountContext.js';
+import { clearEditDraft } from './editDraftStore.js';
 import { APPROVAL_CRITERIA, isApprovalProposal, proposalCard } from './proposalCard.js';
 import { type ProcessCall, ProposalDetail } from './ProposalDetail.js';
 import { actionErrorText, isStaleError } from './proposalDetailView.js';
@@ -94,6 +95,8 @@ export const ApprovalTab = ({ projectId }: { projectId: string }): React.JSX.Ele
           inFlight.current.delete(id);
           succeeded.current.add(id);
           setBusyIds(new Set(inFlight.current));
+          // 처리된 제안의 수정 초안은 더 쓸 일이 없다 (#165)
+          clearEditDraft(projectId, id);
           // 응답으로 목록을 바로 고치고(처리된 제안은 '대기' 필터에서 빠진다), 이 제안을 보고 있을 때만 선택을 풀고,
           // 목록 · 배지를 다시 읽는다 (ADR-056 · ADR-063). 그사이 다른 카드를 골랐으면 그 선택은 그대로 둔다
           replace(updated);
@@ -113,7 +116,7 @@ export const ApprovalTab = ({ projectId }: { projectId: string }): React.JSX.Ele
         },
       );
     },
-    [replace, refresh, refreshCount, setError],
+    [projectId, replace, refresh, refreshCount, setError],
   );
 
   return (

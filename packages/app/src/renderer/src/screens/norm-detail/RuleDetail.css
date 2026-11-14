@@ -1,6 +1,8 @@
 /* 규칙 상세 (SCR-03 상세 · SCR-06). 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
 
 .rule-detail-body {
+  /* 내용 폭에 따라 실행 이력 줄 배치를 바꾼다 (#165: 1280px 창의 규칙 상세 · 펼친 자식 규칙) */
+  container: rule-detail / inline-size;
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -176,6 +178,20 @@
   font-size: var(--font-size-2);
 }
 
+.rule-history-row > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .rule-history-row > .status-badge {
   justify-self: start;
+}
+
+/* 좁은 상세(4칸이 한 줄에 들어가지 않는 폭)에서는 2칸 2줄: 시각 · 판정 / 실행 · 커밋. 값은 줄이지 않는다 (#165) */
+@container rule-detail (max-width: 400px) {
+  .rule-history-row {
+    grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+    row-gap: 0;
+    padding-bottom: var(--space-1);
+  }
 }

@@ -269,6 +269,13 @@
   font-size: var(--font-size-1);
 }
 
+/* 고친 내용이 있는데 닫으려 할 때의 확인 문구 (#165) */
+.decision-warning {
+  margin-right: auto;
+  color: var(--color-warning);
+  font-size: var(--font-size-2);
+}
+
 .decision-button {
   height: 28px;
   padding: 0 var(--space-3);

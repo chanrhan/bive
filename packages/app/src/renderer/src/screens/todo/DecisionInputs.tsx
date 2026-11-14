@@ -3,6 +3,8 @@
 //   문구로 알리고 확인 비활성
 // - 거절: 사유 필수. 공백만 있으면 확인 비활성 (서버도 -32001)
 // - ⌘↵(Ctrl+Enter) 확인 · Esc 닫기. 한글 등 입력기 조합 중의 Enter · Esc는 조합 확정용이라 가로채지 않는다
+// - 수정: 고친 내용이 있으면 Esc · [취소]로 바로 닫지 않고 "수정 내용 있음" + [계속 수정] · [버리기]로 확인한다.
+//   고친 내용은 부모가 제안별 초안으로 기억한다(`onChange`, editDraftStore) (#165, ADR-082)
 // - 처리 중(`busy`)에는 입력을 읽기 전용으로 두고 확인을 막는다 (재전송 없음)
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 
@@ -13,7 +15,7 @@ import {
   EDIT_FIELDS,
   type EditValues,
   editErrors,
-  initialEditValues,
+  isEditDirty,
   shortcutHint,
 } from './proposalDetailView.js';
 
@@ -50,33 +52,60 @@ const useRevealAndFocus = (focusKey: number) => {
 
 export interface EditCardProps {
   kind: ActionableKind;
-  /** 제안 본문 (입력 칸의 처음 값) */
+  /** 제안 본문 (고친 내용이 있는지 비교 · 진술 형식 검사 기준) */
   payload: unknown;
+  /** 입력 칸의 처음 값 (제안 문장, 또는 기억해 둔 초안) */
+  initialValues: EditValues;
   busy: boolean;
   /** 다시 [수정]을 누르면 바뀐다 (다시 스크롤 · 포커스) */
   focusKey: number;
+  /** 고칠 때마다 입력 값 전체 (초안 기억) */
+  onChange: (values: EditValues) => void;
   onConfirm: (values: EditValues) => void;
+  /** 입력을 닫는다. 고친 내용이 있으면 사람이 [버리기]로 확인한 뒤에만 부른다 */
   onCancel: () => void;
 }
 
 export const EditCard = ({
   kind,
   payload,
+  initialValues,
   busy,
   focusKey,
+  onChange,
   onConfirm,
   onCancel,
 }: EditCardProps): React.JSX.Element => {
-  const [values, setValues] = useState<EditValues>(() => initialEditValues(kind, payload));
+  const [values, setValues] = useState<EditValues>(initialValues);
+  // 고친 내용이 있는데 닫으려 함: 버릴지 확인 중
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const { cardRef, firstRef } = useRevealAndFocus(focusKey);
+  const keepRef = useRef<HTMLButtonElement>(null);
   const errors = editErrors(kind, values, payload);
   const valid = Object.keys(errors).length === 0;
   const confirm = (): void => {
     if (busy || !valid) return;
     onConfirm(values);
   };
-  const onKeyDown = keyHandler(confirm, onCancel);
+  const requestCancel = (): void => {
+    if (isEditDirty(kind, values, payload)) setConfirmingDiscard(true);
+    else onCancel();
+  };
+  const keepEditing = (): void => {
+    setConfirmingDiscard(false);
+    firstRef.current?.focus();
+  };
+  useEffect(() => {
+    if (confirmingDiscard) keepRef.current?.focus();
+  }, [confirmingDiscard]);
+  const update = (key: string, value: string): void => {
+    const next = { ...values, [key]: value };
+    setValues(next);
+    onChange(next);
+  };
+  const onKeyDown = keyHandler(confirm, requestCancel);
   const titleId = 'proposal-edit-title';
+  const discardTextId = 'proposal-edit-discard-text';
 
   return (
     <div
@@ -100,8 +129,7 @@ export const EditCard = ({
           readOnly: busy,
           'aria-invalid': error !== undefined,
           'aria-describedby': error === undefined ? undefined : `${id}-error`,
-          onChange: (event: { target: { value: string } }) =>
-            setValues((prev) => ({ ...prev, [field.key]: event.target.value })),
+          onChange: (event: { target: { value: string } }) => update(field.key, event.target.value),
           onKeyDown,
         };
         return (
@@ -130,27 +158,64 @@ export const EditCard = ({
           </div>
         );
       })}
-      <div className="decision-buttons">
-        <span className="decision-hint">{shortcutHint(isMac())}</span>
-        <button
-          type="button"
-          className="decision-button"
-          data-testid="edit-cancel"
-          onClick={onCancel}
+      {confirmingDiscard ? (
+        <div
+          className="decision-buttons"
+          data-testid="edit-discard"
+          role="alertdialog"
+          aria-labelledby={discardTextId}
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape') return;
+            event.preventDefault();
+            event.stopPropagation();
+            keepEditing();
+          }}
         >
-          {DETAIL_TEXT.cancel}
-        </button>
-        <button
-          type="button"
-          className="decision-button"
-          data-primary="true"
-          data-testid="edit-confirm"
-          disabled={busy || !valid}
-          onClick={confirm}
-        >
-          {DETAIL_TEXT.editConfirm}
-        </button>
-      </div>
+          <span id={discardTextId} className="decision-warning" data-testid="edit-discard-text">
+            {DETAIL_TEXT.discardPrompt}
+          </span>
+          <button
+            ref={keepRef}
+            type="button"
+            className="decision-button"
+            data-testid="edit-keep"
+            onClick={keepEditing}
+          >
+            {DETAIL_TEXT.keepEditing}
+          </button>
+          <button
+            type="button"
+            className="decision-button"
+            data-danger="true"
+            data-testid="edit-discard-confirm"
+            onClick={onCancel}
+          >
+            {DETAIL_TEXT.discard}
+          </button>
+        </div>
+      ) : (
+        <div className="decision-buttons">
+          <span className="decision-hint">{shortcutHint(isMac())}</span>
+          <button
+            type="button"
+            className="decision-button"
+            data-testid="edit-cancel"
+            onClick={requestCancel}
+          >
+            {DETAIL_TEXT.cancel}
+          </button>
+          <button
+            type="button"
+            className="decision-button"
+            data-primary="true"
+            data-testid="edit-confirm"
+            disabled={busy || !valid}
+            onClick={confirm}
+          >
+            {DETAIL_TEXT.editConfirm}
+          </button>
+        </div>
+      )}
     </div>
   );
 };

@@ -51,6 +51,11 @@ export const DETAIL_TEXT = {
   rejectCard: '거절 사유',
   rejectConfirm: '거절',
   cancel: '취소',
+  // 수정 입력이 열려 있는 동안 떠 있는 [승인] · [거절]을 막는 이유 (#165, ADR-082)
+  editing: '수정 중',
+  discardPrompt: '수정 내용 있음',
+  keepEditing: '계속 수정',
+  discard: '버리기',
   before: '이전',
   after: '이후',
 } as const;
@@ -298,6 +303,24 @@ export const editErrors = (
     }),
   );
 };
+
+/** 고친 내용이 있는지: 입력 칸 중 하나라도 제안 본문의 문장과 다르다 (닫을 때 확인을 받을지, #165). */
+export const isEditDirty = (
+  kind: ActionableKind,
+  values: EditValues,
+  payload: unknown,
+): boolean => {
+  const original = initialEditValues(kind, payload);
+  return EDIT_FIELDS[kind].some(({ key }) => (values[key] ?? '') !== (original[key] ?? ''));
+};
+
+/**
+ * 떠 있는 처리 버튼 중 지금 누를 수 있는 것 (#165, ADR-082). 수정 입력이 열려 있는 동안 [승인] · [거절]은 막는다:
+ * 그 버튼은 고친 내용을 담지 않으므로 누르면 수정 내용이 경고 없이 버려진다. 처리는 입력 카드의 [수정 후 승인]으로만,
+ * 닫기는 [취소](고친 내용이 있으면 확인)로만 한다. [수정]은 입력 카드로 다시 스크롤 · 포커스한다.
+ */
+export const enabledActions = (editing: boolean): ReadonlySet<DetailAction> =>
+  new Set<DetailAction>(editing ? ['edit'] : ['reject', 'edit', 'approve']);
 
 /** 수정 본문 = 원래 본문 + 고친 문장 (본문 전체, ADR-050). 입력 문구는 그대로 보낸다. */
 export const editedPayload = (
