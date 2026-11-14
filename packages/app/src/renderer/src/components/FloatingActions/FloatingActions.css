@@ -18,10 +18,14 @@
   background: var(--color-surface-raised);
 }
 
+/* 버튼 묶음은 한 줄이 기본이고, 상세 폭이 묶음보다 좁을 때만 묶음 안에서 다음 줄로 넘긴다(상세 밖으로 나가지 않음) */
 .floating-actions-buttons {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: var(--space-2);
+  min-width: 0;
 }
 
 .floating-actions-busy {

@@ -903,18 +903,29 @@ test.describe('1280×800 창의 버튼 문구 (#175)', () => {
     expect(await textClipping(detail(page), testIds)).toEqual([]);
   };
 
-  /** 입력 카드의 끝이 떠 있는 버튼에 가리지 않는다. */
+  /** 입력 카드의 끝이 떠 있는 버튼에 가리지 않는다. 자동 스크롤 자리와 상세를 끝까지 내린 자리 둘 다. */
   const expectCardAboveBar = async (page: Page, cardTestId: string): Promise<void> => {
-    const cardBox = await page.getByTestId(cardTestId).boundingBox();
-    const barBox = await page.getByTestId('floating-actions').boundingBox();
-    if (cardBox === null || barBox === null) throw new Error('카드 · 버튼 영역 없음');
-    expect(cardBox.y + cardBox.height).toBeLessThanOrEqual(barBox.y);
+    const check = async (): Promise<void> => {
+      const cardBox = await page.getByTestId(cardTestId).boundingBox();
+      const barBox = await page.getByTestId('floating-actions').boundingBox();
+      if (cardBox === null || barBox === null) throw new Error('카드 · 버튼 영역 없음');
+      expect(cardBox.y + cardBox.height).toBeLessThanOrEqual(barBox.y);
+    };
+    await check();
+    const scroller = page.getByTestId('proposal-detail');
+    await scroller.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    expect(
+      await scroller.evaluate((el) => Math.ceil(el.scrollTop + el.clientHeight) >= el.scrollHeight),
+    ).toBe(true);
+    await check();
   };
 
   test('떠 있는 [거절] · [수정] · [승인]과 "수정 중", 수정 카드 · 버리기 확인 줄 · 거절 카드의 버튼이 한 줄로 잘리지 않고 상세 안에 있다', async ({
     page,
   }) => {
-    await setup(page);
+    const bive = await setup(page);
     await card(page, 'PRP-001').click();
     await expect(page.getByTestId('detail-if-reject')).toBeVisible();
     await expectOneLine(page, FLOATING);
@@ -954,6 +965,15 @@ test.describe('1280×800 창의 버튼 문구 (#175)', () => {
     await expectOneLine(page, [...FLOATING, 'reject-cancel', 'reject-confirm']);
     await expectCardAboveBar(page, 'reject-card');
     await snapshot(page, '1280-거절');
+
+    // 처리 중: 떠 있는 버튼 + "처리 중" (응답을 기다리는 동안)
+    await bive.setResponse('proposal.reject', { pending: true });
+    await page.getByTestId('reject-reason').fill('헬스 응답 범위 밖');
+    await page.getByTestId('reject-confirm').click();
+    await expect(page.getByTestId('floating-actions-busy')).toHaveText('처리 중');
+    await expectOneLine(page, [...FLOATING, 'floating-actions-busy']);
+    await expectCardAboveBar(page, 'reject-card');
+    await snapshot(page, '1280-처리-중');
   });
 });
 

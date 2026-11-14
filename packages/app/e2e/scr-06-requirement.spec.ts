@@ -26,7 +26,7 @@ import {
   findForbiddenText,
   SCREENSHOT_DIR,
 } from './support/expectScreen.js';
-import { horizontalOverflow } from './support/overflow.js';
+import { horizontalOverflow, textClipping } from './support/overflow.js';
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
@@ -377,6 +377,56 @@ test.describe('직접 편집 (수용 기준 3)', () => {
     // 고쳐 쓰면 실패 문구가 사라진다
     await input.fill(`${EDITED_TEXT} `);
     await expect(page.getByTestId('requirement-action-error')).toHaveCount(0);
+  });
+});
+
+test.describe('1280×800 창의 버튼 문구 (#175)', () => {
+  // 기본 창: 사이드바 · 목록 · 오른쪽 채팅(360px 고정)을 빼면 상세 폭이 가장 좁다
+  test.use({ viewport: { width: 1280, height: 800 } });
+
+  /** 요구사항 상세에 가로 스크롤이 없고, 받은 요소가 한 줄 · 잘림 없음 · 상세 안. */
+  const expectOneLine = async (page: Page, testIds: readonly string[]): Promise<void> => {
+    const pane = page.getByTestId('requirement-detail');
+    const { scroll, client } = await pane.evaluate((el) => ({
+      scroll: el.scrollWidth,
+      client: el.clientWidth,
+    }));
+    expect(scroll, '요구사항 상세 가로 스크롤').toBeLessThanOrEqual(client);
+    expect(await textClipping(pane, testIds)).toEqual([]);
+  };
+
+  test('[편집] · [삭제] · [삭제 확인], 편집 줄의 [취소] · [저장](저장 거부 문구와 함께)이 한 줄로 잘리지 않고 상세 안에 있다', async ({
+    page,
+  }) => {
+    await openRequirement(page, {
+      'requirement.update': { error: { code: -32009, message: '삭제된 요구사항' } },
+    });
+    await expectOneLine(page, ['requirement-edit', 'requirement-delete']);
+    await deleteButton(page).click();
+    await expect(deleteButton(page)).toHaveText('삭제 확인');
+    await expectOneLine(page, ['requirement-edit', 'requirement-delete']);
+    await page.keyboard.press('Escape');
+
+    await page.getByTestId('requirement-edit').click();
+    await page.getByTestId('requirement-edit-input').fill(EDITED_TEXT);
+    await expectOneLine(page, ['requirement-cancel', 'requirement-save']);
+    await page.screenshot({
+      path: `${SCREENSHOT_DIR}SCR-06/요구사항-1280-편집.png`,
+      fullPage: true,
+    });
+
+    // 저장 거부: 오류 문구와 입력 · 버튼이 함께 보이는 상태
+    await page.getByTestId('requirement-save').click();
+    await expect(page.getByTestId('requirement-action-error')).toHaveText('요구사항 저장 실패');
+    await expectOneLine(page, [
+      'requirement-action-error',
+      'requirement-cancel',
+      'requirement-save',
+    ]);
+    await page.screenshot({
+      path: `${SCREENSHOT_DIR}SCR-06/요구사항-1280-저장-실패.png`,
+      fullPage: true,
+    });
   });
 });
 

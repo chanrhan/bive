@@ -61,8 +61,21 @@
 
 .requirement-editor-bar {
   display: flex;
+  /* 상세가 좁으면 단축키 안내가 윗줄, [취소] · [저장]은 다음 줄 오른쪽으로 (#175) */
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+}
+
+/* [취소] · [저장]은 한 묶음으로 오른쪽에 붙는다. 상세가 묶음보다 좁을 때만 묶음 안에서 넘긴다 */
+.requirement-editor-buttons {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-left: auto;
 }
 
 .requirement-editor-hint {
