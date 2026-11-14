@@ -276,3 +276,23 @@ describe('파서 지연 로드 (#137)', () => {
     expect(JSON.parse(result.stdout.trim())).toEqual({ before: false, after: true, problems: 1 });
   }, 30_000);
 });
+
+describe('실행 환경 지정 docblock 거부 (#162, ADR-069)', () => {
+  // vitest 5는 파일 내용 어디서든 실행 환경 표식(`@` + `vitest-environment <이름>`, jest 표기 포함)을 찾아 생성 설정의
+  // `environment`보다 앞세우고, 내장 환경이 아니면 판정 루트에서 `vitest-environment-<이름>` 패키지를 불러온다(코드 확인).
+  // 이 시험 파일도 vitest가 같은 방식으로 읽으므로 표식을 글자 그대로 쓰지 않고 조립한다
+  const VITEST_ENV = ['@vitest', 'environment'].join('-');
+  const JEST_ENV = ['@jest', 'environment'].join('-');
+  it.each([
+    [`/** ${VITEST_ENV} evil */`, VITEST_ENV],
+    [`// ${JEST_ENV} happy-dom`, JEST_ENV],
+    [`const note = '${VITEST_ENV} jsdom';`, VITEST_ENV],
+    [`/* ${VITEST_ENV}-options {"url":"http://x"} */`, VITEST_ENV],
+  ])('%s → 거부', (source, name) => {
+    expectRejected(source, `실행 환경 지정(${name})`);
+  });
+
+  it('실행 환경 표식이 없으면 통과한다', () => {
+    expect(lintAcceptanceSource("import { it } from 'vitest';\nit('a', () => {});")).toEqual([]);
+  });
+});

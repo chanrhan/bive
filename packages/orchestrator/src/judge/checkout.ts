@@ -10,6 +10,7 @@
 // - `worktree add` · `remove`는 워크트리 관리자와 같은 짧은 저장소 잠금(ADR-065 `worktree:<저장소>`) 안에서 돈다.
 //   `worktree add`가 공용 관리 폴더 `.git/worktrees/<이름>/`을 만든 뒤 `commondir`을 쓰기 전에 관리자의
 //   `worktree list` · `add` · `lock`이 돌면 그 폴더를 읽지 못해 실패하기 때문이다(분리된 HEAD라도 관리 폴더는 공용이다)
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -148,7 +149,7 @@ export type InstallDependencies = (
  * `yaml` 패키지 기본값(YAML 1.2)은 병합 키 `<<`를 병합하지 않는데 pnpm 10.28은 병합해 읽는다(실측: snapshot 의존성을
  * `<<` 아래에 두면 검사는 못 보고 pnpm은 그 `file:` 의존성을 설치했다). 검사와 pnpm이 같은 내용을 보도록, pnpm이 쓰지 않는
  * 모양은 모두 거부한다: 문서가 하나가 아님 · 파싱 오류 · 경고, 앵커 · 별칭, 병합 키 `<<`, 명시 태그(`!!map` 등), 중복 키
- * (`uniqueKeys`).
+ * (`uniqueKeys`), `%` 지시문(`%YAML` · `%TAG`, #162: `%YAML 1.1`이면 검사는 `no` · `off`를 false로, pnpm은 문자열로 읽는다).
  * @throws {JudgeCheckoutError} (`install`)
  */
 export const parseStrictYaml = (text: string, what: string): unknown => {
@@ -161,6 +162,14 @@ export const parseStrictYaml = (text: string, what: string): unknown => {
   if (doc === undefined) return fail('문서가 하나가 아님');
   const problem = [...doc.errors, ...doc.warnings][0];
   if (problem !== undefined) return fail(`${problem.code} ${problem.message.split('\n')[0] ?? ''}`);
+  const tagHandles = Object.keys(doc.directives?.tags ?? {});
+  if (
+    doc.directives?.yaml.explicit === true ||
+    tagHandles.some((handle) => handle !== '!!') ||
+    doc.directives?.tags['!!'] !== 'tag:yaml.org,2002:'
+  ) {
+    return fail('% 지시문(%YAML · %TAG)');
+  }
   visit(doc, {
     Alias: () => fail('앵커 · 별칭'),
     Node: (_key, node) => {
@@ -540,12 +549,425 @@ export const assertRegistryTestRunner = (dir: string): void => {
   }
 };
 
-/** 판정 설치의 hoist 설정 고정: 프로젝트 `.npmrc` · `pnpm-workspace.yaml`의 hoist 설정이 bin을 루트로 올리지 못하게 한다. */
-const LAYOUT_FLAGS = [
+/** 체크아웃 밖을 가리키는 상대 · 절대 경로인지 (`base` 기준으로 풀어 `dir` 밖이면 참). */
+const outsideDir = (dir: string, base: string, target: string): boolean => {
+  if (path.isAbsolute(target) || /^[A-Za-z]:/u.test(target) || target.startsWith('\\')) return true;
+  const isOutside = (root: string, candidate: string): boolean => {
+    const rel = path.relative(root, candidate);
+    return rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+  };
+  const resolved = path.resolve(base, target);
+  if (isOutside(dir, resolved)) return true;
+  // 실경로 (검토 2회차): git은 심볼릭 링크를 커밋할 수 있으므로 `link:./inside`의 `inside -> ../밖`을 잡는다. 대상이 없으면
+  // 있는 가장 가까운 조상까지 실경로로 풀고 나머지 조각을 붙인다(경로 중간의 링크도 풀린다). 기준도 체크아웃의 실경로다
+  let rootReal: string;
+  try {
+    rootReal = fs.realpathSync(dir);
+  } catch {
+    return true;
+  }
+  let existing = resolved;
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync(existing);
+      return isOutside(rootReal, path.join(real, ...rest));
+    } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) return true;
+      rest.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+};
+
+/**
+ * 작업 공간 · lockfile이 체크아웃 밖 폴더를 가리키지 않는지 확인한다 (#162 검토 1회차). 판정 체크아웃
+ * (`$BIVE_HOME/work/<pid>/judge/<EXE>/<ULID>`)에서 `../../../worktrees/<EXE>`는 무시된 파일이 있는 실행 워크트리다.
+ * - `pnpm-workspace.yaml`의 `packages` 항목(앞의 `!` 제외)이 절대 경로이거나 `..` 조각을 담으면 거부
+ * - lockfile `importers` 키가 체크아웃 밖이면 거부
+ * - `file:` · `link:` 참조가 체크아웃 밖이면 거부. 실측(pnpm 10.28) 기준: importers의 `version`은 `file:`이면 lockfile 폴더,
+ *   `link:`이면 그 importer 폴더 기준(`specifier`는 package.json에 쓴 그대로라 보지 않는다). `packages:` · `snapshots:`의 키
+ *   (`name@file:<경로>`) · 의존성 값 · `resolution.directory` · `resolution.tarball`(`file:`)은 lockfile 폴더 기준
+ * 체크아웃 안의 `file:` · `link:`(닫힘 밖)는 그대로 받아들인다. 경로는 어휘로 본 뒤 실경로로도 본다(검토 2회차: 커밋한
+ * 심볼릭 링크로 밖을 가리키는 것). `link:`에 `(`가 있으면 거부하고 `file:`의 피어 접미는 뗀 형태 · 떼지 않은 형태를 둘 다 본다.
+ * @throws {JudgeCheckoutError} (`install`)
+ */
+export const assertLockfilePathsInside = (dir: string): void => {
+  const fail = (what: string): never =>
+    reject(`체크아웃 밖을 가리키는 경로는 받아들이지 않습니다: ${what} (판정 설치 거부)`);
+  const workspaceFile = path.join(dir, 'pnpm-workspace.yaml');
+  if (fs.existsSync(workspaceFile)) {
+    const parsed = parseStrictYaml(fs.readFileSync(workspaceFile, 'utf8'), 'pnpm-workspace.yaml');
+    const packages = isRecord(parsed) ? parsed.packages : undefined;
+    if (packages !== undefined && packages !== null) {
+      if (!Array.isArray(packages)) return fail('pnpm-workspace.yaml packages가 목록이 아님');
+      for (const pattern of packages) {
+        const value = typeof pattern === 'string' ? pattern.replace(/^!/u, '') : null;
+        if (
+          value === null ||
+          path.isAbsolute(value) ||
+          /^[A-Za-z]:/u.test(value) ||
+          value.split(/[\\/]/u).includes('..') ||
+          /[{}]/u.test(value) // 중괄호 glob(`{..,packages}/*`)은 조각 단위 `..` 검사를 비켜 간다 (검토 2회차)
+        ) {
+          fail(`pnpm-workspace.yaml packages ${String(pattern)}`);
+        }
+      }
+    }
+  }
+  const lock = readLockfile(dir);
+  // 검사할 경로 후보 (검토 2회차). 실측(pnpm 10.28): 피어 의존성이 있는 `file:` 디렉터리에는 피어 접미가 붙고
+  // (`file:localdir(is-number@7.0.0)`), `link:`에는 붙지 않으며 pnpm은 `link:` 값을 자르지 않고 경로 그대로 쓴다
+  // (`link:x(/../../밖`이 밖으로 링크됨). 그래서 `link:`에 `(`가 있으면 거부하고, `file:`은 뗀 형태와 떼지 않은 형태를
+  // 둘 다 본다
+  const refPaths = (value: string): string[] | null => {
+    const match = /^(file|link):(.*)$/u.exec(value);
+    if (match === null) return null;
+    const target = match[2] ?? '';
+    if (!target.includes('(')) return [target];
+    if (match[1] === 'link') return null;
+    return [target, target.replace(/\(.*$/u, '')];
+  };
+  const checkRef = (value: unknown, base: string, where: string): void => {
+    if (typeof value !== 'string' || !/^(?:file|link):/u.test(value)) return;
+    const targets = refPaths(value);
+    if (targets === null || targets.some((target) => outsideDir(dir, base, target))) {
+      fail(`${where} ${value}`);
+    }
+  };
+  for (const [importer, entry] of Object.entries(lock.importers)) {
+    if (outsideDir(dir, dir, importer)) fail(`lockfile importers ${importer}`);
+    const importerDir = path.resolve(dir, importer);
+    if (!isRecord(entry)) continue;
+    for (const field of DEPENDENCY_FIELDS) {
+      const deps = entry[field];
+      if (!isRecord(deps)) continue;
+      for (const [name, dep] of Object.entries(deps)) {
+        const version = isRecord(dep) ? dep.version : dep;
+        if (typeof version !== 'string') continue;
+        checkRef(
+          version,
+          version.startsWith('link:') ? importerDir : dir,
+          `lockfile ${importer} ${name}`,
+        );
+      }
+    }
+  }
+  for (const [section, entries] of [
+    ['packages', lock.packages],
+    ['snapshots', lock.snapshots],
+  ] as const) {
+    for (const [key, entry] of Object.entries(entries)) {
+      const name = lockfileKeyName(key);
+      if (name !== null) checkRef(key.slice(name.length + 1), dir, `lockfile ${section} ${key}`);
+      if (!isRecord(entry)) continue;
+      const resolution = entry.resolution;
+      if (isRecord(resolution)) {
+        if (
+          typeof resolution.directory === 'string' &&
+          outsideDir(dir, dir, resolution.directory)
+        ) {
+          fail(`lockfile ${section} ${key} directory ${resolution.directory}`);
+        }
+        checkRef(resolution.tarball, dir, `lockfile ${section} ${key} tarball`);
+      }
+      for (const field of SNAPSHOT_DEPENDENCY_FIELDS) {
+        const deps = entry[field];
+        if (!isRecord(deps)) continue;
+        for (const [dep, value] of Object.entries(deps)) {
+          checkRef(value, dir, `lockfile ${section} ${key} → ${dep}`);
+        }
+      }
+    }
+  }
+};
+
+/**
+ * 판정 설치가 받아들이는 프로젝트 pnpm 설정 키 (#162, ADR-069). 판정 설치는 프로젝트(커밋)가 정한 pnpm 설정을 믿지 않는다:
+ * 아래 키 밖의 것이 하나라도 있으면 아무것도 설치 · 실행하지 않고 닫는다. 받아들이는 키는 다음 셋뿐이다.
+ * - 판정 설치가 인자로 덮어쓰는 것(`pinnedPnpmConfigArgs`): `node-linker` · `shamefully-hoist` · `public-hoist-pattern`
+ * - lockfile에 남아 `--frozen-lockfile`이 일치를 강제하거나 닫힘 검사가 따로 보는 것(`overrides` · `patchedDependencies` ·
+ *   `catalog(s)` · `packageExtensions` · `onlyBuiltDependencies` 등), 또는 해석 · 저장 때만 쓰여 frozen 설치에 영향이 없는 것
+ * - 내부 hoist(`hoist` · `hoist-pattern`): 바뀌어도 bin 실경로 확인(`assertBuildPathBins`)이 최종 관문이다(ADR-069)
+ * 레지스트리 주소(`registry` · `@scope:registry`) · 인증(`//host/:…`)은 받지 않는다(사용자 전역 설정은 그대로 쓴다).
+ */
+export const PROJECT_PNPM_CONFIG_ALLOWLIST = {
+  /** 프로젝트 `.npmrc`의 키 (ini, 쓴 그대로 비교. 배열 표기 `key[]`는 `key`) */
+  npmrc: [
+    'node-linker',
+    'shamefully-hoist',
+    'public-hoist-pattern',
+    'hoist',
+    'hoist-pattern',
+    'auto-install-peers',
+    'exclude-links-from-lockfile',
+    'peers-suffix-max-length',
+    'inject-workspace-packages',
+    'strict-peer-dependencies',
+    'engine-strict',
+    'link-workspace-packages',
+    'save-exact',
+    'save-prefix',
+    // 쓰이지 않는다(pnpm 10.28 코드: `fund`는 읽지 않고, `audit`는 `pnpm audit` 명령 밖에서 읽지 않는다). 값은 다른 설정처럼
+    // 빌드 스크립트 환경 `npm_config_*`로도 넘어간다. `loglevel`은 받지 않는다(검토 2회차: `silent`이면 명령줄 `--reporter`보다
+    // 먼저 리포터를 끄므로 판정 설치 실패의 진단 로그가 사라진다)
+    'fund',
+    'audit',
+  ],
+  /** `pnpm-workspace.yaml`의 최상위 키 */
+  workspace: [
+    'packages',
+    'onlyBuiltDependencies',
+    'ignoredBuiltDependencies',
+    'overrides',
+    'patchedDependencies',
+    'catalog',
+    'catalogs',
+    'packageExtensions',
+    'peerDependencyRules',
+    'allowedDeprecatedVersions',
+    'nodeLinker',
+    'shamefullyHoist',
+    'publicHoistPattern',
+    'hoist',
+    'hoistPattern',
+    'autoInstallPeers',
+    'excludeLinksFromLockfile',
+    'peersSuffixMaxLength',
+    'injectWorkspacePackages',
+    'strictPeerDependencies',
+    'engineStrict',
+    'linkWorkspacePackages',
+    'saveExact',
+    'savePrefix',
+    'fund',
+    'audit',
+  ],
+  /** 루트 `package.json`의 `pnpm` 칸 키 */
+  packageJson: [
+    'onlyBuiltDependencies',
+    'ignoredBuiltDependencies',
+    'overrides',
+    'patchedDependencies',
+    'packageExtensions',
+    'peerDependencyRules',
+    'allowedDeprecatedVersions',
+  ],
+} as const;
+
+/** 허용 키 대조에 쓰는 `.npmrc` 키 모양: 소문자 · 숫자 · `-`만 (따옴표 · 공백 · `${…}` · `:` · `/`는 이 모양이 아니다). */
+const NPMRC_KEY = /^[a-z0-9-]+$/u;
+
+/**
+ * 프로젝트(체크아웃 최상위)의 pnpm 설정 출처 `.npmrc` · `pnpm-workspace.yaml` · `package.json`의 `pnpm` 칸이 허용 키
+ * (`PROJECT_PNPM_CONFIG_ALLOWLIST`)만 쓰는지 확인한다 (#162). 실측(pnpm 10.28): 프로젝트 `.npmrc`(따옴표 키 `"store-dir"` ·
+ * 앞뒤 공백도 읽는다)와 `pnpm-workspace.yaml` 설정은 사용자 전역 설정보다 앞서고, `node-gyp=<프로젝트 파일>`은 빌드
+ * 스크립트의 `node-gyp`가, `store-dir=<커밋 안 저장소>`는 설치가 그대로 따랐다. `.npmrc`는 줄마다 주석(`#` · `;`)이나 빈 줄이
+ * 아니면 `키[=값]`이어야 하고 키가 허용 목록에 그대로 있어야 한다(구역 `[…]` · 따옴표 · `${…}` · camelCase 등 다른 모양은 모두
+ * 거부. pnpm이 실제로 읽지 않는 모양도 거부해 실패 쪽으로 닫는다). 설정 파일이 일반 파일이 아니면(폴더 · 링크) 거부한다.
+ * 그 밖의 출처: 자식 환경은 허용 목록이라 `npm_config_*` · `pnpm_config_*`가 넘어가지 않고, 사용자 전역 설정(`~/.npmrc` ·
+ * `~/.config/pnpm/rc`)은 프로젝트가 바꿀 수 없다. pnpm은 하위 폴더의 `.npmrc`를 읽지 않는다(실측).
+ * @throws {JudgeCheckoutError} (`install`) 허용 밖 키 (어느 파일의 어떤 키인지 담는다)
+ */
+export const assertProjectPnpmConfig = (dir: string): void => {
+  const rejectKey = (file: string, key: string): never =>
+    reject(
+      `프로젝트 pnpm 설정을 받아들일 수 없습니다: ${file}의 ${key} (판정 설치는 허용한 설정 키만 받는다)`,
+    );
+  const readRegular = (name: string): string | null => {
+    const file = path.join(dir, name);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(file);
+    } catch {
+      return null;
+    }
+    if (!stat.isFile()) {
+      return reject(`프로젝트 pnpm 설정 ${name}이 일반 파일이 아닙니다 (판정 설치 거부)`);
+    }
+    return fs.readFileSync(file, 'utf8');
+  };
+
+  const npmrc = readRegular('.npmrc');
+  if (npmrc !== null) {
+    const allowed: ReadonlySet<string> = new Set(PROJECT_PNPM_CONFIG_ALLOWLIST.npmrc);
+    for (const raw of npmrc.split(/\r\n|\r|\n/u)) {
+      const line = raw.trim();
+      if (line === '' || line.startsWith('#') || line.startsWith(';')) continue;
+      const eq = line.indexOf('=');
+      const written = (eq === -1 ? line : line.slice(0, eq)).trim();
+      const key = written.endsWith('[]') ? written.slice(0, -2) : written;
+      if (!NPMRC_KEY.test(key) || !allowed.has(key)) {
+        rejectKey('.npmrc', written === '' ? '(빈 키)' : written);
+      }
+    }
+  }
+
+  const workspace = readRegular('pnpm-workspace.yaml');
+  if (workspace !== null) {
+    const parsed = parseStrictYaml(workspace, 'pnpm-workspace.yaml');
+    if (parsed !== null && !isRecord(parsed)) {
+      reject('pnpm-workspace.yaml의 최상위가 객체가 아닙니다');
+    }
+    const allowed: ReadonlySet<string> = new Set(PROJECT_PNPM_CONFIG_ALLOWLIST.workspace);
+    for (const key of Object.keys(isRecord(parsed) ? parsed : {})) {
+      if (!allowed.has(key)) rejectKey('pnpm-workspace.yaml', key);
+    }
+  }
+
+  // pnpm 10.28은 `package.json`이 없으면 `package.json5` → `package.yaml`을 루트 매니페스트로 읽고 그 `pnpm` 칸은 명령줄보다
+  // 앞선다(검토 1회차). 검사는 `package.json`만 읽으므로 다른 매니페스트가 있거나 `package.json`이 없으면 거부한다
+  for (const other of ['package.json5', 'package.yaml']) {
+    let present = true;
+    try {
+      fs.lstatSync(path.join(dir, other)); // 끊어진 링크도 있는 것으로 본다
+    } catch {
+      present = false;
+    }
+    if (present) {
+      reject(
+        `프로젝트 매니페스트 ${other}는 받아들이지 않습니다 (판정 설치는 package.json만 읽는다)`,
+      );
+    }
+  }
+  const manifest = readRegular('package.json');
+  if (manifest === null) reject('프로젝트 최상위에 package.json이 없습니다 (판정 설치 거부)');
+  if (manifest !== null) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(manifest);
+    } catch {
+      return reject('package.json을 읽을 수 없습니다');
+    }
+    const pnpm = isRecord(parsed) ? parsed.pnpm : undefined;
+    if (pnpm !== undefined) {
+      if (!isRecord(pnpm)) return reject('package.json pnpm 칸이 객체가 아닙니다');
+      const allowed: ReadonlySet<string> = new Set(PROJECT_PNPM_CONFIG_ALLOWLIST.packageJson);
+      for (const key of Object.keys(pnpm)) {
+        if (!allowed.has(key)) rejectKey('package.json pnpm', key);
+      }
+    }
+  }
+};
+
+/**
+ * 판정 설치의 `install` · `rebuild`에 늘 주는 pnpm 설정 인자 (ADR-069 #146 · #162). 명령줄 값은 프로젝트 `.npmrc` ·
+ * `pnpm-workspace.yaml`보다 앞선다(실측 pnpm 10.28). 허용 목록(`assertProjectPnpmConfig`)이 놓친 출처가 있어도 닫히게 하는
+ * 두 번째 겹이다.
+ * - hoist 고정: `node-linker=isolated` · `shamefully-hoist=false` · `public-hoist-pattern=`(빈 값)
+ * - `node-gyp=`(빈 값): pnpm `node-gyp-bin`은 `"$npm_config_node_gyp"`를 실행하는데, 빈 값이면 pnpm이 자기 내장 node-gyp로
+ *   채운다(실측: 프로젝트의 `node-gyp=<파일>`을 덮고 내장 node-gyp가 better-sqlite3를 소스에서 빌드했다)
+ * - `store-dir=<저장소>`: 오케스트레이터가 프로젝트 밖에서 정한 pnpm 기본 저장소(`resolveJudgeStoreDir`)
+ * - `side-effects-cache=false`: 저장소의 빌드 결과 캐시를 읽지도 쓰지도 않는다
+ * - `virtual-store-dir=node_modules/.pnpm` · `modules-dir=node_modules`: 지문 · bin 확인이 기대는 배치
+ * - `manage-package-manager-versions=false`: `package.json`의 `packageManager`가 다른 pnpm 버전을 내려받아 실행하지 않게
+ *   한다(실측: `pnpm@10.27.0`이면 그 버전으로 바뀌어 설치했다)
+ * - `verify-store-integrity=true`: 저장소 파일의 integrity 확인을 끄지 못하게 한다(실측: 프로젝트 `false`를 덮음)
+ * - `node-options=` · `script-shell=`(빈 값): 실측에서 이름을 지정한 rebuild는 프로젝트 값을 쓰지 않았지만(ADR-069), 쓰게
+ *   바뀌어도 닫히게 기본값(없음 · `sh`)으로 덮는다(실측: 빈 값이면 `NODE_OPTIONS` 없음 · `sh`)
+ * `use-node-version`은 덮지 못해 허용 목록만 막는다: 빈 값은 install과 레지스트리 패키지 rebuild가
+ * `ERR_PNPM_INVALID_NODE_VERSION`으로 실패했고(실측), 다른 값은 그 Node를 내려받는다(프로젝트 `use-node-version=20.0.0`이면
+ * rebuild가 Node 20을 내려받으려 했다).
+ */
+export const pinnedPnpmConfigArgs = (storeDir: string): string[] => [
   '--config.node-linker=isolated',
   '--config.shamefully-hoist=false',
   '--config.public-hoist-pattern=',
-] as const;
+  '--config.node-gyp=',
+  `--config.store-dir=${storeDir}`,
+  '--config.side-effects-cache=false',
+  '--config.virtual-store-dir=node_modules/.pnpm',
+  '--config.modules-dir=node_modules',
+  '--config.manage-package-manager-versions=false',
+  '--config.verify-store-integrity=true',
+  '--config.node-options=',
+  '--config.script-shell=',
+];
+
+/** 저장소 경로 조회 제한 시간. */
+const STORE_PATH_TIMEOUT_MS = 30_000;
+
+/**
+ * 판정 설치가 쓸 pnpm 저장소 경로: 판정 자식 환경(허용 목록 + `CI=1`)으로 `pnpm store path`를 프로젝트 밖(설치 폴더의 부모)에서
+ * 실행한 결과다 (#162). 그래서 프로젝트 설정이 아니라 사용자 전역 설정 · pnpm 기본값(이 VM `~/.local/share/pnpm/store/v10`)을
+ * 따르고, 고정 전과 같은 저장소를 가리킨다.
+ * @throws {JudgeCheckoutError} (`install`) 실행 실패 · 절대 경로가 아닌 출력
+ */
+export const resolveJudgeStoreDir = async (
+  dir: string,
+  env: NodeJS.ProcessEnv | undefined,
+  signal?: AbortSignal,
+): Promise<string> => {
+  const result = await new Promise<{ stdout: string; error: Error | null }>((resolve) => {
+    execFile(
+      'pnpm',
+      ['store', 'path', '--config.manage-package-manager-versions=false'],
+      {
+        cwd: path.dirname(path.resolve(dir)),
+        env: { ...baseChildEnv(env), CI: '1', NO_COLOR: '1' },
+        timeout: STORE_PATH_TIMEOUT_MS,
+        encoding: 'utf8',
+        ...(signal === undefined ? {} : { signal }),
+      },
+      (error, stdout) => resolve({ stdout, error }),
+    );
+  });
+  if (signal?.aborted === true) throw new JudgeCheckoutError('install', '의존성 설치 중단');
+  const storeDir = result.stdout.trim();
+  if (result.error !== null || !path.isAbsolute(storeDir) || storeDir.includes('\n')) {
+    return reject(
+      `판정 설치의 pnpm 저장소 경로를 정하지 못했습니다 (${result.error?.message ?? storeDir})`,
+    );
+  }
+  return storeDir;
+};
+
+/** shim의 `"$basedir/<인터프리터>"` 자리에 올 수 있는 이름 (`node` · `bash` · `/bin/sh` · `/usr/bin/perl` 등, `..` 없음). */
+const SHIM_PROGRAM = /^\/?[A-Za-z0-9_+-][A-Za-z0-9._+-]*(?:\/[A-Za-z0-9_+-][A-Za-z0-9._+-]*)*$/u;
+const SHIM_PATH = '"\\$basedir/([^"$`\\\\]+)"';
+const SHIM_ARGS = '((?:[^"$`\\\\\\s][^"$`\\\\]*?\\s+)?)';
+
+/**
+ * pnpm 셸 shim(`node_modules/.bin/<이름>`)이 실행하는 대상(`"$basedir/<경로>"`)을 읽는다 (#162). 실측(pnpm 10.28) 모양은
+ * 두 가지다: 인터프리터가 있으면 `if [ -x "$basedir/<prog>" ]; then exec "$basedir/<prog>" <인자> "$basedir/<대상>" "$@"
+ * else exec <prog> <인자> "$basedir/<대상>" "$@" fi`(`<prog>`는 shebang에서 온 `node` · `bash` · `python3` · `/bin/sh`(→
+ * `"$basedir//bin/sh"`) · `/usr/bin/perl` 등), 없으면 `"$basedir/<대상>" "$@"`. `"$basedir/<prog>"`는 bin 폴더 안의 같은 이름
+ * 항목을 가리키는데 그 항목은 bin 확인이 따로 보므로(폴더 항목은 거부) 대상에서 뺀다. 모든 `"$basedir/…"`가 이 자리 중
+ * 하나로 설명되지 않거나, 대상이 없거나, `<prog>`에 `..`이 있으면 `null`(해석할 수 없음 → 거부).
+ */
+export const shimTargets = (body: string): string[] | null => {
+  const ifProg = new RegExp(`^\\s*if \\[ -x ${SHIM_PATH} \\]; then$`, 'u');
+  const execInner = new RegExp(`^\\s*exec ${SHIM_PATH}\\s+${SHIM_ARGS}${SHIM_PATH} "\\$@"$`, 'u');
+  const execOuter = new RegExp(
+    `^\\s*exec ([^\\s"$\`\\\\]+)\\s+${SHIM_ARGS}${SHIM_PATH} "\\$@"$`,
+    'u',
+  );
+  const direct = new RegExp(`^\\s*${SHIM_PATH}\\s+"\\$@"$`, 'u');
+  const targets = new Set<string>();
+  let explained = 0;
+  for (const line of body.split('\n')) {
+    let match: RegExpExecArray | null;
+    if ((match = ifProg.exec(line)) !== null) {
+      if (!SHIM_PROGRAM.test(match[1] ?? '')) return null;
+      explained += 1;
+    } else if ((match = execInner.exec(line)) !== null) {
+      if (!SHIM_PROGRAM.test(match[1] ?? '')) return null;
+      targets.add(match[3] ?? '');
+      explained += 2;
+    } else if ((match = execOuter.exec(line)) !== null) {
+      if (!SHIM_PROGRAM.test(match[1] ?? '')) return null;
+      targets.add(match[3] ?? '');
+      explained += 1;
+    } else if ((match = direct.exec(line)) !== null) {
+      targets.add(match[1] ?? '');
+      explained += 1;
+    }
+  }
+  const references = body.split('"$basedir/').length - 1;
+  if (targets.size !== 1 || targets.has('') || references !== explained) return null;
+  return [...targets];
+};
 
 /**
  * 빌드 스크립트 PATH에 드는 공용 bin 폴더(실측 순서: 패키지 자신 · `.pnpm/<id>/node_modules/.bin`(닫힘 검사 대상) → 루트
@@ -564,7 +986,9 @@ export const assertBuildPathBins = (dir: string): void => {
   try {
     storeReal = fs.realpathSync(store);
   } catch {
-    return; // 설치된 의존성이 없다
+    // 판정 설치는 vitest를 늘 설치하고 가상 저장소 위치를 고정하므로 설치 뒤에는 반드시 있다. 없으면 확인을 건너뛰지 않고
+    // 거부한다(#162)
+    return reject('설치 뒤 node_modules/.pnpm이 없습니다 (판정 설치 거부)');
   }
   const allowedTarget = (file: string): boolean => {
     let real: string;
@@ -611,11 +1035,10 @@ export const assertBuildPathBins = (dir: string): void => {
       if (entry.isSymbolicLink()) {
         targets = [full];
       } else if (entry.isFile()) {
-        const body = fs.readFileSync(full, 'utf8');
-        targets = [...body.matchAll(/"\$basedir\/([^"$]+)"/gu)]
-          .map((match) => match[1] ?? '')
-          .filter((target) => target !== 'node' && target !== '')
-          .map((target) => path.resolve(binDir, target));
+        // 셸 shim의 인터프리터 자리(`"$basedir/bash"` · `"$basedir//bin/sh"`)는 대상이 아니다 (#162)
+        targets = (shimTargets(fs.readFileSync(full, 'utf8')) ?? []).map((target) =>
+          path.resolve(binDir, target),
+        );
       } else {
         targets = [];
       }
@@ -641,12 +1064,14 @@ export const assertBuildPathBins = (dir: string): void => {
  *    `rebuild`는 `--ignore-pnpmfile` 옵션을 모르며 설정 값으로 줘야 pnpmfile을 건너뛴다(실측). 허용 목록의 이름은 설치 전에
  *    lockfile에서 의존성 닫힘까지 레지스트리 패키지로만 해석되는지, 판정 실행기 vitest와 그 닫힘도 그런지 확인한다
  *    (`assertRegistryBuiltDependencies` · `assertRegistryTestRunner`, #146)
- *    설치 · rebuild 모두 `node-linker=isolated` · `shamefully-hoist=false` · `public-hoist-pattern=`(빈 값)으로 고정하고,
+ *    설치 · rebuild 모두 `pinnedPnpmConfigArgs`(hoist · node-gyp · 저장소 · side-effects-cache · 배치 · pnpm 버전 전환)로
+ *    고정하고(#162), 설치 전에 프로젝트 pnpm 설정 키를 허용 목록으로 확인하며(`assertProjectPnpmConfig`, #162),
  *    rebuild 전에 빌드 스크립트 PATH의 공용 bin 폴더를 `assertBuildPathBins`로 확인한다(#146 검토 2회차). 빌드 허용 목록이
  *    비어 있으면 rebuild가 없고, 판정 러너는 vitest를 shim 없이 직접 실행하므로 지문 기준값 전에 `.bin`을 거치는 실행이 없다
  * 프로젝트가 설치 때 하던 생성 단계(`prisma generate`)는 스택 프로필이 따로 한다.
  * 셸 없이 PATH의 `pnpm`을 실행하고 환경 변수는 판정 러너와 같은 허용 목록 + `CI=1`만 넘긴다.
- * @throws {JudgeCheckoutError} (`install`) lockfile 없음 · 레지스트리가 아닌 빌드 허용 목록 · 실행기 닫힘 · 설치 실패 · 시간 초과 · 중단
+ * @throws {JudgeCheckoutError} (`install`) lockfile 없음 · 허용 밖 프로젝트 pnpm 설정 · 레지스트리가 아닌 빌드 허용 목록 ·
+ *   실행기 닫힘 · 설치 실패 · 시간 초과 · 중단
  */
 export const installDependencies: InstallDependencies = async (dir, options) => {
   if (!fs.existsSync(path.join(dir, 'pnpm-lock.yaml'))) {
@@ -656,10 +1081,13 @@ export const installDependencies: InstallDependencies = async (dir, options) => 
     );
   }
   // 허용 목록은 설치 전에 확인한다: 어긋나면 아무것도 설치 · 실행하지 않고 닫는다
+  assertProjectPnpmConfig(dir);
+  assertLockfilePathsInside(dir);
   const built = builtDependencyNames(dir);
   assertRegistryBuiltDependencies(dir, built);
   assertRegistryTestRunner(dir);
   const started = Date.now();
+  const pinned = pinnedPnpmConfigArgs(await resolveJudgeStoreDir(dir, options.env, options.signal));
   const run = async (args: string[], what: string): Promise<void> => {
     const result = await runCommand('pnpm', args, {
       cwd: dir,
@@ -685,7 +1113,7 @@ export const installDependencies: InstallDependencies = async (dir, options) => 
       '--ignore-scripts',
       '--ignore-pnpmfile',
       '--package-import-method=copy',
-      ...LAYOUT_FLAGS,
+      ...pinned,
       '--reporter=append-only',
     ],
     '의존성 설치',
@@ -694,13 +1122,7 @@ export const installDependencies: InstallDependencies = async (dir, options) => 
     // 빌드 스크립트가 PATH에서 찾을 수 있는 bin이 모두 레지스트리 패키지의 것인지 rebuild 전에 확인한다(최종 관문)
     assertBuildPathBins(dir);
     await run(
-      [
-        'rebuild',
-        '--config.ignore-pnpmfile=true',
-        ...LAYOUT_FLAGS,
-        '--reporter=append-only',
-        ...built,
-      ],
+      ['rebuild', '--config.ignore-pnpmfile=true', ...pinned, '--reporter=append-only', ...built],
       '의존성 빌드',
     );
   }
