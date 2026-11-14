@@ -2,7 +2,8 @@
 // - 목록: requirement.list 결과만 그린다(NFR-03). 카드 · 필터 규칙은 requirementsView.ts
 // - [+ 새 요구사항]: 목록 맨 위 입력 줄 → requirement.create 1회 → 목록 다시 불러오기
 //   (저장 뒤 규칙 제안은 오케스트레이터 쪽 이슈 #21이 붙인다. 화면은 호출만 한다)
-// - 상세 자리: 고른 항목의 상세 내용 · 직접 편집 · 삭제는 이슈 #38. 지금은 빈 틀이고 고른 항목이 없으면 "선택 항목 없음"
+// - 상세(SCR-06 규범 상세, norm-detail/RequirementDetail): 본문 · 생성 주체 · 자식 규칙(그 자리에서 펼침) · 직접 편집 ·
+//   삭제(두 번 눌러 확인). 편집 · 삭제 뒤 목록을 다시 불러온다. 고른 항목이 없거나 삭제되면 "선택 항목 없음" (ADR-078)
 // - 상태(ADR-053): 프로젝트 조회 중 = 비움 · 프로젝트 없음 = "프로젝트 없음" · 로딩 = 목록 자리 비움(문구 · 스켈레톤 없음) ·
 //   불러오기 실패 = 목록 자리에 "요구사항 불러오기 실패" · 0건 = "요구사항 없음"(ADR-029)
 import './RequirementsScreen.css';
@@ -14,6 +15,7 @@ import { useCallback, useRef, useState } from 'react';
 import { ListView } from '../../components/ListView/ListView.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { useProject } from '../../project/ProjectContext.js';
+import { RequirementDetail } from '../norm-detail/RequirementDetail.js';
 import { NewRequirementInput } from './NewRequirementInput.js';
 import {
   REQUIREMENT_CRITERIA,
@@ -43,7 +45,7 @@ export const RequirementsScreen = (): React.JSX.Element => {
 };
 
 const RequirementsPanes = ({ projectId }: { projectId: string }): React.JSX.Element => {
-  const { load, create } = useRequirements(projectId);
+  const { load, create, update, remove } = useRequirements(projectId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [inputOpen, setInputOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -120,7 +122,18 @@ const RequirementsPanes = ({ projectId }: { projectId: string }): React.JSX.Elem
         aria-label={TEXT.detail}
         data-selected-id={selected?.id ?? ''}
       >
-        {selected === null && <EmptyState text={TEXT.noSelection} />}
+        {selected === null ? (
+          <EmptyState text={TEXT.noSelection} />
+        ) : (
+          // 요구사항이 바뀌면 편집 · 삭제 확인 대기 · 펼침 상태를 새로 시작한다
+          <RequirementDetail
+            key={selected.id}
+            projectId={projectId}
+            requirement={selected}
+            onUpdate={(text) => update(selected.id, text)}
+            onDelete={() => remove(selected.id)}
+          />
+        )}
       </section>
     </div>
   );
