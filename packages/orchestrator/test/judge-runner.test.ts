@@ -1202,6 +1202,20 @@ describe('빌드 허용 목록 · 판정 실행기의 의존성 닫힘 검사 (#
       );
       expect(rebuild).toEqual(expect.arrayContaining([...pinned, '--config.ignore-pnpmfile=true']));
       expect(rebuild?.at(-1)).toBe('native');
+      // 고정 인자의 각 `--config.<키>`는 install · rebuild에 정확히 한 번씩만 나온다 (뒤에 다른 값으로 덧붙는 회귀를 잡는다,
+      // 검토 2회차)
+      for (const arg of pinned) {
+        const key = arg.slice(0, arg.indexOf('=') + 1);
+        for (const [what, call] of [
+          ['install', install],
+          ['rebuild', rebuild],
+        ] as const) {
+          expect(
+            call?.filter((item) => item.startsWith(key)),
+            `${what} ${key}`,
+          ).toEqual([arg]);
+        }
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1860,14 +1874,19 @@ describe('판정 설치의 프로젝트 pnpm 설정 (#162)', () => {
     }
   });
 
-  it('출력에만 쓰이는 fund · audit · loglevel은 받고, 흔한 다른 키(기본 레지스트리 주소 포함)는 거부하며 빈 키는 (빈 키)로 알린다 (검토 1회차)', () => {
+  it('쓰이지 않는 fund · audit는 받고, 흔한 다른 키(기본 레지스트리 주소 · loglevel 포함)는 거부하며 빈 키는 (빈 키)로 알린다 (검토 1 · 2회차)', () => {
     expect(() =>
       checkConfig({
-        '.npmrc': 'fund=false\naudit=false\nloglevel=warn\n',
-        'pnpm-workspace.yaml': 'packages: []\nloglevel: warn\n',
+        '.npmrc': 'fund=false\naudit=false\n',
+        'pnpm-workspace.yaml': 'packages: []\nfund: false\n',
       }),
     ).not.toThrow();
+    // loglevel=silent는 명령줄 --reporter보다 먼저 리포터를 꺼 판정 설치 로그를 비운다 (검토 2회차)
+    expect(() =>
+      checkConfig({ 'pnpm-workspace.yaml': 'packages: []\nloglevel: silent\n' }),
+    ).toThrow(/pnpm-workspace\.yaml의 loglevel/);
     for (const line of [
+      'loglevel=silent',
       'prefer-offline=true',
       'resolution-mode=highest',
       'ignore-workspace-root-check=true',
@@ -1945,7 +1964,7 @@ describe('판정 설치의 프로젝트 pnpm 설정 (#162)', () => {
     );
     expect(() => check(inside, 'packages:\n  - packages/*\n  - "!packages/skip"\n')).not.toThrow();
     // 작업 공간 packages의 .. · 절대 경로
-    for (const pattern of ['../worktrees/*', '/abs/*', 'packages/../../x']) {
+    for (const pattern of ['../worktrees/*', '/abs/*', 'packages/../../x', '{..,packages}/*']) {
       expect(() => check(inside, `packages:\n  - '${pattern}'\n`), pattern).toThrow(
         /체크아웃 밖.*packages/,
       );
@@ -1973,6 +1992,78 @@ describe('판정 설치의 프로젝트 pnpm 설정 (#162)', () => {
         ),
       ),
     ).toThrow(/체크아웃 밖/);
+  });
+
+  /** 루트 importer가 `wt`를 `version`으로 가리키는 최소 lockfile (pnpm 10.28 · 9.0 형식). */
+  const wtLock = (version: string, extra = ''): string =>
+    [
+      "lockfileVersion: '9.0'",
+      '',
+      'settings:',
+      '  autoInstallPeers: true',
+      '  excludeLinksFromLockfile: false',
+      '',
+      'importers:',
+      '',
+      '  .:',
+      '    dependencies:',
+      '      wt:',
+      '        specifier: link:x',
+      `        version: '${version}'`,
+      '',
+      extra,
+    ].join('\n');
+  /** `dir/co`를 체크아웃으로 삼아 `files`(링크는 `->` 대상)를 만들고 `assertLockfilePathsInside`를 부른다. */
+  const checkCo = (lock: string, links: Record<string, string> = {}): void => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-inside2-'));
+    try {
+      const co = path.join(dir, 'co');
+      mkdirSync(path.join(dir, 'outside', 'wt'), { recursive: true });
+      mkdirSync(co);
+      mkdirSync(path.join(co, 'real-inside', 'wt'), { recursive: true });
+      writeFileSync(path.join(co, 'pnpm-lock.yaml'), lock);
+      writeFileSync(path.join(co, 'pnpm-workspace.yaml'), 'packages: []\n');
+      for (const [link, target] of Object.entries(links)) {
+        symlinkSync(target, path.join(co, link));
+      }
+      assertLockfilePathsInside(co);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('link: · file: 참조의 ( 뒤에 숨긴 .. 를 피어 접미로 잘라 통과시키지 않는다 (검토 2회차 재현)', () => {
+    // pnpm은 importers의 `link:` 값을 자르지 않고 경로 그대로 써 `../outside/wt`로 링크했다(검토자 실측)
+    expect(() => checkCo(wtLock('link:x(/../../outside/wt'))).toThrow(/체크아웃 밖/);
+    expect(() => checkCo(wtLock('file:x(/../../outside/wt'))).toThrow(/체크아웃 밖/);
+    // 정상: pnpm이 피어 의존성이 있는 file: 디렉터리에 붙이는 접미(실측 `file:localdir(is-number@7.0.0)`)
+    expect(() => checkCo(wtLock('file:real-inside/wt(is-number@7.0.0)'))).not.toThrow();
+    // link:에는 pnpm이 접미를 붙이지 않는다(실측) → ( 가 있으면 거부
+    expect(() => checkCo(wtLock('link:real-inside/wt(is-number@7.0.0)'))).toThrow(/체크아웃 밖/);
+  });
+
+  it('체크아웃 안의 심볼릭 링크가 밖을 가리키는 link: · file: · importer 폴더는 실경로로 거부하고, 안을 가리키면 받는다 (검토 2회차 재현)', () => {
+    expect(() => checkCo(wtLock('link:inside'), { inside: '../outside/wt' })).toThrow(
+      /체크아웃 밖.*link:inside/,
+    );
+    expect(() => checkCo(wtLock('file:inside'), { inside: '../outside/wt' })).toThrow(
+      /체크아웃 밖/,
+    );
+    // 경로 중간의 링크도 푼다 (대상 폴더가 없어도 있는 조상까지는 실경로로 본다)
+    expect(() => checkCo(wtLock('link:mid/wt/missing'), { mid: '../outside' })).toThrow(
+      /체크아웃 밖/,
+    );
+    expect(() => checkCo(wtLock('link:inside'), { inside: 'real-inside/wt' })).not.toThrow();
+    // 작업 공간 importer 폴더가 밖을 가리키는 링크
+    expect(() =>
+      checkCo(
+        wtLock('link:real-inside/wt', '\n  pkgs/a:\n    dependencies: {}\n').replace(
+          '\n\n\n  pkgs/a',
+          '\n\n  pkgs/a',
+        ),
+        { pkgs: '../outside' },
+      ),
+    ).toThrow(/체크아웃 밖.*importers pkgs\/a/);
   });
 
   it(

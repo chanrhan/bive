@@ -552,8 +552,33 @@ export const assertRegistryTestRunner = (dir: string): void => {
 /** 체크아웃 밖을 가리키는 상대 · 절대 경로인지 (`base` 기준으로 풀어 `dir` 밖이면 참). */
 const outsideDir = (dir: string, base: string, target: string): boolean => {
   if (path.isAbsolute(target) || /^[A-Za-z]:/u.test(target) || target.startsWith('\\')) return true;
-  const rel = path.relative(dir, path.resolve(base, target));
-  return rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+  const isOutside = (root: string, candidate: string): boolean => {
+    const rel = path.relative(root, candidate);
+    return rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+  };
+  const resolved = path.resolve(base, target);
+  if (isOutside(dir, resolved)) return true;
+  // 실경로 (검토 2회차): git은 심볼릭 링크를 커밋할 수 있으므로 `link:./inside`의 `inside -> ../밖`을 잡는다. 대상이 없으면
+  // 있는 가장 가까운 조상까지 실경로로 풀고 나머지 조각을 붙인다(경로 중간의 링크도 풀린다). 기준도 체크아웃의 실경로다
+  let rootReal: string;
+  try {
+    rootReal = fs.realpathSync(dir);
+  } catch {
+    return true;
+  }
+  let existing = resolved;
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync(existing);
+      return isOutside(rootReal, path.join(real, ...rest));
+    } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) return true;
+      rest.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
 };
 
 /**
@@ -564,7 +589,8 @@ const outsideDir = (dir: string, base: string, target: string): boolean => {
  * - `file:` · `link:` 참조가 체크아웃 밖이면 거부. 실측(pnpm 10.28) 기준: importers의 `version`은 `file:`이면 lockfile 폴더,
  *   `link:`이면 그 importer 폴더 기준(`specifier`는 package.json에 쓴 그대로라 보지 않는다). `packages:` · `snapshots:`의 키
  *   (`name@file:<경로>`) · 의존성 값 · `resolution.directory` · `resolution.tarball`(`file:`)은 lockfile 폴더 기준
- * 체크아웃 안의 `file:` · `link:`(닫힘 밖)는 그대로 받아들인다.
+ * 체크아웃 안의 `file:` · `link:`(닫힘 밖)는 그대로 받아들인다. 경로는 어휘로 본 뒤 실경로로도 본다(검토 2회차: 커밋한
+ * 심볼릭 링크로 밖을 가리키는 것). `link:`에 `(`가 있으면 거부하고 `file:`의 피어 접미는 뗀 형태 · 떼지 않은 형태를 둘 다 본다.
  * @throws {JudgeCheckoutError} (`install`)
  */
 export const assertLockfilePathsInside = (dir: string): void => {
@@ -582,7 +608,8 @@ export const assertLockfilePathsInside = (dir: string): void => {
           value === null ||
           path.isAbsolute(value) ||
           /^[A-Za-z]:/u.test(value) ||
-          value.split(/[\\/]/u).includes('..')
+          value.split(/[\\/]/u).includes('..') ||
+          /[{}]/u.test(value) // 중괄호 glob(`{..,packages}/*`)은 조각 단위 `..` 검사를 비켜 간다 (검토 2회차)
         ) {
           fail(`pnpm-workspace.yaml packages ${String(pattern)}`);
         }
@@ -590,14 +617,24 @@ export const assertLockfilePathsInside = (dir: string): void => {
     }
   }
   const lock = readLockfile(dir);
-  const refPath = (value: string): string | null => {
-    const match = /^(?:file|link):(.*)$/u.exec(value);
-    return match === null ? null : (match[1] ?? '').replace(/\(.*$/u, '');
+  // 검사할 경로 후보 (검토 2회차). 실측(pnpm 10.28): 피어 의존성이 있는 `file:` 디렉터리에는 피어 접미가 붙고
+  // (`file:localdir(is-number@7.0.0)`), `link:`에는 붙지 않으며 pnpm은 `link:` 값을 자르지 않고 경로 그대로 쓴다
+  // (`link:x(/../../밖`이 밖으로 링크됨). 그래서 `link:`에 `(`가 있으면 거부하고, `file:`은 뗀 형태와 떼지 않은 형태를
+  // 둘 다 본다
+  const refPaths = (value: string): string[] | null => {
+    const match = /^(file|link):(.*)$/u.exec(value);
+    if (match === null) return null;
+    const target = match[2] ?? '';
+    if (!target.includes('(')) return [target];
+    if (match[1] === 'link') return null;
+    return [target, target.replace(/\(.*$/u, '')];
   };
   const checkRef = (value: unknown, base: string, where: string): void => {
-    if (typeof value !== 'string') return;
-    const target = refPath(value);
-    if (target !== null && outsideDir(dir, base, target)) fail(`${where} ${value}`);
+    if (typeof value !== 'string' || !/^(?:file|link):/u.test(value)) return;
+    const targets = refPaths(value);
+    if (targets === null || targets.some((target) => outsideDir(dir, base, target))) {
+      fail(`${where} ${value}`);
+    }
   };
   for (const [importer, entry] of Object.entries(lock.importers)) {
     if (outsideDir(dir, dir, importer)) fail(`lockfile importers ${importer}`);
@@ -672,11 +709,11 @@ export const PROJECT_PNPM_CONFIG_ALLOWLIST = {
     'link-workspace-packages',
     'save-exact',
     'save-prefix',
-    // 출력에만 쓰인다(pnpm 10.28 코드: `fund`는 읽지 않고, `audit`는 `pnpm audit` 명령 밖에서 읽지 않으며, `loglevel`은
-    // 보고 수준). 값은 다른 설정처럼 빌드 스크립트 환경 `npm_config_*`로도 넘어가 node-gyp · prebuild-install의 로그 수준이 된다
+    // 쓰이지 않는다(pnpm 10.28 코드: `fund`는 읽지 않고, `audit`는 `pnpm audit` 명령 밖에서 읽지 않는다). 값은 다른 설정처럼
+    // 빌드 스크립트 환경 `npm_config_*`로도 넘어간다. `loglevel`은 받지 않는다(검토 2회차: `silent`이면 명령줄 `--reporter`보다
+    // 먼저 리포터를 끄므로 판정 설치 실패의 진단 로그가 사라진다)
     'fund',
     'audit',
-    'loglevel',
   ],
   /** `pnpm-workspace.yaml`의 최상위 키 */
   workspace: [
@@ -706,7 +743,6 @@ export const PROJECT_PNPM_CONFIG_ALLOWLIST = {
     'savePrefix',
     'fund',
     'audit',
-    'loglevel',
   ],
   /** 루트 `package.json`의 `pnpm` 칸 키 */
   packageJson: [
