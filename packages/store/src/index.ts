@@ -14,6 +14,7 @@ export * from './paths.js';
 export * from './project-store.js';
 export * from './registry.js';
 export * from './repositories/approval-log-repository.js';
+export * from './repositories/code-open-repository.js';
 export * from './repositories/display-id-sequences.js';
 export * from './repositories/judgment-repository.js';
 export * from './repositories/project-repository.js';

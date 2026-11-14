@@ -308,3 +308,10 @@ export type ApprovalAction = z.infer<typeof ApprovalAction>;
 /** 코드 열기 사유 (MET-01). */
 export const CodeOpenReason = z.enum(['screen_error', 'info_lacking', 'debugging']);
 export type CodeOpenReason = z.infer<typeof CodeOpenReason>;
+
+/** 코드 열기 사유 표시명 (MET-01, screens.md 1.4 코드 열기). 순서가 사유 선택 모달의 순서다. */
+export const CODE_OPEN_REASON_LABELS = {
+  screen_error: '화면 오류',
+  info_lacking: '정보 부족',
+  debugging: '디버깅',
+} as const satisfies Record<CodeOpenReason, string>;

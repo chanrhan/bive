@@ -10,6 +10,7 @@ import { migration as m0005 } from './0005_runs.js';
 import { migration as m0006 } from './0006_sessions_tool_calls.js';
 import { migration as m0007 } from './0007_session_budget.js';
 import { migration as m0008 } from './0008_judgments.js';
+import { migration as m0009 } from './0009_code_open_records.js';
 
 export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0001,
@@ -20,4 +21,5 @@ export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0006,
   m0007,
   m0008,
+  m0009,
 ];

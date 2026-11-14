@@ -7,6 +7,9 @@ import {
   ApprovalLogBreakReason,
   ApprovalLogEntry,
   Author,
+  CodeFilePath,
+  CodeLine,
+  CodeOpenRecord,
   CommitSha,
   EntityRef,
   JudgmentResult,
@@ -19,6 +22,7 @@ import {
   Rule,
   Run,
   RunLimits,
+  ScreenId,
   Settings,
   Step,
   Timestamp,
@@ -27,6 +31,7 @@ import {
 } from './domain.js';
 import {
   AgentRole,
+  CodeOpenReason,
   JudgmentStatus,
   ProposalKind,
   ProposalState,
@@ -686,6 +691,42 @@ export const VerificationSummaryResult = z
   });
 export type VerificationSummaryResult = z.infer<typeof VerificationSummaryResult>;
 
+// ── 코드 열람 기록 (MET-01, M2-01, ADR-084) ─────────────────
+// - 모든 요청에 `projectId`가 필수다. 등록되지 않은 프로젝트는 -32004
+// - `codeOpen.record`는 사람이 `file:line` 링크에서 사유를 골라 열 때 앱(main)이 IDE를 열기 전에 1건 남긴다. 주체 `author`를
+//   싣고 사람(`human`)만 받는다(에이전트 주체 -32020). 역할 세션의 도구(MCP)에는 없고, 토큰 인증된 파이프 연결에서만 처리된다
+// - 시각은 오케스트레이터 시계로 정한다(요청에 싣지 않는다). 파일은 프로젝트 루트 기준 상대 경로만(`CodeFilePath`)
+// - 기록은 추가만 한다(수정 · 삭제 RPC 없음, DB 트리거로도 막음). `codeOpen.list`는 조회 전용으로 최신부터 상한까지
+
+/** `codeOpen.list`가 한 번에 돌려주는 기록 상한. 넘으면 최신부터 이만큼과 `truncated: true`. */
+export const CODE_OPEN_LIST_LIMIT = 500;
+
+/** 코드 열기 대상: 사유 · 출발 화면 · 항목 · 파일 · 줄. 앱 main의 `app.openInIde`도 같은 값을 받는다. */
+export const CodeOpenTarget = z.strictObject({
+  projectId: Ulid,
+  reason: CodeOpenReason,
+  sourceScreen: ScreenId,
+  itemRef: EntityRef,
+  file: CodeFilePath,
+  line: CodeLine,
+});
+export type CodeOpenTarget = z.infer<typeof CodeOpenTarget>;
+
+/** `codeOpen.record`: 열람 1건을 남긴다 (사람만). */
+export const CodeOpenRecordParams = CodeOpenTarget.extend({ author: Author });
+export type CodeOpenRecordParams = z.infer<typeof CodeOpenRecordParams>;
+export const CodeOpenRecordResult = z.strictObject({ record: CodeOpenRecord });
+export type CodeOpenRecordResult = z.infer<typeof CodeOpenRecordResult>;
+
+/** `codeOpen.list`: 열람 기록을 최신부터(시각 → ID 내림차순) 상한까지. */
+export const CodeOpenListParams = z.strictObject({ projectId: Ulid });
+export type CodeOpenListParams = z.infer<typeof CodeOpenListParams>;
+export const CodeOpenListResult = z.strictObject({
+  records: z.array(CodeOpenRecord).max(CODE_OPEN_LIST_LIMIT),
+  truncated: z.boolean(),
+});
+export type CodeOpenListResult = z.infer<typeof CodeOpenListResult>;
+
 /**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
@@ -725,6 +766,8 @@ export const METHODS = {
     params: VerificationSummaryParams,
     result: VerificationSummaryResult,
   },
+  'codeOpen.record': { params: CodeOpenRecordParams, result: CodeOpenRecordResult },
+  'codeOpen.list': { params: CodeOpenListParams, result: CodeOpenListResult },
 } as const satisfies Record<string, MethodSpec>;
 
 export type MethodName = keyof typeof METHODS;

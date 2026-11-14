@@ -8,6 +8,7 @@ import {
   ApprovalAction,
   AuthorKind,
   CheckKind,
+  CodeOpenReason,
   JudgeRunner,
   JudgmentStatus,
   NormState,
@@ -39,7 +40,7 @@ export const EntityName = z.enum([
   'Session',
   'JudgmentResult',
   'ApprovalLog',
-  // 예약 (M1 이후 해당 이슈에서 스키마 추가)
+  // 예약 (M1 이후 해당 이슈에서 스키마 추가, 이미 스키마가 생긴 이름은 RESERVED_ENTITY_NAMES에서 뺀다)
   'Contract',
   'Block',
   'Adr',
@@ -62,7 +63,6 @@ export const RESERVED_ENTITY_NAMES = [
   'Adr',
   'NormChange',
   'CodeChange',
-  'CodeOpenRecord',
   'MutationResult',
   'ReviewItem',
   'ChatThread',
@@ -789,3 +789,52 @@ export const JudgmentResult = z
     }
   });
 export type JudgmentResult = z.infer<typeof JudgmentResult>;
+
+// ── 코드 열람 기록 (MET-01, M2-01, ADR-084) ─────────────────
+
+/** 화면 ID (`SCR-01` ~ `SCR-21`, screens.md 1.3). 저장 값이며 화면에는 보이지 않는다 (screens.md 1.1). */
+export const ScreenId = z.string().regex(/^SCR-(?:0[1-9]|1\d|2[01])$/, '화면 ID가 아닙니다');
+export type ScreenId = z.infer<typeof ScreenId>;
+
+/** 코드 파일 경로의 최대 길이 (문자). */
+export const CODE_FILE_PATH_MAX_LENGTH = 1024;
+
+/**
+ * 프로젝트 루트 기준 상대 경로인지 (코드 열기의 `file`, ADR-084). 렌더러가 넘긴 값으로 루트 밖 파일이나 임의 URL을
+ * 열지 못하게 좁게 받는다. 거부: 빈 값 · 너무 긴 값 · 제어 문자 · 절대 경로(`/` · `C:` 등 드라이브 · `\\`) ·
+ * 역슬래시 · 콜론(`file:line` 구분자, 드라이브 상대 경로, 대체 데이터 스트림) · 빈 경로 조각(`a//b`, 앞뒤 `/`) ·
+ * `.` · `..` 조각. 구분자는 `/`만 쓴다(판정 기록의 `file`이 이 모양, judge/report.ts `toRelativePath`).
+ */
+export const isProjectRelativePath = (value: string): boolean => {
+  if (value.length === 0 || value.length > CODE_FILE_PATH_MAX_LENGTH) return false;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return false;
+  }
+  if (value.includes('\\') || value.includes(':')) return false;
+  return value.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
+};
+
+/** 코드 파일 경로: 프로젝트 루트 기준 상대 경로만 ({@link isProjectRelativePath}). */
+export const CodeFilePath = z
+  .string()
+  .refine(isProjectRelativePath, '프로젝트 루트 기준 상대 경로가 아닙니다');
+export type CodeFilePath = z.infer<typeof CodeFilePath>;
+
+/** 코드 줄 번호: 1 이상의 정수. */
+export const CodeLine = z.int().positive();
+
+/**
+ * 코드 열람 기록 1건 (MET-01, architecture.md 3장 CodeOpenRecord). 사람이 `file:line` 링크에서 사유를 고르고 연 때마다
+ * 1건, 추가만 한다. 시각 `at`은 오케스트레이터 시계, `sourceScreen`은 출발 화면, `itemRef`는 링크가 달린 항목.
+ */
+export const CodeOpenRecord = z.strictObject({
+  id: Ulid,
+  at: Timestamp,
+  reason: CodeOpenReason,
+  sourceScreen: ScreenId,
+  itemRef: EntityRef,
+  file: CodeFilePath,
+  line: CodeLine,
+});
+export type CodeOpenRecord = z.infer<typeof CodeOpenRecord>;

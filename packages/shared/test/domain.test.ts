@@ -6,6 +6,12 @@ import {
   APPROVAL_LOG_GENESIS_HASH,
   ApprovalLogEntry,
   Author,
+  CODE_OPEN_REASON_LABELS,
+  CodeFilePath,
+  CodeOpenListResult,
+  CodeOpenReason,
+  CodeOpenRecord,
+  CodeOpenRecordParams,
   CommitSha,
   compareSteps,
   defaultSettings,
@@ -23,12 +29,15 @@ import {
   Rule,
   Run,
   RUN_STEP_PLANS,
+  ScreenId,
   Session,
   Settings,
   Step,
   stepRoles,
   SupportedProposalKind,
   Timestamp,
+  isProjectRelativePath,
+  METHOD_NAMES,
 } from '../src/index.js';
 
 const ID = {
@@ -607,5 +616,106 @@ describe('판정', () => {
       }).success,
     ).toBe(true);
     expect(JudgmentResult.safeParse({ ...judgment, quarantineReason: 'x' }).success).toBe(false);
+  });
+});
+
+describe('코드 열람 기록 (MET-01, ADR-084)', () => {
+  const record = {
+    id: ID.project,
+    at: '2026-11-14T09:00:00.000Z',
+    reason: 'debugging',
+    sourceScreen: 'SCR-03',
+    itemRef: { entity: 'Rule', id: ID.rule },
+    file: 'bive-acceptance/RULE-001/health.acc.ts',
+    line: 18,
+  };
+
+  it('CodeOpenRecord는 스키마가 생겨 예약 이름에서 빠졌다', () => {
+    expect(CodeOpenRecord.safeParse(record).success).toBe(true);
+    expect(EntityName.options).toContain('CodeOpenRecord');
+    expect(RESERVED_ENTITY_NAMES).not.toContain('CodeOpenRecord');
+  });
+
+  it('사유 표시명은 화면 정의서 1.4의 세 가지(화면 오류 · 정보 부족 · 디버깅)이고 순서도 같다', () => {
+    expect(Object.keys(CODE_OPEN_REASON_LABELS)).toEqual(CodeOpenReason.options);
+    expect(Object.values(CODE_OPEN_REASON_LABELS)).toEqual(['화면 오류', '정보 부족', '디버깅']);
+  });
+
+  it('화면 ID는 SCR-01 ~ SCR-21만', () => {
+    for (const id of ['SCR-01', 'SCR-03', 'SCR-10', 'SCR-19', 'SCR-21']) {
+      expect(ScreenId.safeParse(id).success, id).toBe(true);
+    }
+    for (const id of ['SCR-00', 'SCR-22', 'SCR-3', 'scr-03', 'SCR-03 ', 'P-02']) {
+      expect(ScreenId.safeParse(id).success, id).toBe(false);
+    }
+  });
+
+  it.each([
+    ['', '빈 값'],
+    ['/etc/passwd', '절대 경로'],
+    ['//server/share/a.ts', '이중 슬래시 절대 경로'],
+    ['C:\\a.ts', 'Windows 절대 경로'],
+    ['C:/a.ts', '드라이브 + 슬래시'],
+    ['C:a.ts', '드라이브 상대 경로'],
+    ['\\\\server\\a.ts', 'UNC'],
+    ['../a.ts', '상위 폴더'],
+    ['a/../../b.ts', '중간 상위 폴더'],
+    ['a/..', '끝 상위 폴더'],
+    ['./a.ts', '현재 폴더'],
+    ['a//b.ts', '빈 조각'],
+    ['a/', '끝 슬래시'],
+    ['a\\b.ts', '역슬래시'],
+    ['a.ts:18', '콜론'],
+    ['a\u0000.ts', 'NUL'],
+    ['a\t.ts', '탭'],
+    ['a\r\n.ts', '줄바꿈'],
+    ['a\u007f.ts', 'DEL'],
+    ['a\u009b.ts', 'C1 제어 문자'],
+    ['a'.repeat(1025), '1024자 초과'],
+  ])('프로젝트 루트 밖이나 형식이 틀린 경로 %j(%s)는 거부한다', (value) => {
+    expect(isProjectRelativePath(value)).toBe(false);
+    expect(CodeFilePath.safeParse(value).success).toBe(false);
+    expect(CodeOpenRecord.safeParse({ ...record, file: value }).success).toBe(false);
+  });
+
+  it.each([
+    'a.ts',
+    'src/app/page.tsx',
+    '.config/x.ts',
+    'src/화면 목록/a b.ts',
+    'a...b',
+    'a'.repeat(1024),
+  ])('대조군: 상대 경로 %j는 받는다', (value) => {
+    expect(isProjectRelativePath(value)).toBe(true);
+    expect(CodeOpenRecord.safeParse({ ...record, file: value }).success).toBe(true);
+  });
+
+  it('줄은 1 이상의 정수, 사유는 세 가지뿐', () => {
+    for (const line of [0, -1, 1.5, Number.NaN]) {
+      expect(CodeOpenRecord.safeParse({ ...record, line }).success, String(line)).toBe(false);
+    }
+    expect(CodeOpenRecord.safeParse({ ...record, reason: 'curiosity' }).success).toBe(false);
+  });
+
+  it('codeOpen.record 파라미터는 시각 · ID · URL을 받지 않고(엄격 객체) 주체가 필수다', () => {
+    const params = {
+      projectId: ID.project,
+      author: { kind: 'human' },
+      reason: 'debugging',
+      sourceScreen: 'SCR-03',
+      itemRef: { entity: 'Rule', id: ID.rule },
+      file: 'a.ts',
+      line: 1,
+    };
+    expect(CodeOpenRecordParams.safeParse(params).success).toBe(true);
+    expect(CodeOpenRecordParams.safeParse({ ...params, author: undefined }).success).toBe(false);
+    for (const extra of [{ at: record.at }, { id: ID.req }, { url: 'vscode://file/a.ts:1' }]) {
+      expect(CodeOpenRecordParams.safeParse({ ...params, ...extra }).success).toBe(false);
+    }
+    expect(METHOD_NAMES).toContain('codeOpen.record');
+    expect(METHOD_NAMES).toContain('codeOpen.list');
+    expect(CodeOpenListResult.safeParse({ records: [record], truncated: false }).success).toBe(
+      true,
+    );
   });
 });

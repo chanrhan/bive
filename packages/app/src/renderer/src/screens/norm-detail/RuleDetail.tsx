@@ -2,16 +2,20 @@
 // 규칙 목록 + 상세 2단의 상세 영역에 들어간다(별도 화면 아님). 요구사항 상세(#38)가 자식 규칙을 펼칠 때 다시 쓴다.
 // - 순서: 제목 · ID · 판정 → 진술 · 종류 · 검사 · 부모 요구사항 · 생성 주체 → 테스트 실행 결과 → 테스트 출력(접힘) → 실행 이력
 // - 테스트 출력은 기본 접힘, 최신 판정이 실패면 자동 펼침. 안에 실패 원인(케이스 이름 · `file:line` · 메시지) · 전체 케이스
-// - 변경 이력(P1) · 변이 상태 · 대상 블록 · 위험도 · 코드 열기 링크는 해당 이슈 전 미노출 (ADR-035)
+// - 실패 원인의 `file:line`(판정 기록의 케이스 위치)에 코드 열기 링크(CodeLink)를 붙인다. 출발 화면은 놓는 화면이 정하고
+//   항목은 이 규칙이다 (MET-01, ADR-084). 줄이 없거나 상대 경로가 아니면 글자만 보인다
+// - 변경 이력(P1) · 변이 상태 · 대상 블록 · 위험도는 해당 이슈 전 미노출 (ADR-035)
 // - 머리 오른쪽 동작(`actions`)은 놓는 화면이 정한다: 규칙 화면은 [실행] (M1-19, ADR-076)
 // - 요구사항 상세가 자식 규칙으로 펼칠 때는 부모(`parent`)를 넘겨 requirement.get을 다시 부르지 않는다 (ADR-078)
 // - 값은 rule.list 항목 · judgment.list · requirement.get 결과에서만 (NFR-03)
 import './RuleDetail.css';
 
-import type { JudgmentCase, Requirement, RuleWithJudgment } from '@bive/shared';
+import type { JudgmentCase, Requirement, RuleWithJudgment, ScreenId } from '@bive/shared';
 import type { ReactNode } from 'react';
 
 import { AuthorMark } from '../../components/AuthorMark/AuthorMark.js';
+import { CodeLink } from '../../components/CodeLink/CodeLink.js';
+import { linkableLine } from '../../components/CodeLink/codeLinkView.js';
 import { CollapsibleDetail } from '../../components/CollapsibleDetail/CollapsibleDetail.js';
 import { StatusBadge } from '../../components/StatusBadge/StatusBadge.js';
 import {
@@ -33,6 +37,8 @@ import { type RuleHistoryLoad, useRuleHistory, useRuleParent } from './useRuleDe
 export interface RuleDetailProps {
   projectId: string;
   item: RuleWithJudgment;
+  /** 이 상세를 보이는 화면 (코드 열기 기록의 출발 화면: 규칙 SCR-03 · 요구사항 SCR-02) */
+  sourceScreen: ScreenId;
   /** 머리 오른쪽에 둘 동작 (규칙 화면의 [실행]) */
   actions?: ReactNode;
   /** 이미 가진 부모 요구사항 (요구사항 상세에서 펼칠 때). 주면 `requirement.get`을 부르지 않는다 */
@@ -43,6 +49,7 @@ export interface RuleDetailProps {
 export const RuleDetail = ({
   projectId,
   item,
+  sourceScreen,
   actions,
   parent: knownParent,
 }: RuleDetailProps): React.JSX.Element => {
@@ -128,7 +135,10 @@ export const RuleDetail = ({
       {latest !== null && (
         <div className="rule-test-output" data-testid="rule-test-output">
           <CollapsibleDetail title={TEXT.output} forceOpen={outputOpenByDefault(latest)}>
-            <TestOutput cases={latest.cases} />
+            <TestOutput
+              cases={latest.cases}
+              link={{ projectId, sourceScreen, itemRef: { entity: 'Rule', id: rule.id } }}
+            />
           </CollapsibleDetail>
         </div>
       )}
@@ -175,8 +185,17 @@ const Section = ({
   );
 };
 
+/** 실패 원인 위치의 코드 열기 링크 값 (위치 `file` · `line` 말고). */
+type CaseLinkContext = Omit<React.ComponentProps<typeof CodeLink>, 'file' | 'line'>;
+
 /** 테스트 출력: 실패 원인(통과하지 않은 케이스의 실행기 출력) → 전체 케이스. */
-const TestOutput = ({ cases }: { cases: readonly JudgmentCase[] }): React.JSX.Element => {
+const TestOutput = ({
+  cases,
+  link,
+}: {
+  cases: readonly JudgmentCase[];
+  link: CaseLinkContext;
+}): React.JSX.Element => {
   if (cases.length === 0) {
     return <p className="rule-detail-muted">{TEXT.noCases}</p>;
   }
@@ -203,7 +222,7 @@ const TestOutput = ({ cases }: { cases: readonly JudgmentCase[] }): React.JSX.El
                   </span>
                 </div>
                 <span className="rule-mono rule-case-location" data-testid="failure-case-location">
-                  {caseLocation(item)}
+                  <CaseLocation item={item} link={link} />
                 </span>
                 <pre className="rule-case-message" data-testid="failure-case-message">
                   {item.message ?? TEXT.noMessage}
@@ -233,6 +252,22 @@ const TestOutput = ({ cases }: { cases: readonly JudgmentCase[] }): React.JSX.El
         </ul>
       </div>
     </div>
+  );
+};
+
+/** 실패 케이스 위치: 링크를 붙일 수 있으면 코드 열기 링크, 아니면 글자. */
+const CaseLocation = ({
+  item,
+  link,
+}: {
+  item: JudgmentCase;
+  link: CaseLinkContext;
+}): React.JSX.Element => {
+  const line = linkableLine(item);
+  return line === null ? (
+    <>{caseLocation(item)}</>
+  ) : (
+    <CodeLink {...link} file={item.file} line={line} />
   );
 };
 

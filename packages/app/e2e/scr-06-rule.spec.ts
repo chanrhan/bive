@@ -2,6 +2,7 @@
 // 1) checklists/scr-06.ts의 규칙 기본 상태(진술, 테스트 실행 결과, 실행 이력)를 통과하고 변경 이력 영역이 미노출
 // 2) 테스트 출력은 기본 접힘이고 최신 판정이 실패면 자동으로 펼쳐짐
 // 3) 실패 원인에 실행기 출력(실패 케이스 이름, 메시지, file:line)이 보임
+// 4) 실패 원인의 file:line에 코드 열기 링크(CodeLink)가 붙음 (#43 수용 기준 3, 모달 동작은 code-link.spec.ts)
 // 규칙 화면(SCR-03)에서 카드를 눌러 들어온다. 데이터는 가짜 브리지의 rule.list · judgment.list · requirement.get 응답뿐이다.
 import { expect, type Page, test } from '@playwright/test';
 
@@ -203,6 +204,51 @@ test.describe('실패 원인 (수용 기준 3)', () => {
   });
 });
 
+test.describe('실패 케이스의 코드 열기 링크 (#43 수용 기준 3, MET-01)', () => {
+  test('실패 원인의 file:line(판정 기록의 케이스 위치)에 CodeLink가 붙고, 누르면 사유 모달이 열린다', async ({
+    page,
+  }) => {
+    const bive = await openRules(page);
+    await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+    const failure = page.getByTestId('rule-failures').getByTestId('failure-case');
+    const link = failure.getByTestId('failure-case-location').getByTestId('code-link');
+    await expect(link).toHaveCount(1);
+    await expect(link).toHaveText(`${FAILED_CASE.file}:${FAILED_CASE.line}`);
+    await expect(link).toHaveAttribute('type', 'button');
+    // 링크는 실패 원인에만: 전체 케이스 목록에는 없다
+    await expect(page.getByTestId('rule-cases').getByTestId('code-link')).toHaveCount(0);
+    await link.click();
+    await expect(page.getByTestId('code-open-dialog')).toBeVisible();
+    // 사유를 고르지 않았으므로 IDE 호출은 없다
+    expect(await callsOf(bive, 'app.openInIde')).toEqual([]);
+  });
+
+  test('줄이 없는 실패 케이스는 링크 없이 파일만 글자로 보인다', async ({ page }) => {
+    // 실패 규칙의 최신 판정에서 실패 케이스의 줄만 지운다 (테스트 전용 데이터)
+    const rules = RULES.map((item) =>
+      item.rule.id !== FAILING_RULE.id || item.judgment.latest === null
+        ? item
+        : {
+            ...item,
+            judgment: {
+              ...item.judgment,
+              latest: {
+                ...item.judgment.latest,
+                cases: item.judgment.latest.cases.map((c) =>
+                  c.status === 'failed' ? { ...c, line: null } : c,
+                ),
+              },
+            },
+          },
+    );
+    const bive = await openRules(page, { 'rule.list': { result: { rules } } });
+    await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+    const location = page.getByTestId('failure-case').getByTestId('failure-case-location');
+    await expect(location).toHaveText(FAILED_CASE.file);
+    await expect(location.getByTestId('code-link')).toHaveCount(0);
+  });
+});
+
 test.describe('1280px 창의 상세 폭 (#165)', () => {
   test('규칙 상세 패널에 가로 스크롤이 없고 실행 이력 줄 · 실패 원인 줄이 패널 안에 들어온다', async ({
     page,
@@ -221,6 +267,8 @@ test.describe('1280px 창의 상세 폭 (#165)', () => {
         '[data-testid="test-case"], [data-testid="failure-case"] > :not(pre)',
       ),
     ).toEqual([]);
+    // 실패 원인의 코드 열기 링크도 패널 안에 들어온다 (#43)
+    expect(await horizontalOverflow(pane, '[data-testid="code-link"]')).toEqual([]);
     // 실행 이력 줄의 값(시각 · 실행 ID · 커밋)은 줄임 없이 그대로 보인다
     const row = page.getByTestId('history-row').first();
     await expect(row.getByTestId('history-run')).toHaveText('EXE-002');

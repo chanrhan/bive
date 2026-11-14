@@ -342,7 +342,12 @@ const ChildRules = ({
             </button>
             {expanded && (
               <div id={bodyId} className="child-rule-detail" data-testid="child-rule-detail">
-                <RuleDetail projectId={projectId} item={item} parent={requirement} />
+                <RuleDetail
+                  projectId={projectId}
+                  item={item}
+                  sourceScreen="SCR-02"
+                  parent={requirement}
+                />
               </div>
             )}
           </li>
