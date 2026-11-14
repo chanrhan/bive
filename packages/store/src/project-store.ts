@@ -1,6 +1,7 @@
 // 프로젝트별 저장소 (`$BIVE_HOME/projects/<projectId>/bive.db`, ADR-005 · ADR-025 · NFR-01).
 import type { Project, Ulid } from '@bive/shared';
 
+import { runCloseProbe } from './close-probe.js';
 import { openDatabase, withTransaction, type SqliteDatabase } from './database.js';
 import { migrate, type MigrateOptions } from './migrate.js';
 import { observeStoreState, readDigests, trustStoreState } from './norm-snapshot.js';
@@ -23,17 +24,6 @@ export interface OpenStoreOptions extends MigrateOptions {
   /** `false`면 DB가 없을 때 만들지 않고 `NotFoundError`. 기본 `true`. */
   readonly create?: boolean;
 }
-
-let closeProbeForTests: (() => void) | null = null;
-
-/**
- * 시험 전용: 닫기가 `data_version`을 비교한 뒤 · 믿을 행 해시를 읽기 전에 부를 함수(다른 연결의 커밋을 그 순간에
- * 끼워 넣는다).
- * 제품 코드는 부르지 않는다. `null`이면 아무것도 하지 않는다.
- */
-export const setCloseProbeForTests = (probe: (() => void) | null): void => {
-  closeProbeForTests = probe;
-};
 
 /** 열린 프로젝트별 저장소. 다 쓰면 `close()`를 부른다. */
 export class ProjectStore {
@@ -117,7 +107,7 @@ export class ProjectStore {
           const trusted = this.db.transaction(() => {
             const unchanged =
               this.#dataVersion !== null && this.#readDataVersion() === this.#dataVersion;
-            closeProbeForTests?.();
+            runCloseProbe();
             return unchanged ? readDigests(this.db) : null;
           })();
           if (trusted !== null) {

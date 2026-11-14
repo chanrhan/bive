@@ -24,7 +24,14 @@ import { fileURLToPath } from 'node:url';
 import { createUlidGenerator } from '@bive/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { assertRegistryBuiltDependencies, installDependencies } from '../src/judge/checkout.js';
+import {
+  assertRegistryBuiltDependencies,
+  assertRegistryTestRunner,
+  dependencyClosure,
+  installDependencies,
+  lockfileKeyName,
+  overrideTargetNames,
+} from '../src/judge/checkout.js';
 import {
   fingerprintChanges,
   judgeInputFingerprint,
@@ -866,7 +873,7 @@ describe('판정 체크아웃 의존성 설치 (검토 1회차)', () => {
 describe('빌드 허용 목록의 lockfile 해상도 검사 (#146)', () => {
   const INTEGRITY = 'sha512-' + 'A'.repeat(86) + '==';
   /** 픽스처 모양의 최소 lockfile (pnpm 10.28 · lockfileVersion 9.0 실측 형식). */
-  const lockfile = (packages: string, importers = '', extra = ''): string =>
+  const lockfile = (packages: string, importers = '', extra = '', snapshots = ''): string =>
     [
       "lockfileVersion: '9.0'",
       '',
@@ -894,6 +901,8 @@ describe('빌드 허용 목록의 lockfile 해상도 검사 (#146)', () => {
       'snapshots:',
       '',
       '  is-number@7.0.0: {}',
+      '',
+      snapshots,
       '',
     ].join('\n');
   const check = (names: string[], lock: string, files: Record<string, string> = {}): void => {
@@ -923,6 +932,15 @@ describe('빌드 허용 목록의 lockfile 해상도 검사 (#146)', () => {
             "  '@scope/native@1.2.3-beta.1':",
             `    resolution: {integrity: ${INTEGRITY}}`,
             '    hasBin: true',
+          ].join('\n'),
+          '',
+          '',
+          [
+            '  is-number@6.0.0: {}',
+            '',
+            "  '@scope/native@1.2.3-beta.1(is-number@6.0.0)':",
+            '    dependencies:',
+            '      is-number: 6.0.0',
           ].join('\n'),
         ),
       ),
@@ -1019,6 +1037,329 @@ describe('빌드 허용 목록의 lockfile 해상도 검사 (#146)', () => {
     ).toThrow(/lockfile/);
     expect(() => check(['is-number'], ': [\n')).toThrow(/lockfile/);
   });
+});
+
+describe('빌드 허용 목록 · 판정 실행기의 의존성 닫힘 검사 (#146 검토 1회차)', () => {
+  const INTEGRITY = 'sha512-' + 'B'.repeat(86) + '==';
+  const registry = (key: string): string =>
+    `  '${key}':\n    resolution: {integrity: ${INTEGRITY}}\n`;
+  /**
+   * 최소 lockfile (pnpm 10.28 · 9.0 실측 형식). 루트가 vitest(의존성 tinyrainbow, 피어 vite)와 native(빌드 허용,
+   * 의존성 helper)를 선언한다. 일부를 바꿔 위반을 만든다.
+   */
+  const base = {
+    extra: '',
+    rootDeps: ['      native:', '        specifier: 1.0.0', '        version: 1.0.0'],
+    rootDevDeps: [
+      '      vitest:',
+      '        specifier: 5.0.5',
+      '        version: 5.0.5(vite@8.3.4)',
+    ],
+    packages: [
+      registry('native@1.0.0'),
+      registry('helper@2.0.0'),
+      registry('vitest@5.0.5'),
+      registry('tinyrainbow@3.0.0'),
+      registry('vite@8.3.4'),
+    ],
+    snapshots: [
+      '  native@1.0.0:\n    dependencies:\n      helper: 2.0.0\n',
+      '  helper@2.0.0: {}\n',
+      "  'vitest@5.0.5(vite@8.3.4)':\n    dependencies:\n      tinyrainbow: 3.0.0\n      vite: 8.3.4\n",
+      '  tinyrainbow@3.0.0: {}\n',
+      '  vite@8.3.4: {}\n',
+    ],
+  };
+  type Lock = typeof base;
+  const render = (lock: Lock): string =>
+    [
+      "lockfileVersion: '9.0'",
+      '',
+      'settings:',
+      '  autoInstallPeers: true',
+      '  excludeLinksFromLockfile: false',
+      '',
+      lock.extra,
+      'importers:',
+      '',
+      '  .:',
+      '    dependencies:',
+      ...lock.rootDeps,
+      '    devDependencies:',
+      ...lock.rootDevDeps,
+      '',
+      'packages:',
+      '',
+      ...lock.packages,
+      'snapshots:',
+      '',
+      ...lock.snapshots,
+    ].join('\n');
+  /** 판정 설치와 같은 함수(`installDependencies`)로 검사한다. 검사가 거부하면 pnpm을 띄우기 전에 던진다 */
+  const install = async (
+    lock: Lock,
+    workspace = 'onlyBuiltDependencies:\n  - native\n',
+    files: Record<string, string> = {},
+  ): Promise<void> => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-closure-'));
+    try {
+      writeFileSync(path.join(dir, 'pnpm-lock.yaml'), render(lock));
+      writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'app' }));
+      writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), `packages: []\n${workspace}`);
+      for (const [rel, body] of Object.entries(files)) {
+        mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+        writeFileSync(path.join(dir, rel), body);
+      }
+      await installDependencies(dir, { logFile: path.join(dir, 'install.log'), timeoutMs: 1 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const check = (lock: Lock, names: string[] = ['native']): void => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-closure-'));
+    try {
+      writeFileSync(path.join(dir, 'pnpm-lock.yaml'), render(lock));
+      writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'app' }));
+      assertRegistryBuiltDependencies(dir, names);
+      assertRegistryTestRunner(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const replace = (list: string[], from: string, to: string): string[] =>
+    list.map((item) => item.replace(from, to));
+  const PATCH_HASH = '0'.repeat(64);
+
+  it('정상 lockfile(레지스트리 닫힘)은 통과한다', () => {
+    expect(() => check(base)).not.toThrow();
+  });
+
+  it('허용 이름의 의존성이 overrides로 file: 디렉터리면 거부한다 (검토 재현 모양)', async () => {
+    const lock: Lock = {
+      ...base,
+      extra: 'overrides:\n  helper: file:./evil\n',
+      packages: [
+        ...base.packages,
+        '  helper@file:evil:\n    resolution: {directory: evil, type: directory}\n',
+      ],
+      snapshots: [
+        ...replace(base.snapshots, 'helper: 2.0.0', 'helper: file:evil'),
+        '  helper@file:evil: {}\n',
+      ],
+    };
+    await expect(install(lock)).rejects.toThrow(
+      /빌드 허용 목록의 패키지 native.*helper: file:evil/,
+    );
+  });
+
+  it('허용 이름의 의존성이 패치(patchedDependencies) · overrides(레지스트리 값이라도) 대상이면 거부한다', async () => {
+    const patched: Lock = {
+      ...base,
+      extra: `patchedDependencies:\n  helper@2.0.0:\n    hash: ${PATCH_HASH}\n    path: patches/helper@2.0.0.patch\n`,
+    };
+    await expect(install(patched)).rejects.toThrow(/native.*helper: 패치/);
+    const overridden: Lock = { ...base, extra: "overrides:\n  'native>helper': 2.0.0\n" };
+    await expect(install(overridden)).rejects.toThrow(/native.*helper: overrides/);
+  });
+
+  it('vitest가 패치됐거나 file:이거나 그 의존성이 overrides로 file:이면 빌드 허용 목록이 비어 있어도 판정 설치를 거부한다', async () => {
+    const none = '';
+    const patched: Lock = {
+      ...base,
+      extra: `patchedDependencies:\n  vitest@5.0.5:\n    hash: ${PATCH_HASH}\n    path: patches/vitest@5.0.5.patch\n`,
+    };
+    await expect(install(patched, none)).rejects.toThrow(/판정 실행기 vitest.*vitest: 패치/);
+    const fileVitest: Lock = {
+      ...base,
+      rootDevDeps: replace(base.rootDevDeps, 'version: 5.0.5(vite@8.3.4)', 'version: file:x'),
+      packages: [
+        ...base.packages,
+        '  vitest@file:x:\n    resolution: {directory: x, type: directory}\n',
+      ],
+    };
+    await expect(install(fileVitest, none)).rejects.toThrow(/판정 실행기 vitest.*file:x/);
+    const overridden: Lock = {
+      ...base,
+      extra: "overrides:\n  'tinyrainbow@>=1': file:./evil\n",
+      packages: [
+        ...base.packages,
+        '  tinyrainbow@file:evil:\n    resolution: {directory: evil, type: directory}\n',
+      ],
+      snapshots: [
+        ...replace(base.snapshots, 'tinyrainbow: 3.0.0', 'tinyrainbow: file:evil'),
+        '  tinyrainbow@file:evil: {}\n',
+      ],
+    };
+    await expect(install(overridden, none)).rejects.toThrow(
+      /판정 실행기 vitest.*tinyrainbow: file:evil/,
+    );
+    // 루트가 vitest를 선언하지 않으면 판정할 수 없다
+    await expect(install({ ...base, rootDevDeps: [] }, none)).rejects.toThrow(/vitest.*없습니다/);
+  });
+
+  it('닫힘 밖 패키지의 file: · 패치는 막지 않는다', () => {
+    const lock: Lock = {
+      ...base,
+      extra: `patchedDependencies:\n  other@1.0.0:\n    hash: ${PATCH_HASH}\n    path: patches/other@1.0.0.patch\n`,
+      rootDeps: [
+        ...base.rootDeps,
+        '      other:',
+        '        specifier: 1.0.0',
+        '        version: 1.0.0',
+        '      local:',
+        '        specifier: file:./local',
+        '        version: file:local',
+      ],
+      packages: [
+        ...base.packages,
+        registry('other@1.0.0'),
+        '  local@file:local:\n    resolution: {directory: local, type: directory}\n',
+      ],
+      snapshots: [...base.snapshots, '  other@1.0.0: {}\n', '  local@file:local: {}\n'],
+    };
+    // 빌드 허용 목록이 없으면 루트의 bin 검사도 하지 않는다
+    expect(() => check(lock, [])).not.toThrow();
+  });
+
+  it('빌드 허용 목록이 있으면 루트의 레지스트리가 아닌 직접 의존성 중 bin을 내는 것을 거부한다 (빌드 스크립트 PATH)', async () => {
+    const lock: Lock = {
+      ...base,
+      rootDeps: [
+        ...base.rootDeps,
+        '      tool:',
+        '        specifier: file:./tool',
+        '        version: file:tool',
+      ],
+      packages: [
+        ...base.packages,
+        '  tool@file:tool:\n    resolution: {directory: tool, type: directory}\n',
+      ],
+      snapshots: [...base.snapshots, '  tool@file:tool: {}\n'],
+    };
+    await expect(
+      install(lock, undefined, {
+        'tool/package.json': JSON.stringify({ name: 'tool', bin: { 'node-gyp': 'gyp.js' } }),
+      }),
+    ).rejects.toThrow(/bin.*tool/);
+    expect(() => check(lock, [])).not.toThrow();
+  });
+
+  it('닫힘 걷기: 피어 접미 · 범위 이름 · 순환 · 여러 버전 · 레지스트리가 아닌 참조 · 없는 키', () => {
+    const snapshots = {
+      'a@1.0.0(b@2.0.0)': { dependencies: { b: '2.0.0', '@s/c': '3.0.0(b@2.0.0)' } },
+      'b@2.0.0': { dependencies: { a: '1.0.0(b@2.0.0)' } },
+      '@s/c@3.0.0(b@2.0.0)': { optionalDependencies: { d: 'file:d', e: 'other@1.0.0' } },
+      'a@1.1.0': { dependencies: { gone: '9.9.9' } },
+    };
+    expect(dependencyClosure(snapshots, ['a@1.0.0(b@2.0.0)', 'a@1.1.0'])).toEqual({
+      keys: ['@s/c@3.0.0(b@2.0.0)', 'a@1.0.0(b@2.0.0)', 'a@1.1.0', 'b@2.0.0', 'gone@9.9.9'],
+      problems: [
+        '@s/c@3.0.0(b@2.0.0) → d: file:d',
+        '@s/c@3.0.0(b@2.0.0) → e: other@1.0.0',
+        'gone@9.9.9: snapshots에 없음',
+      ],
+    });
+    expect(lockfileKeyName('@s/c@3.0.0(b@2.0.0)')).toBe('@s/c');
+    expect(lockfileKeyName('vitest@5.0.5(@types/node@22.20.5)')).toBe('vitest');
+    expect(lockfileKeyName('nope')).toBeNull();
+  });
+
+  it('overrides 키에서 이름 뽑기 (실측 형식 name · name@범위 · @scope/name@범위 · parent>name, 애매하면 넓게)', () => {
+    expect(overrideTargetNames('prebuild-install')).toEqual(['prebuild-install']);
+    expect(overrideTargetNames('is-number@<8')).toEqual(['is-number']);
+    expect(overrideTargetNames('@types/node@>=1')).toEqual(['@types/node']);
+    expect(overrideTargetNames('better-sqlite3>bindings')).toEqual(['bindings']);
+    expect(overrideTargetNames('better-sqlite3@12>@s/x@<2')).toEqual(['@s/x', 'better-sqlite3']);
+    expect(overrideTargetNames('is-number@>7')).toEqual(['7', 'is-number']);
+    expect(overrideTargetNames('>>')).toEqual([]);
+  });
+
+  it(
+    '픽스처에 허용 패키지 의존성 override(prebuild-install → file: 폴더)를 커밋하면 설치를 거부하고 rebuild가 그 bin을 실행하지 않는다 (검토 재현)',
+    async () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-override-fx-'));
+      const app = copyFixtureFiles(dir);
+      const marker = path.join(app, 'PWNED_OVERRIDE');
+      try {
+        mkdirSync(path.join(app, 'evil'));
+        writeFileSync(
+          path.join(app, 'evil', 'package.json'),
+          JSON.stringify({
+            name: 'prebuild-install',
+            version: '9.9.9',
+            bin: { 'prebuild-install': 'bin.js' },
+          }),
+        );
+        writeFileSync(
+          path.join(app, 'evil', 'bin.js'),
+          `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(marker)}, '');\nprocess.exit(1);\n`,
+        );
+        const workspace = path.join(app, 'pnpm-workspace.yaml');
+        writeFileSync(
+          workspace,
+          `${readFileSync(workspace, 'utf8')}overrides:\n  prebuild-install: file:./evil\n`,
+        );
+        execFileSync(
+          'pnpm',
+          ['install', '--lockfile-only', '--prefer-offline', '--ignore-scripts'],
+          { cwd: app, stdio: 'pipe', env: { ...process.env, CI: '1' } },
+        );
+        const lock = readFileSync(path.join(app, 'pnpm-lock.yaml'), 'utf8');
+        expect(lock).toContain(
+          'prebuild-install@file:evil:\n    resolution: {directory: evil, type: directory}',
+        );
+        expect(lock).toContain('      prebuild-install: file:evil');
+        await expect(
+          installDependencies(app, {
+            logFile: path.join(dir, 'install.log'),
+            timeoutMs: JUDGE_TIMEOUT_MS,
+          }),
+        ).rejects.toThrow(/빌드 허용 목록의 패키지 better-sqlite3.*prebuild-install/);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    '픽스처에 vitest 패치를 커밋하면 빌드 허용 목록과 상관없이 판정 설치를 거부한다',
+    async () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-vitest-patch-fx-'));
+      const app = copyFixtureFiles(dir);
+      try {
+        mkdirSync(path.join(app, 'patches'));
+        writeFileSync(
+          path.join(app, 'patches', 'vitest@5.0.5.patch'),
+          'diff --git a/vitest.mjs b/vitest.mjs\n--- a/vitest.mjs\n+++ b/vitest.mjs\n@@ -1 +1,2 @@\n+globalThis.PATCHED = true;\n #!/usr/bin/env node\n',
+        );
+        const workspace = path.join(app, 'pnpm-workspace.yaml');
+        writeFileSync(
+          workspace,
+          `${readFileSync(workspace, 'utf8').replace(/onlyBuiltDependencies:[\s\S]*$/u, '')}patchedDependencies:\n  vitest@5.0.5: patches/vitest@5.0.5.patch\n`,
+        );
+        execFileSync(
+          'pnpm',
+          ['install', '--lockfile-only', '--prefer-offline', '--ignore-scripts'],
+          { cwd: app, stdio: 'pipe', env: { ...process.env, CI: '1' } },
+        );
+        expect(readFileSync(path.join(app, 'pnpm-lock.yaml'), 'utf8')).toContain(
+          'patchedDependencies:\n  vitest@5.0.5:',
+        );
+        await expect(
+          installDependencies(app, {
+            logFile: path.join(dir, 'install.log'),
+            timeoutMs: JUDGE_TIMEOUT_MS,
+          }),
+        ).rejects.toThrow(/판정 실행기 vitest.*패치/);
+        expect(existsSync(path.join(app, 'node_modules'))).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
 });
 
 describe('판정 입력 지문 (검토 1회차)', () => {

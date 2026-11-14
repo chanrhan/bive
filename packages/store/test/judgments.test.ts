@@ -7,11 +7,8 @@ import { openDatabase } from '../src/database.js';
 import { beginNormWatch, verifyNormWatch } from '../src/norm-snapshot.js';
 import { bivePaths } from '../src/paths.js';
 import { ConflictError } from '../src/errors.js';
-import {
-  openProjectStore,
-  type ProjectStore,
-  setCloseProbeForTests,
-} from '../src/project-store.js';
+import { setCloseProbeForTests } from '../src/close-probe.js';
+import { openProjectStore, type ProjectStore } from '../src/project-store.js';
 import { newId, useTempHome } from './support/temp-home.js';
 
 const home = useTempHome();

@@ -189,45 +189,119 @@ export const builtDependencyNames = (dir: string): string[] => {
 const LOCKFILE_VERSION_PREFIX = '9.';
 
 /**
- * 레지스트리 패키지의 버전 (lockfile `packages:` 키 `<이름>@<버전>`의 버전, importers의 `version`에서 피어 접미 `(…)`를 뗀 값).
- * `file:` · `link:` · tarball URL · git은 이 모양이 아니다.
+ * 레지스트리 패키지의 버전 (lockfile `packages:` 키 `<이름>@<버전>`의 버전, importers · snapshots 의존성 값에서 피어 접미
+ * `(…)`를 뗀 값). `file:` · `link:` · tarball URL · git · 별칭(`<다른 이름>@<버전>`)은 이 모양이 아니다.
  */
 const REGISTRY_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 
 const DEPENDENCY_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies'] as const;
+/** snapshots 항목에서 닫힘으로 따라가는 의존성 칸 (해석된 피어 의존성도 이 두 칸에 나온다, 실측) */
+const SNAPSHOT_DEPENDENCY_FIELDS = ['dependencies', 'optionalDependencies'] as const;
+
+/** 판정 러너가 실행하는 테스트 실행기 패키지 (루트 importer가 선언한 것). 판정 설정 · 도우미는 다른 패키지를 불러오지 않는다 */
+const TEST_RUNNER_PACKAGE = 'vitest';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-const projectNameAt = (file: string): string | null => {
+const readManifest = (file: string): Record<string, unknown> | null => {
   try {
     const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return isRecord(parsed) && typeof parsed.name === 'string' ? parsed.name : null;
+    return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }
 };
 
+const stripPeers = (version: string): string => version.replace(/\(.*$/u, '');
+
+/** lockfile 키 · 의존성 참조 `<이름>@<버전>`의 이름 (범위 이름 `@scope/x@1.0.0` 포함). 모양이 아니면 `null`. */
+export const lockfileKeyName = (key: string): string | null => {
+  const at = key.indexOf('@', key.startsWith('@') ? 1 : 0);
+  if (at <= 0) return null;
+  const name = key.slice(0, at);
+  return PACKAGE_NAME.test(name) ? name : null;
+};
+
 /**
- * 빌드 허용 목록의 이름이 모두 lockfile에서 레지스트리 패키지로만 해석되는지 확인한다 (#146, ADR-069).
- * 허용 목록은 판정할 커밋의 파일(에이전트가 고칠 수 있음)에서 읽으므로, 이름 형식만 보면 `"evil": "file:./evil"` 같은
- * 프로젝트 안 코드를 허용 목록에 넣어 그 설치 스크립트를 판정 입력 지문의 기준값보다 먼저 돌리게 할 수 있다(실측: 이름을
- * 지정한 `pnpm rebuild`가 디렉터리 · 로컬 tarball 의존성의 `postinstall`을 실행한다). 그래서 이름마다 다음을 모두 요구한다:
- * - lockfile(`lockfileVersion` 9 계열)의 `packages:`에 `<이름>@<버전>` 항목이 하나 이상 있다(없으면 거부)
- * - 그런 항목(여러 버전이면 전부)의 버전이 semver이고 `resolution`이 `integrity` 하나뿐이다(레지스트리. `directory` ·
- *   `tarball`(로컬 · 원격 URL) · git(`commit` · `repo`)이 있으면 거부)
- * - 어느 importer(작업 공간 프로젝트)도 그 이름을 semver가 아닌 버전(`link:` · `file:` · 별칭)으로 가리키지 않는다
- * - 작업 공간 프로젝트(루트 포함) 자신의 이름이 아니다
- * - lockfile `patchedDependencies`에 그 이름의 패치가 없다(패치는 프로젝트 파일이라 설치 스크립트를 바꿀 수 있다, 실측:
- *   `--ignore-scripts` frozen 설치에서도 패치가 적용된다)
- * frozen 설치라 lockfile은 `package.json`과 맞아야 하므로 lockfile만 본다.
- * @throws {JudgeCheckoutError} (`install`) 하나라도 어긋나면 (fail closed)
+ * lockfile `overrides` 키에서 바뀌는 패키지 이름들을 뽑는다. 실측(pnpm 10.28): 키는 쓴 그대로 `name` · `name@<범위>` ·
+ * `@scope/name@<범위>` · `parent>name`(부모에도 범위 가능)으로 남는다. 범위에도 `>`(`>=1` · `>7`)가 들어가 구분자와 글자만으로
+ * 가를 수 없으므로, 키 전체와 각 `>` 뒤 부분을 모두 후보로 보고 이름으로 읽히는 것을 전부 돌려준다(넓게 잡아 실패 쪽으로
+ * 닫음: `is-number@>7`은 `is-number`와 `7`). 하나도 읽히지 않으면 빈 목록.
  */
-export const assertRegistryBuiltDependencies = (dir: string, names: readonly string[]): void => {
-  if (names.length === 0) return;
-  const reject = (message: string): never => {
-    throw new JudgeCheckoutError('install', message);
-  };
+export const overrideTargetNames = (key: string): string[] => {
+  const candidates = [key];
+  for (let i = key.indexOf('>'); i !== -1; i = key.indexOf('>', i + 1)) {
+    candidates.push(key.slice(i + 1));
+  }
+  const names = new Set<string>();
+  for (const candidate of candidates) {
+    const name = PACKAGE_NAME.test(candidate) ? candidate : lockfileKeyName(candidate);
+    if (name !== null) names.add(name);
+  }
+  return [...names].sort();
+};
+
+/** 의존성 닫힘을 걸은 결과. */
+export interface DependencyClosure {
+  /** 닫힘 안 snapshots 키 (정렬) */
+  readonly keys: string[];
+  /** 레지스트리가 아닌 의존성 참조 · snapshots에 없는 키 */
+  readonly problems: string[];
+}
+
+/**
+ * lockfile `snapshots:`에서 시작 키들의 `dependencies` · `optionalDependencies` 닫힘을 걷는다(순환 · 여러 버전 · 피어 접미
+ * 포함). 의존성 값이 피어 접미를 뗀 semver가 아니면(`file:` · `link:` · 별칭) 문제로 남기고 따라가지 않는다.
+ */
+export const dependencyClosure = (
+  snapshots: Readonly<Record<string, unknown>>,
+  start: readonly string[],
+): DependencyClosure => {
+  const seen = new Set<string>();
+  const problems: string[] = [];
+  const queue = [...start];
+  while (queue.length > 0) {
+    const key = queue.shift();
+    if (key === undefined || seen.has(key)) continue;
+    seen.add(key);
+    if (!Object.hasOwn(snapshots, key)) {
+      problems.push(`${key}: snapshots에 없음`);
+      continue;
+    }
+    const entry = snapshots[key];
+    if (!isRecord(entry)) continue;
+    for (const field of SNAPSHOT_DEPENDENCY_FIELDS) {
+      const deps = entry[field];
+      if (!isRecord(deps)) continue;
+      for (const [name, value] of Object.entries(deps)) {
+        if (typeof value !== 'string' || !REGISTRY_VERSION.test(stripPeers(value))) {
+          problems.push(`${key} → ${name}: ${String(value)}`);
+          continue;
+        }
+        queue.push(`${name}@${value}`);
+      }
+    }
+  }
+  return { keys: [...seen].sort(), problems };
+};
+
+interface ParsedLockfile {
+  readonly packages: Record<string, unknown>;
+  readonly snapshots: Record<string, unknown>;
+  readonly importers: Record<string, unknown>;
+  /** 패치가 걸린 패키지 이름 */
+  readonly patched: Set<string>;
+  /** `overrides`로 바뀌는 패키지 이름 */
+  readonly overridden: Set<string>;
+}
+
+const reject = (message: string): never => {
+  throw new JudgeCheckoutError('install', message);
+};
+
+/** lockfile을 읽는다. 9 계열이 아니거나 읽을 수 없거나 패치 · override 키에서 이름을 뽑을 수 없으면 거부한다. */
+const readLockfile = (dir: string): ParsedLockfile => {
   let lock: unknown;
   try {
     lock = parseYaml(fs.readFileSync(path.join(dir, 'pnpm-lock.yaml'), 'utf8'));
@@ -245,48 +319,185 @@ export const assertRegistryBuiltDependencies = (dir: string, names: readonly str
       `지원하지 않는 lockfile 형식입니다 (lockfileVersion ${isRecord(lock) ? String(lock.lockfileVersion) : '없음'})`,
     );
   }
-  const packages = isRecord(lock.packages) ? lock.packages : {};
-  const importers = isRecord(lock.importers) ? lock.importers : {};
-  const patched = isRecord(lock.patchedDependencies) ? Object.keys(lock.patchedDependencies) : [];
+  const names = (value: unknown, pick: (key: string) => string[], what: string) => {
+    const result = new Set<string>();
+    for (const key of isRecord(value) ? Object.keys(value) : []) {
+      const picked = pick(key);
+      if (picked.length === 0) {
+        reject(`lockfile ${what} 키에서 패키지 이름을 알 수 없습니다: ${key}`);
+      }
+      for (const name of picked) result.add(name);
+    }
+    return result;
+  };
+  return {
+    packages: isRecord(lock.packages) ? lock.packages : {},
+    snapshots: isRecord(lock.snapshots) ? lock.snapshots : {},
+    importers: isRecord(lock.importers) ? lock.importers : {},
+    patched: names(
+      lock.patchedDependencies,
+      (key) => {
+        const name = PACKAGE_NAME.test(key) ? key : lockfileKeyName(key);
+        return name === null ? [] : [name];
+      },
+      'patchedDependencies',
+    ),
+    overridden: names(lock.overrides, overrideTargetNames, 'overrides'),
+  };
+};
+
+/** snapshots 키 하나(패키지 한 벌)의 문제: 레지스트리 해상도 아님 · 패치 · override. */
+const packageProblems = (lock: ParsedLockfile, key: string): string[] => {
+  const name = lockfileKeyName(key);
+  if (name === null) return [`${key}: 이름을 알 수 없음`];
+  const problems: string[] = [];
+  const version = key.slice(name.length + 1);
+  const packageKey = `${name}@${stripPeers(version)}`;
+  const resolution = isRecord(lock.packages[packageKey])
+    ? lock.packages[packageKey].resolution
+    : undefined;
+  if (!(
+    REGISTRY_VERSION.test(stripPeers(version)) &&
+    isRecord(resolution) &&
+    Object.keys(resolution).length === 1 &&
+    typeof resolution.integrity === 'string'
+  )) {
+    problems.push(`${packageKey}: 레지스트리 해상도(integrity만)가 아님`);
+  }
+  if (lock.patched.has(name) || version.includes('patch_hash=')) {
+    problems.push(`${name}: 패치(patchedDependencies) 적용`);
+  }
+  if (lock.overridden.has(name)) problems.push(`${name}: overrides 적용`);
+  return problems;
+};
+
+/** 시작 키들의 닫힘 전체 문제 (닫힘 걷기 문제 + 닫힘 안 패키지마다의 문제). */
+const closureProblems = (lock: ParsedLockfile, start: readonly string[]): string[] => {
+  const closure = dependencyClosure(lock.snapshots, start);
+  return [
+    ...closure.problems,
+    ...closure.keys
+      .filter((key) => Object.hasOwn(lock.snapshots, key))
+      .flatMap((key) => packageProblems(lock, key)),
+  ];
+};
+
+const summarize = (problems: readonly string[]): string =>
+  [...new Set(problems)].slice(0, 20).join(', ');
+
+/**
+ * 빌드 허용 목록의 이름이 lockfile에서 레지스트리 패키지로만 해석되고, 그 빌드 스크립트가 부를 수 있는 의존성 닫힘에도
+ * 프로젝트 코드가 없는지 확인한다 (#146, ADR-069). 허용 목록은 판정할 커밋의 파일(에이전트가 고칠 수 있음)에서 읽으므로,
+ * 이름 형식만 보면 `"evil": "file:./evil"`이나 허용 패키지 의존성의 `overrides: { prebuild-install: file:./evil }`로
+ * 프로젝트 안 코드를 판정 입력 지문의 기준값보다 먼저 돌리게 할 수 있다(실측: 이름을 지정한 `pnpm rebuild`가 디렉터리 ·
+ * 로컬 tarball 의존성의 `postinstall`을 실행하고, better-sqlite3의 `prebuild-install || node-gyp …`가 override된 bin을
+ * 실행한다). 이름마다 다음을 모두 요구한다:
+ * - lockfile(`lockfileVersion` 9 계열)의 snapshots에 `<이름>@…` 항목이 하나 이상 있다(없으면 거부)
+ * - 그 모든 버전에서 시작한 의존성 닫힘(`dependencyClosure`) 안 패키지마다: `packages:` 해상도가 `{integrity}` 하나뿐
+ *   (디렉터리 · tarball · git 거부), 의존성 값이 semver(`link:` · `file:` · 별칭 거부), 패치 · `overrides` 대상이 아님
+ * - 어느 importer도 그 이름을 semver가 아닌 버전으로 가리키지 않고, 작업 공간 프로젝트(루트 포함) 자신의 이름이 아니다
+ * - 빌드 스크립트의 PATH는 패키지 자신의 `.bin` 다음에 루트 `node_modules/.bin`을 pnpm의 node-gyp보다 먼저 본다(실측).
+ *   그래서 허용 목록이 비어 있지 않으면 루트 importer의 직접 의존성 중 레지스트리가 아닌 것은 bin이 없는 폴더(`file:` ·
+ *   `link:` 디렉터리의 `package.json`에 `bin` · `directories.bin`이 없음)만 허용한다(tarball 등 확인할 수 없으면 거부)
+ * frozen 설치라 lockfile은 `package.json`과 맞아야 하므로 lockfile만 본다.
+ * @throws {JudgeCheckoutError} (`install`) 하나라도 어긋나면 (fail closed)
+ */
+export const assertRegistryBuiltDependencies = (dir: string, names: readonly string[]): void => {
+  if (names.length === 0) return;
+  const lock = readLockfile(dir);
   const projectNames = new Set<string>();
-  for (const importer of new Set(['.', ...Object.keys(importers)])) {
-    const name = projectNameAt(path.join(dir, importer, 'package.json'));
-    if (name !== null) projectNames.add(name);
+  for (const importer of new Set(['.', ...Object.keys(lock.importers)])) {
+    const name = readManifest(path.join(dir, importer, 'package.json'))?.name;
+    if (typeof name === 'string') projectNames.add(name);
   }
   for (const name of names) {
     const problems: string[] = [];
     if (projectNames.has(name)) problems.push('작업 공간 프로젝트 이름');
-    if (patched.some((key) => key === name || key.startsWith(`${name}@`))) {
-      problems.push('패치(patchedDependencies) 적용');
+    const start = Object.keys(lock.snapshots).filter((key) => lockfileKeyName(key) === name);
+    // packages에만 있고 snapshots에 없는 같은 이름 항목(다른 해상도)도 본다
+    for (const key of Object.keys(lock.packages)) {
+      if (lockfileKeyName(key) === name && !start.some((s) => stripPeers(s) === key)) {
+        problems.push(`${key}: snapshots에 없음`);
+      }
     }
-    const prefix = `${name}@`;
-    const entries = Object.entries(packages).filter(([key]) => key.startsWith(prefix));
-    for (const [key, value] of entries) {
-      const resolution = isRecord(value) ? value.resolution : undefined;
-      const registry =
-        REGISTRY_VERSION.test(key.slice(prefix.length)) &&
-        isRecord(resolution) &&
-        Object.keys(resolution).length === 1 &&
-        typeof resolution.integrity === 'string';
-      if (!registry) problems.push(key);
-    }
-    for (const [importer, value] of Object.entries(importers)) {
+    for (const [importer, value] of Object.entries(lock.importers)) {
       if (!isRecord(value)) continue;
       for (const field of DEPENDENCY_FIELDS) {
         const deps = value[field];
-        if (!isRecord(deps) || !(name in deps)) continue;
+        if (!isRecord(deps) || !Object.hasOwn(deps, name)) continue;
         const dep = deps[name];
         const version = isRecord(dep) ? dep.version : dep;
-        const bare = typeof version === 'string' ? version.replace(/\(.*$/u, '') : '';
-        if (!REGISTRY_VERSION.test(bare)) problems.push(`${importer} ${field} ${String(version)}`);
+        if (typeof version !== 'string' || !REGISTRY_VERSION.test(stripPeers(version))) {
+          problems.push(`${importer} ${field} ${String(version)}`);
+        }
       }
     }
+    problems.push(...closureProblems(lock, start));
     if (problems.length > 0) {
       reject(
-        `빌드 허용 목록의 패키지 ${name}의 lockfile 해상도가 레지스트리가 아닙니다 (${problems.join(', ')})`,
+        `빌드 허용 목록의 패키지 ${name}의 lockfile 해상도가 레지스트리가 아닙니다 (${summarize(problems)})`,
       );
     }
-    if (entries.length === 0) reject(`빌드 허용 목록의 패키지 ${name}: lockfile에 없습니다`);
+    if (start.length === 0) reject(`빌드 허용 목록의 패키지 ${name}: lockfile에 없습니다`);
+  }
+  // 빌드 스크립트 PATH에 먼저 오는 루트 node_modules/.bin: 레지스트리가 아닌 직접 의존성이 bin을 내면 거부
+  const root = lock.importers['.'];
+  for (const field of DEPENDENCY_FIELDS) {
+    const deps = isRecord(root) ? root[field] : undefined;
+    if (!isRecord(deps)) continue;
+    for (const [dep, value] of Object.entries(deps)) {
+      const version = isRecord(value) ? value.version : value;
+      if (typeof version === 'string' && REGISTRY_VERSION.test(stripPeers(version))) continue;
+      const folder =
+        typeof version === 'string' && /^(link|file):/u.test(version)
+          ? path.resolve(dir, version.slice(5))
+          : null;
+      const manifest = folder === null ? null : readManifest(path.join(folder, 'package.json'));
+      const directories = manifest?.directories;
+      const hasBin =
+        manifest === null ||
+        manifest.bin !== undefined ||
+        (isRecord(directories) && directories.bin !== undefined);
+      if (hasBin) {
+        reject(
+          `빌드 허용 목록이 있을 때 루트의 레지스트리가 아닌 직접 의존성은 실행 파일(bin)을 낼 수 없습니다: ${dep} (${String(version)})`,
+        );
+      }
+    }
+  }
+};
+
+/**
+ * 판정 러너가 실행하는 테스트 실행기(루트 importer가 선언한 `vitest`)와 그 의존성 닫힘이 모두 레지스트리 패키지인지 확인한다
+ * (#146, ADR-069). 지문은 기준값 뒤의 변경만 보므로, 커밋이 `"vitest": "file:./x"` · `patchedDependencies: vitest@…` ·
+ * 의존성 `overrides`로 실행기를 프로젝트 코드로 바꾸면 판정이 그 코드로 돈다. 빌드 허용 목록과 같은 닫힘 검사를 한다.
+ * 판정 생성 설정 · globalSetup · HTTP 도우미는 다른 패키지를 불러오지 않으므로 시작점은 `vitest` 하나다.
+ * @throws {JudgeCheckoutError} (`install`) 선언 없음 · 레지스트리가 아닌 해상도 · 패치 · override
+ */
+export const assertRegistryTestRunner = (dir: string): void => {
+  const lock = readLockfile(dir);
+  const root = lock.importers['.'];
+  let version: unknown;
+  for (const field of DEPENDENCY_FIELDS) {
+    const deps = isRecord(root) ? root[field] : undefined;
+    if (isRecord(deps) && Object.hasOwn(deps, TEST_RUNNER_PACKAGE)) {
+      const dep = deps[TEST_RUNNER_PACKAGE];
+      version = isRecord(dep) ? dep.version : dep;
+    }
+  }
+  if (version === undefined) {
+    reject(`판정 실행기 ${TEST_RUNNER_PACKAGE}가 프로젝트(루트) 의존성에 없습니다`);
+  }
+  if (typeof version !== 'string' || !REGISTRY_VERSION.test(stripPeers(version))) {
+    return reject(
+      `판정 실행기 ${TEST_RUNNER_PACKAGE}의 lockfile 해상도가 레지스트리가 아닙니다 (루트 ${String(version)})`,
+    );
+  }
+  const problems = closureProblems(lock, [`${TEST_RUNNER_PACKAGE}@${version}`]);
+  if (problems.length > 0) {
+    reject(
+      `판정 실행기 ${TEST_RUNNER_PACKAGE}의 의존성 닫힘에 레지스트리가 아닌 패키지가 있습니다 (${summarize(problems)})`,
+    );
   }
 };
 
@@ -301,10 +512,11 @@ export const assertRegistryBuiltDependencies = (dir: string, names: readonly str
  * 2. `pnpm rebuild --config.ignore-pnpmfile=true <허용 목록>`: 빌드 허용 목록(`onlyBuiltDependencies`)에 있는 의존성의
  *    빌드 스크립트만 돌린다(네이티브 모듈 · 엔진 내려받기). 이름을 지정한 rebuild는 프로젝트 스크립트를 돌리지 않고,
  *    `rebuild`는 `--ignore-pnpmfile` 옵션을 모르며 설정 값으로 줘야 pnpmfile을 건너뛴다(실측). 허용 목록의 이름은 설치 전에
- *    lockfile에서 레지스트리 패키지로만 해석되는지 확인한다(`assertRegistryBuiltDependencies`, #146)
+ *    lockfile에서 의존성 닫힘까지 레지스트리 패키지로만 해석되는지, 판정 실행기 vitest와 그 닫힘도 그런지 확인한다
+ *    (`assertRegistryBuiltDependencies` · `assertRegistryTestRunner`, #146)
  * 프로젝트가 설치 때 하던 생성 단계(`prisma generate`)는 스택 프로필이 따로 한다.
  * 셸 없이 PATH의 `pnpm`을 실행하고 환경 변수는 판정 러너와 같은 허용 목록 + `CI=1`만 넘긴다.
- * @throws {JudgeCheckoutError} (`install`) lockfile 없음 · 레지스트리가 아닌 빌드 허용 목록 · 설치 실패 · 시간 초과 · 중단
+ * @throws {JudgeCheckoutError} (`install`) lockfile 없음 · 레지스트리가 아닌 빌드 허용 목록 · 실행기 닫힘 · 설치 실패 · 시간 초과 · 중단
  */
 export const installDependencies: InstallDependencies = async (dir, options) => {
   if (!fs.existsSync(path.join(dir, 'pnpm-lock.yaml'))) {
@@ -316,6 +528,7 @@ export const installDependencies: InstallDependencies = async (dir, options) => 
   // 허용 목록은 설치 전에 확인한다: 어긋나면 아무것도 설치 · 실행하지 않고 닫는다
   const built = builtDependencyNames(dir);
   assertRegistryBuiltDependencies(dir, built);
+  assertRegistryTestRunner(dir);
   const started = Date.now();
   const run = async (args: string[], what: string): Promise<void> => {
     const result = await runCommand('pnpm', args, {
