@@ -222,6 +222,7 @@ export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
 | `BIVE_E2E_PORT` | 화면 e2e의 Vite 서버 포트. 기본은 worktree 경로 해시로 자동 결정(5179 + hash % 500) |
 | `BIVE_AGENT` | 에이전트 어댑터 선택. `claude`(실제 SDK, 기본) · `scripted`(가짜 에이전트). 빈 값은 미설정과 같고 그 밖의 값은 기동 오류(종료 코드 2). API 키 없이 `claude`가 선택되어도 기동은 되고, 세션을 열면 `not_configured`로 끝난다 (ADR-059) |
 | `BIVE_SCENARIO` | `BIVE_AGENT=scripted`일 때 재생할 시나리오 이름(`packages/orchestrator/scenarios/<이름>.yaml`). 기본 `happy-path`. 없는 시나리오나 형식이 틀린 시나리오는 기동 오류(종료 코드 2). `scripted`가 아니면 읽지 않는다 |
+| `BIVE_OPEN_URL_LOG` | 앱이 코드 열기 IDE URL을 열지 않고 이 파일(절대 경로)에 한 줄씩 덧붙인다. 빈 값은 미설정과 같다. 열람 기록은 평소대로 남는다. 시험 · 검수용(화면 없는 VM에서 연 URL 확인). 절대 경로가 아니거나 쓰기가 실패하면 열지 않고 실패로 보인다 (ADR-087) |
 
 ### M1 완료 기준 흐름 준비
 

@@ -160,6 +160,78 @@ describe('settings.get · settings.update 저장 왕복', () => {
   });
 });
 
+describe('코드 열기 IDE 설정 (M2-03, ADR-018 · ADR-087)', () => {
+  const get = async () =>
+    (await h.client.call('settings.get', { projectId: h.project.id })).settings;
+
+  const rejected = async (patch: unknown, author: Author = human): Promise<number | undefined> => {
+    const response = (await h.client.requestRaw({
+      jsonrpc: '2.0',
+      id: 'ide',
+      method: 'settings.update',
+      params: { projectId: h.project.id, patch, author },
+    })) as { error?: { code: number } };
+    return response.error?.code;
+  };
+
+  it('저장한 적이 없으면 미설정(null)이고, 고르면 그 값이 남으며 예산 · 모델은 그대로다', async () => {
+    expect((await get()).ide).toBeNull();
+    await update(COMPLETE);
+    expect((await update({ ide: { kind: 'cursor' } })).settings.ide).toEqual({ kind: 'cursor' });
+    const after = await get();
+    expect(after.ide).toEqual({ kind: 'cursor' });
+    expect(after.roles.implementer).toEqual(FULL_ROLE);
+    // 예산 · 모델만 바꾸는 패치는 IDE를 건드리지 않는다
+    expect((await update({ run: { maxTurns: 10 } })).settings.ide).toEqual({ kind: 'cursor' });
+    const template = 'idea://open?file=/{path}&line={line}';
+    expect((await update({ ide: { kind: 'custom', template } })).settings.ide).toEqual({
+      kind: 'custom',
+      template,
+    });
+    expect(h.read((store) => store.settings.get()).ide).toEqual({ kind: 'custom', template });
+  });
+
+  it('에이전트 주체는 IDE도 바꿀 수 없다(-32020, NFR-07)', async () => {
+    expect(await rejected({ ide: { kind: 'cursor' } }, implementerAgent)).toBe(
+      ErrorCode.Unauthorized,
+    );
+    expect((await get()).ide).toBeNull();
+  });
+
+  it.each([
+    ['미설정으로 되돌리기', null],
+    ['모르는 종류', { kind: 'idea' }],
+    ['내장 선택에 틀', { kind: 'vscode', template: 'vscode://file/{path}:{line}' }],
+    ['틀 없는 사용자 지정', { kind: 'custom' }],
+    ['웹 스킴', { kind: 'custom', template: 'https://example.com/{path}?l={line}' }],
+    ['파일 스킴', { kind: 'custom', template: 'file:///{path}#{line}' }],
+    ['스크립트 스킴', { kind: 'custom', template: 'javascript://open/{path}{line}' }],
+    ['데이터 스킴', { kind: 'custom', template: 'data://file/{path}:{line}' }],
+    ['목록에 없는 스킴', { kind: 'custom', template: 'ms-msdt://file/{path}:{line}' }],
+    ['대문자 스킴', { kind: 'custom', template: 'VSCODE://file/{path}:{line}' }],
+    ['다른 호스트', { kind: 'custom', template: 'vscode://evil.ext/{path}:{line}' }],
+    ['사용자 정보', { kind: 'custom', template: 'vscode://file@evil/{path}:{line}' }],
+    ['포트', { kind: 'custom', template: 'vscode://file:8080/{path}:{line}' }],
+    ['호스트에 자리 표시자', { kind: 'custom', template: 'vscode://{path}/x:{line}' }],
+    ['{path} 없음', { kind: 'custom', template: 'vscode://file/a.ts:{line}' }],
+    ['{line} 없음', { kind: 'custom', template: 'vscode://file/{path}' }],
+    ['{path} 두 번', { kind: 'custom', template: 'vscode://file/{path}{path}:{line}' }],
+    ['{line} 두 번', { kind: 'custom', template: 'vscode://file/{path}:{line}:{line}' }],
+    ['다른 중괄호', { kind: 'custom', template: 'vscode://file/{path}:{line}{col}' }],
+    ['앞 공백', { kind: 'custom', template: ' vscode://file/{path}:{line}' }],
+    ['공백', { kind: 'custom', template: 'vscode://file/{path} :{line}' }],
+    ['줄바꿈', { kind: 'custom', template: 'vscode://file/{path}:{line}\n' }],
+    ['제어 문자', { kind: 'custom', template: 'vscode://file/{path}\u0000:{line}' }],
+    ['양방향 제어 문자', { kind: 'custom', template: 'vscode://file/‮{path}:{line}' }],
+    ['비ASCII', { kind: 'custom', template: 'vscode://file/화면/{path}:{line}' }],
+    ['길이 초과', { kind: 'custom', template: `vscode://file/{path}:{line}?${'a'.repeat(512)}` }],
+  ])('IDE 패치 위반(%s)은 -32602이고 저장하지 않는다', async (_label, ide) => {
+    await update({ ide: { kind: 'cursor' } });
+    expect(await rejected({ ide })).toBe(ErrorCode.InvalidParams);
+    expect((await get()).ide).toEqual({ kind: 'cursor' });
+  });
+});
+
 describe('settings.validateForRun (NFR-07)', () => {
   it('모두 채우면 통과', async () => {
     await update(COMPLETE);
