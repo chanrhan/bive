@@ -1,6 +1,6 @@
 # BIVE 로드맵
 
-> v2 · 2026-10-15 · 기준 문서: PRD v0.9 · 화면 정의서 v0.5 · 기획서 (docs/spec) · architecture.md v0.1 · ADR-001~036
+> v2 · 2026-10-15 작성(뒤의 변경은 5장 변경 이력) · 기준 문서: PRD v0.9 · 화면 정의서 v0.5 · 기획서 (docs/spec) · architecture.md v0.1 · 작성 당시 ADR-001~036 (이후 결정은 `docs/decisions.md`)
 
 ## 0. 원칙
 
@@ -118,7 +118,7 @@ PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 �
 | M1-28 | 규칙 상세 (SCR-06) · 테스트 출력 | feature | app | M1-11·M1-16 | `e2e/scr-06-rule.spec.ts`가 `checklists/scr-06.ts`의 규칙 기본 상태(진술, 테스트 실행 결과, 실행 이력)를 통과하고 변경 이력 영역이 미노출임을 단언(ADR-035) · 테스트 출력이 기본 접힘이고 최신 판정이 실패면 자동으로 펼쳐짐을 단언 · 실패 원인에 실행기 출력(실패 케이스 이름, 메시지, `file:line`)이 보임을 단언 | NRM-02 · JDG-02 · SCR-03 · SCR-06 | #41 |
 | M1-29 | 파이프라인 e2e (b): 중단 재개 · 금지 경로 · 추가 MCP · 통과 보고 · 병합 충돌 | chore | ci·orchestrator | M1-20·M1-21·M1-22 | `orchestrator/e2e/pipeline/interrupt-resume.test.ts`가 `pause-implement` 도중 오케스트레이터 SIGKILL, 재기동 뒤 `interrupted`, `run.resume` 뒤 `merged`를 단언 · `forbidden-write`와 `extra-mcp` 시나리오를 추가하고 `forbidden-write.test.ts`가 도구 거부 2건 기록과 인수 테스트 해시 불변을, `extra-mcp.test.ts`가 실행 `failed`를 단언 · `false-pass.test.ts`가 판정 `fail`을, `merge-conflict` 시나리오와 `merge-conflict.test.ts`가 병합 직전 기준 브랜치 충돌 커밋에서 `failed`와 브랜치 보존을 단언 · `pnpm e2e:pipeline`이 architecture.md 8장 시나리오 9개를 각각 테스트 1개로, 그리고 `app-exit.test.ts`를 포함해 `ci`에서 통과 | NFR-01 · NFR-02 · NFR-06 · JDG-01 · RUN-08 | #42 |
 | M1-30 | 기준 브랜치 갱신 경합 창 사후 탐지 · 무시 경로 새 추적 차단 | feature | orchestrator | M1-13 | `orchestrator/test/worktree.test.ts`가 `update_ref` 뒤 색인이 병합 커밋과 다르면 되돌리고 `base_update_failed`를 돌려줌을 단언 · 기준 브랜치가 무시하던 경로를 새로 추적하면 `ignored_path_tracked`로 병합하지 않음을 단언 · 동시 `create`, 병합 대기열 직렬화, 재진입 거부(`reentrant_call`), 검사 제한 시간(`check_timeout`), 실패 격리를 단언(ADR-065) | RUN-08 · NFR-01 · ADR-017 · ADR-058 · ADR-065 | #129 |
-| M1-31 | 인수 테스트 검사 보강 | feature | orchestrator | M1-15 | `orchestrator/test/acceptance-lint.test.ts`가 `process`의 탈출 수단(`execve`, `loadEnvFile`, `report`)과 `meta`가 아닌 `import.<이름>`을 거부함을 단언 · 매처 인자, 객체 키, 타입 자리에서는 거부 이름을 허용하고 PR #136 거부 사례는 그대로 거부함을 단언 · 오케스트레이터 기동 시 검사 파서를 불러오지 않음을 단언(ADR-068) | JDG-01 · NFR-02 · ADR-068 | #137 |
+| M1-31 | 인수 테스트 검사 보강 (process 탈출 수단 · import.<이름> · 오탐 · 기동 비용) | feature | orchestrator | M1-15 | `orchestrator/test/acceptance-lint.test.ts`가 `process`의 탈출 수단(`execve`, `loadEnvFile`, `report`)과 `meta`가 아닌 `import.<이름>`을 거부함을 단언 · 매처 인자, 객체 키, 타입 자리에서는 거부 이름을 허용하고 PR #136 거부 사례는 그대로 거부함을 단언 · 오케스트레이터 기동 시 검사 파서를 불러오지 않음을 단언(ADR-068) | JDG-01 · NFR-02 · ADR-068 | #137 |
 | M1-32 | 프로세스 기동 테스트의 부하 시 시간 초과 완화 | chore | app·orchestrator | — | 프로세스를 띄우는 테스트 파일만 제한 상향이나 기동 대기 폴링으로 바꿔 부하 평균 12 이상에서 `pnpm test` 3회 연속 통과 · 끄거나 `skip`, `retry`로 숨기지 않음 · 판정 테스트가 공용 `/tmp` 전체를 비교하지 않고 파일 전용 임시 폴더만 비교함(ADR-064) | NFR-05 · ADR-041 · ADR-064 | #122 |
 | M1-34 | 알림 송신 · 요청 처리 견고함 보강 (느린 시험 · 송신 상한 판단 · 요청 몰림) | bug | orchestrator | M1-19 | `orchestrator/test/events.test.ts`의 읽지 않는 연결 시험 2개가 응답이 큰 요청 몇 건으로 버퍼를 채워 각각 3초 안에 끝남 · `sendFlushed`가 총 시간이 아니라 진척 없음으로 판단해 이벤트 루프가 상한보다 오래 막힌 뒤에도 읽던 연결을 끊지 않음을 `orchestrator/test/transport.test.ts`가 단언 · 한 연결의 연속 요청 사이에 이벤트 루프를 양보해 요청 3000건 처리 중 다른 연결의 `system.status` 응답이 1초 안에 옴을 `orchestrator/test/pipe.test.ts`가 단언 · ADR-076 결과에 끊긴 연결의 대기 요청 오류와 송신 예외로 `failed`가 된 병합 실행의 표시 방침을 적음 | NFR-06 · RUN-02 · ADR-027 · ADR-076 | #153 |
 
@@ -348,10 +348,10 @@ PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 �
 | 항목 | 시점 | 사람이 할 일 |
 |---|---|---|
 | 프로토타입 원본 | 지금 | `docs/prototype/`에 프로토타입 v5 HTML 추가 (prototype-map.md 표 4 이름으로) |
-| 실제 Claude 인증 완주 | M1 끝 | 구독 로그인 또는 API 키로 M1 완료 기준 흐름 1회 수행, 결과를 이슈에 기록 (M1-23) |
-| Windows 완주 | M1 끝 | Windows에서 설치 · named pipe · 앱 종료 후 실행 유지 확인, 결과 코멘트 (M1-23, M1 완료 기준 흐름 15) |
-| 패키징된 앱의 SDK 내장 실행 파일 호출 | M1 끝 | PRD 5.1 "확인 필요": 패키징 빌드에서 SDK 실행 파일 호출 실측 (M1-23) |
-| 에이전트 세션 메모리 | M1 끝 | PRD 5.1 "확인 필요": 세션당 메모리 사용량 실측(약 1GB가 출발점) (M1-23) |
+| 실제 Claude 인증 완주 | M1 끝 | 구독 로그인 또는 API 키로 M1 완료 기준 흐름 1회 수행, 결과를 이슈에 기록 (M1-23, #126) |
+| Windows 완주 | M1 끝 | Windows에서 설치 · named pipe · 앱 종료 후 실행 유지 확인, 결과 코멘트 (M1-23, M1 완료 기준 흐름 15, #158) |
+| 패키징된 앱의 SDK 내장 실행 파일 호출 | M1 끝 | PRD 5.1 "확인 필요": 패키징 빌드에서 SDK 실행 파일 호출 실측 (M1-23, #159) |
+| 에이전트 세션 메모리 | M1 끝 | PRD 5.1 "확인 필요": 세션당 메모리 사용량 실측(약 1GB가 출발점) (M1-23, #160) |
 | 실제 프로젝트 시작 | M2 | PRD "M1 직후 측정 시작": 작은 실제 프로젝트를 BIVE로 시작 |
 | 브랜치 보호 | M0 끝 | 권한이 없으면 `ci`를 required status check로 등록 |
 | ADR 확인 | 수시 | `docs/decisions.md` 제안 항목 채택 · 기각 (특히 ADR-033 변이 생성 방식) |
@@ -366,3 +366,4 @@ PRD 6장 M1 완료 기준 대응: 1회 완주 → 3~7 · NFR-02 역할 접근 �
 - 2026-10-16 M0 흐름 2의 스크린샷 경로를 ADR-043(SCR-00 · 상태 이름)에 맞게 수정 (#109).
 - 2026-11-10 M1 진행 중 생긴 보조 이슈 3개를 M1 표에 추가(보조 이슈): M1-30(#129, PR #123 검토 후속), M1-31(#137, PR #136 검토 후속), M1-32(#122, 시험 안정화). 요약 표 상태 갱신(M0 완료, M1 진행). M1 이슈 29개 → 32개.
 - 2026-11-14 M1 보조 이슈 M1-34(#153, PR #152 2차 검토 후속)를 M1 표 · 커버리지 표(RUN-02 · NFR-06)에 추가. M1 이슈 32개 → 33개.
+- 2026-11-14 머리 상태 줄의 ADR 범위를 "작성 당시"로 고치고, M1-31 제목을 GitHub #137 제목에 맞춤. 4장 needs-human 후보 중 M1 끝 4개에 이슈 번호를 적음(#126 · #158 · #159 · #160) (#36).
