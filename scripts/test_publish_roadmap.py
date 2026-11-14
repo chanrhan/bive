@@ -238,7 +238,7 @@ class PublishRoadmapTest(unittest.TestCase):
         code, out, _ = self.run_main(fake, [("M9-01", title, "#6")])
         self.assertEqual(code, 0, out)
         self.assertEqual(fake.writes(), [])
-        self.assertIn("본문 갱신 0건", out)
+        self.assertIn("본문 갱신 0건, 본문 수동 확인 필요 0건", out)
 
     def test_only_roadmap_sections_are_compared(self):
         title = "사람이 절을 더한 것"
@@ -275,6 +275,64 @@ class PublishRoadmapTest(unittest.TestCase):
             "## 로드맵 키\nM9-01 (M1 후속)\n\n"
             "## 검수에서 나온 것\n- 메모\n" + FOOTER))
         self.assertIn("본문 갱신: #6 M9-01", out)
+        # 갱신하는 이슈에서도 목표 차이를 알린다
+        self.assertIn("본문 참고: #6 M9-01: 목표 문장 다름(고치지 않음)", out)
+
+    def test_uppercase_check_mark_is_kept(self):
+        title = "대문자 체크"
+        body = row_body("M9-01", title, criteria=("기준 하나", "예전 기준")).replace(
+            "- [ ] 기준 하나", "- [X] 기준 하나") + FOOTER
+        fake = FakeGitHub([issue(6, f"[M9] {title}", state="open", body=body)])
+        code, out, _ = self.run_main(fake, [("M9-01", title, "#6")])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(fake.patch_bodies, [row_body("M9-01", title).replace(
+            "- [ ] 기준 하나", "- [X] 기준 하나") + FOOTER])
+
+    def test_unknown_footer_and_extra_lines_in_single_line_sections_are_left_for_manual_check(self):
+        title = "덧붙은 줄"
+        base = row_body("M9-01", title)
+        cases = {
+            "다른 모양 꼬리말": (base + "\n---\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+                          "'로드맵 키' 절에 로드맵이 만들지 않은 줄"),
+            "꼬리말 뒤 세션 링크": (base + FOOTER + "\n\nhttps://claude.ai/code/session_x\n",
+                            "'로드맵 키' 절에 로드맵이 만들지 않은 줄"),
+            "로드맵 키 뒤 사람 메모": (base + "\n참고: #170과 함께 머지\n" + FOOTER,
+                              "'로드맵 키' 절에 로드맵이 만들지 않은 줄"),
+            "꼬리말 두 번": (base + FOOTER + FOOTER, "'로드맵 키' 절에 로드맵이 만들지 않은 줄"),
+            "의존 절 덧붙임": (base.replace("## 의존\n—\n", "## 의존\n—\n(#171 머지 뒤 착수)\n") + FOOTER,
+                         "'의존' 절에 로드맵이 만들지 않은 줄"),
+            "관련 ID 덧붙임": (base.replace("## 관련 ID\nADR-015\n", "## 관련 ID\nADR-015\n참고: PR #180\n") + FOOTER,
+                          "'관련 ID' 절에 로드맵이 만들지 않은 줄"),
+            "값이 달라도 덧붙임이 있으면": (
+                base.replace("## 관련 ID\nADR-015\n", "## 관련 ID\nADR-001\n\n참고: PR #180\n") + FOOTER,
+                "'관련 ID' 절에 로드맵이 만들지 않은 줄"),
+        }
+        for name, (body, note) in cases.items():
+            with self.subTest(name):
+                fake = FakeGitHub([issue(6, f"[M9] {title}", state="open", body=body)])
+                code, out, _ = self.run_main(fake, [("M9-01", title, "#6")])
+                self.assertEqual(code, 0, out)
+                self.assertEqual(fake.writes(), [])
+                self.assertIn(f"본문 수동 확인 필요 (고치지 않음): #6 M9-01 ({note})", out)
+
+    def test_headings_inside_code_fence_are_not_sections(self):
+        title = "펜스"
+        fenced = "## 메모\n```\n## 로드맵 키\nM9-99\n```\n"
+        cases = {
+            "```": (row_body("M9-01", title) + fenced + FOOTER, None),
+            "~~~ (펜스로 보지 않아 절이 둘)": (row_body("M9-01", title) + fenced.replace("```", "~~~") + FOOTER,
+                                       "'로드맵 키' 절 2개"),
+        }
+        for name, (body, manual) in cases.items():
+            with self.subTest(name):
+                fake = FakeGitHub([issue(6, f"[M9] {title}", state="open", body=body)])
+                code, out, _ = self.run_main(fake, [("M9-01", title, "#6")])
+                self.assertEqual(code, 0, out)
+                self.assertEqual(fake.writes(), [])
+                if manual:
+                    self.assertIn(f"본문 수동 확인 필요 (고치지 않음): #6 M9-01 ({manual})", out)
+                else:
+                    self.assertIn("본문 갱신 0건, 본문 수동 확인 필요 0건", out)
 
     def test_goal_difference_is_reported_not_patched(self):
         title = "목표만 다른 것"
@@ -335,6 +393,20 @@ class PublishRoadmapTest(unittest.TestCase):
             got = pr.gh_list(f"repos/{REPO}/issues?state=all&milestone=9")
         self.assertEqual(len(got), 100)
         self.assertEqual([c[1].rsplit("page=", 1)[1] for c in fake.calls], ["1", "2"])
+
+    def test_list_stops_with_failure_when_page_is_ignored(self):
+        calls = []
+
+        def full_page(method, path, payload=None, extra=()):
+            calls.append(path)
+            if len(calls) > pr.MAX_PAGES + 5:
+                raise AssertionError("페이지 상한 없이 계속 읽음")
+            return "".join(json.dumps({"number": n}) + "\n" for n in range(100))
+
+        with mock.patch.object(pr, "gh", full_page):
+            with self.assertRaisesRegex(pr.GhError, "50쪽"):
+                pr.gh_list(f"repos/{REPO}/labels")
+        self.assertEqual(len(calls), pr.MAX_PAGES)
 
     # ------------------------------------------------------------ 중복 대응 · 행 번호 원인 · 검증 (M2-10)
 
