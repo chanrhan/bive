@@ -5,6 +5,7 @@
 // 경로로만 조작한다: project.open → settings.update → requirement.create → rule-writer 제안 승인 → run.create → run.get.
 // 단언용 읽기(판정 기록 · 세션 기록)만 실행이 끝난 뒤 저장소를 직접 연다.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +15,7 @@ import {
   type Proposal,
   type Requirement,
   type Rule,
+  type Run,
   type RunGetResult,
   type StepKind,
 } from '@bive/shared';
@@ -25,11 +27,16 @@ import { connectWhenReady, type TestClient } from '../../test/helpers/client.js'
 import { COMPLETE_SETTINGS, human, withProject } from '../../test/helpers/engine-harness.js';
 import {
   cleanup,
+  leftoverProcesses,
+  type LeftoverProcess,
   makeBiveHome,
   REPO_ROOT,
+  sleep,
   type Spawned,
   spawnCli,
   spawnScript,
+  terminate,
+  trackedHomes,
   waitFor,
 } from '../../test/helpers/process.js';
 
@@ -44,6 +51,10 @@ export const RUN_BRANCH = 'bive/run-EXE-001';
 const START_TIMEOUT_MS = 30_000;
 /** rule-writer 제안 등록 대기 */
 const PROPOSAL_TIMEOUT_MS = 30_000;
+/** 정리: SIGTERM 뒤 오케스트레이터가 진행 중 실행(판정 포함)을 멈추고 끝나기를 기다리는 시간 */
+const TERMINATE_TIMEOUT_MS = 30_000;
+/** 정리: SIGKILL 뒤 남은 프로세스가 사라지기를 기다리는 시간 */
+const LEFTOVER_TIMEOUT_MS = 10_000;
 
 const fixtureDirs: string[] = [];
 const clients: TestClient[] = [];
@@ -53,10 +64,52 @@ export interface PipelineE2e {
   biveHome: string;
   /** 픽스처 복사본 (프로젝트 폴더, 기준 브랜치 `main`) */
   repo: string;
+  /** 지금 오케스트레이터 (재기동하면 바뀐다) */
   orchestrator: Spawned;
   client: TestClient;
   projectId: string;
+  /** 오케스트레이터 기동 방법 (재기동에 같은 값을 쓴다) */
+  launch: { entry: string | undefined; env: Record<string, string> };
 }
+
+/** 오케스트레이터 출력 (실패 메시지에 붙인다). */
+export const orchestratorOutput = (e: Pick<PipelineE2e, 'orchestrator'>): string =>
+  `오케스트레이터 출력:\n${e.orchestrator.stdout}\n오케스트레이터 오류 출력:\n${e.orchestrator.stderr}`;
+
+/** 기다리다 시간이 다 되면 오케스트레이터 출력을 붙여 던진다. */
+const waitWithOutput = async (
+  e: Pick<PipelineE2e, 'orchestrator'>,
+  condition: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+  what: string,
+): Promise<void> => {
+  try {
+    await waitFor(condition, timeoutMs, what);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${message}\n${orchestratorOutput(e)}`, { cause: error });
+  }
+};
+
+/** 오케스트레이터를 띄우고 기동 출력 · 파이프 접속까지 기다린다. */
+const launchOrchestrator = async (
+  scenario: string,
+  launch: PipelineE2e['launch'],
+): Promise<{ orchestrator: Spawned; client: TestClient }> => {
+  const orchestrator =
+    launch.entry === undefined ? spawnCli(launch.env) : spawnScript(launch.entry, launch.env);
+  await waitWithOutput(
+    { orchestrator },
+    () => orchestrator.stdout.includes('오케스트레이터 기동'),
+    START_TIMEOUT_MS,
+    `오케스트레이터 기동 (${scenario})`,
+  );
+  expect(orchestrator.stdout).toContain(`에이전트 scripted · 시나리오 ${scenario}`);
+  const paths = runPaths(String(launch.env.BIVE_HOME));
+  const client = await connectWhenReady(paths.pipe, () => fs.readFileSync(paths.token, 'utf8'));
+  clients.push(client);
+  return { orchestrator, client };
+};
 
 /** 읽기 전용 git (사용자 설정 · 서명과 무관한 조회만 한다). */
 export const git = (cwd: string, ...args: string[]): string =>
@@ -110,24 +163,34 @@ export const startPipeline = async (
     BIVE_AGENT: 'scripted',
     BIVE_SCENARIO: scenario,
   };
-  const orchestrator =
-    options.entry === undefined ? spawnCli(env) : spawnScript(options.entry, env);
-  await waitFor(
-    () => orchestrator.stdout.includes('오케스트레이터 기동'),
-    START_TIMEOUT_MS,
-    `오케스트레이터 기동 (${scenario})`,
-  );
-  expect(orchestrator.stdout).toContain(`에이전트 scripted · 시나리오 ${scenario}`);
-  const paths = runPaths(biveHome);
-  const client = await connectWhenReady(paths.pipe, () => fs.readFileSync(paths.token, 'utf8'));
-  clients.push(client);
+  const launch = { entry: options.entry, env };
+  const { orchestrator, client } = await launchOrchestrator(scenario, launch);
   const { project } = await client.call('project.open', { path: repo });
   await client.call('settings.update', {
     projectId: project.id,
     patch: COMPLETE_SETTINGS,
     author: human,
   });
-  return { scenario, biveHome, repo, orchestrator, client, projectId: project.id };
+  return { scenario, biveHome, repo, orchestrator, client, projectId: project.id, launch };
+};
+
+/**
+ * 오케스트레이터를 SIGKILL로 강제 종료한다(비정상 종료 재현). 대상은 이 시험이 띄운 자식 핸들뿐이다
+ * (지어낸 pid · 프로세스 그룹에 신호를 보내지 않는다). 끝날 때까지 기다린다.
+ */
+export const killOrchestrator = async (e: PipelineE2e): Promise<void> => {
+  const { child } = e.orchestrator;
+  if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  const exit = await e.orchestrator.exited;
+  expect(exit.signal).toBe('SIGKILL');
+  e.client.destroy();
+};
+
+/** 같은 BIVE_HOME · 시나리오로 오케스트레이터를 다시 띄우고 새 연결로 바꾼다. */
+export const restartOrchestrator = async (e: PipelineE2e): Promise<void> => {
+  const { orchestrator, client } = await launchOrchestrator(e.scenario, e.launch);
+  e.orchestrator = orchestrator;
+  e.client = client;
 };
 
 /** 요구사항을 저장하고 rule-writer 세션이 제안을 `count`개 등록할 때까지 기다린다. */
@@ -142,7 +205,8 @@ export const saveRequirement = async (
     author: human,
   });
   let proposals: Proposal[] = [];
-  await waitFor(
+  await waitWithOutput(
+    e,
     async () => {
       proposals = (
         await e.client.call('proposal.list', { projectId: e.projectId, state: 'pending' })
@@ -167,29 +231,86 @@ export const approveRule = async (e: PipelineE2e, proposal: Proposal): Promise<R
   return applied.rule;
 };
 
-/** 실행을 만들고(사람) 끝 상태(`merged` · `failed` · `budget_exceeded`)가 될 때까지 run.get을 폴링한다. */
-export const runToEnd = async (
+/** 실행을 만든다 (사람). */
+export const createRun = async (e: PipelineE2e, ruleIds: string[]): Promise<Run> =>
+  (await e.client.call('run.create', { projectId: e.projectId, ruleIds, author: human })).run;
+
+/** 실행이 끝 상태(`merged` · `failed` · `budget_exceeded`)가 될 때까지 run.get을 폴링한다. */
+export const waitForRunEnd = async (
   e: PipelineE2e,
-  ruleIds: string[],
+  runId: string,
   timeoutMs: number,
 ): Promise<RunGetResult> => {
-  const created = await e.client.call('run.create', {
-    projectId: e.projectId,
-    ruleIds,
-    author: human,
-  });
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const detail = await e.client.call('run.get', { projectId: e.projectId, id: created.run.id });
+    const detail = await e.client.call('run.get', { projectId: e.projectId, id: runId });
     if (isTerminalRunStatus(detail.run.status)) return detail;
     if (Date.now() > deadline) {
       throw new Error(
         `시간 초과: 실행 종료 (${e.scenario}, 상태 ${detail.run.status}, 단계 ${String(detail.run.currentStep)})\n` +
-          `오케스트레이터 출력:\n${e.orchestrator.stdout}`,
+          orchestratorOutput(e),
       );
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await sleep(500);
   }
+};
+
+/** 실행을 만들고(사람) 끝 상태가 될 때까지 기다린다. */
+export const runToEnd = async (
+  e: PipelineE2e,
+  ruleIds: string[],
+  timeoutMs: number,
+): Promise<RunGetResult> => waitForRunEnd(e, (await createRun(e, ruleIds)).id, timeoutMs);
+
+/** 파일이 생길 때까지 기다린다 (시나리오의 pause 대기 파일 등). */
+export const waitForFile = (
+  e: PipelineE2e,
+  file: string,
+  timeoutMs: number,
+  what: string,
+): Promise<void> => waitWithOutput(e, () => fs.existsSync(file), timeoutMs, what);
+
+/** 시나리오 pause 대기 파일 (`{{biveHome}}/run/pause`) */
+export const pauseFile = (e: PipelineE2e): string => path.join(e.biveHome, 'run', 'pause');
+
+/** SHA-256 16진수 (`hashAcceptanceFiles`와 같은 계산). */
+export const sha256 = (content: string | Buffer): string =>
+  createHash('sha256').update(content).digest('hex');
+
+/** git 객체 내용 그대로 (`<커밋>:<경로>`). */
+export const gitBlob = (cwd: string, spec: string): Buffer =>
+  execFileSync('git', ['cat-file', 'blob', spec], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+
+/**
+ * 사람이 프로젝트 폴더에서 커밋한다(기준 브랜치에 직접 올리는 커밋). 서명 · 훅 등 사용자 전역 설정과 무관하게
+ * `scripts/reset-fixture.sh`와 같은 주체 · 설정으로 커밋한다.
+ */
+export const commitAsUser = (
+  repo: string,
+  file: string,
+  content: string,
+  message: string,
+): string => {
+  fs.writeFileSync(path.join(repo, file), content);
+  const userGit = (...args: string[]): string =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.name=BIVE Fixture',
+        '-c',
+        'user.email=fixture@bive.invalid',
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        'core.hooksPath=/dev/null',
+        ...args,
+      ],
+      { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    ).trim();
+  userGit('add', '--', file);
+  userGit('commit', '-q', '-m', message);
+  return userGit('rev-parse', 'HEAD');
 };
 
 /** 단계 시도 목록 `종류#시도:상태` (종류를 주면 그 종류만). */
@@ -202,9 +323,35 @@ export const attempts = (detail: RunGetResult, ...kinds: StepKind[]): string[] =
 export const readStore = <T>(e: PipelineE2e, fn: (store: ProjectStore) => T): T =>
   withProject(e.biveHome, e.projectId, fn);
 
-/** 연결 · 오케스트레이터 · BIVE_HOME · 픽스처 복사본을 정리한다. */
+const describeLeftovers = (leftovers: readonly LeftoverProcess[]): string =>
+  leftovers.map((p) => `pid ${String(p.pid)} (${p.cwd}): ${p.command}`).join('\n');
+
+/**
+ * 연결 · 오케스트레이터 · BIVE_HOME · 픽스처 복사본을 정리한다.
+ * 1. 오케스트레이터에 SIGTERM을 보내 진행 중 실행(판정 러너의 하위 프로세스 포함)을 멈추고 끝나기를 기다린다(최대 30초)
+ * 2. 그래도 남은 것은 `cleanup`이 SIGKILL한다(자기가 띄운 자식 핸들과 `BIVE_HOME`이 이 시험의 것인 pid만)
+ * 3. 이 시험의 BIVE_HOME 안을 작업 폴더로 쓰는 프로세스가 남았는지 확인한다. 남았으면 죽이지 않고 목록과 함께 실패한다
+ *    (판정 하위 프로세스는 `BIVE_HOME` 환경 변수가 없어 소유를 확정할 수 없으므로 정리 대상이 아니라 결함 신호로 본다)
+ */
 export const cleanupPipeline = async (): Promise<void> => {
   for (const client of clients.splice(0)) client.destroy();
-  await cleanup();
-  for (const dir of fixtureDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  const homes = trackedHomes();
+  let leftovers: LeftoverProcess[];
+  try {
+    await terminate(TERMINATE_TIMEOUT_MS);
+    await cleanup();
+    const deadline = Date.now() + LEFTOVER_TIMEOUT_MS;
+    for (;;) {
+      leftovers = homes.flatMap(leftoverProcesses);
+      if (leftovers.length === 0 || Date.now() > deadline) break;
+      await sleep(250);
+    }
+  } finally {
+    for (const dir of fixtureDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  }
+  if (leftovers.length > 0) {
+    throw new Error(
+      `정리 뒤 남은 프로세스 (시험의 BIVE_HOME 안):\n${describeLeftovers(leftovers)}`,
+    );
+  }
 };

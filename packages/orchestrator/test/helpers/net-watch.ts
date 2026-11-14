@@ -143,8 +143,9 @@ export const installNetWatch = (options: NetWatchOptions): (() => void) => {
     ...connectTarget(args),
   }));
 
-  // UDP: connect(port[, address][, cb]) · send(msg[, offset, length][, port][, address][, cb]). 주소를 생략하면 Node 기본값
-  // `localhost`(외부로 센다). 연결된 소켓의 send(포트 없음)는 connect에서 기록했으므로 건너뛴다
+  // UDP: connect(port[, address][, cb]) · send(msg[, offset, length][, port][, address][, cb]). 주소를 생략하면 Node는
+  // 루프백(udp4 `127.0.0.1` · udp6 `::1`)으로 보내지만, 주소가 정해지지 않은 호출로 보고 `localhost`로 기록해 보수적으로 외부로 센다.
+  // 연결된 소켓의 send(포트 없음)는 connect에서 기록했으므로 건너뛴다
   const udpSocket = dgram.Socket.prototype as unknown as Record<string, unknown>;
   const udpTarget = (port: unknown, address: unknown): { host: string; port: number | null } => ({
     host: typeof address === 'string' && address.length > 0 ? address : 'localhost',

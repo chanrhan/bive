@@ -26,9 +26,12 @@ import { waitFor } from './helpers/process.js';
 
 const REQUIRED_SCENARIOS = [
   'budget-exceeded',
+  'extra-mcp',
   'fail-check',
   'false-pass',
+  'forbidden-write',
   'happy-path',
+  'merge-conflict',
   'pause-implement',
 ];
 
@@ -101,7 +104,7 @@ const adapterFor = (name: string, biveHome = '/tmp/bive-home'): ScriptedAdapter 
   new ScriptedAdapter({ scenario: loadScenario(name), biveHome, pollIntervalMs: 10 });
 
 describe('시나리오 파일 스키마', () => {
-  it('필수 시나리오 5개가 scenarios/에 있고 모두 스키마 검증을 통과한다', () => {
+  it('필수 시나리오가 scenarios/에 있고 모두 스키마 검증을 통과한다', () => {
     const names = listScenarios();
     for (const name of REQUIRED_SCENARIOS) {
       expect(names).toContain(name);
@@ -139,6 +142,18 @@ describe('시나리오 파일 스키마', () => {
       pause: { file: '{{biveHome}}/run/pause', until: 'removed' },
     });
     expect(sessions[1]?.turns.some((turn) => 'pause' in turn)).toBe(false);
+  });
+
+  it('extra-mcp는 테스트 작성 세션에만 bive 밖의 MCP 서버를 더 보고한다 (ADR-077)', () => {
+    const scenario = loadScenario('extra-mcp');
+    expect(scenario.roles['test-writer']?.sessions.map((s) => s.extraMcpServers)).toEqual([
+      ['user-filesystem'],
+    ]);
+    for (const role of ['rule-writer', 'implementer'] as const) {
+      for (const session of scenario.roles[role]?.sessions ?? []) {
+        expect(session.extraMcpServers).toBeUndefined();
+      }
+    }
   });
 
   const valid = {
@@ -362,6 +377,20 @@ describe('ScriptedAdapter 재생', () => {
       adapter.startSession(spec({ role: 'implementer', runId: 'r1', roleSessionIndex: 1 })),
     );
     expect(resultOf(events).total_cost_usd).toBe(0.0571);
+  });
+
+  it('extraMcpServers가 있으면 init의 MCP 서버 목록이 bive 뒤에 그 이름을 더한다', async () => {
+    const adapter = adapterFor('extra-mcp');
+    const [writerInit] = await collect(
+      adapter.startSession(
+        spec({ role: 'test-writer', runId: 'r1', vars: { ruleId: 'RULE-001' } }),
+      ),
+    );
+    expect(writerInit).toMatchObject({ type: 'init', mcpServers: ['bive', 'user-filesystem'] });
+    const [implementerInit] = await collect(
+      adapter.startSession(spec({ role: 'implementer', runId: 'r1' })),
+    );
+    expect(implementerInit).toMatchObject({ type: 'init', mcpServers: ['bive'] });
   });
 
   it('세션 한도를 넘는 성공 결과는 SDK처럼 한도 subtype으로 끝나고 값은 파일 그대로다', async () => {

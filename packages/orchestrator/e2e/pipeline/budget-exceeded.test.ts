@@ -1,7 +1,9 @@
 // 파이프라인 e2e: 예산 초과 (M1-21, architecture.md 8장 "예산 초과 subtype", COST-01 · RUN-08).
 // 테스트 작성 · Red 확인(실제 판정 러너)은 정상으로 끝나고, 구현 세션이 결과 subtype error_max_budget_usd로 끝난다.
-// 실행은 budget_exceeded, 브랜치 · 워크트리 보존, 구현 판정 · 병합 없음이어야 한다. 구현 세션은 다시 열리지 않는다.
+// 실행은 budget_exceeded, 브랜치 · 워크트리 보존(구현 세션이 고치던 미커밋 변경 포함), 구현 판정 · 병합 없음이어야 한다.
+// 구현 세션은 다시 열리지 않는다.
 import fs from 'node:fs';
+import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -14,6 +16,7 @@ import {
   mainTip,
   mergeCount,
   readStore,
+  ROUTE,
   RUN_BRANCH,
   runToEnd,
   saveRequirement,
@@ -71,6 +74,10 @@ describe('budget-exceeded: budget_exceeded, 브랜치 보존, 병합 없음', ()
     const worktree = String(done.run.worktreePath);
     expect(fs.existsSync(worktree)).toBe(true);
     expect(git(worktree, 'rev-parse', 'HEAD')).toBe(done.run.headCommit);
+    // 미커밋 작업 보존: 구현 세션이 한도에 닿기 전에 고친 라우트가 커밋되지 않은 변경으로 워크트리에 남는다
+    expect(git(worktree, 'status', '--porcelain')).not.toBe('');
+    expect(git(worktree, 'status', '--porcelain', '--', ROUTE)).toBe(`M ${ROUTE}`);
+    expect(fs.readFileSync(path.join(worktree, ROUTE), 'utf8')).toContain("const db = 'ok';");
     // 병합 없음: main 그대로, merge commit 0개, 인수 테스트도 main에 없다
     expect(mainTip(e)).toBe(base);
     expect(mergeCount(e)).toBe(0);

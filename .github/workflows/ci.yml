@@ -1,4 +1,6 @@
-# 저장소 기본 검사. 잡 이름 `ci`는 브랜치 보호의 필수 상태 검사 이름으로 쓰이므로 바꾸지 않는다.
+# 저장소 기본 검사. 검사 이름 `ci`는 브랜치 보호의 필수 상태 검사 이름으로 쓰이므로 바꾸지 않는다.
+# 구조 (ADR-077): 잡 `checks`(린트 · 타입 · 단위 · 빌드 · 형식 · 픽스처 · 화면 e2e)와 `pipeline-e2e`(파이프라인 e2e)가
+# 병렬로 돌고, 이름이 `ci`인 집계 잡이 둘을 기다려 둘 다 성공일 때만 성공한다.
 name: ci
 
 on:
@@ -16,8 +18,8 @@ permissions:
   contents: read
 
 jobs:
-  ci:
-    name: ci
+  checks:
+    name: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -72,13 +74,6 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: '1'
 
-      # 파이프라인 e2e (M1-21, architecture.md 8장, ADR-071): 픽스처 복사본 · 실제 git · 실제 판정 러너 · ScriptedAdapter로
-      # 요구사항 저장부터 실행 종료까지. 시험마다 실제 설치 · next build를 여러 번 한다 (이 VM 단독 실측은 PR 본문)
-      - name: 파이프라인 e2e
-        run: pnpm e2e:pipeline
-        env:
-          NEXT_TELEMETRY_DISABLED: '1'
-
       # 화면 e2e (M0-07, architecture.md 8장). 브라우저 처리 (ADR-043):
       # 러너에 깔린 Google Chrome이 있으면 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH로 그것을 쓰고 내려받지 않는다.
       # 없을 때만 Playwright Chromium을 설치하고 ~/.cache/ms-playwright를 Playwright 버전별로 캐시한다.
@@ -119,3 +114,59 @@ jobs:
           path: artifacts/
           if-no-files-found: ignore
           retention-days: 14
+
+  # 파이프라인 e2e (M1-21 · M1-29, architecture.md 8장, ADR-071 · ADR-077): 픽스처 복사본 · 실제 git · 실제 판정 러너 ·
+  # ScriptedAdapter로 요구사항 저장부터 실행 종료까지. 시험마다 실제 설치 · next build를 여러 번 해서 `checks`와 나눠 병렬로 돈다
+  pipeline-e2e:
+    name: pipeline-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v7
+
+      - name: pnpm 설치
+        uses: pnpm/action-setup@v6
+
+      - name: Node 22 설치 · pnpm 저장소 캐시
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            fixtures/sample-next-app/pnpm-lock.yaml
+
+      - name: 의존성 설치
+        run: pnpm install --frozen-lockfile
+
+      # 시험의 픽스처 복사본(`scripts/reset-fixture.sh`)과 판정 러너의 설치가 이 설치로 채운 pnpm 저장소를 쓴다
+      - name: 픽스처 의존성 설치
+        working-directory: fixtures/sample-next-app
+        run: pnpm install --frozen-lockfile
+
+      - name: 파이프라인 e2e
+        run: pnpm e2e:pipeline
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+
+  # 필수 검사 `ci`: 두 잡이 모두 성공일 때만 성공한다. 한쪽이 실패 · 취소 · 건너뜀이어도 이 잡은 `always()`로 돌아
+  # 실패로 끝난다(건너뛴 잡은 브랜치 보호에서 성공으로 처리되므로 이 잡 자체가 건너뛰어지면 안 된다).
+  ci:
+    name: ci
+    needs: [checks, pipeline-e2e]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: 검사 결과 확인
+        env:
+          CHECKS: ${{ needs.checks.result }}
+          PIPELINE: ${{ needs.pipeline-e2e.result }}
+        run: |
+          echo "checks: $CHECKS"
+          echo "pipeline-e2e: $PIPELINE"
+          if [ "$CHECKS" != "success" ] || [ "$PIPELINE" != "success" ]; then
+            echo "필수 잡이 성공하지 않았습니다" >&2
+            exit 1
+          fi
