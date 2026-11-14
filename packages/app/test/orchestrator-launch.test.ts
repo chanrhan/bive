@@ -3,7 +3,9 @@
 // 제한: 프로세스를 띄우는 묶음은 30초(부하 평균 12 이상에서 실제 오케스트레이터 기동 테스트가 4초를 넘어 기본 5초에 닿았다, #122).
 import { type ChildProcess, spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { ErrorCode } from '@bive/shared';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -166,6 +168,62 @@ describe('main 세션: 오케스트레이터 기동 · 접속 · app.pid', PROCE
     await sleep(200);
     expect(existing.exitCode).toBeNull();
     expect(readPidFile(paths.orchestratorPid)).toBe(existing.pid);
+  });
+
+  it('앱을 다시 띄우면 새 오케스트레이터를 만들지 않고 같은 pid에 붙어, 앞 앱이 남긴 상태를 그대로 본다 (M1-20)', async () => {
+    const home = makeBiveHome();
+    const paths = appRunPaths(home);
+    const folder = mkdtempSync(path.join(os.tmpdir(), 'bive-app-project-'));
+    try {
+      // 앱 1: 기동 · 프로젝트 열기 · 종료
+      const { spawn, calls } = recordingSpawn();
+      const first = startMainSession({
+        biveHome: home,
+        command: sourceCommand(home),
+        spawn,
+        timeoutMs: 20_000,
+      });
+      const launched = await first.link.connect();
+      expect(launched.launched).toBe(true);
+      expect(calls).toHaveLength(1);
+      const orchestratorPid = readPidFile(paths.orchestratorPid);
+      expect(orchestratorPid).toBe(launched.spawnedPid);
+      const opened = (await first.link.request('project.open', { path: folder })) as {
+        project: { id: string };
+      };
+      const before = (await first.link.request('system.status')) as { uptimeMs: number };
+      const beforeAt = Date.now();
+      first.dispose();
+      expect(existsSync(paths.appPid)).toBe(false);
+      await sleep(300);
+      expect(orchestratorPid !== null && isProcessAlive(orchestratorPid)).toBe(true);
+
+      // 앱 2: 기동 함수를 부르면 실패하도록 두고 붙는다
+      const second = startMainSession({
+        biveHome: home,
+        command: sourceCommand(home),
+        spawn: forbiddenSpawn,
+      });
+      const attached = await second.link.connect();
+      expect(attached).toMatchObject({ launched: false, spawnedPid: null });
+      expect(readPidFile(paths.orchestratorPid)).toBe(orchestratorPid);
+      // 같은 프로세스: 가동 시간이 이어지고, 메모리에만 있는 "마지막으로 연 프로젝트"가 그대로다
+      const after = (await second.link.request('system.status')) as {
+        uptimeMs: number;
+        connections: number;
+        runsInProgress: number;
+      };
+      expect(after.uptimeMs).toBeGreaterThanOrEqual(
+        before.uptimeMs + (Date.now() - beforeAt) - 100,
+      );
+      expect(after).toMatchObject({ connections: 1, runsInProgress: 0 });
+      await expect(second.link.request('project.current')).resolves.toMatchObject({
+        project: { id: opened.project.id, rootPath: folder },
+      });
+      second.dispose();
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
   });
 
   it('dispose는 app.pid가 다른 pid를 가리키면 지우지 않는다', () => {

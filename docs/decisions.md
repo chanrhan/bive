@@ -809,6 +809,19 @@
   - 위치: `packages/app/src/renderer/src/screens/norm-detail/`(`RuleDetail` · `ruleDetailView` · `useRuleDetailData`, prototype-map의 SCR-06 경로). 요구사항 상세(#38)가 자식 규칙을 펼칠 때 `RuleDetail`을 다시 쓴다. 체크리스트 `e2e/checklists/scr-06.ts`(`ruleDetailChecklist`, 상태 기본 · 로딩 · 에러)에 #38이 요구사항 상태를 더한다.
 - 결과: M1-28. `packages/app/e2e/scr-06-rule.spec.ts`, `packages/app/test/rule-detail-view.test.ts`, `packages/orchestrator/test/rule.test.ts`(`judgment.list`), `packages/shared/test/protocol.test.ts`. 한계: 이력은 50건까지이고 더 보기는 없다. 판정 기록의 미래 시각 위조 행은 최신 판정에서는 빠지지만(ADR-069) 이력에는 그대로 보인다(기록된 사실의 표시). 기각 시: 이력 범위 · 항목은 `rule-handlers.ts`의 `judgmentEntries`와 `RuleDetail`의 `History`만, 실패 원인 범위는 `ruleDetailView.ts`의 `failureCases`만 고친다.
 
+## ADR-074 앱 종료 후 실행 유지 · 재접속의 시험 방식 ("앱 프로세스"의 정의)
+
+- 상태: 제안 (에이전트) · 2026-11-14
+- 맥락: M1-20(#33)은 실행 중 앱 프로세스가 끝난 동안에도 오케스트레이터가 살아 있고 실행이 `merged`까지 가는지(`orchestrator/e2e/pipeline/app-exit.test.ts`), 다시 띄운 앱이 같은 pid에 붙어 진행 상태를 그대로 보는지(`app/test/orchestrator-launch.test.ts`), 진행 중 실행이 있으면 `BIVE_IDLE_SHUTDOWN_MS`가 지나도 종료하지 않는지(`orchestrator/test/lifecycle.test.ts`)를 요구한다. 이 VM에는 GUI가 없고 Electron 창을 시험에서 띄웠다 닫는 경로는 없다. 무엇을 "앱 프로세스"로 볼지, 진행 상태를 무엇으로 확인할지는 문서에 없다. 확인해 보니 제품 동작은 이미 세 기준을 충족했다: 앱은 오케스트레이터를 분리(detached) 프로세스로 띄우고 종료 때 연결 · `app.pid`만 정리하며(ADR-042), 실행 엔진은 실행마다 `beginRun`으로 유휴 종료를 막는다.
+- 결정:
+  - 제품 코드는 고치지 않고 시험만 더한다.
+  - "앱 프로세스" = `packages/app/test/helpers/app-process.ts`. Electron 없이 앱 main과 같은 코드(`orchestratorCommand` → `startMainSession` → `link.connect`, 잠금 pid가 없으면 분리 프로세스 기동)를 쓰는 Node 프로세스다. 렌더러 요청 대신 표준 입력의 JSON 줄을 같은 링크로 보내고, 표준 입력이 닫히면 `will-quit`처럼 `session.dispose()` 뒤 끝난다. 앱의 개발 실행과 달리 Node 경로는 시험 프로세스의 것(`process.execPath`)을 쓴다. 오케스트레이터 패키지의 e2e는 이 파일을 import하지 않고 프로세스로만 띄운다(`e2e/pipeline/app-process.ts`, 패키지 의존 방향 유지).
+  - `app-exit.test.ts`: roadmap M1 완료 기준 흐름 11을 따른다. 시나리오 `pause-implement`, `BIVE_IDLE_SHUTDOWN_MS=10000`. 앱 1이 기동 · 규칙 승인 · `run.create` 뒤 종료 → 앱 없이(연결 0개) 테스트 작성 · Red 확인(실제 판정) · 구현 대기 파일까지 진행하고, 앱 종료 뒤 유휴 시간이 넘게 지나도 같은 pid(`/proc/<pid>/environ`의 `BIVE_HOME`까지 확인)가 살아 있음 → 앱 2가 기동 없이 같은 pid에 붙어 `runsInProgress: 1`, 이어진 가동 시간, 구현 단계 진행 중을 봄 → 앱 2 종료, 대기 파일 삭제 → 앱 없이 main에 merge commit → 앱 3이 같은 pid에 붙어 `merged`를 본다. 병합 뒤에는 유휴 시간(10초) 안에 앱 3이 붙어야 한다.
+  - `orchestrator-launch.test.ts`: 같은 프로세스 안에서 main 세션 2개를 차례로 만든다(앞 세션 `dispose` = 앱 종료). 진행 상태는 같은 프로세스에서만 남는 값으로 확인한다: 이어지는 `system.status.uptimeMs`와 메모리에만 있는 `project.current`(앱 1이 연 프로젝트). 진행 중 실행을 다시 붙은 앱이 보는 것은 판정 러너가 필요해 `app-exit.test.ts`가 맡는다.
+  - `lifecycle.test.ts`: 시험 진입점(`test/helpers/engine-orchestrator.ts`, 시험 단계 실행기 · 시나리오 `regress-pause`)을 `BIVE_IDLE_SHUTDOWN_MS=1500`으로 띄우고 실제 `run.create` → 구현 대기 중 연결을 닫고 유휴 시간의 3배 동안 살아 있음 → 대기 해제 뒤 `merged`, 그다음 스스로 종료 코드 0으로 끝남을 확인한다. 실행 추적(`beginRun`)을 빼면 이 시험이 실패함을 확인했다.
+  - 시험이 죽이는 프로세스는 자기가 띄운 자식 핸들과 잠금 파일 pid 중 `BIVE_HOME`이 그 시험의 것인 프로세스뿐이다(`test/helpers/process.ts`의 cleanup).
+- 결과: `pnpm e2e:pipeline`에 파일 1개(이 VM 단독 약 80초)가 늘어 `ci` 잡이 그만큼 길어진다. Windows의 앱 종료 후 유지는 여전히 needs-human(M1-23)이다. 실제 Electron 창을 닫는 경로(`will-quit`)는 스모크 범위이고 이 시험은 그 처리 함수(`session.dispose`)만 거친다. 기각 시: 앱 프로세스를 실제 Electron으로 바꾸려면 `e2e/pipeline/app-process.ts`의 `startApp`만 고친다.
+
 ## ADR-075 무결성 시험: 시험 위치 · 금지 도구 판별 · 작업 디렉터리 검사 시점 · 네트워크 감시 방법과 범위
 
 - 상태: 제안 (에이전트) · 2026-11-14
