@@ -1,12 +1,14 @@
 // 오케스트레이터 기동 · 종료: 어댑터 선택 → 단일 인스턴스 잠금 → 토큰 → 파이프 서버 → 수명 감시
 // (PRD 5.1, ADR-027 · ADR-041 · ADR-049). 규칙 자동 생성 세션(ADR-062)은 선택된 어댑터로 돈다.
 // 연결을 받기 전에 `running` 실행을 `interrupted`로 바꾸고(자동 재개 없음) 실행 엔진(ADR-066)을 붙인다.
+// 실행 상태 저장마다 인증된 연결에 `event.step.updated` · `event.run.updated`를 보낸다 (ADR-076).
 import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 
 import { type AgentSelection, selectAgent } from './agent/select.js';
 import { type InterruptedRun, PipelineEngine } from './engine/pipeline-engine.js';
 import type { StepExecutors } from './engine/types.js';
+import { RunEventPublisher } from './events/run-events.js';
 import { createHandlers } from './ipc/handlers.js';
 import { PipeServer } from './ipc/server.js';
 import { NetPipeTransport, type PipeTransport } from './ipc/transport.js';
@@ -26,6 +28,8 @@ export interface OrchestratorOptions {
   /** 연결 0개 · 진행 중 실행 0개 상태가 이만큼 이어지면 종료 (기본 300000) */
   idleShutdownMs?: number;
   helloTimeoutMs?: number;
+  /** 연결별 알림 쓰기 상한 (기본 5초, 넘기면 그 연결을 끊는다, ADR-076) */
+  notifyTimeoutMs?: number;
   platform?: NodeJS.Platform;
   username?: string;
   transport?: PipeTransport;
@@ -34,7 +38,7 @@ export interface OrchestratorOptions {
   agent?: AgentSelection;
   /** 진행 기록 한 줄 (규칙 작성 세션 시작 · 생략 · 종료, 실행 엔진, 기본 표준 출력) */
   log?: (line: string) => void;
-  /** 실행 엔진의 단계 실행기 (테스트 작성 · Red 확인 #28, 구현 · 검사 · 병합 #29, 화면 갱신 #32) */
+  /** 실행 엔진의 단계 실행기 (테스트 작성 · Red 확인 #28, 구현 · 검사 · 병합 #29, 화면 갱신 #32 ADR-076) */
   executors?: StepExecutors;
 }
 
@@ -187,11 +191,15 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       tasks: lifecycle,
       log,
     });
+    // 실행 저장 · 화면 갱신 단계 → event.step.updated · event.run.updated (ADR-076). 서버를 만들기 전(기동 중
+    // 중단 표시)에는 받을 연결이 없으므로 보내지 않는다
+    const runEvents = new RunEventPublisher({ biveHome: options.biveHome, sink: () => server });
     const engine = new PipelineEngine({
       biveHome: options.biveHome,
       agent: agent.adapter,
       runs: lifecycle,
       log,
+      onEvent: (event) => runEvents.publish(event),
       ...(options.executors === undefined ? {} : { executors: options.executors }),
     });
     // 잠금을 잡은 뒤 · 연결을 받기 전: 비정상 종료로 남은 running 실행은 interrupted (PRD 5.1, 자동 재개 없음)
@@ -217,6 +225,9 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         engine,
       }),
       ...(options.helloTimeoutMs === undefined ? {} : { helloTimeoutMs: options.helloTimeoutMs }),
+      ...(options.notifyTimeoutMs === undefined
+        ? {}
+        : { notifyTimeoutMs: options.notifyTimeoutMs }),
       onConnectionOpened: () => lifecycle.connectionOpened(),
       onConnectionClosed: () => lifecycle.connectionClosed(),
     });

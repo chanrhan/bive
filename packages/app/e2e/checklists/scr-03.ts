@@ -1,7 +1,8 @@
 // SCR-03 규칙 (screens.md SCR-03 · 1.4, ADR-029 · ADR-035 · ADR-060).
 // - 기본: 목록 + 상세 2단. 카드 1줄 제목 · 생성 주체 아이콘(판정이 통과면 앞에 흐린 점), 2줄 ID · WHEN 조건 · 예외.
 //   검색 · 필터 칩 6종(판정 · 변이 · 준수 집계 · 블록 · 위험도 · 종류) · [문제만]. 상세 자리는 "선택 항목 없음".
-//   [실행]은 실행 시작 확인 이슈(#32) 전이라 미노출 (ADR-035)
+//   [실행]은 고른 규칙의 상세 머리에만 있어 고른 항목이 없으면 없다 (실행 시작 확인, ADR-076)
+// - 실행 시작 확인 대화 문구(RUN_START): 화면 정의서에 없어 1.1 원칙으로 정함, 설정 미비는 설정 화면과 같은 문구 (ADR-076)
 // - 빈: "규칙 없음"(ADR-029)
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-060 (ADR-053과 같음: 로딩 = 목록 자리 비움, 에러 = "규칙 불러오기 실패")
 import type { JudgmentResult, Rule, RuleWithJudgment } from '@bive/shared';
@@ -120,6 +121,20 @@ export const RULES: RuleWithJudgment[] = [
 /** 화면에 보이는 순서: 문제 항목(실패 · 미판정 · 재검증 필요 · 잠정) 먼저 받은 순서, 그다음 정상 (ADR-034 · ADR-060). */
 export const VISIBLE_ORDER = ['RULE-002', 'RULE-003', 'RULE-005', 'RULE-006', 'RULE-001'] as const;
 
+/**
+ * 실행 시작 확인 대화 문구 (screens.md SCR-03 [실행] = 실행 시작 확인, 1.1 문구, ADR-076).
+ * `settingsIncomplete`는 `run.create`가 -32010(`SETTINGS_INCOMPLETE`)을 돌려줄 때 대화에 보이는 설정 미비 오류 문구.
+ */
+export const RUN_START = {
+  run: '실행',
+  title: '실행 시작 확인',
+  targets: '대상 규칙',
+  confirm: '시작',
+  cancel: '취소',
+  settingsIncomplete: '예산 · 모델 미설정',
+  failed: '실행 시작 실패',
+} as const;
+
 /** 필터 칩 6종 (SCR-03 필터). 변이 · 블록 · 위험도는 값이 없어 0건 비활성 (ADR-035). */
 export const CHIPS = [
   { id: 'judgment', label: '판정', enabled: true },
@@ -139,8 +154,8 @@ const frame: ElementCheck[] = [
     attributes: { 'data-selected-id': '' },
   },
   { label: '상세 빈 상태', text: '선택 항목 없음' },
-  // [실행]은 실행 시작 확인(#32) 전 미노출 (ADR-035)
-  { label: '실행 버튼 미노출', role: 'button', name: '실행', absent: true },
+  // [실행]은 고른 규칙의 상세에만 있다 (ADR-076)
+  { label: '실행 버튼 없음 (고른 항목 없음)', role: 'button', name: '실행', absent: true },
 ];
 
 const toolbar: ElementCheck[] = [

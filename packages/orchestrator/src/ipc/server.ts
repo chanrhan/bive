@@ -1,6 +1,7 @@
 // 파이프 서버: 연결별 인증(`system.hello`) · JSON-RPC 디스패치 (architecture.md 5장 · 10장, ADR-027 · ADR-039 · ADR-041).
 import {
   createErrorResponse,
+  createNotification,
   createSuccessResponse,
   ERROR_MESSAGES,
   ErrorCode,
@@ -10,6 +11,8 @@ import {
   type MethodName,
   type MethodParams,
   type MethodResult,
+  type NotificationName,
+  type NotificationParams,
   parseJsonFrame,
   parseNotification,
   parseRequest,
@@ -22,6 +25,13 @@ import type { FrameConnection, FrameErrorKind, PipeListener, PipeTransport } fro
 
 /** hello를 기다리는 최대 시간 기본값. 인증 안 된 연결이 유휴 종료를 막지 못하게 한다. */
 export const DEFAULT_HELLO_TIMEOUT_MS = 10_000;
+
+/**
+ * 연결 하나에 알림 1개를 쓰는 데 기다리는 최대 시간 기본값 (ADR-076). 넘기면 읽지 않는(멈춘) 연결로 보고 끊는다.
+ * 앱 main은 받는 즉시 읽고, 연결 감시가 1초마다 `system.status`를 부르므로 정상 연결이 5초 동안 한 줄도 비우지 못하는
+ * 일은 없다고 본다. 화면 갱신 단계가 기다리는 최대 시간도 이 값이다.
+ */
+export const DEFAULT_NOTIFY_TIMEOUT_MS = 5_000;
 
 const HELLO_METHOD = 'system.hello' satisfies MethodName;
 
@@ -65,6 +75,8 @@ export interface PipeServerOptions {
   orchestratorVersion: string;
   handlers: MethodHandlers;
   helloTimeoutMs?: number;
+  /** 연결별 알림 쓰기 상한 (기본 {@link DEFAULT_NOTIFY_TIMEOUT_MS}) */
+  notifyTimeoutMs?: number;
   onConnectionOpened?: () => void;
   onConnectionClosed?: () => void;
 }
@@ -118,6 +130,15 @@ class Session {
 
   get authenticated(): boolean {
     return this.#state === 'ready';
+  }
+
+  /** 인증된 연결에만 알림 프레임을 보낸다. 쓰기가 끝나면(또는 보낼 수 없으면) 풀린다. */
+  notify(frame: string): Promise<void> {
+    if (this.#state !== 'ready') return Promise.resolve();
+    return this.#connection.sendFlushed(
+      frame,
+      this.#options.notifyTimeoutMs ?? DEFAULT_NOTIFY_TIMEOUT_MS,
+    );
   }
 
   #clearHelloTimer(): void {
@@ -282,6 +303,19 @@ export class PipeServer {
     let count = 0;
     for (const session of this.#sessions) if (session.authenticated) count += 1;
     return count;
+  }
+
+  /**
+   * 인증된 모든 연결에 알림을 보낸다 (오케스트레이터 → 앱, ADR-076). 보내는 쪽 검증: 파라미터가 알림 스키마와
+   * 다르면 아무 연결에도 보내지 않고 예외. 프레임은 연결마다 같은 틱에 쓰므로 알림 순서는 부른 순서와 같고,
+   * 돌려준 약속은 모든 연결의 쓰기가 끝나면 풀린다. 인증 전 연결은 받지 않는다. 쓰기 상한(`notifyTimeoutMs`)을
+   * 넘긴 연결은 끊고 완료로 본다(다른 연결 · 실행에는 영향 없음).
+   */
+  notify<N extends NotificationName>(method: N, params: NotificationParams<N>): Promise<void> {
+    const frame = JSON.stringify(createNotification(method, params));
+    return Promise.all([...this.#sessions].map((session) => session.notify(frame))).then(
+      () => undefined,
+    );
   }
 
   async listen(): Promise<void> {
