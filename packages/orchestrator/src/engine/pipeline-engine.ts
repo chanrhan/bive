@@ -129,6 +129,7 @@ export const skipMutationStep: StepExecutor = () =>
  * 화면 갱신 (RUN-02 8단계 "판정 결과 저장 + `event.*` 알림 전송", ADR-076). 판정 결과는 검사 · 병합 재검사가 판정마다
  * 바로 저장했으므로(ADR-069) 그 기록을 읽은 뒤 `event.run.updated`를 보내고, 송신이 끝나야 통과를 돌려준다. 그래서
  * 이 단계가 완료로 저장되기 전에 화면은 저장된 판정을 다시 조회할 수 있다. 송신이 실패하면 예외 → 실행 `failed`.
+ * 송신 대기는 연결마다 상한이 있고(넘기면 그 연결을 끊음, `PipeServer.notify`), 종료 신호가 오면 저장 없이 끝난다.
  */
 export const screenUpdateStep: StepExecutor = async (context) => {
   const judgments = context.read((store) => store.judgments.listByRun(context.run.id).length);
@@ -148,6 +149,25 @@ export const DEFAULT_STEP_EXECUTORS: StepExecutors = {
   mutation: skipMutationStep,
   merge: createMergeExecutor(),
   screen_update: screenUpdateStep,
+};
+
+/** `promise`가 풀리거나, 그 전에 `signal`이 중단되면 중단 사유로 거부된다. */
+const untilAborted = (promise: Promise<unknown>, signal: AbortSignal): Promise<void> => {
+  if (signal.aborted) return Promise.reject(signal.reason as Error);
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason as Error);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      () => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
 };
 
 const errorMessage = (error: unknown): string =>
@@ -703,9 +723,14 @@ export class PipelineEngine {
       signal,
       read: (fn) => this.#store(projectId, fn),
       runSession: (request) => this.#runSession(projectId, detail.run, step, request, signal),
-      notify: async (topic, data) => {
-        await this.#onEvent?.({ type: 'notify', projectId, runId: detail.run.id, topic, data });
-      },
+      // 송신을 기다리는 동안 종료 · 중단 신호가 오면 바로 거부한다(엔진은 저장하지 않고 끝남 → 다음 기동 때 중단)
+      notify: (topic, data) =>
+        untilAborted(
+          Promise.resolve(
+            this.#onEvent?.({ type: 'notify', projectId, runId: detail.run.id, topic, data }),
+          ),
+          signal,
+        ),
     };
     try {
       return await executor(context);

@@ -28,6 +28,8 @@ export interface OrchestratorOptions {
   /** 연결 0개 · 진행 중 실행 0개 상태가 이만큼 이어지면 종료 (기본 300000) */
   idleShutdownMs?: number;
   helloTimeoutMs?: number;
+  /** 연결별 알림 쓰기 상한 (기본 5초, 넘기면 그 연결을 끊는다, ADR-076) */
+  notifyTimeoutMs?: number;
   platform?: NodeJS.Platform;
   username?: string;
   transport?: PipeTransport;
@@ -223,6 +225,9 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         engine,
       }),
       ...(options.helloTimeoutMs === undefined ? {} : { helloTimeoutMs: options.helloTimeoutMs }),
+      ...(options.notifyTimeoutMs === undefined
+        ? {}
+        : { notifyTimeoutMs: options.notifyTimeoutMs }),
       onConnectionOpened: () => lifecycle.connectionOpened(),
       onConnectionClosed: () => lifecycle.connectionClosed(),
     });

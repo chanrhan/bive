@@ -1086,4 +1086,55 @@ describe('화면 갱신 단계 (M1-19 수용 기준 4, RUN-02 8단계, ADR-076)'
     expect(done.run).toMatchObject({ status: 'failed', failureReason: 'step_error' });
     expect(done.run.lastCompletedStep).toBe('merge');
   }, 60_000);
+
+  it('송신을 기다리는 중 엔진을 멈추면 바로 끝나고(저장 없음), 재기동 뒤 재개하면 병합을 다시 하지 않고 화면 갱신만 다시 해 merged (검토 1회차)', async () => {
+    const h = setup();
+    const { engine, probe } = probedEngine(h);
+    h.engine = engine;
+    expect(engine.evaluateApproval(h.project.id, h.runId)).toBe(true);
+    await waitFor(() => probe.seen.length === 1, 30_000, '화면 갱신 알림');
+    const merged = detailOf(h);
+    const mergeCommit = merged.run.mergeCommit;
+    expect(mergeCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(mainTip(h)).toBe(mergeCommit);
+
+    // 송신이 끝나지 않아도 stop()은 중단 신호로 풀린다. 중단은 저장하지 않는다 (ADR-066)
+    const outcome = await Promise.race([
+      engine.stop().then(() => 'stopped'),
+      sleep(5_000).then(() => 'timeout'),
+    ]);
+    expect(outcome).toBe('stopped');
+    expect(detailOf(h).run).toMatchObject({ status: 'running', currentStep: 'screen_update' });
+
+    // 재기동: running → interrupted (진행 중 시도 failed + 같은 단계 새 시도 pending)
+    const notified: string[] = [];
+    const second = new PipelineEngine({
+      biveHome: h.biveHome,
+      agent: h.adapter,
+      executors: { ...h.executors, check: judgingCheck },
+      onEvent: (event) => {
+        if (event.type === 'notify') notified.push(event.topic);
+      },
+    });
+    engines.push(second);
+    expect(second.recoverInterruptedRuns()).toHaveLength(1);
+    expect(attempts(detailOf(h), 'screen_update')).toEqual([
+      'screen_update#1:failed',
+      'screen_update#2:pending',
+    ]);
+    expect(detailOf(h).run.status).toBe('interrupted');
+
+    await second.resume(h.project.id, h.runId, human);
+    await second.settled();
+    const done = detailOf(h);
+    expect(done.run).toMatchObject({ status: 'merged', currentStep: null, mergeCommit });
+    // 병합은 1번뿐이고 기준 브랜치도 그대로, 화면 갱신만 새 시도로 다시 했다
+    expect(attempts(done, 'merge')).toEqual(['merge#1:passed']);
+    expect(attempts(done, 'screen_update')).toEqual([
+      'screen_update#1:failed',
+      'screen_update#2:passed',
+    ]);
+    expect(mainTip(h)).toBe(mergeCommit);
+    expect(notified).toEqual(['screen_update']);
+  }, 60_000);
 });

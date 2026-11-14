@@ -6,9 +6,12 @@
 // 렌더러가 알림을 받아 두 화면을 다시 조회하는 것은 앱 쪽에서 단언한다(`packages/app/e2e/run-start.spec.ts`의
 // "실행 알림" · `packages/app/test/refresh-coalescer.test.ts`). 파일이 프로세스 경계를 넘을 수 없어 나눴다(ADR-076).
 import fs from 'node:fs';
+import net from 'node:net';
 
 import {
+  createRequest,
   type JudgmentResult,
+  PROTOCOL_VERSION,
   parseNotification,
   RUN_STEP_PLANS,
   type RunUpdatedEvent,
@@ -113,7 +116,9 @@ interface Started extends SeededProject {
   orchestrator: Orchestrator;
 }
 
-const start = async (executors: StepExecutors = stubExecutors): Promise<Started> => {
+const start = async (
+  options: { executors?: StepExecutors; notifyTimeoutMs?: number } = {},
+): Promise<Started> => {
   const biveHome = makeBiveHome();
   const repo = copyFixture(temps);
   const seeded = seedProject(biveHome, repo);
@@ -122,8 +127,9 @@ const start = async (executors: StepExecutors = stubExecutors): Promise<Started>
     idleShutdownMs: 60_000,
     helloTimeoutMs: 60_000,
     agent: selectAgent({ BIVE_AGENT: 'scripted' }, { biveHome }),
-    executors,
+    executors: options.executors ?? stubExecutors,
     log: () => undefined,
+    ...(options.notifyTimeoutMs === undefined ? {} : { notifyTimeoutMs: options.notifyTimeoutMs }),
   });
   if (result.status !== 'started') throw new Error('기동 실패');
   running.push(result.orchestrator);
@@ -311,6 +317,115 @@ describe('알림을 받은 순간 다시 조회하면 그 상태가 보인다 (�
     });
     await waitFor(() => reads.length === 2, 30_000, '재조회 2건');
     expect(await Promise.all(reads)).toEqual(['SCR-03 pass', 'SCR-05 merged 준수 1/1 기준 true']);
+  }, 60_000);
+});
+
+/**
+ * 인증만 하고 소켓을 읽지 않는 연결 (멈춘 앱). 응답을 읽지 않는 `rule.list` 요청을 많이 보내 그 연결의 송신 버퍼를
+ * 채운다(검토 1회차 재현과 같은 방법). 닫히면 `closed`가 풀린다.
+ */
+const stalledConnection = async (
+  s: Started,
+): Promise<{ socket: net.Socket; closed: Promise<void> }> => {
+  const socket = net.createConnection(s.orchestrator.paths.pipe);
+  await new Promise<void>((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('error', reject);
+  });
+  socket.on('error', () => undefined);
+  const closed = new Promise<void>((resolve) => socket.once('close', () => resolve()));
+  socket.setEncoding('utf8');
+  // hello 응답 1줄만 읽고 멈춘다
+  const hello = new Promise<void>((resolve) => {
+    const onData = (chunk: string): void => {
+      if (!chunk.includes('\n')) return;
+      socket.off('data', onData);
+      socket.pause();
+      resolve();
+    };
+    socket.on('data', onData);
+  });
+  socket.write(
+    `${JSON.stringify(
+      createRequest(0, 'system.hello', {
+        protocolVersion: PROTOCOL_VERSION,
+        token: s.orchestrator.token,
+      }),
+    )}\n`,
+  );
+  await hello;
+  const request = (id: number): string =>
+    JSON.stringify(createRequest(id, 'rule.list', { projectId: s.project.id }));
+  const lines: string[] = [];
+  for (let id = 1; id <= 3000; id += 1) lines.push(request(id));
+  socket.write(`${lines.join('\n')}\n`);
+  return { socket, closed };
+};
+
+describe('읽지 않는 연결 · 종료 (검토 1회차, ADR-076)', () => {
+  it('인증만 하고 읽지 않는 연결이 있어도 화면 갱신 단계는 송신 상한 안에 끝나 merged, 멈춘 연결은 닫히고 정상 연결은 알림을 받는다', async () => {
+    const s = await start({ notifyTimeoutMs: 300 });
+    const stalled = await stalledConnection(s);
+    // 서버가 요청을 처리해 응답이 그 연결의 버퍼에 쌓일 시간
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    const received = collect(await client(s));
+    const caller = await client(s);
+    const created = await caller.call('run.create', {
+      projectId: s.project.id,
+      ruleIds: [s.rule.id],
+      author: human,
+    });
+    await waitFor(
+      () => received.some((n) => n.method === 'event.run.updated' && n.params.status === 'merged'),
+      20_000,
+      '병합 알림 (멈춘 연결이 있어도)',
+    );
+    const detail = await caller.call('run.get', { projectId: s.project.id, id: created.run.id });
+    expect(detail.run.status).toBe('merged');
+    expect(detail.steps.find((step) => step.kind === 'screen_update')?.status).toBe('passed');
+    // 멈춘 연결은 송신 상한을 넘겨 서버가 끊었다 (끊긴 연결과 같이 완료로 본다). 쌓인 것을 비우면 끝(EOF)이 온다
+    expect(s.orchestrator.connectionCount).toBe(2);
+    stalled.socket.resume();
+    await stalled.closed;
+  }, 60_000);
+
+  it('송신을 기다리는 화면 갱신 단계에서 orchestrator.stop()이 제한 시간 안에 끝나고, 실행은 다음 기동 때 중단으로 남는다', async () => {
+    const s = await start({ notifyTimeoutMs: 120_000 });
+    const stalled = await stalledConnection(s);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    const caller = await client(s);
+    const created = await caller.call('run.create', {
+      projectId: s.project.id,
+      ruleIds: [s.rule.id],
+      author: human,
+    });
+    // 병합까지 끝나고 화면 갱신 단계에서 송신을 기다린다
+    await waitFor(
+      () =>
+        withProject(s.biveHome, s.project.id, (store) => {
+          const steps = store.runs.steps(created.run.id);
+          return steps.find((step) => step.kind === 'merge')?.status === 'passed';
+        }),
+      20_000,
+      '병합 단계 완료',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const run = withProject(s.biveHome, s.project.id, (store) => store.runs.get(created.run.id));
+    expect(run).toMatchObject({ status: 'running', currentStep: 'screen_update' });
+
+    const stopped = s.orchestrator.stop();
+    const outcome = await Promise.race([
+      stopped.then(() => 'stopped'),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 10_000)),
+    ]);
+    expect(outcome).toBe('stopped');
+    running.splice(running.indexOf(s.orchestrator), 1);
+    stalled.socket.resume();
+    await stalled.closed;
+    // 중단은 저장하지 않는다(ADR-066): running · 화면 갱신 진행 중으로 남고 다음 기동 때 interrupted
+    expect(
+      withProject(s.biveHome, s.project.id, (store) => store.runs.get(created.run.id)),
+    ).toMatchObject({ status: 'running', currentStep: 'screen_update' });
   }, 60_000);
 });
 

@@ -162,7 +162,7 @@ export interface StepContext {
   runSession(request: StepSessionRequest): Promise<StepSessionResult>;
   /**
    * 알림 (`EngineEvent`의 `notify`). 화면 갱신 단계는 `screen_update`로 `event.run.updated`를 보낸다. 송신이 끝나면
-   * 풀리고, 실패하면 거부된다 (ADR-076)
+   * 풀리고, 실패하거나 송신 중 `signal`이 중단되면 거부된다 (ADR-076)
    */
   notify(topic: string, data?: unknown): Promise<void>;
 }

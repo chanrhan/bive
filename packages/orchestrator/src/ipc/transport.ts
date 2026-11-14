@@ -87,8 +87,9 @@ export interface FrameConnection {
   /**
    * `send`와 같고, 프레임을 운영체제에 넘겨 쓰기가 끝나면 풀린다 (알림 송신 완료, ADR-076).
    * 닫힌 연결이거나 쓰는 도중 연결이 끊기면 보낼 상대가 없으므로 거부하지 않고 바로 풀린다.
+   * `timeoutMs` 안에 쓰기가 끝나지 않으면(상대가 읽지 않아 버퍼가 참) 그 연결을 끊고 풀린다(끊긴 연결과 같음).
    */
-  sendFlushed(frame: string): Promise<void>;
+  sendFlushed(frame: string, timeoutMs: number): Promise<void>;
   /** 보낸 내용을 흘려보낸 뒤 닫는다. */
   end(): void;
   /** 즉시 닫는다. */
@@ -149,12 +150,21 @@ class NetFrameConnection implements FrameConnection {
     this.#socket.write(`${frame}\n`);
   }
 
-  sendFlushed(frame: string): Promise<void> {
+  sendFlushed(frame: string, timeoutMs: number): Promise<void> {
     if (frame.includes('\n')) throw new Error('프레임에 개행을 넣을 수 없음');
     if (this.#closed || this.#socket.writableEnded) return Promise.resolve();
     return new Promise((resolve) => {
+      // 읽지 않는 상대: 끊어서 쌓인 쓰기 버퍼를 버린다. 끊긴 연결은 보낼 상대가 없으므로 완료로 본다
+      const timer = setTimeout(() => {
+        this.#socket.destroy();
+        resolve();
+      }, timeoutMs);
+      timer.unref();
       // 쓰기 오류(상대가 끊음)도 콜백으로 온다. 연결이 사라진 것이므로 완료로 본다
-      this.#socket.write(`${frame}\n`, () => resolve());
+      this.#socket.write(`${frame}\n`, () => {
+        clearTimeout(timer);
+        resolve();
+      });
     });
   }
 
