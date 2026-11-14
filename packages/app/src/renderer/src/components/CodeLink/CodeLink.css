@@ -67,6 +67,7 @@
 }
 
 .code-open-reason,
+.code-open-confirm,
 .code-open-cancel {
   height: 28px;
   padding: 0 var(--space-3);
@@ -78,12 +79,14 @@
   cursor: pointer;
 }
 
-.code-open-reason {
+.code-open-reason,
+.code-open-confirm {
   border-color: var(--color-accent);
   color: var(--color-accent);
 }
 
 .code-open-reason:disabled,
+.code-open-confirm:disabled,
 .code-open-cancel:disabled {
   opacity: var(--opacity-dimmed);
   cursor: default;
@@ -98,4 +101,12 @@
 .code-open-buttons {
   display: flex;
   justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.code-open-ide {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
 }

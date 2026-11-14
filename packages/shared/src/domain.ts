@@ -166,6 +166,118 @@ export type RoleSettings = z.infer<typeof RoleSettings>;
 export const RoleSettingsMap = z.record(AgentRole, RoleSettings);
 export type RoleSettingsMap = z.infer<typeof RoleSettingsMap>;
 
+// ── 코드 열기 IDE (MET-01, ADR-018 · ADR-087) ───────────────
+
+/**
+ * 코드 열기 URL에 쓸 수 있는 스킴과 그 스킴의 고정 호스트 (ADR-087 허용 목록). 내장 선택(VS Code · Cursor)과
+ * 사용자 지정 틀 모두 이 목록의 `스킴://호스트`로만 시작할 수 있다. 웹 · 파일 · 스크립트 계열(`http` · `file` ·
+ * `javascript` · `data` 등)과 OS 처리기(`ms-*` 등)는 목록에 없으므로 거부된다. 호스트를 고정해 같은 스킴의 다른
+ * 처리기(예: VS Code 확장 URI `vscode://<확장>/…`)를 부르지 못하게 한다.
+ */
+export const IDE_URL_SCHEME_HOSTS = {
+  vscode: 'file',
+  'vscode-insiders': 'file',
+  vscodium: 'file',
+  cursor: 'file',
+  windsurf: 'file',
+  zed: 'file',
+  idea: 'open',
+  subl: 'open',
+  txmt: 'open',
+  mvim: 'open',
+} as const satisfies Record<string, string>;
+export type IdeUrlScheme = keyof typeof IDE_URL_SCHEME_HOSTS;
+
+/** IDE URL 틀의 자리 표시자. `{path}` = 절대 경로(앞의 `/` 없이, 조각마다 퍼센트 인코딩), `{line}` = 줄 번호. */
+export const IDE_URL_PATH_PLACEHOLDER = '{path}';
+export const IDE_URL_LINE_PLACEHOLDER = '{line}';
+
+/** 내장 IDE의 URL 틀 (ADR-018). */
+export const IDE_URL_TEMPLATES = {
+  vscode: 'vscode://file/{path}:{line}',
+  cursor: 'cursor://file/{path}:{line}',
+} as const;
+
+/** 사용자 지정 URL 틀의 최대 길이 (문자). */
+export const IDE_URL_TEMPLATE_MAX_LENGTH = 512;
+
+/** 완성된 IDE URL의 최대 길이 (문자). */
+export const IDE_URL_MAX_LENGTH = 8192;
+
+/** URL 앞부분 `스킴://권한` + 나머지(`/` 또는 `?`로 시작). */
+const IDE_URL_HEAD = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)([/?][\s\S]*)$/;
+
+/** 허용 스킴의 고정 호스트 (목록에 없으면 `undefined`). */
+export const ideUrlSchemeHost = (scheme: string): string | undefined =>
+  Object.hasOwn(IDE_URL_SCHEME_HOSTS, scheme)
+    ? IDE_URL_SCHEME_HOSTS[scheme as IdeUrlScheme]
+    : undefined;
+
+/** 출력 가능한 ASCII(0x21 ~ 0x7E)만: 공백 · 줄바꿈 · 제어 문자 · 비ASCII(양방향 제어 문자 포함) 거부. */
+const isPrintableAscii = (value: string): boolean => /^[\x21-\x7e]+$/.test(value);
+
+const countOf = (value: string, part: string): number => value.split(part).length - 1;
+
+/**
+ * 완성된 IDE URL이 허용 범위인지 (ADR-087): 출력 가능한 ASCII만, `스킴://호스트`가 허용 목록의 쌍과 글자 그대로 같고
+ * (소문자 스킴, 사용자 정보 · 포트 없음), `new URL()`로 다시 읽어도 같은 스킴 · 호스트다. 여는 곳 바로 앞(main)과
+ * 틀 검사({@link isIdeUrlTemplate})가 함께 쓴다.
+ */
+export const isAllowedIdeUrl = (url: string, maxLength: number = IDE_URL_MAX_LENGTH): boolean => {
+  if (url.length === 0 || url.length > maxLength || !isPrintableAscii(url)) return false;
+  const head = IDE_URL_HEAD.exec(url);
+  if (head === null) return false;
+  const [, scheme = '', authority = ''] = head;
+  const host = ideUrlSchemeHost(scheme);
+  if (host === undefined || authority !== host) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return (
+    parsed.protocol === `${scheme}:` &&
+    parsed.host === host &&
+    parsed.username === '' &&
+    parsed.password === '' &&
+    parsed.port === ''
+  );
+};
+
+/**
+ * 사용자 지정 IDE URL 틀인지 (ADR-087). `{path}` · `{line}`을 각각 정확히 한 번 담고 그 밖의 중괄호가 없으며,
+ * 길이 {@link IDE_URL_TEMPLATE_MAX_LENGTH} 이하, 출력 가능한 ASCII만(공백 · 줄바꿈 · 제어 문자 거부),
+ * `스킴://호스트`가 허용 목록({@link IDE_URL_SCHEME_HOSTS})의 쌍이고 자리 표시자를 채운 결과도 같은 스킴 · 호스트다.
+ */
+export const isIdeUrlTemplate = (template: string): boolean => {
+  if (template.length > IDE_URL_TEMPLATE_MAX_LENGTH || !isPrintableAscii(template)) return false;
+  if (countOf(template, IDE_URL_PATH_PLACEHOLDER) !== 1) return false;
+  if (countOf(template, IDE_URL_LINE_PLACEHOLDER) !== 1) return false;
+  const rest = template.replace(IDE_URL_PATH_PLACEHOLDER, '').replace(IDE_URL_LINE_PLACEHOLDER, '');
+  if (rest.includes('{') || rest.includes('}')) return false;
+  // 자리 표시자가 `스킴://호스트`에 들어가면 쌍 비교에서 걸린다
+  const sample = template
+    .replace(IDE_URL_PATH_PLACEHOLDER, 'bive/sample.ts')
+    .replace(IDE_URL_LINE_PLACEHOLDER, '1');
+  return isAllowedIdeUrl(sample);
+};
+
+/** 사용자 지정 IDE URL 틀 ({@link isIdeUrlTemplate}). */
+export const IdeUrlTemplate = z.string().refine(isIdeUrlTemplate, 'IDE URL 틀이 아닙니다');
+
+/**
+ * 코드 열기 IDE 선택 (ADR-018 · ADR-087): VS Code · Cursor · 사용자 지정 URL 틀. 설정의 `ide`가 `null`이면 미설정이고,
+ * 화면은 처음 열 때 선택을 먼저 요구한다(미리 골라 둔 값은 VS Code). 바꾸는 주체는 사람뿐이다(`settings.update`).
+ */
+export const IdeSetting = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('vscode') }),
+  z.strictObject({ kind: z.literal('cursor') }),
+  z.strictObject({ kind: z.literal('custom'), template: IdeUrlTemplate }),
+]);
+export type IdeSetting = z.infer<typeof IdeSetting>;
+export type IdeKind = IdeSetting['kind'];
+
 /**
  * 프로젝트 설정 (COST-01, NFR-07, TODO-04, ADR-012, RUN-05, NFR-02, ADR-057).
  * 예산 · 모델은 실행에 필수지만 저장은 미설정(`null`)을 허용한다 (일부 역할만 먼저 저장하는 흐름, roadmap M1 흐름 2).
@@ -185,6 +297,8 @@ export const Settings = z.strictObject({
   autoMode: z.boolean(),
   /** 에이전트 패키지 설치 허용 목록 (ADR-024 기본 비어 있음) */
   installAllowlist: z.array(NonEmptyString),
+  /** 코드 열기 IDE (ADR-018 · ADR-087). `null` = 미설정(처음 열 때 선택 요구) */
+  ide: IdeSetting.nullable(),
   updatedAt: Timestamp.nullable(),
   updatedBy: HumanAuthor.nullable(),
 });
@@ -208,6 +322,7 @@ export const defaultSettings = (projectId: Ulid): Settings => ({
   provisionalPolicy: 'off',
   autoMode: false,
   installAllowlist: [],
+  ide: null,
   updatedAt: null,
   updatedBy: null,
 });
@@ -800,8 +915,19 @@ export type ScreenId = z.infer<typeof ScreenId>;
 export const CODE_FILE_PATH_MAX_LENGTH = 1024;
 
 /**
+ * 양방향 제어 문자인지 (U+061C, U+200E · U+200F, U+202A ~ U+202E, U+2066 ~ U+2069). 파일 이름에 있으면 링크 글자가
+ * 뒤집혀 보일 수 있어 코드 열기 경로에서 거부한다 (ADR-087).
+ */
+export const isBidiControl = (code: number): boolean =>
+  code === 0x061c ||
+  code === 0x200e ||
+  code === 0x200f ||
+  (code >= 0x202a && code <= 0x202e) ||
+  (code >= 0x2066 && code <= 0x2069);
+
+/**
  * 프로젝트 루트 기준 상대 경로인지 (코드 열기의 `file`, ADR-084). 렌더러가 넘긴 값으로 루트 밖 파일이나 임의 URL을
- * 열지 못하게 좁게 받는다. 거부: 빈 값 · 너무 긴 값 · 제어 문자 · 절대 경로(`/` · `C:` 등 드라이브 · `\\`) ·
+ * 열지 못하게 좁게 받는다. 거부: 빈 값 · 너무 긴 값 · 제어 문자 · 양방향 제어 문자(ADR-087) · 절대 경로(`/` · `C:` 등 드라이브 · `\\`) ·
  * 역슬래시 · 콜론(`file:line` 구분자, 드라이브 상대 경로, 대체 데이터 스트림) · 빈 경로 조각(`a//b`, 앞뒤 `/`) ·
  * `.` · `..` 조각. 구분자는 `/`만 쓴다(판정 기록의 `file`이 이 모양, judge/report.ts `toRelativePath`).
  */
@@ -809,7 +935,7 @@ export const isProjectRelativePath = (value: string): boolean => {
   if (value.length === 0 || value.length > CODE_FILE_PATH_MAX_LENGTH) return false;
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
-    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return false;
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || isBidiControl(code)) return false;
   }
   if (value.includes('\\') || value.includes(':')) return false;
   return value.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');

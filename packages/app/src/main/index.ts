@@ -73,7 +73,7 @@ const projects = createProjectOpener({
   emit: broadcast,
 });
 
-// 코드 열기: 기록(codeOpen.record) 뒤 고정 틀의 IDE URL로 연다 (MET-01, ADR-084)
+// 코드 열기: 설정의 IDE 선택으로 URL을 만들고 기록(codeOpen.record) 뒤 연다 (MET-01, ADR-084 · ADR-087)
 const codeOpener = createCodeOpener({
   request: (method, params) => session.link.request(method, params),
   openUrl: openExternalUrl,

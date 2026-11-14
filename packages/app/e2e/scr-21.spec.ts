@@ -1,13 +1,15 @@
-// SCR-21 설정 (이슈 #18 수용 기준 3, screens.md 7장 X-02, ADR-010 · ADR-035 · ADR-057):
-// 사이드바 하단 톱니 → 모달 820 × 600, 바깥 클릭 · Esc · ×로 닫기, 초점 가두기, 예산 · 모델 섹션만 노출,
+// SCR-21 설정 (이슈 #18 수용 기준 3 · #45 수용 기준 1, screens.md 7장 X-02, ADR-010 · ADR-035 · ADR-057 · ADR-018 · ADR-087):
+// 사이드바 하단 톱니 → 모달 820 × 600, 바깥 클릭 · Esc · ×로 닫기, 초점 가두기, 예산 · 모델과 IDE 섹션만 노출,
 // [저장] → settings.update(사람 주체) → 검증 상태 다시 읽기.
+// IDE 섹션: VS Code(vscode://file/{path}:{line}) · Cursor(cursor://file/{path}:{line}) · 사용자 지정 URL 틀, 기본값 VS Code.
 // 열린 프로젝트는 가짜 `project.current` 응답으로 준다(현재 프로젝트 계약은 M1-01 `ProjectContext`).
 import type { Project, Settings, SettingsValidateResult } from '@bive/shared';
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
-import { FIELD_NAMES, HIDDEN_SECTIONS, SETTINGS_TEXT } from './checklists/scr-21.js';
+import { FIELD_NAMES, HIDDEN_SECTIONS, IDE_TEXT, SETTINGS_TEXT } from './checklists/scr-21.js';
 import { type BiveMock, mockBive, type MockResponses } from './support/bive-mock.js';
 import { expectScreen, findForbiddenText } from './support/expectScreen.js';
+import { horizontalOverflow, textClipping } from './support/overflow.js';
 
 const PROJECT_ID = '01JA00000000000000000000P1';
 const PROJECT: Project = {
@@ -35,6 +37,7 @@ const settingsWith = (overrides: Partial<Settings> = {}): Settings => ({
   provisionalPolicy: 'off',
   autoMode: false,
   installAllowlist: [],
+  ide: null,
   updatedAt: null,
   updatedBy: null,
   ...overrides,
@@ -139,10 +142,10 @@ test.describe('체크리스트', () => {
     for (const text of HIDDEN_SECTIONS) {
       await expect(page.getByText(text)).toHaveCount(0);
     }
-    // 섹션 목록 항목은 예산 · 모델 하나뿐
+    // 섹션 목록 항목은 예산 · 모델과 IDE 두 개뿐 (IDE는 ADR-018 · ADR-087이 더함)
     await expect(
       dialog(page).getByRole('navigation', { name: '설정 섹션' }).locator('li'),
-    ).toHaveText([SETTINGS_TEXT.section]);
+    ).toHaveText([SETTINGS_TEXT.section, IDE_TEXT.section]);
     await expect(page.getByTestId('settings-role-planner')).toHaveCount(0);
     await expect(page.getByTestId('settings-role-chat')).toHaveCount(0);
   });
@@ -201,7 +204,7 @@ test.describe('모달 열기 · 닫기', () => {
         const modal = document.querySelector('[data-testid="settings-modal"]');
         return modal !== null && modal.contains(document.activeElement);
       });
-    // 입력 11칸 + 저장 + 닫기 = 13개보다 많이 눌러 한 바퀴 이상 돈다
+    // 섹션 목록 2개 + 입력 11칸 + 저장 + 닫기 = 15개보다 많이 눌러 한 바퀴 이상 돈다
     for (let i = 0; i < 16; i += 1) {
       await page.keyboard.press('Tab');
       expect(await inside()).toBe(true);
@@ -210,8 +213,11 @@ test.describe('모달 열기 · 닫기', () => {
       await page.keyboard.press('Shift+Tab');
       expect(await inside()).toBe(true);
     }
-    // 마지막(닫기) 다음은 첫 칸
+    // 마지막(닫기) 다음은 첫 요소(섹션 목록의 예산 · 모델), 섹션 목록 다음이 첫 칸
     await page.getByRole('button', { name: SETTINGS_TEXT.close, exact: true }).focus();
+    await page.keyboard.press('Tab');
+    await expect(page.getByTestId('settings-nav-budget-model')).toBeFocused();
+    await page.keyboard.press('Tab');
     await page.keyboard.press('Tab');
     await expect(field(page, '실행 전체 한도 USD')).toBeFocused();
   });
@@ -343,5 +349,177 @@ test.describe('저장', () => {
     await page.getByRole('button', { name: SETTINGS_TEXT.save, exact: true }).click();
     await expect(page.getByTestId('settings-save-status')).toHaveText('저장 실패');
     await expect(field(page, 'rule-writer 모델')).toHaveValue('model-b');
+  });
+});
+
+test.describe('IDE (코드 열기, #45 수용 기준 1)', () => {
+  const ideSection = (page: Page): Locator => page.getByTestId('settings-section-ide');
+  const radio = (page: Page, label: string): Locator =>
+    ideSection(page).getByRole('radio', { name: label });
+  const template = (page: Page): Locator =>
+    ideSection(page).getByRole('textbox', { name: IDE_TEXT.customField, exact: true });
+  const save = (page: Page): Locator =>
+    page.getByRole('button', { name: SETTINGS_TEXT.save, exact: true });
+
+  /** 모달을 열고 섹션 목록에서 IDE로 옮긴다. */
+  const openIde = async (page: Page, settings: Settings): Promise<BiveMock> => {
+    const bive = await openModal(page, settings);
+    await page.getByTestId('settings-nav-ide').click();
+    await expect(page.getByTestId('settings-ide')).toHaveAttribute('data-state', 'ready');
+    return bive;
+  };
+
+  const updates = async (bive: BiveMock) =>
+    (await settingsCalls(bive)).filter((call) => call.method === 'settings.update');
+
+  test('섹션 목록의 IDE를 누르면 선택지 VS Code · Cursor · 사용자 지정과 내장 URL 틀이 보이고, 미설정이면 VS Code가 골라져 있다', async ({
+    page,
+  }) => {
+    await openIde(page, EMPTY);
+    await expect(page.getByTestId('settings-nav-ide')).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByTestId('settings-nav-budget-model')).not.toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    await expect(ideSection(page).getByRole('heading', { name: IDE_TEXT.section })).toBeVisible();
+    await expect(ideSection(page).getByRole('radio')).toHaveCount(3);
+    await expect(page.getByTestId('ide-label-vscode')).toHaveText('VS Code');
+    await expect(page.getByTestId('ide-label-cursor')).toHaveText('Cursor');
+    await expect(page.getByTestId('ide-label-custom')).toHaveText('사용자 지정');
+    await expect(page.getByTestId('ide-template-vscode')).toHaveText('vscode://file/{path}:{line}');
+    await expect(page.getByTestId('ide-template-cursor')).toHaveText('cursor://file/{path}:{line}');
+    // 기본값 VS Code (ADR-018). 아직 저장하지 않았으므로 "IDE 미설정"
+    await expect(radio(page, 'VS Code')).toBeChecked();
+    await expect(radio(page, 'Cursor')).not.toBeChecked();
+    await expect(radio(page, '사용자 지정')).not.toBeChecked();
+    await expect(page.getByTestId('settings-ide-unset')).toHaveText(IDE_TEXT.unset);
+    await expect(template(page)).toBeDisabled();
+    // 예산 · 모델 입력 칸은 이 섹션에 없다
+    await expect(field(page, '실행 전체 턴')).toHaveCount(0);
+    expect(findForbiddenText([{ source: 'IDE 섹션', text: await page.innerText('body') }])).toEqual(
+      [],
+    );
+  });
+
+  test('기본값 그대로 [저장]하면 VS Code를 사람 주체로 저장하고 "IDE 미설정"이 사라진다', async ({
+    page,
+  }) => {
+    const bive = await openIde(page, EMPTY);
+    await bive.setResponse('settings.update', {
+      result: { settings: settingsWith({ ide: { kind: 'vscode' } }) },
+    });
+    await save(page).click();
+    await expect(page.getByTestId('settings-save-status')).toHaveText(SETTINGS_TEXT.saved);
+    await expect(page.getByTestId('settings-ide-unset')).toHaveCount(0);
+    expect(await updates(bive)).toEqual([
+      {
+        method: 'settings.update',
+        params: {
+          projectId: PROJECT_ID,
+          patch: { ide: { kind: 'vscode' } },
+          author: { kind: 'human' },
+        },
+      },
+    ]);
+  });
+
+  test('저장된 선택(Cursor)이 골라져 있고, 사용자 지정 틀로 바꿔 저장한다(앞뒤 공백은 뗀다)', async ({
+    page,
+  }) => {
+    const bive = await openIde(page, settingsWith({ ide: { kind: 'cursor' } }));
+    await expect(radio(page, 'Cursor')).toBeChecked();
+    await expect(page.getByTestId('settings-ide-unset')).toHaveCount(0);
+
+    const custom = 'idea://open?file=/{path}&line={line}';
+    await radio(page, '사용자 지정').check();
+    await expect(template(page)).toBeEnabled();
+    await template(page).fill(`  ${custom} `);
+    await bive.setResponse('settings.update', {
+      result: { settings: settingsWith({ ide: { kind: 'custom', template: custom } }) },
+    });
+    await save(page).click();
+    await expect(page.getByTestId('settings-save-status')).toHaveText(SETTINGS_TEXT.saved);
+    await expect(radio(page, '사용자 지정')).toBeChecked();
+    await expect(template(page)).toHaveValue(custom);
+    expect(await updates(bive)).toEqual([
+      {
+        method: 'settings.update',
+        params: {
+          projectId: PROJECT_ID,
+          patch: { ide: { kind: 'custom', template: custom } },
+          author: { kind: 'human' },
+        },
+      },
+    ]);
+  });
+
+  test('사용자 지정 틀이 비어 있으면 저장을 부르지 않고, 거부된 틀(-32602)은 "입력 오류"이고 입력 값은 그대로다', async ({
+    page,
+  }) => {
+    const bive = await openIde(page, settingsWith({ ide: { kind: 'vscode' } }));
+    await radio(page, '사용자 지정').check();
+    await save(page).click();
+    await expect(page.getByTestId('settings-save-status')).toHaveText('입력 오류');
+    await expect(template(page)).toHaveAttribute('aria-invalid', 'true');
+    expect(await updates(bive)).toEqual([]);
+
+    await bive.setResponse('settings.update', {
+      error: { code: -32602, message: '스키마 불일치: settings.update 파라미터' },
+    });
+    await template(page).fill('https://example.com/{path}?line={line}');
+    await expect(template(page)).toHaveAttribute('aria-invalid', 'false');
+    await save(page).click();
+    await expect(page.getByTestId('settings-save-status')).toHaveText('입력 오류');
+    await expect(template(page)).toHaveAttribute('data-state', 'invalid');
+    await expect(template(page)).toHaveValue('https://example.com/{path}?line={line}');
+    expect(await updates(bive)).toHaveLength(1);
+  });
+
+  test('1280 × 800 창에서 IDE 항목이 잘리거나 가로 스크롤을 만들지 않는다', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const bive = await openIde(page, EMPTY);
+    await radio(page, '사용자 지정').check();
+    await bive.setResponse('settings.update', {
+      error: { code: -32602, message: '스키마 불일치' },
+    });
+    await template(page).fill('vscode-insiders://file/{path}:{line}');
+    await save(page).click();
+    await expect(page.getByTestId('settings-save-status')).toHaveText('입력 오류');
+    const content = ideSection(page);
+    expect(await horizontalOverflow(content, '[data-testid^="ide-option-"]')).toEqual([]);
+    expect(
+      await textClipping(dialog(page), [
+        'settings-nav-budget-model',
+        'settings-nav-ide',
+        'ide-label-vscode',
+        'ide-label-cursor',
+        'ide-label-custom',
+        'ide-template-vscode',
+        'ide-template-cursor',
+        'settings-ide-unset',
+        'settings-save-status',
+        'settings-save',
+      ]),
+    ).toEqual([]);
+    const box = await template(page).boundingBox();
+    const area = await content.boundingBox();
+    if (box === null || area === null) throw new Error('입력 칸 · 섹션 없음');
+    expect(box.x + box.width).toBeLessThanOrEqual(area.x + area.width);
+  });
+
+  test('설정을 읽지 못하면 "설정 불러오기 실패"', async ({ page }) => {
+    await mockBive(page, {
+      responses: {
+        ...responses(EMPTY, OK),
+        'settings.get': { error: { code: -32603, message: '오케스트레이터 연결 실패' } },
+      },
+    });
+    await page.goto('/');
+    await gear(page).click();
+    await page.getByTestId('settings-nav-ide').click();
+    await expect(ideSection(page).getByTestId('settings-load-error')).toHaveText(
+      '설정 불러오기 실패',
+    );
+    await expect(ideSection(page).getByRole('radio')).toHaveCount(0);
   });
 });

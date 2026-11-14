@@ -1,6 +1,6 @@
 // 프로젝트 설정 리포지토리 (COST-01, NFR-07, SCR-21, ADR-057). 입력 · 출력은 `@bive/shared`의 `Settings`로 검증한다.
 // - 행이 없으면(한 번도 저장하지 않음) 기본값을 돌려준다. 기본값은 저장하지 않는다
-// - 바꾸기는 예산 · 모델 패치를 현재 값에 덮어쓴다(없는 키는 그대로, `null`은 미설정으로)
+// - 바꾸기는 예산 · 모델 · IDE 패치를 현재 값에 덮어쓴다(없는 키는 그대로, 예산 · 모델의 `null`은 미설정으로)
 // - 누가 바꿀 수 있는지(사람만)는 호출한 쪽(오케스트레이터)이 정한다. 여기서는 주체 형식만 검증한다
 import {
   defaultSettings,
@@ -36,6 +36,7 @@ const toBody = (settings: Settings): SettingsBody => ({
   provisionalPolicy: settings.provisionalPolicy,
   autoMode: settings.autoMode,
   installAllowlist: settings.installAllowlist,
+  ide: settings.ide,
 });
 
 export class SettingsRepository {
@@ -80,11 +81,11 @@ export class SettingsRepository {
   }
 
   /**
-   * 예산 · 모델 패치를 덮어쓰고 변경 주체 · 시각을 기록한다. 바뀐 설정을 돌려준다.
+   * 예산 · 모델 · IDE 패치를 덮어쓰고 변경 주체 · 시각을 기록한다. 바뀐 설정을 돌려준다.
    * @throws {ZodError} 패치 · 주체 · 시각 · 결과가 스키마 위반
    */
   update(patch: SettingsPatch, change: SettingsChange): Settings {
-    const { run, roles } = SettingsPatch.parse(patch);
+    const { run, roles, ide } = SettingsPatch.parse(patch);
     const by = HumanAuthor.parse(change.by);
     const at = Timestamp.parse(change.at);
     return withTransaction(this.#db, () => {
@@ -100,6 +101,7 @@ export class SettingsRepository {
         ...current,
         run: { ...current.run, ...run },
         roles: nextRoles,
+        ide: ide ?? current.ide,
         updatedAt: at,
         updatedBy: by,
       });

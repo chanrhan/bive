@@ -1,5 +1,6 @@
 // SCR-21 설정 (screens.md 7장 X-02, ADR-010 · ADR-035 · ADR-057): 사이드바 하단 톱니 → 모달(820 × 600).
-// M1은 예산 · 모델 섹션만: 실행 전체 한도(USD · 턴) + 역할별(rule-writer · test-writer · implementer) 모델 · 한도.
+// 예산 · 모델 섹션: 실행 전체 한도(USD · 턴) + 역할별(rule-writer · test-writer · implementer) 모델 · 한도.
+// 섹션 목록에는 IDE(코드 열기, ADR-018 · ADR-087)가 하나 더 있다. 기본 상태는 예산 · 모델이 골라져 있다.
 // 나머지 섹션(잠정 승인 · 자동 모드 · 대기열 · 작성 규칙)과 planner · 채팅 역할 행은 DOM에 없다.
 // 상태: 기본 = 모달 열림 · 저장된 설정(검증 통과), 빈 = 미설정(한 번도 저장하지 않음, 화면 정의서에 정의 없음 · ADR-029).
 import type { ElementCheck, ScreenChecklist, StateChecklist } from './types.js';
@@ -15,6 +16,13 @@ export const SETTINGS_TEXT = {
   incomplete: '예산 · 모델 미설정',
   saved: '저장됨',
   noProject: '프로젝트 없음',
+} as const;
+
+/** IDE 섹션 문구 (ADR-018 · ADR-087). */
+export const IDE_TEXT = {
+  section: 'IDE',
+  unset: 'IDE 미설정',
+  customField: '사용자 지정 URL 틀',
 } as const;
 
 /** 보이는 역할 행 (화면 정의서 명칭). */
@@ -40,6 +48,12 @@ const modal = (validation: string): StateChecklist => {
       testId: 'settings-nav-budget-model',
       text: SETTINGS_TEXT.section,
       attributes: { 'aria-current': 'page' },
+    },
+    {
+      label: '섹션 목록 IDE',
+      testId: 'settings-nav-ide',
+      role: 'button',
+      name: IDE_TEXT.section,
     },
     { label: '섹션 제목', role: 'heading', name: SETTINGS_TEXT.section },
     { label: '실행 전체 묶음', role: 'group', name: SETTINGS_TEXT.run },

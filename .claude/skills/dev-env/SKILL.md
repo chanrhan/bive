@@ -38,6 +38,8 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 | 파이프라인 e2e 한 파일 | `packages/orchestrator`에서 `pnpm exec vitest run --config vitest.pipeline.config.ts e2e/pipeline/<파일>` | 그 시험 하나만 통과. 픽스처 설치가 먼저 필요하다. 파일마다 실제 설치 · `next build`를 해서 오래 걸린다(2026-11-14 새 컨테이너에서 전체 `pnpm e2e:pipeline` 11개 파일이 약 19분, 한 파일 평균 2분 가까이) |
 | GitHub REST | `scripts/gh-rest.sh GET repos/chanrhan/bive/milestones` | 마일스톤 목록 JSON |
 
+코드 열기(IDE URL)는 화면 없는 VM에서 열 곳이 없으므로 앱을 `BIVE_OPEN_URL_LOG=$BIVE_HOME/open-url.log`(절대 경로)를 더해 띄우면 URL을 열지 않고 그 파일에 한 줄씩 적는다(로드맵 2.2 흐름, ADR-087). IDE 설정은 프로젝트별이라 새 프로젝트의 첫 열기는 IDE 선택 단계가 먼저 나온다.
+
 오케스트레이터의 개발 기동은 `packages/orchestrator`에서 `node --conditions=@bive/source --import tsx src/cli.ts`이고 `pnpm --filter @bive/orchestrator start`와 같다. 앱은 개발 중 같은 명령으로 분리 프로세스를 띄운다 (ADR-042).
 
 ## 자주 겪는 문제

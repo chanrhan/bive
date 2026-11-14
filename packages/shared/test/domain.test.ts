@@ -17,6 +17,12 @@ import {
   defaultSettings,
   EntityName,
   findMissingSettings,
+  IDE_URL_SCHEME_HOSTS,
+  IDE_URL_TEMPLATE_MAX_LENGTH,
+  IDE_URL_TEMPLATES,
+  IdeSetting,
+  isAllowedIdeUrl,
+  isIdeUrlTemplate,
   JudgmentResult,
   M1_RUN_TYPE,
   MissingSettingPath,
@@ -210,6 +216,7 @@ const settings = {
   provisionalPolicy: 'off',
   autoMode: false,
   installAllowlist: [],
+  ide: null,
   updatedAt: null,
   updatedBy: null,
 };
@@ -671,6 +678,10 @@ describe('코드 열람 기록 (MET-01, ADR-084)', () => {
     ['a\r\n.ts', '줄바꿈'],
     ['a\u007f.ts', 'DEL'],
     ['a\u009b.ts', 'C1 제어 문자'],
+    ['src/a\u202Ests.ts', '양방향 제어 문자 RLO'],
+    ['a\u2066.ts', '양방향 제어 문자 LRI'],
+    ['a\u200F.ts', '양방향 제어 문자 RLM'],
+    ['a\u061C.ts', '양방향 제어 문자 ALM'],
     ['a'.repeat(1025), '1024자 초과'],
   ])('프로젝트 루트 밖이나 형식이 틀린 경로 %j(%s)는 거부한다', (value) => {
     expect(isProjectRelativePath(value)).toBe(false);
@@ -717,5 +728,120 @@ describe('코드 열람 기록 (MET-01, ADR-084)', () => {
     expect(CodeOpenListResult.safeParse({ records: [record], truncated: false }).success).toBe(
       true,
     );
+  });
+});
+
+describe('코드 열기 IDE 선택 (ADR-018 · ADR-087)', () => {
+  it('내장 틀은 VS Code · Cursor 두 개이고 허용 목록의 스킴 · 호스트로 시작한다', () => {
+    expect(IDE_URL_TEMPLATES).toEqual({
+      vscode: 'vscode://file/{path}:{line}',
+      cursor: 'cursor://file/{path}:{line}',
+    });
+    for (const template of Object.values(IDE_URL_TEMPLATES)) {
+      expect(isIdeUrlTemplate(template), template).toBe(true);
+    }
+    // 웹 · 파일 · 스크립트 계열은 목록에 없다
+    for (const scheme of [
+      'http',
+      'https',
+      'file',
+      'ftp',
+      'javascript',
+      'data',
+      'vbscript',
+      'blob',
+      'about',
+      'mailto',
+      'smb',
+    ]) {
+      expect(Object.hasOwn(IDE_URL_SCHEME_HOSTS, scheme), scheme).toBe(false);
+    }
+  });
+
+  it.each([
+    'vscode://file/{path}:{line}',
+    'vscode-insiders://file/{path}:{line}',
+    'vscodium://file/{path}:{line}',
+    'windsurf://file/{path}:{line}',
+    'zed://file/{path}:{line}',
+    'idea://open?file=/{path}&line={line}',
+    'idea://open?line={line}&file=/{path}',
+    'subl://open?url=file:///{path}&line={line}',
+    'txmt://open?url=file:///{path}&line={line}',
+    'mvim://open?url=file:///{path}&line={line}',
+  ])('사용자 지정 틀 %j는 받는다', (template) => {
+    expect(isIdeUrlTemplate(template)).toBe(true);
+    expect(IdeSetting.safeParse({ kind: 'custom', template }).success).toBe(true);
+  });
+
+  it.each([
+    ['https://example.com/{path}?l={line}', '웹'],
+    ['http://localhost/{path}:{line}', '웹(로컬)'],
+    ['file:///{path}#{line}', '파일'],
+    ['javascript://file/{path}:{line}', '스크립트'],
+    ['data://file/{path}:{line}', '데이터'],
+    ['vbscript://file/{path}:{line}', 'VBScript'],
+    ['ms-msdt://file/{path}:{line}', '목록에 없는 OS 처리기'],
+    ['jetbrains://idea/{path}:{line}', '목록에 없는 에디터'],
+    ['VSCODE://file/{path}:{line}', '대문자 스킴'],
+    ['vscode:file/{path}:{line}', '권한 없음'],
+    ['vscode://evil.ext/{path}:{line}', '다른 호스트'],
+    ['vscode://file@evil/{path}:{line}', '사용자 정보'],
+    ['vscode://file:1/{path}:{line}', '포트'],
+    ['idea://file/{path}:{line}', '스킴과 맞지 않는 호스트'],
+    ['vscode://{path}:{line}', '권한에 자리 표시자'],
+    ['vscode://file{path}:{line}', '호스트에 붙은 자리 표시자'],
+    ['vscode://file/a.ts:{line}', '{path} 없음'],
+    ['vscode://file/{path}', '{line} 없음'],
+    ['vscode://file/{path}/{path}:{line}', '{path} 두 번'],
+    ['vscode://file/{path}:{line}{line}', '{line} 두 번'],
+    ['vscode://file/{path}:{line}{x}', '그 밖의 중괄호'],
+    ['vscode://file/{PATH}:{line}', '대문자 자리 표시자'],
+    [' vscode://file/{path}:{line}', '앞 공백'],
+    ['vscode://file/{path}:{line} ', '뒤 공백'],
+    ['vscode://file/{path}\n:{line}', '줄바꿈'],
+    ['vscode://file/{path}\t:{line}', '탭'],
+    ['vscode://file/{path}\u0000:{line}', 'NUL'],
+    ['vscode://file/\u202E{path}:{line}', '양방향 제어 문자'],
+    ['vscode://file/화면/{path}:{line}', '비ASCII'],
+    ['', '빈 값'],
+    [`vscode://file/{path}:{line}#${'a'.repeat(IDE_URL_TEMPLATE_MAX_LENGTH)}`, '길이 초과'],
+  ])('사용자 지정 틀 %j(%s)는 거부한다', (template) => {
+    expect(isIdeUrlTemplate(template)).toBe(false);
+    expect(IdeSetting.safeParse({ kind: 'custom', template }).success).toBe(false);
+  });
+
+  it('선택 값은 종류 3개의 엄격 객체이고 설정의 기본값은 미설정(null)이다', () => {
+    expect(IdeSetting.safeParse({ kind: 'vscode' }).success).toBe(true);
+    expect(IdeSetting.safeParse({ kind: 'cursor' }).success).toBe(true);
+    for (const value of [
+      null,
+      { kind: 'idea' },
+      { kind: 'vscode', template: 'vscode://file/{path}:{line}' },
+      { kind: 'custom' },
+    ]) {
+      expect(IdeSetting.safeParse(value).success, JSON.stringify(value)).toBe(false);
+    }
+    expect(defaultSettings(ID.project).ide).toBeNull();
+    expect(
+      Settings.safeParse({ ...defaultSettings(ID.project), ide: { kind: 'cursor' } }).success,
+    ).toBe(true);
+  });
+
+  it('완성된 URL 확인: 허용 스킴 · 고정 호스트만, 다시 읽어도 같은 스킴 · 호스트 (#45 코멘트 1)', () => {
+    expect(isAllowedIdeUrl('vscode://file/w/a.ts:1')).toBe(true);
+    expect(isAllowedIdeUrl('idea://open?file=/w/a.ts&line=1')).toBe(true);
+    for (const url of [
+      'vscode://evil.ext/x',
+      'vscode://file@evil/x',
+      'VSCODE://file/x',
+      ' vscode://file/x',
+      'vscode://FILE/x',
+      'vscode://file/x\n',
+      'https://example.com',
+      'javascript:alert(1)',
+    ]) {
+      expect(isAllowedIdeUrl(url), url).toBe(false);
+    }
   });
 });

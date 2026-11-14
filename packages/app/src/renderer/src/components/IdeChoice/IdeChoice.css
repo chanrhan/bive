@@ -1,0 +1,71 @@
+/* 코드 열기 IDE 선택 칸 (설정 IDE 섹션 · 코드 열기 첫 선택). 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.ide-choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.ide-choice-legend {
+  margin-bottom: var(--space-2);
+  padding: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+}
+
+.ide-choice-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--font-size-2);
+  cursor: pointer;
+}
+
+.ide-choice-option input {
+  flex: none;
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+.ide-choice-label {
+  flex: none;
+  color: var(--color-text);
+}
+
+.ide-choice-template {
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-1);
+  overflow-wrap: anywhere;
+}
+
+.ide-choice-input {
+  width: 100%;
+  height: 30px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-1);
+}
+
+.ide-choice-input:focus-visible {
+  border-color: var(--color-accent);
+}
+
+.ide-choice-input[data-state='invalid'] {
+  border-color: var(--color-danger);
+}
+
+.ide-choice-input:disabled,
+.ide-choice:disabled .ide-choice-option {
+  opacity: var(--opacity-dimmed);
+}

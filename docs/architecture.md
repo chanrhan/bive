@@ -99,6 +99,7 @@ interface AgentAdapter {
 | **Settings** | `projectId`, `run{maxBudgetUsd, maxTurns}` (실행 전체 한도, 미설정 시 실행 거부) | COST-01, NFR-07, 기획서 4.5, ADR-057 |
 | | `roles{<역할>: {model, maxBudgetUsd, maxTurns}}` (모든 역할 키, 값 `null` = 미설정. 실행 전 검사 역할은 `settings.validateForRun`이 정함) | NFR-07, ADR-024, ADR-057 |
 | | `approvalQueueLimit` (기본 40), `provisionalPolicy` (`off` 기본), `autoMode` (`false`), `installAllowlist` (빈 목록), `updatedAt` · `updatedBy` (사람, 저장 전 `null`) | TODO-04, ADR-012, RUN-05, NFR-02 |
+| | `ide` (코드 열기 IDE: `{kind: vscode \| cursor}` · `{kind: custom, template}`, `null` = 미설정. 사용자 지정 틀은 허용 스킴 · 고정 호스트 · `{path}` `{line}` 한 번씩) | MET-01, ADR-018, ADR-087 |
 | | `writingRules` (P2), `updatedAt`, `updatedBy` | NRM-10 |
 | **Requirement** | `id`, `displayId`, `text`, `author`, `normState`, `createdAt`, `updatedAt`, `updatedBy` (마지막 수정 · 삭제 주체), `deletedAt` | NRM-01, ADR-047 |
 | | `unrulable: { reason } \| null` | NRM-08 |
@@ -234,7 +235,7 @@ stateDiagram-v2
 - 연결 수립: `system.hello { protocolVersion, token }`. 토큰 = `~/.bive/run/token` (0600, 기동마다 갱신). 불일치 시 연결 종료
 - 인증 전 메시지 처리 · 프레임 상한(1 MiB) · 유휴 종료(`BIVE_IDLE_SHUTDOWN_MS`) · 단일 인스턴스 잠금(`run/orchestrator.pid`)은 ADR-041. 구현 `orchestrator/src/ipc/{transport,server}.ts` · `lifecycle.ts` · `lock.ts`
 - 렌더러 경로: renderer `window.bive.invoke(method, params)` → preload(그대로 전달) → `ipcRenderer.invoke('bive:rpc')` → main(허용 목록 확인 · zod 검증, 접속 전) → 파이프. 알림은 main → `webContents.send('bive:event')` → `window.bive.on(event, cb)`. 샌드박스 preload는 electron 외 모듈을 불러올 수 없어 검증은 main이 맡는다 (ADR-042)
-- main 전용 (파이프 아님): `app.pickFolder` (OS 대화상자 → `{path \| null}`, ADR-055), `app.openInIde` (`{projectId, reason, sourceScreen, itemRef, file, line}` → 기록 `codeOpen.record` 뒤 고정 틀의 IDE URL로 연다, 렌더러는 URL을 넘기지 않음, MET-01 · ADR-084)
+- main 전용 (파이프 아님): `app.pickFolder` (OS 대화상자 → `{path \| null}`, ADR-055), `app.openInIde` (`{projectId, reason, sourceScreen, itemRef, file, line}` → 설정의 IDE 선택으로 URL을 만들고 확인한 뒤 기록 `codeOpen.record`, 기록이 성공해야 연다. IDE 미설정이면 거부, 렌더러는 URL · 틀을 넘기지 않음, `codeOpen.record`는 렌더러 중계 차단, MET-01 · ADR-084 · ADR-087)
 - main이 만드는 알림 (파이프 아님): `system.connection` `{state: 'connected', status}` · `{state: 'disconnected'}`. main이 1초마다 `system.status`를 부른 결과와 연결이 끊긴 순간에 보낸다. 끊기면 오케스트레이터를 다시 띄우지 않고 1초 간격으로 붙기만 한다 (ADR-045). `project.opened`는 main을 거친 `project.open`의 성공 결과다 (기동 인자 · 렌더러 요청, ADR-055)
 
 | 메서드 | 파라미터 → 결과 | 출처 | 단계 |
