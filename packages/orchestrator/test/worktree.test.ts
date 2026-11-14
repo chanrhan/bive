@@ -387,6 +387,31 @@ describe('merge(run)', GIT_TEST_OPTIONS, () => {
     expect(registeredWorktrees(repo)).toHaveLength(2);
   });
 
+  it('기준 브랜치가 그대로여도 실행 브랜치가 기준 커밋에서 이어지지 않아 병합 결과 트리가 검사한 커밋의 트리와 다르면 병합하지 않는다 (#146)', async () => {
+    // 기준 커밋 = 사용자 커밋(첫 커밋의 자식). 실행 브랜치를 기준 커밋의 부모로 되돌린 뒤 구현 커밋을 만든다
+    const base = userCommit('src/lib/base-only.ts', 'export const baseOnly = 1;\n');
+    const run = await createRun();
+    expect(run.baseCommit).toBe(base);
+    userGit(run.worktreePath, 'reset', '-q', '--hard', `${base}~1`);
+    const head = await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');
+    expect(userGit(repo, 'merge-base', head, base)).toBe(userGit(repo, 'rev-parse', `${base}~1`));
+    const check = vi.fn(passCheck);
+
+    const result = await manager.merge(run, { check });
+
+    // 검사하지 않는 경로라 병합 커밋 트리 = 검사한 커밋 트리여야 하는데(검증 화면 전제), 기준 커밋의 파일이 섞인다
+    expect(check).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'unchecked_tree_mismatch',
+      headCommit: head,
+    });
+    expect(tip(repo)).toBe(base);
+    expect(userGit(repo, 'status', '--porcelain')).toBe('');
+    expect(runBranches(repo)).toEqual(['bive/run-EXE-001']);
+    expect(mergeLeftovers()).toEqual([]);
+  });
+
   it('기준 브랜치가 바뀌었으면 병합 결과로 검사를 다시 돌려 통과할 때만 갱신한다', async () => {
     const run = await createRun();
     const head = await agentChange(run, 'src/lib/added.ts', 'export const added = 1;\n');

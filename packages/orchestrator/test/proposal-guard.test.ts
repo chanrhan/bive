@@ -117,4 +117,10 @@ describe('승인된 규칙 · 계약의 직접 수정 RPC 없음 (NRM-04)', () =
     expect(METHOD_NAMES).not.toContain('proposal.submit');
     expectUntouched();
   });
+
+  it('판정 기록 이름 공간(judgment.*)에는 조회(list)만 있다: 판정 기록은 판정 러너만 쓴다 (JDG-01 · ADR-069, #146)', () => {
+    const judgmentMethods = METHOD_NAMES.filter((name) => /^judgment\./.test(name));
+    expect(judgmentMethods).toEqual(['judgment.list']);
+    expect(judgmentMethods.filter((name) => !/\.list$/.test(name))).toEqual([]);
+  });
 });

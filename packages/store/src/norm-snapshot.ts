@@ -7,7 +7,9 @@
 //   장부를 지금 상태로 맞춘다(같은 변경을 한 번만 남긴다). 장부가 없으면(프로세스 시작 뒤 처음) 지금 상태로 만든다
 // - `ProjectStore`가 쓰고 닫을 때(`trustStoreState`) 지금 상태를 믿는 상태로 기록한다. 단, 연 뒤 다른 연결이 커밋했으면
 //   (`PRAGMA data_version`이 바뀜: 자기 연결의 쓰기로는 바뀌지 않고 다른 연결의 커밋으로만 바뀜을 실측) 믿지 않고
-//   `observeStoreState`로 사건을 남긴다(열려 있는 동안 끼어든 위조가 흡수되지 않게, 검토 2회차)
+//   `observeStoreState`로 사건을 남긴다(열려 있는 동안 끼어든 위조가 흡수되지 않게, 검토 2회차). 열 때 · 닫을 때 모두
+//   `data_version`과 행 해시를 같은 읽기 트랜잭션(같은 스냅숏)에서 읽는다: 따로 읽으면 비교와 해시 사이에 커밋된 위조가
+//   믿는 상태로 흡수된다(#146). 읽기 트랜잭션 안에서는 `data_version`도 행도 스냅숏에 고정된다(실측)
 // - 감시(`beginNormWatch` · `verifyNormWatch`): 단계 실행기가 시작할 때 아직 보고되지 않은 사건부터 대조 대상으로 잡고,
 //   대조할 때마다 다시 관찰해 그 뒤의 사건 · 깨진 승인 기록 체인 · 미래 시각 판정 기록을 불일치로 돌려준다
 // 어느 테이블이든(규칙 행 추가 · 승인 기록 꼬리 추가 · 규칙 열 변경 · 판정 행 · 트리거 삭제) 오케스트레이터 밖에서 바뀌면
@@ -54,7 +56,11 @@ export const tableDigests = (db: SqliteDatabase): Map<string, string> =>
   // 읽기 트랜잭션 하나 안에서 읽는다: 테이블마다 따로 읽으면 해시하는 도중 다른 연결의 커밋이 섞인다 (검토 2회차)
   db.transaction(() => readDigests(db))();
 
-const readDigests = (db: SqliteDatabase): Map<string, string> => {
+/**
+ * `tableDigests`와 같은 해시를 트랜잭션 없이 읽는다. 호출자가 읽기 트랜잭션 안에서 부른다(같은 스냅숏에서
+ * `PRAGMA data_version`과 함께 읽으려고, #146).
+ */
+export const readDigests = (db: SqliteDatabase): Map<string, string> => {
   const digests = new Map<string, string>();
   const schema = db
     .prepare<[], { type: string; name: string; tbl_name: string; sql: string | null }>(
@@ -79,9 +85,11 @@ const changedTables = (a: Map<string, string>, b: Map<string, string>): string[]
  * 지금 상태를 장부와 대조한다. 다르면 사건으로 남기고 장부를 지금 상태로 맞춘다. 장부가 없으면 만든다.
  * `ProjectStore`를 열 때 부른다.
  */
-export const observeStoreState = (store: ProjectStore): void => {
+export const observeStoreState = (
+  store: ProjectStore,
+  current: Map<string, string> = tableDigests(store.db),
+): void => {
   const key = keyOf(store);
-  const current = tableDigests(store.db);
   const ledger = ledgers.get(key);
   if (ledger === undefined) {
     ledgers.set(key, { digests: current, events: [], nextSeq: 0, reportedUntil: 0 });
@@ -95,11 +103,16 @@ export const observeStoreState = (store: ProjectStore): void => {
   }
 };
 
-/** 이 프로세스의 쓰기 뒤 지금 상태를 믿는 상태로 기록한다. `ProjectStore`가 쓰고 닫을 때 부른다. */
-export const trustStoreState = (store: ProjectStore): void => {
+/**
+ * 이 프로세스의 쓰기 뒤 상태(`digests`, 생략하면 지금 읽음)를 믿는 상태로 기록한다. `ProjectStore`가 쓰고 닫을 때
+ * `data_version`과 같은 읽기 트랜잭션에서 읽은 해시를 넘긴다.
+ */
+export const trustStoreState = (
+  store: ProjectStore,
+  digests: Map<string, string> = tableDigests(store.db),
+): void => {
   const key = keyOf(store);
   const ledger = ledgers.get(key);
-  const digests = tableDigests(store.db);
   if (ledger === undefined) {
     ledgers.set(key, { digests, events: [], nextSeq: 0, reportedUntil: 0 });
   } else {

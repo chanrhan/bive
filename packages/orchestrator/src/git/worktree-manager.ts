@@ -186,6 +186,12 @@ export type MergeFailureReason =
    * 기준 브랜치를 체크아웃할 때 그 자리의 로컬 파일(예: 로컬 DB)이 말없이 바뀐다 (`files`, ADR-065)
    */
   | 'ignored_path_tracked'
+  /**
+   * 기준 브랜치가 실행 시작 때 그대로라 검사를 다시 돌리지 않는 경로인데, 병합 결과 트리가 실행 브랜치 커밋(검사한 커밋)의
+   * 트리와 다르다. 실행 브랜치가 기준 커밋에서 이어지지 않는 경우다(검사하지 않은 기준 쪽 파일이 섞인다). 검증 화면은
+   * 이 경로의 병합 커밋 트리 = 검사한 커밋 트리를 전제로 검사 단계 판정을 기준 커밋 판정으로 쓴다(ADR-072, #146)
+   */
+  | 'unchecked_tree_mismatch'
   /** 병합 결과로 다시 돌린 검사가 실패했다 */
   | 'check_failed'
   /** 검사 함수가 예외를 던졌다 */
@@ -1067,6 +1073,18 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
         return fail('git_error', `병합 결과 트리를 읽지 못했습니다: ${mergeTree}`);
       }
 
+      // 검사를 다시 돌리지 않는 경로(기준 브랜치가 실행 시작 때 그대로)는 병합 결과 트리가 검사한 커밋의 트리와 같아야 한다.
+      // 실행 브랜치가 기준 커밋에서 이어질 때만 성립하므로 트리로 직접 확인하고, 다르면 병합하지 않는다 (#146, ADR-072 전제)
+      const headTree = baseChanged
+        ? null
+        : await out(run.repoPath, ['rev-parse', `${headCommit}^{tree}`]);
+      const treeMismatch = (actual: string): MergeResult =>
+        fail(
+          'unchecked_tree_mismatch',
+          `실행 브랜치가 기준 커밋에서 이어지지 않아 병합 결과가 검사한 커밋과 다릅니다 (병합 결과 트리 ${actual}, 검사한 커밋 트리 ${String(headTree)})`,
+        );
+      if (headTree !== null && mergeTree !== headTree) return treeMismatch(mergeTree);
+
       if (isAborted()) return abortedResult();
       // 병합 커밋은 기준 브랜치 커밋에서 분리된 임시 워크트리에서 `--no-ff`로 만든다
       // 시도마다 새 이름: 제한 시간 뒤에도 도는 이전 검사가 이 시도의 체크아웃을 건드리지 않는다
@@ -1095,6 +1113,11 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
         },
       );
       const mergeCommit = await out(mergePath, ['rev-parse', 'HEAD']);
+      if (headTree !== null) {
+        // 실제로 만든 병합 커밋의 트리도 다시 본다 (미리 보기와 같은 ort 병합이지만 갱신할 커밋 자체를 확인)
+        const mergedTree = await out(mergePath, ['rev-parse', 'HEAD^{tree}']);
+        if (mergedTree !== headTree) return treeMismatch(mergedTree);
+      }
 
       if (baseChanged) {
         const outcome = await runCheck(

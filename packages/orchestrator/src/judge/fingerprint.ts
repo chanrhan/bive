@@ -4,8 +4,13 @@
 // 만든 판정 설정을 바꾸면 거짓 통과가 된다. 그래서 판정 러너는 프로젝트 코드가 돌기 전에 이 지문을 만들고 vitest를
 // 띄우기 직전과 끝난 직후에 다시 만들어 대조한다(다르면 판정 결과를 쓰지 않는다, fail closed).
 // - 인수 테스트: `bive-acceptance/` 아래 일반 파일 (`hashAcceptanceFiles`)
-// - 테스트 실행기: `node_modules/.bin/vitest`(링크면 대상 문자열, 파일이면 내용)와 `node_modules/vitest` 패키지의 의존성
-//   닫힘(pnpm 배치: 의존성은 패키지 폴더의 형제 링크)에 있는 패키지들의 파일 (패키지 안 `node_modules` 포함)
+// - 테스트 실행기: `node_modules/.bin/vitest`(링크면 대상 문자열, 파일이면 내용), 진입 파일 경로(`runner:entry`)와
+//   `node_modules/vitest` 패키지의 의존성 닫힘(pnpm 배치: 의존성은 패키지 폴더의 형제 링크)에 있는 패키지들의 파일
+//   (패키지 안 `node_modules` 포함)
+// 판정 러너는 vitest를 pnpm 셸 shim(`node_modules/.bin/vitest`)으로 실행하지 않는다: shim은 `node_modules/.bin/node`가
+// 실행 가능하면 그 파일로 실행하므로, 빌드 중 에이전트 코드가 그 자리에 래퍼를 심으면 지문 밖 코드가 vitest를 띄운다(#146).
+// 대신 오케스트레이터의 node(`process.execPath`)로 `resolveRunnerEntry`가 찾은 진입 파일을 직접 실행한다. 진입 파일은
+// vitest 패키지 폴더 안에 있어 지문 범위 안이다
 // - 판정 폴더의 BIVE 생성 파일 (설정 · 수집 설정 · globalSetup · HTTP 도우미)
 // 한계: 같은 OS 사용자라 대조 사이에 바꿨다가 되돌리거나, 실행기가 쓰는 결과 파일(`result.json`)을 바꾸는 것은 막지 못한다(#117).
 import { createHash } from 'node:crypto';
@@ -25,6 +30,46 @@ const readJson = (file: string): Record<string, unknown> | null => {
     return typeof parsed === 'object' && parsed !== null
       ? (parsed as Record<string, unknown>)
       : null;
+  } catch {
+    return null;
+  }
+};
+
+/** vitest 진입 파일. */
+export interface RunnerEntry {
+  /** `node_modules/vitest`의 실경로 (지문의 의존성 닫힘 시작점) */
+  readonly packageDir: string;
+  /** 진입 파일 실경로 (`package.json`의 `bin`) */
+  readonly entry: string;
+}
+
+/**
+ * vitest 진입 파일을 찾는다: `realpath(node_modules/vitest)`의 `package.json` `bin`(문자열이거나 `bin.vitest`). 파일 이름을
+ * 하드코딩하지 않아 버전이 바뀌어도 따라간다. 진입 파일은 패키지 폴더 안의 일반 파일이어야 한다(링크로 밖을 가리키면 거부:
+ * 지문은 패키지 폴더만 해시한다). 찾지 못하면 `null`.
+ */
+export const resolveRunnerEntry = (worktreeDir: string): RunnerEntry | null => {
+  let packageDir: string;
+  try {
+    packageDir = fs.realpathSync(path.join(worktreeDir, 'node_modules', 'vitest'));
+  } catch {
+    return null;
+  }
+  const bin = readJson(path.join(packageDir, 'package.json'))?.bin;
+  const relative =
+    typeof bin === 'string'
+      ? bin
+      : typeof bin === 'object' &&
+          bin !== null &&
+          typeof (bin as Record<string, unknown>).vitest === 'string'
+        ? ((bin as Record<string, unknown>).vitest as string)
+        : null;
+  if (relative === null) return null;
+  try {
+    const entry = fs.realpathSync(path.resolve(packageDir, relative));
+    const inside = path.relative(packageDir, entry);
+    if (inside === '' || inside.startsWith('..') || path.isAbsolute(inside)) return null;
+    return fs.statSync(entry).isFile() ? { packageDir, entry } : null;
   } catch {
     return null;
   }
@@ -109,6 +154,9 @@ export const judgeInputFingerprint = (
       : stat.isSymbolicLink()
         ? sha256(`link:${fs.readlinkSync(bin)}`)
         : sha256(fs.readFileSync(bin));
+  // 진입 파일 경로: `node_modules/vitest` 링크를 다른 사본으로 바꾸면 달라진다 (내용은 아래 패키지 해시가 본다)
+  const entry = resolveRunnerEntry(worktreeDir);
+  fingerprint['runner:entry'] = entry === null ? 'missing' : sha256(entry.entry);
   const dirs = runnerPackageDirs(worktreeDir);
   if (dirs.length === 0) fingerprint['runner:vitest'] = 'missing';
   for (const dir of dirs) {

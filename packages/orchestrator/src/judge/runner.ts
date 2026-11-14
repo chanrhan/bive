@@ -18,6 +18,7 @@ import {
   fingerprintChanges,
   type JudgeInputFingerprint,
   judgeInputFingerprint,
+  resolveRunnerEntry,
 } from './fingerprint.js';
 import { renderHttpHelper } from './acceptance-env.js';
 import {
@@ -360,8 +361,19 @@ export class JudgeRunner {
       fingerprintChanges(baseline, judgeInputFingerprint(worktreeDir, judgeFiles));
 
     try {
-      const vitestBin = path.join(worktreeDir, 'node_modules', '.bin', 'vitest');
-      if (!existsSync(vitestBin)) return await runnerError(`실행 파일 없음: ${vitestBin}`);
+      // vitest는 pnpm 셸 shim을 거치지 않고 오케스트레이터의 node로 진입 파일을 직접 실행한다(#146: shim은
+      // `node_modules/.bin/node`가 있으면 그것으로 실행한다). 진입 파일은 프로젝트 코드가 돌기 전에 한 번 정하고
+      // (지문 기준값과 같은 시점) 그 경로만 실행한다
+      const runnerEntry = resolveRunnerEntry(worktreeDir);
+      if (runnerEntry === null) {
+        return await runnerError(
+          `실행 파일 없음: ${path.join(worktreeDir, 'node_modules', 'vitest')} (package.json bin)`,
+        );
+      }
+      const vitestCommand = (configPath: string): [string, string[]] => [
+        process.execPath,
+        [runnerEntry.entry, 'run', '--config', configPath, '--root', worktreeDir],
+      ];
 
       baseline = judgeInputFingerprint(worktreeDir, judgeFiles);
       if (input.acceptanceHashes !== undefined) {
@@ -397,22 +409,24 @@ export class JudgeRunner {
 
       const childEnv = baseChildEnv(this.#env);
       // vitest에만: 스냅숏을 새로 쓰지 않는다(`CI=1` + 생성 설정 `update: 'none'`, #29 · ADR-069). 없는 스냅숏 단언은 실패다
-      const vitestEnv = { ...childEnv, CI: '1', NO_COLOR: '1' };
+      // 오케스트레이터가 Electron 실행 파일로 돌 때(패키징)는 `process.execPath`를 Node로 쓰게 한다(BIVE가 정한 값)
+      const vitestEnv: NodeJS.ProcessEnv = {
+        ...childEnv,
+        CI: '1',
+        NO_COLOR: '1',
+        ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: '1' }),
+      };
       const signal = input.signal;
       const signalOption = signal === undefined ? {} : { signal };
 
       // 수집 단계: 서버 없이 파일을 불러와 로드 오류 · 테스트 0개 · `.only`를 먼저 가린다
-      const collectExit = await runCommand(
-        vitestBin,
-        ['run', '--config', paths.collectConfig, '--root', worktreeDir],
-        {
-          cwd: worktreeDir,
-          env: { ...vitestEnv, [BASE_URL_ENV]: COLLECT_PLACEHOLDER_BASE_URL },
-          stdoutFile: paths.collectLog,
-          timeoutMs: deadline.remaining(),
-          ...signalOption,
-        },
-      );
+      const collectExit = await runCommand(...vitestCommand(paths.collectConfig), {
+        cwd: worktreeDir,
+        env: { ...vitestEnv, [BASE_URL_ENV]: COLLECT_PLACEHOLDER_BASE_URL },
+        stdoutFile: paths.collectLog,
+        timeoutMs: deadline.remaining(),
+        ...signalOption,
+      });
       timings.collect = collectExit.durationMs;
       if (collectExit.aborted) return await runnerError(new JudgeAbortedError('collect').message);
       if (collectExit.timedOut) return await runnerError(new JudgeTimeoutError('collect').message);
@@ -454,18 +468,14 @@ export class JudgeRunner {
       const beforeVitest = changedSinceBaseline();
       if (beforeVitest.length > 0) return await tamper('before_vitest', beforeVitest);
 
-      const exit = await runCommand(
-        vitestBin,
-        ['run', '--config', paths.config, '--root', worktreeDir],
-        {
-          cwd: worktreeDir,
-          env: { ...vitestEnv, [BASE_URL_ENV]: server.baseUrl },
-          stdoutFile: paths.stdout,
-          stderrFile: paths.stderr,
-          timeoutMs: deadline.remaining(),
-          ...signalOption,
-        },
-      );
+      const exit = await runCommand(...vitestCommand(paths.config), {
+        cwd: worktreeDir,
+        env: { ...vitestEnv, [BASE_URL_ENV]: server.baseUrl },
+        stdoutFile: paths.stdout,
+        stderrFile: paths.stderr,
+        timeoutMs: deadline.remaining(),
+        ...signalOption,
+      });
       timings.vitest = exit.durationMs;
       exitCode = exit.code;
       // vitest가 끝나면 서버(프로젝트 코드)를 먼저 멈춘 뒤 대조하고 결과를 읽는다 (대조 뒤 서버가 바꾸지 못하게)

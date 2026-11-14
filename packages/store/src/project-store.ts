@@ -1,9 +1,10 @@
 // 프로젝트별 저장소 (`$BIVE_HOME/projects/<projectId>/bive.db`, ADR-005 · ADR-025 · NFR-01).
 import type { Project, Ulid } from '@bive/shared';
 
+import { runCloseProbe } from './close-probe.js';
 import { openDatabase, withTransaction, type SqliteDatabase } from './database.js';
 import { migrate, type MigrateOptions } from './migrate.js';
-import { observeStoreState, trustStoreState } from './norm-snapshot.js';
+import { observeStoreState, readDigests, trustStoreState } from './norm-snapshot.js';
 import { PROJECT_MIGRATIONS } from './migrations/project/index.js';
 import { bivePaths, assertProjectId } from './paths.js';
 import { ApprovalLogRepository } from './repositories/approval-log-repository.js';
@@ -72,12 +73,18 @@ export class ProjectStore {
     return this.projects.get(this.projectId);
   }
 
-  /** 열 때(장부 대조 직전) 읽은 `PRAGMA data_version`. 다른 연결이 커밋하면 바뀐다 */
+  /** 열 때(장부 대조와 같은 읽기 트랜잭션에서) 읽은 `PRAGMA data_version`. 다른 연결이 커밋하면 바뀐다 */
   #dataVersion: number | null = null;
 
-  /** 장부 대조 직전의 `data_version`을 기록한다 (`openProjectStore`가 부른다). */
-  markDataVersion(): void {
-    this.#dataVersion = this.#readDataVersion();
+  /**
+   * `data_version`을 기록하고 같은 읽기 트랜잭션(같은 스냅숏)에서 읽은 행 해시를 돌려준다 (`openProjectStore`가 부른다).
+   * 기록한 `data_version`과 대조에 쓰는 해시가 같은 시점의 것이라 그 사이에 끼어든 커밋이 없다(#146).
+   */
+  markDataVersion(): Map<string, string> {
+    return this.db.transaction(() => {
+      this.#dataVersion = this.#readDataVersion();
+      return readDigests(this.db);
+    })();
   }
 
   #readDataVersion(): number {
@@ -88,14 +95,23 @@ export class ProjectStore {
    * 닫는다. 이 연결이 무언가를 썼으면 지금 상태를 쓰기 장부의 믿는 상태로 남긴다(`norm-snapshot.ts`, ADR-069).
    * 열 때 장부와 대조했고, 연 뒤 다른 연결의 커밋이 없으면(`data_version` 그대로) 연 뒤의 변경은 이 연결의 쓰기다.
    * 다른 연결의 커밋이 있었으면 믿지 않고 사건으로 남긴다(그 위조가 이 연결의 정상 쓰기와 함께 흡수되지 않게).
+   * `data_version` 비교와 믿을 행 해시는 같은 읽기 트랜잭션에서 읽는다: 트랜잭션 안에서는 둘 다 스냅숏에 고정되므로
+   * 비교 뒤에 다른 연결이 커밋해도 그 변경은 믿는 해시에 들어가지 않고 다음 열기의 대조가 사건으로 잡는다(#146 3차 검토:
+   * 따로 읽으면 비교와 해시 사이의 커밋이 흡수됐다).
    */
   close(): void {
     try {
       if (this.db.open) {
         const changes = this.db.prepare<[], { n: number }>('SELECT total_changes() AS n').get();
         if (changes !== undefined && changes.n > 0) {
-          if (this.#dataVersion !== null && this.#readDataVersion() === this.#dataVersion) {
-            trustStoreState(this);
+          const trusted = this.db.transaction(() => {
+            const unchanged =
+              this.#dataVersion !== null && this.#readDataVersion() === this.#dataVersion;
+            runCloseProbe();
+            return unchanged ? readDigests(this.db) : null;
+          })();
+          if (trusted !== null) {
+            trustStoreState(this, trusted);
           } else {
             observeStoreState(this);
           }
@@ -123,10 +139,9 @@ export const openProjectStore = (
   try {
     migrate(db, PROJECT_MIGRATIONS, options);
     const store = new ProjectStore(projectId, path, db);
-    // 쓰기 장부와 대조한다: 이 프로세스 밖의 변경은 사건으로 남는다 (ADR-069). data_version은 대조 직전에 읽는다:
-    // 그 사이 다른 연결의 커밋은 대조에 들어가고, 닫을 때 바뀐 것으로 보여 믿지 않는 쪽(실패 쪽)으로 닫힌다
-    store.markDataVersion();
-    observeStoreState(store);
+    // 쓰기 장부와 대조한다: 이 프로세스 밖의 변경은 사건으로 남는다 (ADR-069). data_version과 대조할 해시는 같은 읽기
+    // 트랜잭션에서 읽는다. 그 뒤 다른 연결의 커밋은 닫을 때 바뀐 것으로 보여 믿지 않는 쪽(실패 쪽)으로 닫힌다
+    observeStoreState(store, store.markDataVersion());
     return store;
   } catch (error) {
     db.close();

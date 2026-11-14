@@ -98,7 +98,8 @@ export class JudgmentRepository {
       `SELECT ${COLUMNS} FROM judgments WHERE run_id = ? ORDER BY judged_at, id`,
     );
     this.#byRule = db.prepare<[string, number], JudgmentRow>(
-      `SELECT ${COLUMNS} FROM judgments WHERE rule_id = ? ${LATEST_FIRST} LIMIT ?`,
+      // 미래 시각 행은 이력에서도 뺀다: 최신부터라 맨 위에 와서 실제 기록을 밀어내므로 건수 제한 전에 SQL에서 거른다 (#146)
+      `SELECT ${COLUMNS} FROM judgments WHERE rule_id = ? AND ${NOT_FUTURE} ${LATEST_FIRST} LIMIT ?`,
     );
   }
 
@@ -153,7 +154,7 @@ export class JudgmentRepository {
     return this.#byRun.all(runId).map(toJudgment);
   }
 
-  /** 규칙의 판정 이력 (최신부터, 기본 50건). */
+  /** 규칙의 판정 이력 (최신부터, 기본 50건). 미래 시각 기록은 최신 판정과 같은 기준으로 뺀다. */
   listByRule(ruleId: string, limit = 50): JudgmentResult[] {
     return this.#byRule.all(ruleId, Math.max(1, Math.trunc(limit))).map(toJudgment);
   }
