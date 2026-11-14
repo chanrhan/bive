@@ -92,6 +92,13 @@ export interface FrameConnection {
    * 읽는 상대는 끊지 않는다. 이벤트 루프가 막혀 있던 시간은 진척을 잴 수 없으므로 상한 만료 뒤 I/O를 한 번 처리하고 판단한다.
    */
   sendFlushed(frame: string, timeoutMs: number): Promise<void>;
+  /**
+   * 받기를 멈춘다(소켓 읽기 중지, 처리 대기열 역압). 이미 읽은 조각의 프레임은 그대로 전달된다.
+   * 멈춘 동안에는 상대가 닫아도 다시 읽기 전까지 닫힘을 알 수 없다.
+   */
+  pauseReading(): void;
+  /** 받기를 다시 시작한다. */
+  resumeReading(): void;
   /** 보낸 내용을 흘려보낸 뒤 닫는다. */
   end(): void;
   /** 즉시 닫는다. */
@@ -228,6 +235,14 @@ class NetFrameConnection implements FrameConnection {
       completedWrites: this.#completedWrites,
       queuedBytes: typeof queued === 'number' ? queued : null,
     };
+  }
+
+  pauseReading(): void {
+    this.#socket.pause();
+  }
+
+  resumeReading(): void {
+    this.#socket.resume();
   }
 
   end(): void {

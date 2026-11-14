@@ -33,6 +33,17 @@ export const DEFAULT_HELLO_TIMEOUT_MS = 10_000;
  */
 export const DEFAULT_NOTIFY_TIMEOUT_MS = 5_000;
 
+/**
+ * 한 연결의 처리 대기 프레임 수 상한 기본값 (ADR-076 보강). 넘으면 그 연결의 소켓 읽기를 멈추고, 대기열이
+ * {@link resumeBelow} 이하로 줄면 다시 읽는다. 앱 렌더러는 화면마다 조회 1개 · 뒤따르는 조회 1개만 두고(합치기)
+ * CLI는 요청 1건씩 응답을 기다리므로 정상 연결은 이 값에 닿지 않는다. 읽기를 멈춰도 이미 읽은 조각(최대 64KB)의
+ * 프레임은 들어오므로 대기열은 상한 + 한 조각의 프레임까지 찰 수 있다.
+ */
+export const DEFAULT_MAX_PENDING_FRAMES = 256;
+
+/** 읽기를 다시 시작하는 대기열 길이 (상한의 1/4). */
+const resumeBelow = (max: number): number => Math.floor(max / 4);
+
 const HELLO_METHOD = 'system.hello' satisfies MethodName;
 
 /** 처리기가 던지면 해당 코드의 JSON-RPC 오류 응답이 된다. 그 밖의 예외는 -32603. */
@@ -77,6 +88,8 @@ export interface PipeServerOptions {
   helloTimeoutMs?: number;
   /** 연결별 알림 쓰기 상한 (기본 {@link DEFAULT_NOTIFY_TIMEOUT_MS}) */
   notifyTimeoutMs?: number;
+  /** 연결별 처리 대기 프레임 수 상한 (기본 {@link DEFAULT_MAX_PENDING_FRAMES}) */
+  maxPendingFrames?: number;
   onConnectionOpened?: () => void;
   onConnectionClosed?: () => void;
 }
@@ -119,6 +132,8 @@ class Session {
   readonly #backlog: (() => void)[] = [];
   /** 프레임 하나를 처리했고 양보 뒤 다음 차례를 기다리는 중 */
   #yielding = false;
+  /** 대기열이 상한을 넘어 소켓 읽기를 멈춘 상태 */
+  #readingPaused = false;
 
   constructor(id: number, connection: FrameConnection, options: PipeServerOptions) {
     this.#id = id;
@@ -160,6 +175,13 @@ class Session {
   #enqueue(work: () => void): void {
     if (this.#yielding) {
       this.#backlog.push(work);
+      if (
+        !this.#readingPaused &&
+        this.#backlog.length > (this.#options.maxPendingFrames ?? DEFAULT_MAX_PENDING_FRAMES)
+      ) {
+        this.#readingPaused = true;
+        this.#connection.pauseReading();
+      }
       return;
     }
     this.#runThenYield(work);
@@ -177,6 +199,15 @@ class Session {
   readonly #next = (): void => {
     this.#yielding = false;
     const work = this.#backlog.shift();
+    if (
+      this.#readingPaused &&
+      this.#backlog.length <=
+        resumeBelow(this.#options.maxPendingFrames ?? DEFAULT_MAX_PENDING_FRAMES)
+    ) {
+      // 다시 읽어야 상대가 닫은 것(EOF)도 알 수 있다
+      this.#readingPaused = false;
+      this.#connection.resumeReading();
+    }
     if (work !== undefined) this.#runThenYield(work);
   };
 

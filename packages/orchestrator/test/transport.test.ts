@@ -105,7 +105,8 @@ describe('NetPipeTransport', () => {
 /**
  * 다른 스레드(자기 이벤트 루프)에서 소켓을 읽는 상대. 오케스트레이터 쪽 루프가 막혀 있어도 계속 읽는다.
  * - `steady`: 받는 대로 읽는다 · `slow`: 조각을 받을 때마다 `pauseMs` 쉬고 다시 읽는다 · `stalled`: 읽지 않는다
- * `last` 줄까지 받으면 `sawLast`가 참이 되고, 연결이 닫히면 `closed`가 참이 된다.
+ * `last` 줄까지 받으면 `sawLast`가 참이 되고, 연결이 닫히면 `closed`가 참이 된다. 읽기를 멈춘 소켓은 이벤트 루프를
+ * 붙잡지 않으므로(멈춘 상대의 스레드가 바로 끝나 소켓이 닫힘) 타이머로 루프를 붙잡는다. 스레드가 끝나면 `exited`가 참.
  */
 const READER_SOURCE = `
 const { parentPort, workerData } = require('node:worker_threads');
@@ -123,11 +124,13 @@ socket.on('data', (chunk) => {
   }
 });
 socket.on('close', () => parentPort.postMessage('closed'));
+setInterval(() => undefined, 1 << 30);
 `;
 
 interface Reader {
   sawLast: boolean;
   closed: boolean;
+  exited: boolean;
   stop(): Promise<number>;
 }
 
@@ -143,8 +146,10 @@ const startReader = (
   const reader: Reader = {
     sawLast: false,
     closed: false,
+    exited: false,
     stop: () => worker.terminate(),
   };
+  worker.on('exit', () => (reader.exited = true));
   worker.on('message', (message: string) => {
     if (message === 'last') reader.sawLast = true;
     if (message === 'closed') reader.closed = true;
@@ -204,6 +209,7 @@ describe('sendFlushed 송신 상한: 총 시간이 아니라 진척 없음 (ADR-
     expect(connection.closed).toBe(false);
     await waitFor(() => reader.sawLast, 3000, '상대가 마지막 프레임까지 받음');
     expect(reader.closed).toBe(false);
+    expect(reader.exited).toBe(false);
     expect(connection.closed).toBe(false);
   }, 10_000);
 
@@ -217,6 +223,7 @@ describe('sendFlushed 송신 상한: 총 시간이 아니라 진척 없음 (ADR-
     expect(connection.closed).toBe(false);
     await waitFor(() => reader.sawLast, 3000, '상대가 마지막 프레임까지 받음');
     expect(reader.closed).toBe(false);
+    expect(reader.exited).toBe(false);
     expect(connection.closed).toBe(false);
   }, 10_000);
 
@@ -224,9 +231,21 @@ describe('sendFlushed 송신 상한: 총 시간이 아니라 진척 없음 (ADR-
     const { connection, reader } = await accept('stalled');
     fill(connection);
     const started = Date.now();
-    await connection.sendFlushed('last', 200);
-    expect(Date.now() - started).toBeLessThan(2000);
+    let settled = false;
+    const flushed = connection.sendFlushed('last', 200).then(() => (settled = true));
+    // 상한 전: 풀리지 않았고 연결 · 상대가 살아 있다 (상대가 먼저 끝나 쓰기가 오류로 끝난 것이 아님)
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(settled).toBe(false);
+    expect(connection.closed).toBe(false);
+    expect(reader.closed).toBe(false);
+    expect(reader.exited).toBe(false);
+    await flushed;
+    const elapsed = Date.now() - started;
+    // 타이머는 이벤트 루프가 반복 처음에 잡아 둔 시각부터 재므로 `Date.now()` 기준으로 몇 ms 일찍 올 수 있다
+    expect(elapsed).toBeGreaterThanOrEqual(190);
+    expect(elapsed).toBeLessThan(2000);
     await waitFor(() => connection.closed, 2000, '연결 닫힘');
     expect(reader.sawLast).toBe(false);
+    expect(reader.exited).toBe(false);
   }, 10_000);
 });
