@@ -228,7 +228,7 @@ export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
 [`docs/roadmap.md`](docs/roadmap.md) 2.1의 M1 완료 기준 흐름은 `pnpm install --frozen-lockfile && pnpm build` 뒤 아래 블록을 한 셸에서 실행하고 시작한다. 가짜 에이전트(`scripted`)와 새 데이터 폴더 · 새 픽스처 복사본을 쓴다.
 
 ```sh
-export BIVE_AGENT=scripted BIVE_HOME=$(mktemp -d) BIVE_IDLE_SHUTDOWN_MS=1000 FX=$(mktemp -d)/fx
+export BIVE_AGENT=scripted BIVE_HOME=$(mktemp -d /tmp/bh.XXXX) BIVE_IDLE_SHUTDOWN_MS=1000 FX=$(mktemp -d)/fx   # BIVE_HOME은 짧은 경로(소켓 경로 길이 제한)
 scripts/reset-fixture.sh $FX     # 픽스처의 추적 파일을 $FX로 복사 → 설치 → git 저장소(커밋 1개)
 app()  { BIVE_SCENARIO=${1:-happy-path} xvfb-run -a pnpm --filter @bive/app start -- --open $FX --remote-debugging-port=9222 &
          for i in $(seq 60); do [ -s $BIVE_HOME/run/app.pid ] && [ -s $FX/.bive.json ] && break; sleep 1; done; sleep 3
@@ -258,7 +258,7 @@ fresh() { quit; FX=$(mktemp -d)/fx; scripts/reset-fixture.sh $FX; }   # 10~13번
 | 픽스처 초기화 | `scripts/reset-fixture.sh <dir> [--verify]` | 픽스처의 추적 파일을 `<dir>`로 복사해 설치하고 git 저장소(커밋 1개)로 만든다. `--verify`는 끝에 픽스처 테스트까지 실행한다 |
 | 초기화 스크립트 검사 | `scripts/test-reset-fixture.sh` | 지우면 안 되는 경로를 거부하는지 검사 |
 
-모든 PR이 통과해야 하는 완료 조건 명령은 [`CLAUDE.md`](CLAUDE.md) 5장에, 이 VM(Chromium 1194만 설치)의 제약 · 기동 방법 · 자주 겪는 오류는 [`dev-env` 스킬](.claude/skills/dev-env/SKILL.md)에 있다. 같은 VM의 worktree 여러 개에서 e2e를 동시에 돌려도 기본 포트가 worktree 경로 해시로 정해져 보통 겹치지 않는다. 겹치면 `BIVE_E2E_PORT`로 지정한다.
+모든 PR이 통과해야 하는 완료 조건 명령은 [`CLAUDE.md`](CLAUDE.md) 5장에, 이 VM(Playwright 브라우저는 `/opt/pw-browsers` 아래 버전 폴더 하나)의 제약 · 기동 방법 · 자주 겪는 오류는 [`dev-env` 스킬](.claude/skills/dev-env/SKILL.md)에 있다. 같은 VM의 worktree 여러 개에서 e2e를 동시에 돌려도 기본 포트가 worktree 경로 해시로 정해져 보통 겹치지 않는다. 겹치면 `BIVE_E2E_PORT`로 지정한다.
 
 ## 8. 개발 규칙
 
