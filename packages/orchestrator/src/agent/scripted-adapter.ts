@@ -192,7 +192,7 @@ export class ScriptedAdapter implements AgentAdapter {
       sessionId: randomUUID(),
       model: spec.model,
       tools: [...spec.tools.toolNames],
-      mcpServers: [...SCRIPTED_MCP_SERVERS],
+      mcpServers: [...SCRIPTED_MCP_SERVERS, ...(picked.extraMcpServers ?? [])],
     };
 
     let turn = 0;

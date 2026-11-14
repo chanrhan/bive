@@ -1,7 +1,7 @@
 // 테스트용 임시 BIVE_HOME · 오케스트레이터 자식 프로세스 도우미.
 // 테스트가 끝나면 cleanup()으로 자식 프로세스 · 임시 폴더를 모두 정리한다.
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +39,7 @@ export interface Spawned {
   child: ChildProcess;
   exited: Promise<Exit>;
   readonly stdout: string;
+  readonly stderr: string;
 }
 
 const track = (child: ChildProcess): Spawned => {
@@ -60,6 +61,9 @@ const track = (child: ChildProcess): Spawned => {
     exited,
     get stdout() {
       return stdout;
+    },
+    get stderr() {
+      return stderr;
     },
   };
 };
@@ -154,16 +158,112 @@ export const isOrchestratorOf = (pid: number, home: string): boolean => {
   }
 };
 
+/** 잠금 파일이 가리키는 이 테스트의 오케스트레이터 pid (살아 있고 `BIVE_HOME`이 그 폴더인 것만). */
+const ownOrchestratorPids = (): { pid: number; home: string }[] =>
+  homes.flatMap((home) => {
+    const pid = readPidFile(runPaths(home).pid);
+    return pid !== null && pid !== process.pid && isProcessAlive(pid) && isOrchestratorOf(pid, home)
+      ? [{ pid, home }]
+      : [];
+  });
+
+const closedOf = (child: ChildProcess): Promise<void> =>
+  new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) resolve();
+    else child.once('close', () => resolve());
+  });
+
+/**
+ * 정상 종료 요청: 남은 자식 프로세스(자기가 띄운 핸들)와 잠금 파일이 가리키는 이 테스트의 오케스트레이터
+ * (`isOrchestratorOf`로 확인한 것만)에 SIGTERM을 보내고 `timeoutMs`까지 끝나기를 기다린다. 오케스트레이터의 SIGTERM
+ * 처리기(`src/cli.ts`)는 진행 중 실행을 중단하고, 판정 러너는 중단 신호로 자기가 띄운 프로세스 그룹 · 하위 프로세스를
+ * 끝낸 뒤에야 엔진이 멈춘다(`src/judge/process.ts`의 `runCommand`). 그래서 판정 도중 실패 · 시간 초과한 시험도
+ * `next start` 등을 남기지 않는다. 그때까지 끝나지 않은 프로세스는 `cleanup`의 SIGKILL이 맡는다.
+ */
+export const terminate = async (timeoutMs: number): Promise<void> => {
+  const waits: Promise<void>[] = [];
+  const childPids = new Set<number>();
+  for (const child of children) {
+    if (child.pid !== undefined) childPids.add(child.pid);
+    if (child.exitCode !== null || child.signalCode !== null) continue;
+    waits.push(closedOf(child));
+    child.kill('SIGTERM');
+  }
+  for (const { pid, home } of ownOrchestratorPids()) {
+    if (childPids.has(pid)) continue;
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      continue; // 이미 끝남
+    }
+    waits.push(
+      waitFor(() => !(isProcessAlive(pid) && isOrchestratorOf(pid, home)), timeoutMs, '종료'),
+    );
+  }
+  if (waits.length === 0) return;
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    Promise.allSettled(waits),
+    new Promise((resolve) => (timer = setTimeout(resolve, timeoutMs))),
+  ]);
+  clearTimeout(timer);
+};
+
+export interface LeftoverProcess {
+  pid: number;
+  /** 명령줄 (공백 구분) */
+  command: string;
+  /** 작업 폴더 */
+  cwd: string;
+}
+
+/**
+ * 이 테스트의 `home` 안을 작업 폴더로 쓰는 프로세스(판정 체크아웃의 `next start` 등)와 환경 변수 `BIVE_HOME`이
+ * `home`인 프로세스 목록. 판정 러너의 하위 프로세스는 환경 변수 허용 목록만 받아 `BIVE_HOME`이 없으므로 작업 폴더로 찾는다.
+ * 확인만 한다(죽이지 않는다). Linux 밖에서는 빈 목록.
+ */
+export const leftoverProcesses = (home: string): LeftoverProcess[] => {
+  if (process.platform !== 'linux') return [];
+  let names: string[];
+  try {
+    names = readdirSync('/proc').filter((name) => /^\d+$/.test(name));
+  } catch {
+    return [];
+  }
+  const found: LeftoverProcess[] = [];
+  for (const name of names) {
+    const pid = Number(name);
+    if (pid === process.pid) continue;
+    let cwd = '';
+    try {
+      // 지워진 폴더는 끝에 ` (deleted)`가 붙는다
+      cwd = readlinkSync(`/proc/${name}/cwd`).replace(/ \(deleted\)$/u, '');
+    } catch {
+      // 끝났거나 좀비 · 권한 없음
+    }
+    const inHome = cwd !== '' && (cwd === home || cwd.startsWith(`${home}/`));
+    if (!inHome && !isOrchestratorOf(pid, home)) continue;
+    let command: string;
+    try {
+      command = readFileSync(`/proc/${name}/cmdline`, 'utf8').split('\0').join(' ').trim();
+    } catch {
+      continue;
+    }
+    found.push({ pid, command, cwd });
+  }
+  return found;
+};
+
+/** 지금 정리 대상인 임시 BIVE_HOME 목록 (남은 프로세스 확인용). */
+export const trackedHomes = (): readonly string[] => [...homes];
+
 /** 남은 자식 프로세스 · 잠금 파일이 가리키는 이 테스트의 오케스트레이터를 죽이고 임시 폴더를 지운다. */
 export const cleanup = async (): Promise<void> => {
-  for (const home of homes) {
-    const pid = readPidFile(runPaths(home).pid);
-    if (pid !== null && pid !== process.pid && isProcessAlive(pid) && isOrchestratorOf(pid, home)) {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {
-        // 이미 끝남
-      }
+  for (const { pid } of ownOrchestratorPids()) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // 이미 끝남
     }
   }
   const waiting = [...children].map(

@@ -76,9 +76,10 @@ roles:
                 // 요청마다 실행한다(빌드 시점 정적 생성 금지).
                 export const dynamic = 'force-dynamic';
 
-                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태를 돌려준다. */
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 데이터베이스 상태를 돌려준다. */
                 export async function GET(): Promise<Response> {
                   await getDb().item.count();
+                  const db = 'ok';
                   return Response.json({ ok: true });
                 }
           - message: 데이터베이스 상태 필드를 추가하는 중입니다.
