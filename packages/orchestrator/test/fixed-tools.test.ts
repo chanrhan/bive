@@ -377,6 +377,117 @@ describe('도구 호출 기록', () => {
     await tools.execute('anything', { blob: 'x'.repeat(5000) });
     expect(tools.records[0]?.argsSummary.length).toBeLessThanOrEqual(201);
   });
+
+  describe('인자가 객체가 아니거나 읽기에 실패해도 예외 없이 기록하고 결과가 바뀌지 않는다 (M2-06, ADR-089)', () => {
+    const circular = (): Record<string, unknown> => {
+      const value: Record<string, unknown> = { path: 'src/a.ts' };
+      value.self = value;
+      return value;
+    };
+    const deep = (): Record<string, unknown> => {
+      let value: Record<string, unknown> = {};
+      for (let i = 0; i < 100_000; i += 1) value = { d: value };
+      return value;
+    };
+    const throwingGetter = (): Record<string, unknown> =>
+      Object.defineProperty({}, 'path', {
+        enumerable: true,
+        get: () => {
+          throw new Error('SECRET_GETTER');
+        },
+      }) as Record<string, unknown>;
+    const throwingProxy = (): Record<string, unknown> =>
+      new Proxy(
+        {},
+        {
+          get: () => {
+            throw new Error('SECRET_PROXY');
+          },
+          ownKeys: () => {
+            throw new Error('SECRET_PROXY');
+          },
+          getOwnPropertyDescriptor: () => {
+            throw new Error('SECRET_PROXY');
+          },
+        },
+      );
+    /**
+     * 실행기 경계(`ToolExecutor.execute`)의 타입 밖 값: MCP · 시나리오가 잘못된 인자를 넘긴 경우를 흉내 낸다.
+     * 셋째 값은 읽기가 예외를 던지는지: 그러면 허용된 도구의 인자 검증이 예외로 끝나 error(tool_failed)가 될 수 있다
+     */
+    const hostile: [string, () => unknown, boolean][] = [
+      ['null', () => null, false],
+      ['undefined', () => undefined, false],
+      ['배열', () => ['src/a.ts'], false],
+      ['문자열', () => 'src/a.ts', false],
+      ['숫자', () => 42, false],
+      ['순환 참조', circular, false],
+      ['매우 깊은 객체', deep, false],
+      ['getter가 예외를 던지는 객체', throwingGetter, true],
+      ['모든 접근이 예외인 Proxy', throwingProxy, true],
+    ];
+    /** [역할, 도구, 기대 상태, 기대 사유] — 역할 허용 · 인자 검증이 지금과 같게 끝나야 한다 */
+    const calls: [AgentRole, string, string, string][] = [
+      ['implementer', 'write_file', 'denied', 'invalid_args'],
+      ['implementer', 'read_file', 'denied', 'invalid_args'],
+      ['implementer', 'list_files', 'denied', 'invalid_args'],
+      ['implementer', 'run_tests', 'denied', 'invalid_args'],
+      ['rule-writer', 'write_file', 'denied', 'unknown_tool'],
+      ['rule-writer', 'propose_rule', 'denied', 'invalid_args'],
+      ['test-writer', 'proposal.approve', 'denied', 'unknown_tool'],
+    ];
+
+    it.each(hostile)('%s', async (_label, make, readThrows) => {
+      for (const [role, name, expectedStatus, expectedReason] of calls) {
+        // 역할에 없는 도구는 인자를 읽기 전에 거부된다. 허용된 도구는 인자 검증이 그 값을 읽다 예외가 나면
+        // 검증 결과 대신 error(tool_failed)가 된다(스키마가 모르는 키를 읽지 않고 거부하면 검증 결과 그대로)
+        const expected = { status: expectedStatus, reason: expectedReason };
+        const allowed =
+          readThrows && expectedReason !== 'unknown_tool'
+            ? [expected, { status: 'error', reason: 'tool_failed' }]
+            : [expected];
+        const seen: ToolCallRecord[] = [];
+        const tools = createRoleTools({
+          role,
+          sessionRoot: role === 'implementer' ? worktree : session,
+          biveHome: home,
+          hooks: { onToolCall: (record) => seen.push(record) },
+        });
+        const result = await tools.execute(name, make() as Record<string, unknown>);
+        const label = `${role} ${name}`;
+        // 역할 허용 목록 · 인자 검증이 정한 결과 그대로 (요약 예외로 기록 없는 executor_error가 되거나 통과로 바뀌지 않는다)
+        const outcome = { status: result.status, reason: result.reason };
+        expect(allowed, label).toContainEqual(outcome);
+        expect(seen, label).toHaveLength(1);
+        expect(seen[0], label).toMatchObject({ role, name, ...outcome });
+        expect(typeof seen[0]?.argsSummary, label).toBe('string');
+        expect(seen[0]?.argsSummary.length, label).toBeLessThanOrEqual(201);
+        expect(JSON.stringify(seen), label).not.toContain('SECRET');
+      }
+      // 쓰기는 일어나지 않았다
+      expect(
+        readFileSync(path.join(worktree, 'src', 'app', 'api', 'health', 'route.ts'), 'utf8'),
+      ).toBe('export async function GET() { return Response.json({ ok: true }); }\n');
+    });
+  });
+
+  it('저장할 경로 요약 · 도구 이름에도 길이 상한이 있다: 글자는 그대로 두고 잘라 …를 붙인다 (ADR-089)', async () => {
+    const tools = createRoleTools({ role: 'implementer', sessionRoot: worktree, biveHome: home });
+    const longPath = `src/${'a'.repeat(5000)}\n.ts`;
+    await tools.execute('write_file', { path: longPath, content: 'x' });
+    const longName = `x\u001b${'n'.repeat(3000)}`;
+    await tools.execute(longName, {});
+    const shortPath = `src/${'b'.repeat(4092)}`;
+    await tools.execute('read_file', { path: shortPath });
+
+    const [write, unknown, read] = tools.records;
+    expect(write?.argsSummary).toBe(`${longPath.slice(0, 4095)}…`);
+    expect(write?.status).not.toBe('ok');
+    expect(unknown).toMatchObject({ name: `${longName.slice(0, 1023)}…`, reason: 'unknown_tool' });
+    // 정확히 상한(4096)이면 자르지 않는다
+    expect(read?.argsSummary).toBe(shortPath);
+    expect(shortPath).toHaveLength(4096);
+  });
 });
 
 describe('ScriptedAdapter 재생 (happy-path)', () => {

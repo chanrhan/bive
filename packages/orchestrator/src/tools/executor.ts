@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { AgentRole } from '@bive/shared';
 
 import type { ToolExecutor, ToolResult } from '../agent/adapter.js';
+import { clipText } from '../text-limit.js';
 import { type CommandContext, runCommand } from './commands.js';
 import {
   type CommandToolName,
@@ -31,9 +32,9 @@ export interface ToolCallRecord {
   role: AgentRole;
   /** 세션 ID. init 전 · 미지정이면 `null` */
   sessionId: string | null;
-  /** 모델이 요청한 도구 이름 (허용 목록 밖 이름 포함) */
+  /** 모델이 요청한 도구 이름 (허용 목록 밖 이름 포함, 1024자 상한 · 넘으면 잘라 `…`, ADR-089) */
   name: string;
-  /** 파일 도구는 경로, 명령 도구는 argv, 그 밖은 요청 인자 요약 */
+  /** 파일 도구는 경로(4096자 상한), 명령 도구는 argv, 그 밖은 요청 인자 요약 */
   argsSummary: string;
   status: ToolResult['status'];
   reason?: string;
@@ -77,8 +78,12 @@ export interface CreateRoleToolsOptions {
 }
 
 const ARGS_SUMMARY_MAX = 200;
+/** 저장할 파일 도구 경로 요약의 상한: OS 경로 길이 상한(Linux `PATH_MAX`)과 같다 (ADR-089) */
+const PATH_SUMMARY_MAX = 4096;
+/** 저장할 도구 이름의 상한: 모르는 도구 이름은 에이전트가 정한 임의 문자열이다 (ADR-089) */
+const TOOL_NAME_RECORD_MAX = 1024;
 
-const summarizeArgs = (args: Record<string, unknown>): string => {
+const summarizeArgs = (args: unknown): string => {
   let text: string;
   try {
     text = JSON.stringify(args) ?? '';
@@ -88,8 +93,16 @@ const summarizeArgs = (args: Record<string, unknown>): string => {
   return text.length <= ARGS_SUMMARY_MAX ? text : `${text.slice(0, ARGS_SUMMARY_MAX)}…`;
 };
 
-const pathSummary = (args: Record<string, unknown>, fallback: string): string =>
-  typeof args.path === 'string' ? args.path : fallback;
+/** 인자의 문자열 `path`. 인자가 객체가 아니거나 읽기가 예외를 던지면(getter · Proxy) 없음으로 본다. */
+const pathArg = (args: unknown): string | undefined => {
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) return undefined;
+  try {
+    const value: unknown = (args as Record<string, unknown>).path;
+    return typeof value === 'string' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+};
 
 const isFileToolName = (name: string): name is FileToolName =>
   (FILE_TOOL_NAMES as readonly string[]).includes(name);
@@ -97,11 +110,15 @@ const isFileToolName = (name: string): name is FileToolName =>
 /**
  * 호출 기록의 인자 요약. 파일 도구 이름이면 역할 허용 · 인자 검증 · 예외 여부와 상관없이 대상 경로만 남긴다
  * (쓰기 내용이 기록에 섞이지 않게, ADR-083). 경로가 문자열이 아니면 고정 표기(목록 · 검색은 `.`, 그 밖은 빈 값).
+ * 인자가 객체가 아니거나(`null` · 배열 · 원시 값) 읽기가 예외를 던져도 예외 없이 요약을 만든다. 경로는 글자를 바꾸지 않고
+ * 길이만 제한한다(ADR-089).
  */
-const summaryOf = (name: string, args: Record<string, unknown>): string =>
-  isFileToolName(name)
-    ? pathSummary(args, name === 'search_files' || name === 'list_files' ? '.' : '')
-    : summarizeArgs(args);
+const summaryOf = (name: string, args: unknown): string => {
+  if (!isFileToolName(name)) return summarizeArgs(args);
+  const target = pathArg(args);
+  if (target !== undefined) return clipText(target, PATH_SUMMARY_MAX);
+  return name === 'search_files' || name === 'list_files' ? '.' : '';
+};
 
 const isCommandTool = (name: FixedToolName): name is CommandToolName =>
   (COMMAND_TOOL_NAMES as readonly string[]).includes(name);
@@ -154,7 +171,7 @@ export class FixedToolExecutor implements ToolExecutor {
       at: startedAt.toISOString(),
       role: this.role,
       sessionId: this.sessionId,
-      name,
+      name: clipText(name, TOOL_NAME_RECORD_MAX),
       argsSummary: summary,
       status: result.status,
       ...(result.reason === undefined ? {} : { reason: result.reason }),

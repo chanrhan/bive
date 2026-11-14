@@ -586,6 +586,14 @@ export type RunResumeParams = z.infer<typeof RunResumeParams>;
 /** 한 번에 돌려주는 도구 호출 기록 상한. 넘으면 앞에서부터 이만큼과 `truncated: true`. */
 export const TOOL_CALL_LIST_LIMIT = 500;
 
+/**
+ * `toolCall.list` 항목의 도구 이름 · 경로 길이 상한 (UTF-16 코드 단위, M2-06, ADR-089). 값은 보이지 않거나 줄 · 표시 방향을
+ * 바꾸는 글자(제어 문자 · 줄 구분 · 양방향 제어 · 짝 없는 서로게이트)를 `\n` · `\uXXXX` 표기로, 역슬래시를 `\\`로 바꾼
+ * 표시용 문자열이고, 바꾼 결과가 상한을 넘으면 잘라 끝에 `…`를 붙인다(`nameTruncated` · `pathTruncated`가 `true`).
+ */
+export const TOOL_CALL_NAME_DISPLAY_MAX = 128;
+export const TOOL_CALL_PATH_DISPLAY_MAX = 1024;
+
 /** `toolCall.list`: 실행(ULID 또는 표시 ID `EXE-NNN`)의 도구 호출 기록. */
 export const ToolCallListParams = z.strictObject({ projectId: Ulid, runId: RunRef });
 export type ToolCallListParams = z.infer<typeof ToolCallListParams>;
@@ -597,11 +605,19 @@ export const ToolCallEntry = z.strictObject({
   at: Timestamp,
   role: AgentRole,
   step: z.strictObject({ kind: StepKind, attempt: z.int().positive() }).nullable(),
-  name: z.string().min(1),
+  /** 도구 이름(모르는 도구면 에이전트가 부른 그대로). 표시용 표기 · 상한은 {@link TOOL_CALL_NAME_DISPLAY_MAX} */
+  name: z.string().min(1).max(TOOL_CALL_NAME_DISPLAY_MAX),
+  /** `name`이 상한 때문에 잘렸는지 (목록 상한의 `truncated`와 다르다) */
+  nameTruncated: z.boolean(),
   status: ToolCallStatus,
   reason: z.string().min(1).nullable(),
-  /** 파일 도구의 대상 경로(에이전트가 넘긴 그대로). 그 밖의 도구 · 경로가 없거나 경로로 읽을 수 없는 기록은 `null` */
-  path: z.string().min(1).nullable(),
+  /**
+   * 파일 도구의 대상 경로(에이전트가 넘긴 값의 표시용 표기, 상한 {@link TOOL_CALL_PATH_DISPLAY_MAX}). 그 밖의 도구 ·
+   * 경로가 없거나 경로로 읽을 수 없는 기록은 `null`
+   */
+  path: z.string().min(1).max(TOOL_CALL_PATH_DISPLAY_MAX).nullable(),
+  /** `path`가 상한 때문에 잘렸는지. `path`가 `null`이면 `false` */
+  pathTruncated: z.boolean(),
 });
 export type ToolCallEntry = z.infer<typeof ToolCallEntry>;
 

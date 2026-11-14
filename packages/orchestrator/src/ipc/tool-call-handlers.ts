@@ -2,16 +2,20 @@
 // - 사람(앱 · CLI)이 실행의 도구 호출 기록을 읽는 조회 전용 RPC `toolCall.list` 하나뿐이다. 기록은 도구 실행기만 쓴다
 // - 역할 세션의 도구(MCP)에는 없다. 파이프 서버가 토큰 인증된 연결에서만 처리한다 (ADR-041)
 // - 인자 · 결과 원문은 싣지 않는다. 파일 도구의 대상 경로만 싣는다(도구 실행기가 파일 도구의 인자 요약으로 경로만 남긴다)
+// - 도구 이름 · 경로는 표시용 표기(제어 문자 이스케이프)로 바꾸고 길이 상한을 건다. 저장된 기록은 바꾸지 않는다 (ADR-089)
 // - 저장소 열림 구간은 동기다 (ADR-069)
 import {
   ErrorCode,
   parseDisplayId,
   TOOL_CALL_LIST_LIMIT,
+  TOOL_CALL_NAME_DISPLAY_MAX,
+  TOOL_CALL_PATH_DISPLAY_MAX,
   type ToolCall,
   type ToolCallEntry,
 } from '@bive/shared';
 import type { ProjectStore, RunDetail } from '@bive/store';
 
+import { displayText } from '../text-limit.js';
 import { FILE_TOOL_NAMES } from '../tools/definitions.js';
 import { withProjectStore } from './project-store-access.js';
 import { RpcError, type MethodHandlers } from './server.js';
@@ -69,17 +73,24 @@ export const createToolCallHandlers = ({ biveHome }: ToolCallHandlerDeps): ToolC
       );
       // 상한보다 1건 더 읽어 넘쳤는지 안다
       const rows = store.sessions.toolCallsLimited(detail.run.id, TOOL_CALL_LIST_LIMIT + 1);
-      const calls = rows.slice(0, TOOL_CALL_LIST_LIMIT).map((call): ToolCallEntry => ({
-        sessionId: call.sessionId,
-        seq: call.seq,
-        at: call.at,
-        role: call.role,
-        step: stepOfSession.get(call.sessionId) ?? null,
-        name: call.name,
-        status: call.status,
-        reason: call.reason,
-        path: pathOf(call),
-      }));
+      const calls = rows.slice(0, TOOL_CALL_LIST_LIMIT).map((call): ToolCallEntry => {
+        const name = displayText(call.name, TOOL_CALL_NAME_DISPLAY_MAX);
+        const rawPath = pathOf(call);
+        const shown = rawPath === null ? null : displayText(rawPath, TOOL_CALL_PATH_DISPLAY_MAX);
+        return {
+          sessionId: call.sessionId,
+          seq: call.seq,
+          at: call.at,
+          role: call.role,
+          step: stepOfSession.get(call.sessionId) ?? null,
+          name: name.text,
+          nameTruncated: name.truncated,
+          status: call.status,
+          reason: call.reason,
+          path: shown?.text ?? null,
+          pathTruncated: shown?.truncated ?? false,
+        };
+      });
       return {
         runId: detail.run.id,
         displayId: detail.run.displayId,

@@ -15,6 +15,8 @@ import {
   SETTINGS_INCOMPLETE_REASON,
   type Step,
   type StepKind,
+  TOOL_CALL_NAME_DISPLAY_MAX,
+  TOOL_CALL_PATH_DISPLAY_MAX,
 } from '@bive/shared';
 import { openProjectStore, registerProject, type ProjectStore } from '@bive/store';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -493,9 +495,11 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
               role: 'test-writer',
               step: { kind: 'test_writing', attempt: 1 },
               name: 'write_file',
+              nameTruncated: false,
               status: 'ok',
               reason: null,
               path: 'bive-acceptance/RULE-001/a.acc.ts',
+              pathTruncated: false,
             },
             {
               sessionId: implSession,
@@ -504,9 +508,11 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
               role: 'implementer',
               step: { kind: 'implementation', attempt: 1 },
               name: 'write_file',
+              nameTruncated: false,
               status: 'denied',
               reason: 'path_denied',
               path: '/tmp/bh/projects/x/bive.db',
+              pathTruncated: false,
             },
             {
               sessionId: implSession,
@@ -515,9 +521,11 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
               role: 'implementer',
               step: { kind: 'implementation', attempt: 1 },
               name: 'proposal.approve',
+              nameTruncated: false,
               status: 'denied',
               reason: 'unknown_tool',
               path: null,
+              pathTruncated: false,
             },
             {
               sessionId: implSession,
@@ -526,9 +534,11 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
               role: 'implementer',
               step: { kind: 'implementation', attempt: 1 },
               name: 'run_tests',
+              nameTruncated: false,
               status: 'error',
               reason: 'tool_failed',
               path: null,
+              pathTruncated: false,
             },
           ],
         });
@@ -681,6 +691,102 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
         rows.map(([name, , expected]) => [name, expected]),
       );
       expect(JSON.stringify(result)).not.toContain('SECRET');
+    });
+
+    describe('경로 · 도구 이름의 길이 상한과 제어 문자 이스케이프 (M2-06, ADR-089)', () => {
+      const PATH_MAX = TOOL_CALL_PATH_DISPLAY_MAX;
+      const NAME_MAX = TOOL_CALL_NAME_DISPLAY_MAX;
+
+      /** 기록을 남기고 조회 결과의 [name, nameTruncated, path, pathTruncated]를 돌려준다. */
+      const listShown = async (rows: readonly (readonly [string, string])[]) => {
+        const { sessionIds, append } = await runWithSessions(1);
+        const [sessionId] = sessionIds as [string];
+        append(rows.map(([name, summary], i) => [sessionId, T0 + i, name, summary] as const));
+        const result = await h.client.call('toolCall.list', {
+          projectId: h.project.id,
+          runId: 'EXE-001',
+        });
+        return result.calls.map((c) => [c.name, c.nameTruncated, c.path, c.pathTruncated]);
+      };
+
+      it('경로: 상한 바로 아래 · 정확히 상한은 그대로, 넘으면 상한 길이로 잘라 …와 pathTruncated', async () => {
+        const below = `src/${'a'.repeat(PATH_MAX - 5)}`;
+        const exact = `src/${'b'.repeat(PATH_MAX - 4)}`;
+        const over = `src/${'c'.repeat(6000)}`;
+        expect([below.length, exact.length]).toEqual([PATH_MAX - 1, PATH_MAX]);
+        const shown = await listShown([
+          ['read_file', below],
+          ['read_file', exact],
+          ['write_file', over],
+          ['write_file', '/tmp/bh/projects/forbidden-write.txt'],
+        ]);
+        expect(shown).toEqual([
+          ['read_file', false, below, false],
+          ['read_file', false, exact, false],
+          ['write_file', false, `${over.slice(0, PATH_MAX - 1)}…`, true],
+          // 정상 길이의 경로는 글자까지 그대로다 (roadmap 2.1 흐름 12번)
+          ['write_file', false, '/tmp/bh/projects/forbidden-write.txt', false],
+        ]);
+      });
+
+      it('경로: 제어 문자 · 줄 구분 · 양방향 제어를 표기로 바꾸고 역슬래시를 \\\\로 적는다', async () => {
+        // 짝 없는 서로게이트(\ud800)는 저장소(UTF-8)가 U+FFFD로 바꿔 저장한다: 조회 값은 그 글자다
+        const raw =
+          'a\nb\rc\td\u001be\u0000f\u007fg\u0085h\u2028i\u2029j\u202ek\u2066l\u200fm\u061cn\ud800o\\np\\q😀r';
+        const shown = await listShown([['write_file', raw]]);
+        expect(shown).toEqual([
+          [
+            'write_file',
+            false,
+            'a\\nb\\rc\\td\\u001be\\u0000f\\u007fg\\u0085h\\u2028i\\u2029j\\u202ek\\u2066l\\u200fm\\u061cn\ufffdo\\\\np\\\\q😀r',
+            false,
+          ],
+        ]);
+        // 응답에는 제어 문자 · 줄 구분 · 양방향 제어 글자가 남지 않는다
+        const path = String(shown[0]?.[2]);
+        expect(path).not.toMatch(
+          // eslint-disable-next-line no-control-regex
+          /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/,
+        );
+      });
+
+      it('경로: 이스케이프로 늘어난 길이로 상한을 재고, 표기 · 서로게이트 쌍 중간에서 자르지 않는다', async () => {
+        // 줄바꿈 하나가 `\n` 두 글자가 되어 원래 길이(정확히 상한)가 상한을 넘는다
+        const grown = `${'a'.repeat(PATH_MAX - 1)}\n`;
+        // `\u001b`(6글자)가 상한에 걸친다: 표기 전체를 빼고 자른다
+        const esc = `${'b'.repeat(PATH_MAX - 4)}\u001b`;
+        // 서로게이트 쌍(2 코드 단위)이 상한에 걸친다: 쌍 전체를 빼고 자른다
+        const pair = `${'c'.repeat(PATH_MAX - 2)}😀😀`;
+        const shown = await listShown([
+          ['read_file', grown],
+          ['read_file', esc],
+          ['read_file', pair],
+        ]);
+        expect(shown).toEqual([
+          ['read_file', false, `${'a'.repeat(PATH_MAX - 1)}…`, true],
+          ['read_file', false, `${'b'.repeat(PATH_MAX - 4)}…`, true],
+          ['read_file', false, `${'c'.repeat(PATH_MAX - 2)}…`, true],
+        ]);
+        for (const [, , path] of shown) expect(String(path).length).toBeLessThanOrEqual(PATH_MAX);
+      });
+
+      it('도구 이름: 상한을 넘는 · 제어 문자를 담은 모르는 도구 이름도 조회가 실패하지 않고 잘리거나 이스케이프된다', async () => {
+        const longName = `proposal.${'x'.repeat(5000)}`;
+        const exactName = 'y'.repeat(NAME_MAX);
+        const shown = await listShown([
+          [longName, '{"id":"SECRET-ARGS"}'],
+          [exactName, '{}'],
+          ['proposal.approve\n\u001b[2J\u202e', '{}'],
+          ['write_file\u0000', 'src/a.ts'],
+        ]);
+        expect(shown).toEqual([
+          [`${longName.slice(0, NAME_MAX - 1)}…`, true, null, false],
+          [exactName, false, null, false],
+          ['proposal.approve\\n\\u001b[2J\\u202e', false, null, false],
+          // 파일 도구 이름과 글자가 다르면 파일 도구가 아니다: 경로를 싣지 않는다
+          ['write_file\\u0000', false, null, false],
+        ]);
+      });
     });
 
     it('없는 실행 · 다른 프로젝트의 실행 · 등록되지 않은 프로젝트는 -32004, projectId 없으면 -32602', async () => {
