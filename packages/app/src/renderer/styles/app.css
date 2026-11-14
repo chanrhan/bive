@@ -26,9 +26,12 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 버튼 문구는 줄바꿈하지 않는다(좁은 상세에서 "거 / 절"처럼 갈라져 잘리지 않게, #175).
+   좁을 때는 버튼이 아니라 버튼 줄이 다음 줄로 넘어간다 (각 버튼 줄의 flex-wrap) */
 button {
   font: inherit;
   color: inherit;
+  white-space: nowrap;
 }
 
 :focus-visible {

@@ -6,21 +6,37 @@
   bottom: var(--space-4);
   z-index: 1;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-2);
+  /* 상세가 좁으면 상세 밖으로 나가지 않고 문구(수정 중 · 처리 중)가 버튼 묶음 위 줄로 간다 (#175) */
+  max-width: calc(100% - var(--space-4) * 2);
   padding: var(--space-2);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-2);
   background: var(--color-surface-raised);
 }
 
+/* 버튼 묶음은 한 줄이 기본이고, 상세 폭이 묶음보다 좁을 때만 묶음 안에서 다음 줄로 넘긴다(상세 밖으로 나가지 않음) */
+.floating-actions-buttons {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
 .floating-actions-busy {
   padding: 0 var(--space-2);
+  white-space: nowrap;
   color: var(--color-text-muted);
   font-size: var(--font-size-2);
 }
 
 .floating-action {
+  flex: none;
   height: 30px;
   padding: 0 var(--space-4);
   border: 1px solid var(--color-border);

@@ -35,3 +35,57 @@ export const horizontalOverflow = (pane: Locator, rowSelector: string): Promise<
     });
     return problems;
   }, rowSelector);
+
+/**
+ * 한 줄 문구 검사 (#175 M1-39): `testIds` 요소마다 글자가 한 줄이고 잘리지 않으며 패널(`pane`) 경계 안에 있는지.
+ * 비어 있으면 통과. 요소를 못 찾으면 그것도 문제로 돌려준다.
+ * - 한 줄: 글자 범위(Range)의 줄 조각 위쪽 좌표가 하나뿐
+ * - 잘림 없음: `scrollHeight <= clientHeight`, `scrollWidth <= clientWidth`
+ * - 패널 안: 요소의 경계 상자가 패널 테두리 안쪽에 들어온다
+ */
+export const textClipping = (pane: Locator, testIds: readonly string[]): Promise<string[]> =>
+  pane.evaluate((el, ids) => {
+    const problems: string[] = [];
+    const paneBox = el.getBoundingClientRect();
+    const inner = {
+      left: paneBox.left + el.clientLeft,
+      top: paneBox.top + el.clientTop,
+      right: paneBox.left + el.clientLeft + el.clientWidth,
+      bottom: paneBox.top + el.clientTop + el.clientHeight,
+    };
+    for (const id of ids) {
+      const target = el.querySelector<HTMLElement>(`[data-testid="${id}"]`);
+      if (target === null) {
+        problems.push(`${id}: 없음`);
+        continue;
+      }
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      const tops = new Set(
+        [...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top)),
+      );
+      if (tops.size !== 1) problems.push(`${id}: ${tops.size}줄`);
+      if (target.scrollHeight > target.clientHeight + 0.5) {
+        problems.push(
+          `${id}: 세로 잘림 (내용 ${target.scrollHeight}px > 높이 ${target.clientHeight}px)`,
+        );
+      }
+      if (target.scrollWidth > target.clientWidth + 0.5) {
+        problems.push(
+          `${id}: 가로 잘림 (내용 ${target.scrollWidth}px > 폭 ${target.clientWidth}px)`,
+        );
+      }
+      const box = target.getBoundingClientRect();
+      if (
+        box.left < inner.left - 0.5 ||
+        box.top < inner.top - 0.5 ||
+        box.right > inner.right + 0.5 ||
+        box.bottom > inner.bottom + 0.5
+      ) {
+        problems.push(
+          `${id}: 패널 밖 (가로 ${Math.round(box.left)}~${Math.round(box.right)}, 세로 ${Math.round(box.top)}~${Math.round(box.bottom)} / 패널 가로 ${Math.round(inner.left)}~${Math.round(inner.right)}, 세로 ${Math.round(inner.top)}~${Math.round(inner.bottom)})`,
+        );
+      }
+    }
+    return problems;
+  }, testIds);

@@ -202,26 +202,28 @@ export const RequirementDetail = ({
                 <span className="requirement-editor-hint">
                   {isMac() ? '⌘↵ 저장 · Esc 취소' : 'Ctrl+Enter 저장 · Esc 취소'}
                 </span>
-                <button
-                  type="button"
-                  className="requirement-action"
-                  data-testid="requirement-cancel"
-                  disabled={busy !== null}
-                  onClick={cancelEdit}
-                >
-                  {TEXT.cancel}
-                </button>
-                <button
-                  type="button"
-                  className="requirement-action"
-                  data-testid="requirement-save"
-                  data-primary="true"
-                  disabled={busy !== null || !canSaveEdit(requirement, draft)}
-                  aria-busy={busy === 'save'}
-                  onClick={save}
-                >
-                  {TEXT.save}
-                </button>
+                <span className="requirement-editor-buttons">
+                  <button
+                    type="button"
+                    className="requirement-action"
+                    data-testid="requirement-cancel"
+                    disabled={busy !== null}
+                    onClick={cancelEdit}
+                  >
+                    {TEXT.cancel}
+                  </button>
+                  <button
+                    type="button"
+                    className="requirement-action"
+                    data-testid="requirement-save"
+                    data-primary="true"
+                    disabled={busy !== null || !canSaveEdit(requirement, draft)}
+                    aria-busy={busy === 'save'}
+                    onClick={save}
+                  >
+                    {TEXT.save}
+                  </button>
+                </span>
               </div>
             </div>
           ) : (

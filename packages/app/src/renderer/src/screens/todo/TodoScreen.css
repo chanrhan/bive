@@ -76,8 +76,9 @@
   gap: var(--space-4);
   min-height: 0;
   overflow: auto;
-  /* 떠 있는 버튼이 마지막 카드를 가리지 않게 아래를 비운다 */
-  padding: var(--space-4) var(--space-5) calc(var(--space-6) * 3);
+  /* 떠 있는 버튼이 마지막 카드를 가리지 않게 아래를 비운다. 좁은 상세에서 떠 있는 줄이 두 줄(문구 + 버튼,
+     약 76px) + 아래 띄움 16px이 되어도 틈이 남는 높이 (#175) */
+  padding: var(--space-4) var(--space-5) calc(var(--space-6) * 4);
 }
 
 .proposal-detail-head {
@@ -130,7 +131,7 @@
   gap: var(--space-2);
   border-color: var(--color-accent);
   /* 자동 스크롤 때 떠 있는 버튼 위에 멈춘다 (.proposal-detail 아래 여백과 같음) */
-  scroll-margin-bottom: calc(var(--space-6) * 3);
+  scroll-margin-bottom: calc(var(--space-6) * 4);
 }
 
 .detail-heading {
@@ -258,9 +259,22 @@
 
 .decision-buttons {
   display: flex;
+  /* 상세가 좁으면 보조 문구가 한 줄을 차지하고 버튼은 다음 줄 오른쪽으로 (#175) */
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
+}
+
+/* 버튼은 한 묶음으로 다음 줄로 넘어가도 오른쪽에 붙는다. 카드가 묶음보다 좁을 때만 묶음 안에서 넘긴다 */
+.decision-button-group {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-left: auto;
 }
 
 .decision-hint {
@@ -272,11 +286,13 @@
 /* 고친 내용이 있는데 닫으려 할 때의 확인 문구 (#165) */
 .decision-warning {
   margin-right: auto;
+  white-space: nowrap;
   color: var(--color-warning);
   font-size: var(--font-size-2);
 }
 
 .decision-button {
+  flex: none;
   height: 28px;
   padding: 0 var(--space-3);
   border: 1px solid var(--color-border);

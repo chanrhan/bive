@@ -174,46 +174,50 @@ export const EditCard = ({
           <span id={discardTextId} className="decision-warning" data-testid="edit-discard-text">
             {DETAIL_TEXT.discardPrompt}
           </span>
-          <button
-            ref={keepRef}
-            type="button"
-            className="decision-button"
-            data-testid="edit-keep"
-            onClick={keepEditing}
-          >
-            {DETAIL_TEXT.keepEditing}
-          </button>
-          <button
-            type="button"
-            className="decision-button"
-            data-danger="true"
-            data-testid="edit-discard-confirm"
-            onClick={onCancel}
-          >
-            {DETAIL_TEXT.discard}
-          </button>
+          <span className="decision-button-group">
+            <button
+              ref={keepRef}
+              type="button"
+              className="decision-button"
+              data-testid="edit-keep"
+              onClick={keepEditing}
+            >
+              {DETAIL_TEXT.keepEditing}
+            </button>
+            <button
+              type="button"
+              className="decision-button"
+              data-danger="true"
+              data-testid="edit-discard-confirm"
+              onClick={onCancel}
+            >
+              {DETAIL_TEXT.discard}
+            </button>
+          </span>
         </div>
       ) : (
         <div className="decision-buttons">
           <span className="decision-hint">{shortcutHint(isMac())}</span>
-          <button
-            type="button"
-            className="decision-button"
-            data-testid="edit-cancel"
-            onClick={requestCancel}
-          >
-            {DETAIL_TEXT.cancel}
-          </button>
-          <button
-            type="button"
-            className="decision-button"
-            data-primary="true"
-            data-testid="edit-confirm"
-            disabled={busy || !valid}
-            onClick={confirm}
-          >
-            {DETAIL_TEXT.editConfirm}
-          </button>
+          <span className="decision-button-group">
+            <button
+              type="button"
+              className="decision-button"
+              data-testid="edit-cancel"
+              onClick={requestCancel}
+            >
+              {DETAIL_TEXT.cancel}
+            </button>
+            <button
+              type="button"
+              className="decision-button"
+              data-primary="true"
+              data-testid="edit-confirm"
+              disabled={busy || !valid}
+              onClick={confirm}
+            >
+              {DETAIL_TEXT.editConfirm}
+            </button>
+          </span>
         </div>
       )}
     </div>
@@ -271,24 +275,26 @@ export const RejectCard = ({
       </div>
       <div className="decision-buttons">
         <span className="decision-hint">{shortcutHint(isMac())}</span>
-        <button
-          type="button"
-          className="decision-button"
-          data-testid="reject-cancel"
-          onClick={onCancel}
-        >
-          {DETAIL_TEXT.cancel}
-        </button>
-        <button
-          type="button"
-          className="decision-button"
-          data-danger="true"
-          data-testid="reject-confirm"
-          disabled={busy || !ready}
-          onClick={confirm}
-        >
-          {DETAIL_TEXT.rejectConfirm}
-        </button>
+        <span className="decision-button-group">
+          <button
+            type="button"
+            className="decision-button"
+            data-testid="reject-cancel"
+            onClick={onCancel}
+          >
+            {DETAIL_TEXT.cancel}
+          </button>
+          <button
+            type="button"
+            className="decision-button"
+            data-danger="true"
+            data-testid="reject-confirm"
+            disabled={busy || !ready}
+            onClick={confirm}
+          >
+            {DETAIL_TEXT.rejectConfirm}
+          </button>
+        </span>
       </div>
     </div>
   );
