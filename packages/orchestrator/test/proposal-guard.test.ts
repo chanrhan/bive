@@ -3,6 +3,7 @@
 // - 승인된 규칙 · 계약을 직접 고치는 RPC는 없다: `rule.update` · `contract.update` → -32601
 // - 제안 등록도 파이프 RPC가 없다(내부 API `ProposalService.submit`만)
 // - 코드 열람 기록(`codeOpen.record`)도 인증된 파이프의 사람 요청으로만 남는다: 역할 세션 도구 · 인증 전 연결은 거부 (#43)
+// - 코드 열기 IDE 선택(`settings.update`의 `ide`)도 역할 세션 도구로는 바꿀 수 없다 (#45)
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -222,6 +223,30 @@ describe('승인된 규칙 · 계약의 직접 수정 RPC 없음 (NRM-04)', () =
       fs.rmSync(root, { recursive: true, force: true });
     }
     h.read((store) => expect(store.codeOpens.listLatest(10)).toEqual([]));
+  });
+
+  it('역할 세션이 settings.update(IDE 선택 포함)를 도구로 부르면 unknown_tool로 거부되고 IDE 설정은 미설정 그대로다: 여는 URL 틀은 사람만 정한다 (NFR-07 · ADR-087, #45)', async () => {
+    for (const role of AgentRole.options) {
+      expect(
+        roleToolNames(role).filter((name) => /settings/i.test(name)),
+        role,
+      ).toEqual([]);
+    }
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bive-ide-'));
+    try {
+      for (const role of AgentRole.options) {
+        const executor = new FixedToolExecutor({ role, sessionRoot: root, biveHome: h.biveHome });
+        const result = await executor.execute('settings.update', {
+          projectId: h.project.id,
+          patch: { ide: { kind: 'custom', template: 'vscode-insiders://file/{path}:{line}' } },
+          author: { kind: 'human' },
+        });
+        expect(result, role).toMatchObject({ status: 'denied', reason: 'unknown_tool' });
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+    h.read((store) => expect(store.settings.get().ide).toBeNull());
   });
 
   it('역할 세션이 toolCall.list를 도구로 부르면 unknown_tool로 거부되고 기록만 남는다 (NFR-01)', async () => {

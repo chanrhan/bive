@@ -20,8 +20,14 @@ export const EVENT_CHANNEL = 'bive:event';
 /** `window.bive`가 노출하는 키. 이 두 개뿐이다. */
 export const BRIDGE_KEYS = ['invoke', 'on'] as const;
 
-/** 렌더러가 부를 수 없는 메서드: 파이프 인증은 main이 맡는다. */
-export const MAIN_ONLY_METHODS = ['system.hello'] as const satisfies readonly MethodName[];
+/**
+ * 렌더러가 부를 수 없는 메서드: 파이프 인증은 main이 맡는다. 코드 열람 기록은 main의 `app.openInIde`에서만 남긴다
+ * (렌더러가 열지 않고 기록만 남기지 못하게, ADR-087).
+ */
+export const MAIN_ONLY_METHODS = [
+  'system.hello',
+  'codeOpen.record',
+] as const satisfies readonly MethodName[];
 
 /**
  * main이 직접 처리하는 메서드 (파이프 아님, architecture.md 5장 "main 전용").
@@ -30,9 +36,9 @@ export const MAIN_ONLY_METHODS = ['system.hello'] as const satisfies readonly Me
 export const PICK_FOLDER_METHOD = 'app.pickFolder';
 
 /**
- * - `app.openInIde`: 코드 열기 (MET-01, ADR-084). 사유를 고른 `file:line` 대상(`CodeOpenTarget`)을 받아 main이
- *   `codeOpen.record`로 먼저 기록하고, 기록이 성공해야 고정 틀의 IDE URL로 연다. 렌더러는 URL을 넘기지 않는다.
- *   결과는 남긴 기록 `{ record }`
+ * - `app.openInIde`: 코드 열기 (MET-01, ADR-084 · ADR-087). 사유를 고른 `file:line` 대상(`CodeOpenTarget`)을 받아 main이
+ *   설정의 IDE 선택으로 URL을 만들고 확인한 뒤 `codeOpen.record`로 기록하고, 기록이 성공해야 연다. IDE 미설정이면 기록 ·
+ *   열기 없이 실패한다(화면이 먼저 선택을 받는다). 렌더러는 URL · 틀을 넘기지 않는다. 결과는 남긴 기록 `{ record }`
  */
 export const OPEN_IN_IDE_METHOD = 'app.openInIde';
 
