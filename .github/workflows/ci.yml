@@ -72,6 +72,13 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: '1'
 
+      # 파이프라인 e2e (M1-21, architecture.md 8장, ADR-071): 픽스처 복사본 · 실제 git · 실제 판정 러너 · ScriptedAdapter로
+      # 요구사항 저장부터 실행 종료까지. 시험마다 실제 설치 · next build를 여러 번 한다 (이 VM 단독 실측은 PR 본문)
+      - name: 파이프라인 e2e
+        run: pnpm e2e:pipeline
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+
       # 화면 e2e (M0-07, architecture.md 8장). 브라우저 처리 (ADR-043):
       # 러너에 깔린 Google Chrome이 있으면 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH로 그것을 쓰고 내려받지 않는다.
       # 없을 때만 Playwright Chromium을 설치하고 ~/.cache/ms-playwright를 Playwright 버전별로 캐시한다.
