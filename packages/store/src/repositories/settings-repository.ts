@@ -5,6 +5,7 @@
 import {
   defaultSettings,
   HumanAuthor,
+  IdeSetting,
   type RoleSettingsMap,
   Settings,
   SettingsPatch,
@@ -61,7 +62,7 @@ export class SettingsRepository {
 
   /**
    * 현재 설정. 저장한 적이 없으면 기본값(예산 · 모델 미설정, 변경 주체 · 시각 `null`).
-   * 저장 뒤 역할이 늘어난 경우(새 역할 키)는 그 역할만 미설정으로 채운다.
+   * 저장 뒤 역할이 늘어난 경우(새 역할 키)는 그 역할만 미설정으로 채운다. 잘못된 IDE 선택은 미설정으로 읽는다.
    * @throws {ZodError} 저장된 값이 스키마와 맞지 않을 때
    */
   get(): Settings {
@@ -74,10 +75,26 @@ export class SettingsRepository {
       ...defaults,
       ...body,
       roles: { ...defaults.roles, ...storedRoles },
+      ide: this.#readIde(body.ide),
       projectId: this.#projectId,
       updatedAt: row.updated_at,
       updatedBy: JSON.parse(row.updated_by) as unknown,
     });
+  }
+
+  /**
+   * 저장된 IDE 선택. 없으면 미설정. 스키마를 어기면(허용 목록이 좁아져 예전에 받던 틀 · 직접 고친 DB) 미설정으로
+   * 강등하고 로그 한 줄을 남긴다. 다른 설정은 그대로 읽히고 화면에서 다시 고를 수 있다 (ADR-087). 여는 쪽(main)은
+   * 읽은 값을 다시 검증한다.
+   */
+  #readIde(value: unknown): IdeSetting | null {
+    if (value === undefined || value === null) return null;
+    const checked = IdeSetting.safeParse(value);
+    if (checked.success) return checked.data;
+    console.warn(
+      `설정의 IDE 선택이 허용 범위가 아니라 미설정으로 읽음 (프로젝트 ${this.#projectId})`,
+    );
+    return null;
   }
 
   /**

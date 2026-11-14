@@ -50,7 +50,13 @@ beforeAll(() => {
   // 끊어진 링크 (대상 없음)
   symlinkSync(path.join(base, 'gone'), path.join(ROOT, 'src', 'dangling.ts'));
   symlinkSync(path.join(base, 'gone-dir'), path.join(ROOT, 'src', 'dangling-dir'));
+  // 이름이 글자 그대로 `%2e%2e`인 실제 폴더 (#184 검토 1회차 재현): 중첩 디코딩 틀에서는 `..`가 된다
+  mkdirSync(path.join(ROOT, ...NESTED_DIR.split('/')), { recursive: true });
+  writeFileSync(path.join(ROOT, ...NESTED_FILE.split('/')), 'x\n');
 });
+
+const NESTED_DIR = 'bive-acceptance/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc';
+const NESTED_FILE = `${NESTED_DIR}/passwd`;
 
 const target = (patch: Partial<CodeOpenTarget> = {}): CodeOpenTarget => ({
   projectId: PROJECT_ID,
@@ -227,6 +233,31 @@ describe('app.openInIde: 확인 → 기록 → 열기 (MET-01)', () => {
     await expect(h.open(target({ file }))).rejects.toThrow(/루트 밖/);
     expect(h.log).toEqual(['request project.list']);
   });
+});
+
+describe('중첩 디코딩으로 루트 밖 열기 (#184 검토 1회차, ADR-087)', () => {
+  it('경로 조각의 `%`: 이름이 `%2e%2e`인 실제 폴더 아래 파일은 VS Code 선택에서도 기록 · 열기 없이 거부 (1-b)', async () => {
+    const h = harness();
+    await expect(h.open(target({ file: NESTED_FILE }))).rejects.toThrow();
+    expect(h.log).toEqual([]);
+    await expect(h.open(target({ file: 'src/a%20b.ts' }))).rejects.toThrow();
+    expect(h.log).toEqual([]);
+  });
+
+  it.each([
+    ['Sublime', 'subl://open?url=file:///{path}&line={line}'],
+    ['TextMate', 'txmt://open?url=file:///{path}&line={line}'],
+    ['MacVim', 'mvim://open?url=file:///{path}&line={line}'],
+    ['허용 스킴 안의 중첩 http', 'vscode://file/x?u=http://e/{path}:{line}'],
+    ['허용 스킴 안의 중첩 file', 'idea://open?file=file:///{path}&line={line}'],
+  ])(
+    '값 안에 다시 URL을 넣는 틀(%s)은 평범한 경로에서도 기록 전에 거부 (1-a)',
+    async (_label, template) => {
+      const h = harness({ ide: { kind: 'custom', template } });
+      await expect(h.open(target({ file: 'src/a.ts' }))).rejects.toThrow();
+      expect(h.log).toEqual(CHECKED);
+    },
+  );
 });
 
 describe('경로 범위 (ADR-084 · ADR-087)', () => {

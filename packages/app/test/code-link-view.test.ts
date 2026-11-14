@@ -40,6 +40,9 @@ const PATHS = [
   'a‎.ts',
   'a‏.ts',
   'a؜.ts',
+  // 퍼센트 (#184 검토 1회차): 중첩 디코딩에서 `%2e%2e`가 `..`가 되지 않게 거부
+  'bive-acceptance/%2e%2e/etc/passwd',
+  'a%20b.ts',
   // 경계 바로 밖의 글자는 그대로 허용 (U+2029 문단 구분자 · U+206A)
   'a .ts',
   'a⁪.ts',

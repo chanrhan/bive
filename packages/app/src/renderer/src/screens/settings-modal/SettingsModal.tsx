@@ -1,6 +1,6 @@
 // 설정 모달 (SCR-21, screens.md 7장 X-02): 사이드바 하단 톱니 → 모달(820 × 600, 바깥 클릭 · Esc · × 닫기).
 // 왼쪽 섹션 목록 · 오른쪽 섹션 내용. 섹션은 예산 · 모델과 IDE(코드 열기, ADR-018 · ADR-087)를 그린다. 목록 항목을 누르면
-// 오른쪽 내용이 바뀐다(처음은 예산 · 모델). 잠정 승인 · 자동 모드 · 대기열 · 작성 규칙은 그 기능을 여는 이슈 전까지
+// 오른쪽 내용이 바뀐다(처음은 예산 · 모델). 한 번 연 섹션은 해제하지 않고 숨겨 저장하지 않은 입력을 남긴다. 잠정 승인 · 자동 모드 · 대기열 · 작성 규칙은 그 기능을 여는 이슈 전까지
 // DOM에 두지 않는다 (ADR-010 · ADR-035).
 import './SettingsModal.css';
 
@@ -27,6 +27,12 @@ const SECTIONS: readonly { key: SectionKey; title: string }[] = [
 export const SettingsModal = ({ onClose }: { onClose: () => void }): React.JSX.Element => {
   const { project } = useProject();
   const [current, setCurrent] = useState<SectionKey>('budget-model');
+  // 한 번 연 섹션 (숨길 뿐 해제하지 않는다)
+  const [visited, setVisited] = useState<ReadonlySet<SectionKey>>(new Set(['budget-model']));
+  const select = (key: SectionKey): void => {
+    setCurrent(key);
+    setVisited((prev) => (prev.has(key) ? prev : new Set([...prev, key])));
+  };
   const section = SECTIONS.find((item) => item.key === current) ?? SECTIONS[0];
   return (
     <Modal
@@ -47,7 +53,7 @@ export const SettingsModal = ({ onClose }: { onClose: () => void }): React.JSX.E
                 className="settings-nav-item"
                 data-testid={`settings-nav-${item.key}`}
                 aria-current={item.key === current ? 'page' : undefined}
-                onClick={() => setCurrent(item.key)}
+                onClick={() => select(item.key)}
               >
                 {item.title}
               </button>
@@ -67,10 +73,20 @@ export const SettingsModal = ({ onClose }: { onClose: () => void }): React.JSX.E
           <p className="settings-message" data-testid="settings-no-project">
             {NO_PROJECT_TEXT}
           </p>
-        ) : current === 'ide' ? (
-          <IdeSection key={project.id} projectId={project.id} />
         ) : (
-          <BudgetModelSection key={project.id} projectId={project.id} />
+          SECTIONS.filter((item) => visited.has(item.key)).map((item) => (
+            <div
+              key={`${project.id}-${item.key}`}
+              className="settings-pane"
+              hidden={item.key !== current}
+            >
+              {item.key === 'ide' ? (
+                <IdeSection projectId={project.id} />
+              ) : (
+                <BudgetModelSection projectId={project.id} />
+              )}
+            </div>
+          ))
         )}
       </section>
     </Modal>

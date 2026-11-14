@@ -35,8 +35,8 @@ describe('선택별 URL 생성 (ADR-018)', () => {
     expect(buildIdeUrl(custom('idea://open?line={line}&file=/{path}'), '/w/a b.ts', 7)).toBe(
       'idea://open?line=7&file=/w/a%20b.ts',
     );
-    expect(buildIdeUrl(custom('subl://open?url=file:///{path}&line={line}'), '/w/a.ts', 2)).toBe(
-      'subl://open?url=file:///w/a.ts&line=2',
+    expect(buildIdeUrl(custom('vscodium://file/{path}:{line}'), '/w/a.ts', 2)).toBe(
+      'vscodium://file/w/a.ts:2',
     );
   });
 
@@ -145,14 +145,16 @@ describe(`${OPEN_URL_LOG_ENV}: 열지 않고 파일에 한 줄로 기록`, () =>
     expect(readFileSync(file, 'utf8')).toBe('earlier\nvscode://file/w/a.ts:3\n');
   });
 
-  it('설정되지 않으면 연다(파일 없음)', async () => {
-    const { opened, open } = opener({});
-    await open('vscode://file/w/a.ts:3');
-    expect(opened).toEqual(['vscode://file/w/a.ts:3']);
+  it('설정되지 않거나 빈 값이면 연다(파일 없음, 빈 값은 미설정과 같다)', async () => {
+    for (const env of [{}, { [OPEN_URL_LOG_ENV]: '' }]) {
+      const { opened, open } = opener(env);
+      await open('vscode://file/w/a.ts:3');
+      expect(opened, JSON.stringify(env)).toEqual(['vscode://file/w/a.ts:3']);
+    }
   });
 
-  it('절대 경로가 아니면(빈 값 포함) 열지도 적지도 않고 예외', async () => {
-    for (const value of ['open-url.log', '', './x.log']) {
+  it('절대 경로가 아니면 열지도 적지도 않고 예외', async () => {
+    for (const value of ['open-url.log', './x.log', ' ']) {
       const { opened, open } = opener({ [OPEN_URL_LOG_ENV]: value });
       await expect(open('vscode://file/w/a.ts:3'), value).rejects.toThrow(/절대 경로/);
       expect(opened).toEqual([]);

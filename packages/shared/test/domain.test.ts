@@ -678,6 +678,8 @@ describe('코드 열람 기록 (MET-01, ADR-084)', () => {
     ['a\r\n.ts', '줄바꿈'],
     ['a\u007f.ts', 'DEL'],
     ['a\u009b.ts', 'C1 제어 문자'],
+    ['bive-acceptance/%2e%2e/%2e%2e/etc/passwd', '퍼센트(중첩 디코딩에서 상위 폴더)'],
+    ['a%20b.ts', '퍼센트'],
     ['src/a\u202Ests.ts', '양방향 제어 문자 RLO'],
     ['a\u2066.ts', '양방향 제어 문자 LRI'],
     ['a\u200F.ts', '양방향 제어 문자 RLM'],
@@ -763,18 +765,23 @@ describe('코드 열기 IDE 선택 (ADR-018 · ADR-087)', () => {
     'vscode-insiders://file/{path}:{line}',
     'vscodium://file/{path}:{line}',
     'windsurf://file/{path}:{line}',
-    'zed://file/{path}:{line}',
     'idea://open?file=/{path}&line={line}',
     'idea://open?line={line}&file=/{path}',
-    'subl://open?url=file:///{path}&line={line}',
-    'txmt://open?url=file:///{path}&line={line}',
-    'mvim://open?url=file:///{path}&line={line}',
   ])('사용자 지정 틀 %j는 받는다', (template) => {
     expect(isIdeUrlTemplate(template)).toBe(true);
     expect(IdeSetting.safeParse({ kind: 'custom', template }).success).toBe(true);
   });
 
   it.each([
+    ['subl://open?url=file:///{path}&line={line}', '중첩 file URL(Sublime, 목록에서 뺌)'],
+    ['txmt://open?url=file:///{path}&line={line}', '중첩 file URL(TextMate, 목록에서 뺌)'],
+    ['mvim://open?url=file:///{path}&line={line}', '중첩 file URL(MacVim, 목록에서 뺌)'],
+    ['zed://file/{path}:{line}', '근거 없는 스킴(목록에서 뺌)'],
+    ['vscode://file/x?u=http://e/{path}:{line}', '허용 스킴 안의 중첩 http URL'],
+    ['idea://open?file=file:///{path}&line={line}', '허용 스킴 안의 중첩 file URL'],
+    ['idea://open?file=file%3A%2F%2F{path}&line={line}', '퍼센트 인코딩한 중첩 URL'],
+    ['idea://open?file=//{path}&line={line}', '값 안의 권한 모양'],
+    ['vscode://file/C:/{path}:{line}', '값 안의 스킴 모양(드라이브)'],
     ['https://example.com/{path}?l={line}', '웹'],
     ['http://localhost/{path}:{line}', '웹(로컬)'],
     ['file:///{path}#{line}', '파일'],

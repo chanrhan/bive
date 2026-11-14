@@ -59,7 +59,7 @@ export const IdeSection = ({ projectId }: { projectId: string }): React.JSX.Elem
   if (load.state === 'error') {
     return (
       <div className="settings-section" data-testid="settings-ide" data-state="error">
-        <p className="settings-message" data-testid="settings-load-error">
+        <p className="settings-message" data-testid="settings-ide-load-error">
           {SECTION_TEXT.loadFailed}
         </p>
       </div>
@@ -122,7 +122,7 @@ export const IdeSection = ({ projectId }: { projectId: string }): React.JSX.Elem
           {save !== 'idle' && (
             <span
               className="settings-save-status"
-              data-testid="settings-save-status"
+              data-testid="settings-ide-save-status"
               data-state={save}
               role="status"
             >
@@ -133,7 +133,7 @@ export const IdeSection = ({ projectId }: { projectId: string }): React.JSX.Elem
         <button
           type="submit"
           className="settings-save"
-          data-testid="settings-save"
+          data-testid="settings-ide-save"
           disabled={save === 'saving'}
         >
           {SECTION_TEXT.save}

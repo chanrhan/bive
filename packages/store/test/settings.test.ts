@@ -127,17 +127,36 @@ describe('settings 테이블 · 리포지토리', () => {
     });
   });
 
-  it('저장된 IDE 틀이 허용 범위가 아니면(DB를 직접 고친 경우) 읽기가 실패한다', () => {
-    const projectId = newId();
-    withStore(projectId, (store) => {
-      store.settings.update({ ide: { kind: 'vscode' } }, { by: human, at: T0 });
-      const row = store.db.prepare('SELECT body FROM settings').get() as { body: string };
-      const body = JSON.parse(row.body) as Record<string, unknown>;
-      body.ide = { kind: 'custom', template: 'file:///{path}#{line}' };
-      store.db.prepare('UPDATE settings SET body = ?').run(JSON.stringify(body));
-      expect(() => store.settings.get()).toThrow();
-    });
-  });
+  it.each([
+    [
+      '예전에 받던 중첩 틀',
+      { kind: 'custom', template: 'subl://open?url=file:///{path}&line={line}' },
+    ],
+    ['직접 고친 금지 틀', { kind: 'custom', template: 'file:///{path}#{line}' }],
+    ['모르는 종류', { kind: 'idea' }],
+  ])(
+    '저장된 IDE 선택이 허용 범위가 아니면(%s) 미설정으로 읽고 나머지 설정은 그대로이며, 다시 고르면 저장된다 (#184 검토 1회차)',
+    (_label, ide) => {
+      const projectId = newId();
+      withStore(projectId, (store) => {
+        const saved = store.settings.update(
+          { run: { maxBudgetUsd: 5, maxTurns: 200 }, ide: { kind: 'vscode' } },
+          { by: human, at: T0 },
+        );
+        const row = store.db.prepare('SELECT body FROM settings').get() as { body: string };
+        const body = JSON.parse(row.body) as Record<string, unknown>;
+        body.ide = ide;
+        store.db.prepare('UPDATE settings SET body = ?').run(JSON.stringify(body));
+        const read = store.settings.get();
+        expect(read.ide).toBeNull();
+        expect(read).toEqual({ ...saved, ide: null });
+        const next = store.settings.update({ ide: { kind: 'cursor' } }, { by: human, at: T1 });
+        expect(next.ide).toEqual({ kind: 'cursor' });
+        expect(next.run).toEqual({ maxBudgetUsd: 5, maxTurns: 200 });
+        expect(store.settings.get().ide).toEqual({ kind: 'cursor' });
+      });
+    },
+  );
 
   it('행은 1개만 둘 수 있다 (singleton = 1)', () => {
     withStore(newId(), (store) => {

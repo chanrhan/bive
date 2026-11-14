@@ -173,6 +173,8 @@ export type RoleSettingsMap = z.infer<typeof RoleSettingsMap>;
  * 사용자 지정 틀 모두 이 목록의 `스킴://호스트`로만 시작할 수 있다. 웹 · 파일 · 스크립트 계열(`http` · `file` ·
  * `javascript` · `data` 등)과 OS 처리기(`ms-*` 등)는 목록에 없으므로 거부된다. 호스트를 고정해 같은 스킴의 다른
  * 처리기(예: VS Code 확장 URI `vscode://<확장>/…`)를 부르지 못하게 한다.
+ * 처리기가 `{path}`를 한 번만 디코딩한다고 근거를 댈 수 있는 스킴만 둔다(ADR-087). 값 안에 다시 `file:` URL을 넣는
+ * 처리기(`subl` · `txmt` · `mvim`의 `?url=file://…`)는 두 번 디코딩되어 `%2e%2e` 같은 이름이 `..`가 되므로 두지 않는다.
  */
 export const IDE_URL_SCHEME_HOSTS = {
   vscode: 'file',
@@ -180,11 +182,7 @@ export const IDE_URL_SCHEME_HOSTS = {
   vscodium: 'file',
   cursor: 'file',
   windsurf: 'file',
-  zed: 'file',
   idea: 'open',
-  subl: 'open',
-  txmt: 'open',
-  mvim: 'open',
 } as const satisfies Record<string, string>;
 export type IdeUrlScheme = keyof typeof IDE_URL_SCHEME_HOSTS;
 
@@ -256,6 +254,12 @@ export const isIdeUrlTemplate = (template: string): boolean => {
   if (countOf(template, IDE_URL_LINE_PLACEHOLDER) !== 1) return false;
   const rest = template.replace(IDE_URL_PATH_PLACEHOLDER, '').replace(IDE_URL_LINE_PLACEHOLDER, '');
   if (rest.includes('{') || rest.includes('}')) return false;
+  // 중첩 URL 거부: `스킴://호스트` 뒤(경로 · query · fragment)에 다른 스킴 모양(`file:` · `http://` 등)이나 퍼센트
+  // 인코딩(`file%3A…`)이 있으면 처리기가 `{path}`를 두 번 디코딩할 수 있다 (ADR-087)
+  const tail = template.slice(template.indexOf('://') + 3);
+  if (/[A-Za-z][A-Za-z0-9+.-]*:/.test(tail) || tail.includes('//') || tail.includes('%')) {
+    return false;
+  }
   // 자리 표시자가 `스킴://호스트`에 들어가면 쌍 비교에서 걸린다
   const sample = template
     .replace(IDE_URL_PATH_PLACEHOLDER, 'bive/sample.ts')
@@ -928,7 +932,7 @@ export const isBidiControl = (code: number): boolean =>
 /**
  * 프로젝트 루트 기준 상대 경로인지 (코드 열기의 `file`, ADR-084). 렌더러가 넘긴 값으로 루트 밖 파일이나 임의 URL을
  * 열지 못하게 좁게 받는다. 거부: 빈 값 · 너무 긴 값 · 제어 문자 · 양방향 제어 문자(ADR-087) · 절대 경로(`/` · `C:` 등 드라이브 · `\\`) ·
- * 역슬래시 · 콜론(`file:line` 구분자, 드라이브 상대 경로, 대체 데이터 스트림) · 빈 경로 조각(`a//b`, 앞뒤 `/`) ·
+ * 역슬래시 · 콜론(`file:line` 구분자, 드라이브 상대 경로, 대체 데이터 스트림) · `%`(중첩 디코딩, ADR-087) · 빈 경로 조각(`a//b`, 앞뒤 `/`) ·
  * `.` · `..` 조각. 구분자는 `/`만 쓴다(판정 기록의 `file`이 이 모양, judge/report.ts `toRelativePath`).
  */
 export const isProjectRelativePath = (value: string): boolean => {
@@ -937,7 +941,8 @@ export const isProjectRelativePath = (value: string): boolean => {
     const code = value.charCodeAt(i);
     if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || isBidiControl(code)) return false;
   }
-  if (value.includes('\\') || value.includes(':')) return false;
+  // `%`는 거부: 중첩 디코딩에서 `%2e%2e`가 `..`가 되지 않게 (ADR-087)
+  if (value.includes('\\') || value.includes(':') || value.includes('%')) return false;
   return value.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
 };
 

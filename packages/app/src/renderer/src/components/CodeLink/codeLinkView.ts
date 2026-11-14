@@ -49,7 +49,7 @@ export const isLinkableFile = (value: string): boolean => {
     const code = value.charCodeAt(i);
     if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || isBidiControl(code)) return false;
   }
-  if (value.includes('\\') || value.includes(':')) return false;
+  if (value.includes('\\') || value.includes(':') || value.includes('%')) return false;
   return value.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
 };
 

@@ -64,6 +64,18 @@
   color: var(--color-text-muted);
 }
 
+/* 섹션 하나의 자리. 숨긴 섹션은 해제하지 않고 감춘다 */
+.settings-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.settings-pane[hidden] {
+  display: none;
+}
+
 .settings-section {
   display: flex;
   flex: 1;

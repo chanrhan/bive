@@ -409,7 +409,7 @@ test.describe('IDE (코드 열기, #45 수용 기준 1)', () => {
       result: { settings: settingsWith({ ide: { kind: 'vscode' } }) },
     });
     await save(page).click();
-    await expect(page.getByTestId('settings-save-status')).toHaveText(SETTINGS_TEXT.saved);
+    await expect(page.getByTestId('settings-ide-save-status')).toHaveText(SETTINGS_TEXT.saved);
     await expect(page.getByTestId('settings-ide-unset')).toHaveCount(0);
     expect(await updates(bive)).toEqual([
       {
@@ -438,7 +438,7 @@ test.describe('IDE (코드 열기, #45 수용 기준 1)', () => {
       result: { settings: settingsWith({ ide: { kind: 'custom', template: custom } }) },
     });
     await save(page).click();
-    await expect(page.getByTestId('settings-save-status')).toHaveText(SETTINGS_TEXT.saved);
+    await expect(page.getByTestId('settings-ide-save-status')).toHaveText(SETTINGS_TEXT.saved);
     await expect(radio(page, '사용자 지정')).toBeChecked();
     await expect(template(page)).toHaveValue(custom);
     expect(await updates(bive)).toEqual([
@@ -459,7 +459,7 @@ test.describe('IDE (코드 열기, #45 수용 기준 1)', () => {
     const bive = await openIde(page, settingsWith({ ide: { kind: 'vscode' } }));
     await radio(page, '사용자 지정').check();
     await save(page).click();
-    await expect(page.getByTestId('settings-save-status')).toHaveText('입력 오류');
+    await expect(page.getByTestId('settings-ide-save-status')).toHaveText('입력 오류');
     await expect(template(page)).toHaveAttribute('aria-invalid', 'true');
     expect(await updates(bive)).toEqual([]);
 
@@ -469,7 +469,7 @@ test.describe('IDE (코드 열기, #45 수용 기준 1)', () => {
     await template(page).fill('https://example.com/{path}?line={line}');
     await expect(template(page)).toHaveAttribute('aria-invalid', 'false');
     await save(page).click();
-    await expect(page.getByTestId('settings-save-status')).toHaveText('입력 오류');
+    await expect(page.getByTestId('settings-ide-save-status')).toHaveText('입력 오류');
     await expect(template(page)).toHaveAttribute('data-state', 'invalid');
     await expect(template(page)).toHaveValue('https://example.com/{path}?line={line}');
     expect(await updates(bive)).toHaveLength(1);
@@ -484,7 +484,7 @@ test.describe('IDE (코드 열기, #45 수용 기준 1)', () => {
     });
     await template(page).fill('vscode-insiders://file/{path}:{line}');
     await save(page).click();
-    await expect(page.getByTestId('settings-save-status')).toHaveText('입력 오류');
+    await expect(page.getByTestId('settings-ide-save-status')).toHaveText('입력 오류');
     const content = ideSection(page);
     expect(await horizontalOverflow(content, '[data-testid^="ide-option-"]')).toEqual([]);
     expect(
@@ -497,8 +497,8 @@ test.describe('IDE (코드 열기, #45 수용 기준 1)', () => {
         'ide-template-vscode',
         'ide-template-cursor',
         'settings-ide-unset',
-        'settings-save-status',
-        'settings-save',
+        'settings-ide-save-status',
+        'settings-ide-save',
       ]),
     ).toEqual([]);
     const box = await template(page).boundingBox();
@@ -517,9 +517,29 @@ test.describe('IDE (코드 열기, #45 수용 기준 1)', () => {
     await page.goto('/');
     await gear(page).click();
     await page.getByTestId('settings-nav-ide').click();
-    await expect(ideSection(page).getByTestId('settings-load-error')).toHaveText(
+    await expect(ideSection(page).getByTestId('settings-ide-load-error')).toHaveText(
       '설정 불러오기 실패',
     );
     await expect(ideSection(page).getByRole('radio')).toHaveCount(0);
+  });
+
+  test('섹션을 바꿔도 저장하지 않은 입력이 남는다 (예산 입력 → IDE → 예산, IDE 선택 → 예산 → IDE)', async ({
+    page,
+  }) => {
+    const bive = await openModal(page, EMPTY, INCOMPLETE(ALL_MISSING));
+    await field(page, '실행 전체 한도 USD').fill('7');
+    await field(page, 'rule-writer 모델').fill('draft-model');
+    await page.getByTestId('settings-nav-ide').click();
+    await expect(page.getByTestId('settings-ide')).toHaveAttribute('data-state', 'ready');
+    await expect(field(page, '실행 전체 한도 USD')).toHaveCount(0);
+    await radio(page, 'Cursor').check();
+    await page.getByTestId('settings-nav-budget-model').click();
+    await expect(field(page, '실행 전체 한도 USD')).toHaveValue('7');
+    await expect(field(page, 'rule-writer 모델')).toHaveValue('draft-model');
+    await expect(ideSection(page)).toHaveCount(0);
+    await page.getByTestId('settings-nav-ide').click();
+    await expect(radio(page, 'Cursor')).toBeChecked();
+    // 섹션을 오가는 것만으로는 저장하지 않는다
+    expect(await updates(bive)).toEqual([]);
   });
 });

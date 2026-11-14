@@ -175,6 +175,8 @@ describe('파일 경로 · 줄 · 화면 · 사유 검증: 프로젝트 루트 �
     ['줄바꿈', { file: 'src/a\n.ts' }],
     ['DEL', { file: 'src/a\u007f.ts' }],
     ['C1 제어 문자', { file: 'src/a\u0085.ts' }],
+    ['양방향 제어 문자', { file: 'src/a‮sts.ts' }],
+    ['퍼센트(중첩 디코딩에서 상위 폴더)', { file: 'bive-acceptance/%2e%2e/%2e%2e/etc/passwd' }],
     ['빈 경로', { file: '' }],
     ['너무 긴 경로', { file: `${'a/'.repeat(600)}b.ts` }],
     ['줄 0', { line: 0 }],
