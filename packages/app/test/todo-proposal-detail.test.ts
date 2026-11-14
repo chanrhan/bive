@@ -34,14 +34,21 @@ import {
   EDIT_FIELDS,
   editedPayload,
   editErrors,
+  enabledActions,
   initialEditValues,
   isEarsStatement,
+  isEditDirty,
   isStaleError,
   payloadFields,
   shortcutHint,
   sourceRows,
   STATEMENT_FORMAT_ERROR,
 } from '../src/renderer/src/screens/todo/proposalDetailView.js';
+import {
+  clearEditDraft,
+  getEditDraft,
+  setEditDraft,
+} from '../src/renderer/src/screens/todo/editDraftStore.js';
 
 /** 사례: orchestrator test/rule-writer.test.ts의 받는 · 거부하는 진술과 리뷰 재현 사례. */
 const EARS_CASES = [
@@ -357,6 +364,39 @@ describe('수정 후 승인 입력', () => {
   it('단축키 안내는 운영체제에 맞춘다', () => {
     expect(shortcutHint(true)).toBe('⌘↵ 확인 · Esc 취소');
     expect(shortcutHint(false)).toBe('Ctrl+Enter 확인 · Esc 취소');
+  });
+});
+
+describe('수정 입력 보호 (#165, ADR-082)', () => {
+  it('수정 입력이 열려 있으면 떠 있는 버튼은 [수정]만 누를 수 있다 ([승인] · [거절]은 고친 내용을 버림)', () => {
+    expect([...enabledActions(true)]).toEqual(['edit']);
+    expect([...enabledActions(false)].sort()).toEqual(['approve', 'edit', 'reject']);
+  });
+
+  it('고친 내용 = 입력 칸 중 하나라도 제안 문장과 다름 (공백 하나도 다름)', () => {
+    const original = initialEditValues('rule_new', RULE_PAYLOAD);
+    expect(isEditDirty('rule_new', original, RULE_PAYLOAD)).toBe(false);
+    expect(
+      isEditDirty('rule_new', { ...original, title: `${original.title}됨` }, RULE_PAYLOAD),
+    ).toBe(true);
+    expect(
+      isEditDirty('rule_new', { ...original, statement: `${original.statement} ` }, RULE_PAYLOAD),
+    ).toBe(true);
+    expect(isEditDirty('requirement_new', { text: '원문' }, { text: '원문' })).toBe(false);
+    expect(isEditDirty('requirement_new', { text: '' }, { text: '원문' })).toBe(true);
+  });
+
+  it('수정 초안은 프로젝트 · 제안별로 기억하고 지우면 닫힌다', () => {
+    expect(getEditDraft('P1', 'A')).toBeNull();
+    setEditDraft('P1', 'A', { text: '고친 문장' });
+    setEditDraft('P2', 'A', { text: '다른 프로젝트' });
+    expect(getEditDraft('P1', 'A')).toEqual({ text: '고친 문장' });
+    expect(getEditDraft('P1', 'B')).toBeNull();
+    expect(getEditDraft('P2', 'A')).toEqual({ text: '다른 프로젝트' });
+    clearEditDraft('P1', 'A');
+    expect(getEditDraft('P1', 'A')).toBeNull();
+    expect(getEditDraft('P2', 'A')).toEqual({ text: '다른 프로젝트' });
+    clearEditDraft('P2', 'A');
   });
 });
 

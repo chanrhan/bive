@@ -19,6 +19,7 @@ import {
 } from './checklists/scr-06.js';
 import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
 import { collectVisibleText, expectScreen, findForbiddenText } from './support/expectScreen.js';
+import { horizontalOverflow } from './support/overflow.js';
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
@@ -199,6 +200,31 @@ test.describe('실패 원인 (수용 기준 3)', () => {
     // 통과 케이스는 실패 원인에 들지 않고 전체 케이스에만 있다
     await expect(failures).not.toContainText('200을 돌려준다');
     await expect(page.getByTestId('rule-cases').getByTestId('test-case')).toHaveCount(2);
+  });
+});
+
+test.describe('1280px 창의 상세 폭 (#165)', () => {
+  test('규칙 상세 패널에 가로 스크롤이 없고 실행 이력 줄 · 실패 원인 줄이 패널 안에 들어온다', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const bive = await openRules(page);
+    // 실패 규칙: 테스트 출력이 펼쳐져 실패 원인 · 전체 케이스 줄까지 보인다
+    await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+    await expect(page.getByTestId('history-row')).toHaveCount(FAILING_HISTORY.length);
+    await expect(page.getByTestId('failure-case')).toBeVisible();
+    const pane = page.getByTestId('rule-detail');
+    expect(await horizontalOverflow(pane, '[data-testid="history-row"]')).toEqual([]);
+    expect(
+      await horizontalOverflow(
+        pane,
+        '[data-testid="test-case"], [data-testid="failure-case"] > :not(pre)',
+      ),
+    ).toEqual([]);
+    // 실행 이력 줄의 값(시각 · 실행 ID · 커밋)은 줄임 없이 그대로 보인다
+    const row = page.getByTestId('history-row').first();
+    await expect(row.getByTestId('history-run')).toHaveText('EXE-002');
+    await expect(row).toContainText('b2c3d4e');
   });
 });
 

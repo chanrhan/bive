@@ -132,6 +132,27 @@ export const SUMMARY: VerificationSummaryResult = {
   pipeline: { run: run(), stages: stages('implementation', 'running') },
 };
 
+/**
+ * `verification.summary` 가짜 응답: 최근 실행이 병합 완료이고 변이 주입은 생략 (M1의 실제 흐름: 변이 주입은 P1이라
+ * `skipped`로 기록, roadmap M1-14). 생략 단계의 보이는 문구 "생략"을 검사한다 (#165).
+ */
+export const SKIPPED_SUMMARY: VerificationSummaryResult = {
+  ...SUMMARY,
+  pipeline: {
+    run: run({
+      status: 'merged',
+      currentStep: null,
+      lastCompletedStep: 'screen_update',
+      endedAt: '2026-10-16T03:20:00.000Z',
+    }),
+    stages: PLAN.map((kind) => ({
+      kind,
+      status: kind === 'mutation' ? ('skipped' as const) : ('passed' as const),
+      attempt: 1,
+    })),
+  },
+};
+
 /** `verification.summary` 가짜 응답: 실행 없음 (규칙은 있고 판정 전). */
 export const EMPTY_SUMMARY: VerificationSummaryResult = {
   basis: null,
@@ -190,6 +211,7 @@ export const verificationChecklist = {
         { label: '최근 실행 상태', testId: 'pipeline-run-status', text: '진행 중' },
         { label: '현재 단계', testId: 'pipeline-current', text: '구현' },
         { label: '단계 순서', testId: 'pipeline-stage', count: STAGE_LABELS.length },
+        { label: '생략 문구 없음 (생략 단계 없음)', testId: 'pipeline-skip', absent: true },
         { label: '재개 버튼 미노출 (중단 아님)', role: 'button', name: '재개', absent: true },
         { label: '실행 없음 미표시', text: '실행 없음', absent: true },
         {
@@ -244,6 +266,29 @@ export const verificationChecklist = {
           text: '검증 불러오기 실패',
         },
         { label: '머리줄 미표시', testId: 'verification-basis', absent: true },
+      ],
+    },
+  },
+} satisfies ScreenChecklist;
+
+/**
+ * 생략 단계가 있는 파이프라인 (`SKIPPED_SUMMARY`, #165). screens.md "생략 단계 흐림 + '생략'": 생략 단계에는 툴팁이 아니라
+ * 보이는 문구 "생략"이 있다. 상태 이름은 기본이지만 데이터가 다르므로 scr-05.spec.ts가 이 표를 직접 넘긴다.
+ */
+export const verificationSkippedChecklist = {
+  id: 'SCR-05',
+  name: '검증 (생략 단계)',
+  states: {
+    기본: {
+      title: 'BIVE',
+      elements: [
+        { label: '파이프라인 영역', testId: 'pipeline', role: 'region', name: '파이프라인' },
+        { label: '최근 실행', testId: 'pipeline-run', text: 'EXE-003' },
+        { label: '최근 실행 상태', testId: 'pipeline-run-status', text: '병합 완료' },
+        { label: '현재 단계 없음 (끝난 실행)', testId: 'pipeline-current', absent: true },
+        { label: '단계 순서', testId: 'pipeline-stage', count: STAGE_LABELS.length },
+        { label: '생략 단계 이름', text: '변이 주입' },
+        { label: '생략 단계 문구 (보이는 글자)', testId: 'pipeline-skip', text: '생략', count: 1 },
       ],
     },
   },

@@ -3,7 +3,7 @@
 // - 지표 카드는 준수 · 실행당 비용만. 잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드, 준수 추이 그래프, 코드 열람 영역은
 //   기능 이슈 전까지 미노출 (ADR-035)
 // - 준수 카드 → 규칙 화면 `준수 집계: 판정 가능` 필터 (분모 목록, JDG-03)
-// - 파이프라인 = 최근 실행의 단계 순서와 현재 단계. 중단이면 [재개] → run.resume (ADR-011)
+// - 파이프라인 = 최근 실행의 단계 순서와 현재 단계, 생략 단계는 흐림 + 보이는 "생략"(#165). 중단이면 [재개] → run.resume (ADR-011)
 // - 실행 알림(event.run.updated · event.step.updated)을 받으면 요약을 다시 읽는다(useVerification, ADR-076)
 // - 상태(ADR-072, ADR-060과 같은 방식): 프로젝트 조회 중 = 비움 · 프로젝트 없음 = "프로젝트 없음" ·
 //   로딩 = 자리 비움(문구 · 스켈레톤 없음) · 불러오기 실패 = "검증 불러오기 실패" · 실행 없음 = 파이프라인 자리 "실행 없음"(ADR-029)
@@ -220,6 +220,12 @@ const Pipeline = ({
             >
               <span className="pipeline-dot" aria-hidden="true" />
               <span className="pipeline-label">{STEP_LABELS[stage.kind]}</span>
+              {/* 생략 단계 흐림 + "생략" (screens.md 파이프라인 스테퍼): 툴팁만이 아니라 보이는 글자 (#165) */}
+              {stage.status === 'skipped' && (
+                <span className="pipeline-skip" data-testid="pipeline-skip">
+                  {STEP_STATUS_TEXT.skipped}
+                </span>
+              )}
             </li>
           );
         })}

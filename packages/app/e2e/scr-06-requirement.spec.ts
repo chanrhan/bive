@@ -26,6 +26,7 @@ import {
   findForbiddenText,
   SCREENSHOT_DIR,
 } from './support/expectScreen.js';
+import { horizontalOverflow } from './support/overflow.js';
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
@@ -217,6 +218,28 @@ test.describe('자식 규칙 펼침 (수용 기준 2)', () => {
     await toggle.click();
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await expect(row.getByTestId('child-rule-detail')).toHaveCount(0);
+  });
+
+  test('1280px 창: 펼친 자식 규칙의 실행 이력 줄 · 실패 원인 줄이 요구사항 상세 안에 들어오고 가로 스크롤이 없다 (#165)', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const bive = await openRequirement(page);
+    await bive.setResponse('judgment.list', {
+      result: { judgments: HISTORY[FAILING_RULE.id] ?? [] },
+    });
+    const row = childRule(page, FAILING_RULE.displayId);
+    await row.getByTestId('child-rule-toggle').click();
+    await expect(row.getByTestId('history-row')).toHaveCount(FAILING_HISTORY.length);
+    await expect(row.getByTestId('failure-case')).toBeVisible();
+    const pane = page.getByTestId('requirement-detail');
+    expect(await horizontalOverflow(pane, '[data-testid="history-row"]')).toEqual([]);
+    expect(
+      await horizontalOverflow(
+        pane,
+        '[data-testid="test-case"], [data-testid="failure-case"] > :not(pre)',
+      ),
+    ).toEqual([]);
   });
 
   test('통과 규칙을 펼치면 테스트 출력은 기본 접힘이고 눌러야 펼쳐진다', async ({ page }) => {

@@ -172,6 +172,11 @@ button.metric-card:focus-visible {
   opacity: var(--opacity-dimmed);
 }
 
+.pipeline-skip {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .pipeline-stage[aria-current='step'] {
   color: var(--color-text);
 }

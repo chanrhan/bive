@@ -690,6 +690,201 @@ test.describe('수정 · 거절 입력 카드 (수용 기준 3)', () => {
   });
 });
 
+test.describe('수정 입력 보호 (#165, ADR-082)', () => {
+  const EDITED_TITLE = `${String(P1_PAYLOAD.title)}됨`;
+  const CONNECTED = { state: 'connected', status: STATUS } as const;
+  const DISCONNECTED = { state: 'disconnected' } as const;
+
+  /** PRP-001에서 [수정]을 열고 제목 끝에 "됨"을 붙인다 (roadmap 2.1 흐름 4번). */
+  const editTitle = async (page: Page): Promise<Locator> => {
+    await card(page, 'PRP-001').click();
+    await action(page, 'edit').click();
+    const title = page.getByTestId('edit-title');
+    await expect(title).toBeFocused();
+    await title.fill(EDITED_TITLE);
+    return title;
+  };
+
+  /** 수정 입력이 열려 있고 고친 제목이 그대로다. */
+  const expectDraft = async (page: Page): Promise<void> => {
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-001');
+    await expect(page.getByTestId('edit-card')).toBeVisible();
+    await expect(page.getByTestId('edit-title')).toHaveValue(EDITED_TITLE);
+    await expect(action(page, 'approve')).toBeDisabled();
+  };
+
+  test('수정 입력이 열려 있으면 떠 있는 [승인] · [거절]은 비활성이고 "수정 중"이 보인다, [수정 후 승인]만 수정 내용으로 처리', async ({
+    page,
+  }) => {
+    const bive = await setup(page);
+    await editTitle(page);
+
+    // 카드 밖 떠 있는 [승인]으로는 수정 내용이 버려지는 승인을 할 수 없다
+    await expect(action(page, 'approve')).toBeDisabled();
+    await expect(action(page, 'reject')).toBeDisabled();
+    await expect(action(page, 'edit')).toBeEnabled();
+    const note = page.getByTestId('floating-actions-note');
+    await expect(note).toBeVisible();
+    await expect(note).toHaveText('수정 중');
+    await action(page, 'approve').click({ force: true });
+    await action(page, 'reject').click({ force: true });
+    await expect(page.getByTestId('reject-card')).toHaveCount(0);
+    await expect(page.getByTestId('edit-title')).toHaveValue(EDITED_TITLE);
+    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
+    expect(await callsOf(bive, 'proposal.reject')).toEqual([]);
+    await snapshot(page, '수정-중');
+
+    // 고친 내용이 없어도(원문과 같아도) 입력이 열려 있는 동안은 같다
+    await page.getByTestId('edit-title').fill(String(P1_PAYLOAD.title));
+    await expect(action(page, 'approve')).toBeDisabled();
+
+    // 카드 안의 [수정 후 승인] = 수정 내용 · 사람 주체로 proposal.amend (approve_edited 기록)
+    await page.getByTestId('edit-title').fill(EDITED_TITLE);
+    const approved: Proposal = {
+      ...P1,
+      state: 'approved',
+      decision: {
+        at: '2026-10-16T05:00:00.000Z',
+        by: HUMAN,
+        appliedRef: { entity: 'Rule', id: ID.rule },
+        editedPayload: { ...P1_PAYLOAD, title: EDITED_TITLE },
+      },
+    };
+    await bive.setResponse('proposal.amend', {
+      result: {
+        proposal: approved,
+        applied: { entity: 'Rule', rule: { ...RULE, title: EDITED_TITLE } },
+        approvalLog: { ...LOG_APPROVE, action: 'approve_edited' },
+      },
+    });
+    await bive.setResponse('proposal.list', { result: { proposals: [approved, P3, P4, P5] } });
+    await page.getByTestId('edit-confirm').click();
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
+    expect(await callsOf(bive, 'proposal.amend')).toEqual([
+      {
+        projectId: PROJECT_ID,
+        id: ID.p1,
+        author: HUMAN,
+        edited: { ...P1_PAYLOAD, title: EDITED_TITLE },
+      },
+    ]);
+    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
+  });
+
+  test('제안 알림 · 재접속으로 목록을 다시 읽어도 수정 입력이 닫히거나 지워지지 않는다', async ({
+    page,
+  }) => {
+    const bive = await setup(page);
+    await editTitle(page);
+
+    // 다른 제안이 생겼다는 알림 → proposal.list 다시 조회
+    const newer: Proposal = { ...P3, id: '01JBVE0000000000000000P006', displayId: 'PRP-006' };
+    await bive.setResponse('proposal.list', { result: { proposals: [P1, P3, P4, P5, newer] } });
+    let listCalls = (await callsOf(bive, 'proposal.list')).length;
+    await bive.emit('event.proposal.changed', {
+      projectId: PROJECT_ID,
+      proposalId: newer.id,
+      displayId: newer.displayId,
+      kind: newer.kind,
+      state: 'pending',
+    });
+    await expect
+      .poll(async () => (await callsOf(bive, 'proposal.list')).length)
+      .toBeGreaterThan(listCalls);
+    await expect(card(page, 'PRP-006')).toBeVisible();
+    await expectDraft(page);
+
+    // 오케스트레이터에 다시 붙음 → proposal.list 다시 조회
+    listCalls = (await callsOf(bive, 'proposal.list')).length;
+    await bive.emit('system.connection', DISCONNECTED);
+    await bive.emit('system.connection', CONNECTED);
+    await expect
+      .poll(async () => (await callsOf(bive, 'proposal.list')).length)
+      .toBeGreaterThan(listCalls);
+    await expectDraft(page);
+    await expect(page.getByTestId('edit-title')).toBeFocused();
+    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
+  });
+
+  test('다른 카드 선택 · 필터 전환 · 화면 이동 뒤 돌아와도 수정 입력과 고친 내용이 남아 있다', async ({
+    page,
+  }) => {
+    const bive = await setup(page);
+    await editTitle(page);
+
+    // 다른 카드를 골랐다가 돌아옴
+    await card(page, 'PRP-003').click();
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-003');
+    await expect(page.getByTestId('edit-card')).toHaveCount(0);
+    await expect(action(page, 'approve')).toBeEnabled();
+    await card(page, 'PRP-001').click();
+    await expectDraft(page);
+
+    // 필터 전환 (처리됨만 → 다시 대기)
+    await chooseStates(page, ['approved', 'rejected']);
+    await expect(card(page, 'PRP-001')).toHaveCount(0);
+    await chooseStates(page, ['pending']);
+    await card(page, 'PRP-001').click();
+    await expectDraft(page);
+
+    // 다른 화면으로 갔다가 할 일로 돌아옴
+    await page.getByRole('button', { name: '검증', exact: true }).click();
+    await expect(page.getByTestId('main-area')).not.toHaveAttribute('data-route', 'todo');
+    await page.getByTestId('todo-button').click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'todo');
+    await card(page, 'PRP-001').click();
+    await expectDraft(page);
+
+    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
+    expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
+  });
+
+  test('Esc · [취소]: 고친 내용이 있으면 바로 닫지 않고 "수정 내용 있음"과 [계속 수정] · [버리기]를 보인다', async ({
+    page,
+  }) => {
+    const bive = await setup(page);
+    const title = await editTitle(page);
+
+    // Esc → 확인 줄, [계속 수정]에 초점. 입력은 그대로
+    await title.press('Escape');
+    const prompt = page.getByTestId('edit-discard');
+    await expect(prompt).toBeVisible();
+    await expect(prompt.getByTestId('edit-discard-text')).toHaveText('수정 내용 있음');
+    await expect(page.getByTestId('edit-keep')).toBeFocused();
+    await expect(page.getByTestId('edit-card')).toBeVisible();
+    await expect(title).toHaveValue(EDITED_TITLE);
+    await expect(action(page, 'approve')).toBeDisabled();
+    await snapshot(page, '수정-버리기-확인');
+
+    // 확인 줄에서 Esc = 계속 수정
+    await page.getByTestId('edit-keep').press('Escape');
+    await expect(prompt).toHaveCount(0);
+    await expect(title).toBeFocused();
+    await expect(title).toHaveValue(EDITED_TITLE);
+
+    // [취소] → 확인 줄 → [계속 수정]
+    await page.getByTestId('edit-cancel').click();
+    await expect(prompt).toBeVisible();
+    await page.getByTestId('edit-keep').click();
+    await expect(prompt).toHaveCount(0);
+    await expect(title).toHaveValue(EDITED_TITLE);
+
+    // [취소] → [버리기]: 그때만 닫히고 고친 내용이 버려진다. 다시 열면 원문
+    await page.getByTestId('edit-cancel').click();
+    await page.getByTestId('edit-discard-confirm').click();
+    await expect(page.getByTestId('edit-card')).toHaveCount(0);
+    await expect(action(page, 'approve')).toBeEnabled();
+    await expect(page.getByTestId('floating-actions-note')).toHaveCount(0);
+    await action(page, 'edit').click();
+    await expect(page.getByTestId('edit-title')).toHaveValue(String(P1_PAYLOAD.title));
+    // 고친 내용이 없으면 Esc로 바로 닫힌다
+    await page.getByTestId('edit-title').press('Escape');
+    await expect(page.getByTestId('edit-card')).toHaveCount(0);
+    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
+    expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
+  });
+});
+
 test.describe('필터 · 처리 기록 (수용 기준 4)', () => {
   test('필터 칩 4종, 위험도 0건 비활성, 처리됨 필터에서 승인 · 거절 기록(수정 내용 · 주체 · 사유)', async ({
     page,
