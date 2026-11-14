@@ -29,6 +29,7 @@ import {
   REPO_ROOT,
   type Spawned,
   spawnCli,
+  spawnScript,
   waitFor,
 } from '../../test/helpers/process.js';
 
@@ -82,19 +83,35 @@ const resetFixture = (): string => {
   return repo;
 };
 
+export interface StartPipelineOptions {
+  /**
+   * 제품 CLI 대신 띄울 시험 진입점 (패키지 기준 상대 경로). 무언가를 먼저 건 뒤 `src/cli.ts`를 그대로 불러야 한다
+   * (예: 네트워크 감시 `test/helpers/net-watched-cli.ts`, ADR-075)
+   */
+  entry?: string;
+  /** 오케스트레이터에 더 줄 환경 변수 */
+  env?: Record<string, string>;
+}
+
 /**
  * 픽스처 복사본 + 제품 오케스트레이터(시나리오 지정)를 띄우고 프로젝트를 열어 예산 · 모델을 저장한다
  * (roadmap M1 흐름 1 · 2 · 6의 값).
  */
-export const startPipeline = async (scenario: string): Promise<PipelineE2e> => {
+export const startPipeline = async (
+  scenario: string,
+  options: StartPipelineOptions = {},
+): Promise<PipelineE2e> => {
   const repo = resetFixture();
   const biveHome = makeBiveHome();
-  const orchestrator = spawnCli({
+  const env = {
+    ...options.env,
     BIVE_HOME: biveHome,
     BIVE_IDLE_SHUTDOWN_MS: '600000',
     BIVE_AGENT: 'scripted',
     BIVE_SCENARIO: scenario,
-  });
+  };
+  const orchestrator =
+    options.entry === undefined ? spawnCli(env) : spawnScript(options.entry, env);
   await waitFor(
     () => orchestrator.stdout.includes('오케스트레이터 기동'),
     START_TIMEOUT_MS,
