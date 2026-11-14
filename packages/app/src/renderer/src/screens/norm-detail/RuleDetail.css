@@ -1,0 +1,181 @@
+/* 규칙 상세 (SCR-03 상세 · SCR-06). 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.rule-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5) var(--space-6);
+}
+
+.rule-detail-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.rule-detail-title {
+  min-width: 0;
+  margin: 0;
+  font-size: var(--font-size-4);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.rule-detail-id {
+  flex: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+}
+
+.rule-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.rule-field {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: var(--space-3);
+}
+
+.rule-field dt {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+}
+
+.rule-field dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.rule-detail-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.rule-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.rule-section-heading,
+.rule-output-heading {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+  font-weight: 600;
+}
+
+.rule-detail-muted {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.rule-detail-error {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--font-size-2);
+}
+
+.rule-mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-1);
+}
+
+.rule-output {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.rule-output-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.rule-case-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rule-failure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-surface);
+}
+
+.rule-case-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.rule-case-status {
+  flex: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+}
+
+.rule-case-status[data-status='failed'] {
+  color: var(--color-danger);
+}
+
+.rule-case-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rule-case-location {
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.rule-case-message {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rule-history-loading {
+  min-height: var(--space-5);
+}
+
+.rule-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rule-history-row {
+  display: grid;
+  grid-template-columns: 140px 72px 72px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--font-size-2);
+}
+
+.rule-history-row > .status-badge {
+  justify-self: start;
+}
