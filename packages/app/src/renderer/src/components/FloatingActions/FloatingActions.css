@@ -6,21 +6,33 @@
   bottom: var(--space-4);
   z-index: 1;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-2);
+  /* 상세가 좁으면 상세 밖으로 나가지 않고 문구(수정 중 · 처리 중)가 버튼 묶음 위 줄로 간다 (#175) */
+  max-width: calc(100% - var(--space-4) * 2);
   padding: var(--space-2);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-2);
   background: var(--color-surface-raised);
 }
 
+.floating-actions-buttons {
+  display: flex;
+  flex: none;
+  gap: var(--space-2);
+}
+
 .floating-actions-busy {
   padding: 0 var(--space-2);
+  white-space: nowrap;
   color: var(--color-text-muted);
   font-size: var(--font-size-2);
 }
 
 .floating-action {
+  flex: none;
   height: 30px;
   padding: 0 var(--space-4);
   border: 1px solid var(--color-border);

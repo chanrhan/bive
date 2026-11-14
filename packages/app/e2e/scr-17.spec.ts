@@ -31,6 +31,7 @@ import {
   findForbiddenText,
   SCREENSHOT_DIR,
 } from './support/expectScreen.js';
+import { textClipping } from './support/overflow.js';
 
 const PROJECT_ID = '01JBVE0000000000000000000P';
 const PROJECT = {
@@ -882,6 +883,77 @@ test.describe('수정 입력 보호 (#165, ADR-082)', () => {
     await expect(page.getByTestId('edit-card')).toHaveCount(0);
     expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
     expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
+  });
+});
+
+test.describe('1280×800 창의 버튼 문구 (#175)', () => {
+  // 기본 창: 사이드바 · 목록 · 오른쪽 채팅(360px 고정)을 빼면 상세 폭이 가장 좁다
+  test.use({ viewport: { width: 1280, height: 800 } });
+
+  const FLOATING = ['action-reject', 'action-edit', 'action-approve'] as const;
+
+  /** 상세에 가로 스크롤이 없고, 받은 요소가 한 줄 · 잘림 없음 · 상세 안. */
+  const expectOneLine = async (page: Page, testIds: readonly string[]): Promise<void> => {
+    for (const id of ['todo-detail', 'proposal-detail']) {
+      const { scroll, client } = await page
+        .getByTestId(id)
+        .evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
+      expect(scroll, `${id} 가로 스크롤`).toBeLessThanOrEqual(client);
+    }
+    expect(await textClipping(detail(page), testIds)).toEqual([]);
+  };
+
+  /** 입력 카드의 끝이 떠 있는 버튼에 가리지 않는다. */
+  const expectCardAboveBar = async (page: Page, cardTestId: string): Promise<void> => {
+    const cardBox = await page.getByTestId(cardTestId).boundingBox();
+    const barBox = await page.getByTestId('floating-actions').boundingBox();
+    if (cardBox === null || barBox === null) throw new Error('카드 · 버튼 영역 없음');
+    expect(cardBox.y + cardBox.height).toBeLessThanOrEqual(barBox.y);
+  };
+
+  test('떠 있는 [거절] · [수정] · [승인]과 "수정 중", 수정 카드 · 버리기 확인 줄 · 거절 카드의 버튼이 한 줄로 잘리지 않고 상세 안에 있다', async ({
+    page,
+  }) => {
+    await setup(page);
+    await card(page, 'PRP-001').click();
+    await expect(page.getByTestId('detail-if-reject')).toBeVisible();
+    await expectOneLine(page, FLOATING);
+
+    // 수정 중: 떠 있는 버튼 + "수정 중", 수정 카드의 [취소] · [수정 후 승인]
+    await action(page, 'edit').click();
+    const title = page.getByTestId('edit-title');
+    await expect(title).toBeFocused();
+    await title.fill(`${String(P1_PAYLOAD.title)}됨`);
+    await expect(page.getByTestId('floating-actions-note')).toHaveText('수정 중');
+    await expectOneLine(page, [
+      ...FLOATING,
+      'floating-actions-note',
+      'edit-cancel',
+      'edit-confirm',
+    ]);
+    await expectCardAboveBar(page, 'edit-card');
+    await snapshot(page, '1280-수정-중');
+
+    // 버리기 확인 줄: "수정 내용 있음" · [계속 수정] · [버리기]
+    await page.getByTestId('edit-cancel').click();
+    await expect(page.getByTestId('edit-discard')).toBeVisible();
+    await expectOneLine(page, [
+      ...FLOATING,
+      'edit-discard-text',
+      'edit-keep',
+      'edit-discard-confirm',
+    ]);
+    await expectCardAboveBar(page, 'edit-card');
+    await snapshot(page, '1280-수정-버리기-확인');
+
+    // 버리고 거절 카드: [취소] · [거절 확정]
+    await page.getByTestId('edit-discard-confirm').click();
+    await expect(page.getByTestId('edit-card')).toHaveCount(0);
+    await action(page, 'reject').click();
+    await expect(page.getByTestId('reject-reason')).toBeFocused();
+    await expectOneLine(page, [...FLOATING, 'reject-cancel', 'reject-confirm']);
+    await expectCardAboveBar(page, 'reject-card');
+    await snapshot(page, '1280-거절');
   });
 });
 

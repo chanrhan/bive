@@ -258,9 +258,19 @@
 
 .decision-buttons {
   display: flex;
+  /* 상세가 좁으면 보조 문구가 한 줄을 차지하고 버튼은 다음 줄 오른쪽으로 (#175) */
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
+}
+
+/* 버튼은 한 묶음으로 갈라지지 않고, 다음 줄로 넘어가도 오른쪽에 붙는다 */
+.decision-button-group {
+  display: flex;
+  flex: none;
+  gap: var(--space-2);
+  margin-left: auto;
 }
 
 .decision-hint {
@@ -272,11 +282,13 @@
 /* 고친 내용이 있는데 닫으려 할 때의 확인 문구 (#165) */
 .decision-warning {
   margin-right: auto;
+  white-space: nowrap;
   color: var(--color-warning);
   font-size: var(--font-size-2);
 }
 
 .decision-button {
+  flex: none;
   height: 28px;
   padding: 0 var(--space-3);
   border: 1px solid var(--color-border);

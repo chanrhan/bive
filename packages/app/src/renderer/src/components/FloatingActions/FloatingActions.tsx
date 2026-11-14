@@ -52,19 +52,22 @@ export const FloatingActions = ({
         {note}
       </span>
     )}
-    {actions.map((action) => (
-      <button
-        key={action.id}
-        type="button"
-        className="floating-action"
-        data-testid={`action-${action.id}`}
-        data-primary={action.primary === true}
-        aria-pressed={action.pressed === undefined ? undefined : action.pressed}
-        disabled={busy || action.disabled === true}
-        onClick={action.onClick}
-      >
-        {action.label}
-      </button>
-    ))}
+    {/* 버튼은 한 묶음: 상세가 좁으면 문구만 윗줄로 가고 버튼은 갈라지지 않는다 (#175) */}
+    <span className="floating-actions-buttons">
+      {actions.map((action) => (
+        <button
+          key={action.id}
+          type="button"
+          className="floating-action"
+          data-testid={`action-${action.id}`}
+          data-primary={action.primary === true}
+          aria-pressed={action.pressed === undefined ? undefined : action.pressed}
+          disabled={busy || action.disabled === true}
+          onClick={action.onClick}
+        >
+          {action.label}
+        </button>
+      ))}
+    </span>
   </div>
 );
