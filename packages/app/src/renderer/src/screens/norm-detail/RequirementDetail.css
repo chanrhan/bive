@@ -1,0 +1,137 @@
+/* 요구사항 상세 (SCR-02 상세 · SCR-06). 필드 · 구역 배치는 RuleDetail.css를 같이 쓴다. 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.requirement-actions {
+  display: flex;
+  flex: none;
+  gap: var(--space-2);
+  margin-left: auto;
+  align-self: center;
+}
+
+.requirement-action {
+  height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-2);
+  cursor: pointer;
+}
+
+.requirement-action[data-primary='true'] {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-bg);
+  font-weight: 600;
+}
+
+/* 삭제 확인 대기 (두 번 눌러 확인) */
+.requirement-action[data-armed='true'] {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.requirement-action:disabled {
+  opacity: var(--opacity-dimmed);
+  cursor: default;
+}
+
+.requirement-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.requirement-edit-input {
+  display: block;
+  width: 100%;
+  min-height: 64px;
+  padding: var(--space-2);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-2);
+  outline: none;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-3);
+  resize: vertical;
+}
+
+.requirement-editor-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.requirement-editor-hint {
+  margin-right: auto;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+}
+
+.child-rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.child-rule {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+}
+
+.child-rule-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-2);
+  text-align: left;
+  cursor: pointer;
+}
+
+.child-rule-toggle:hover {
+  background: var(--color-surface-raised);
+}
+
+.child-rule-chevron {
+  flex: none;
+  transition: transform 0.1s ease;
+}
+
+.child-rule[data-open='true'] .child-rule-chevron {
+  transform: rotate(90deg);
+}
+
+.child-rule-id {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.child-rule-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.child-rule-detail {
+  border-top: 1px solid var(--color-border);
+}
+
+/* 펼친 규칙 상세는 요구사항 상세 안에 들어가므로 여백을 줄인다 */
+.child-rule-detail > .rule-detail-body {
+  padding: var(--space-3);
+}
