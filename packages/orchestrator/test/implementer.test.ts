@@ -748,6 +748,8 @@ describe('판정 설정 · 인수 테스트 검사: 스냅숏 쓰기 금지 (코
       ruleIds: null,
     });
     expect(config.test.update).toBe('none');
+    // 실행 환경은 node로 고정한다 (#162). 인수 테스트의 실행 환경 지정 docblock은 검사가 거부한다
+    expect(config.test.environment).toBe('node');
   });
 
   it('인수 테스트 검사는 스냅숏 단언(toMatchSnapshot · toMatchInlineSnapshot · toMatchFileSnapshot 등)을 거부한다', () => {

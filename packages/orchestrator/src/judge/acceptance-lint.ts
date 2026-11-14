@@ -81,6 +81,9 @@ export interface AcceptanceLintProblem {
   message: string;
 }
 
+/** vitest가 파일 내용에서 찾는 실행 환경 지정 표식(`@vitest-environment` · `@jest-environment`, `-options` 포함). */
+const ENVIRONMENT_DOCBLOCK = /@(?:vitest|jest)-environment/gu;
+
 // ── 거부 이름 ─────────────────────────────────────────────
 
 const PROCESS_REPORT_MESSAGE = 'process.report로 진단 보고서 파일을 쓸 수 없습니다';
@@ -497,6 +500,14 @@ export const lintAcceptanceSource = (source: string): AcceptanceLintProblem[] =>
   const report = (node: TS.Node, message: string): void => {
     problems.push({ line: lineOf(node.getStart(sourceFile)), message });
   };
+  // 실행 환경 지정 docblock (#162): vitest는 주석 · 문자열을 가리지 않고 파일 내용 전체에서 이 표식을 찾아 생성 설정의
+  // `environment: 'node'`보다 앞세운다(내장 환경이 아니면 `vitest-environment-<이름>` 패키지를 불러온다). 같은 범위로 본다
+  for (const match of source.matchAll(ENVIRONMENT_DOCBLOCK)) {
+    problems.push({
+      line: lineOf(match.index),
+      message: `실행 환경 지정(${match[0]})을 쓸 수 없습니다 (판정 환경은 node로 고정)`,
+    });
+  }
   const checkSpecifier = (node: TS.Node, specifier: string): void => {
     if (!isAllowedAcceptanceImport(specifier)) report(node, describeSpecifier(specifier));
   };
