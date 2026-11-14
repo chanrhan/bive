@@ -28,6 +28,7 @@ import { parse as parseYaml } from 'yaml';
 
 import {
   assertBuildPathBins,
+  assertLockfilePathsInside,
   assertProjectPnpmConfig,
   assertRegistryBuiltDependencies,
   assertRegistryTestRunner,
@@ -1147,6 +1148,65 @@ describe('빌드 허용 목록 · 판정 실행기의 의존성 닫힘 검사 (#
     expect(() => check(base)).not.toThrow();
   });
 
+  it('installDependencies는 install과 rebuild 둘 다에 고정 인자(pinnedPnpmConfigArgs 전부)와 스크립트 · pnpmfile 차단 인자를 넘긴다 (#162 검토 1회차)', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-fakepnpm-'));
+    try {
+      // PATH 앞의 가짜 pnpm: 받은 인자를 기록하고, `store path`에는 경로만 출력하며, install은 가상 저장소 폴더만 만든다
+      const bin = path.join(dir, 'bin');
+      const log = path.join(dir, 'pnpm-args.log');
+      const fakeStore = path.join(dir, 'fake-store', 'v10');
+      mkdirSync(bin);
+      writeFileSync(
+        path.join(bin, 'pnpm'),
+        [
+          '#!/bin/sh',
+          `for a in "$@"; do printf '%s\\n' "$a" >> '${log}'; done`,
+          `printf '%s\\n' '--END--' >> '${log}'`,
+          `if [ "$1" = store ]; then printf '%s\\n' '${fakeStore}'; exit 0; fi`,
+          'if [ "$1" = install ]; then mkdir -p node_modules/.pnpm; fi',
+          'exit 0',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const app = path.join(dir, 'app');
+      mkdirSync(app);
+      writeFileSync(path.join(app, 'pnpm-lock.yaml'), render(base));
+      writeFileSync(path.join(app, 'package.json'), JSON.stringify({ name: 'app' }));
+      writeFileSync(
+        path.join(app, 'pnpm-workspace.yaml'),
+        'packages: []\nonlyBuiltDependencies:\n  - native\n',
+      );
+      await installDependencies(app, {
+        logFile: path.join(dir, 'install.log'),
+        timeoutMs: 60_000,
+        env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}` },
+      });
+      const calls = readFileSync(log, 'utf8')
+        .split('--END--\n')
+        .filter((call) => call !== '')
+        .map((call) => call.split('\n').filter((arg) => arg !== ''));
+      const install = calls.find((call) => call[0] === 'install');
+      const rebuild = calls.find((call) => call[0] === 'rebuild');
+      expect(calls.map((call) => call[0])).toEqual(['store', 'install', 'rebuild']);
+      const pinned = pinnedPnpmConfigArgs(fakeStore);
+      expect(pinned).toHaveLength(12);
+      expect(install).toEqual(
+        expect.arrayContaining([
+          ...pinned,
+          '--frozen-lockfile',
+          '--ignore-scripts',
+          '--ignore-pnpmfile',
+          '--package-import-method=copy',
+        ]),
+      );
+      expect(rebuild).toEqual(expect.arrayContaining([...pinned, '--config.ignore-pnpmfile=true']));
+      expect(rebuild?.at(-1)).toBe('native');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('허용 이름의 의존성이 overrides로 file: 디렉터리면 거부한다 (검토 재현 모양)', async () => {
     const lock: Lock = {
       ...base,
@@ -1774,10 +1834,145 @@ describe('판정 설치의 프로젝트 pnpm 설정 (#162)', () => {
         '--config.virtual-store-dir=node_modules/.pnpm',
         '--config.modules-dir=node_modules',
         '--config.manage-package-manager-versions=false',
+        '--config.verify-store-integrity=true',
+        '--config.node-options=',
+        '--config.script-shell=',
       ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('pnpm이 읽는 다른 루트 매니페스트(package.json5 · package.yaml)가 있거나 package.json이 없으면 거부한다 (검토 1회차)', () => {
+    for (const other of ['package.json5', 'package.yaml']) {
+      expect(() => checkConfig({ [other]: 'name: app\n' }), other).toThrow(
+        new RegExp(`${other.replace('.', '\\.')}는 받아들이지 않습니다`, 'u'),
+      );
+    }
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-pnpmcfg-'));
+    try {
+      expect(() => assertProjectPnpmConfig(dir)).toThrow(/package\.json이 없습니다/);
+      writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'app' }));
+      symlinkSync('missing', path.join(dir, 'package.yaml'));
+      expect(() => assertProjectPnpmConfig(dir)).toThrow(/package\.yaml/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('출력에만 쓰이는 fund · audit · loglevel은 받고, 흔한 다른 키(기본 레지스트리 주소 포함)는 거부하며 빈 키는 (빈 키)로 알린다 (검토 1회차)', () => {
+    expect(() =>
+      checkConfig({
+        '.npmrc': 'fund=false\naudit=false\nloglevel=warn\n',
+        'pnpm-workspace.yaml': 'packages: []\nloglevel: warn\n',
+      }),
+    ).not.toThrow();
+    for (const line of [
+      'prefer-offline=true',
+      'resolution-mode=highest',
+      'ignore-workspace-root-check=true',
+      'strict-ssl=false',
+      'registry=https://registry.npmjs.org/',
+    ]) {
+      expect(() => checkConfig({ '.npmrc': `${line}\n` }), line).toThrow(
+        new RegExp(`\\.npmrc의 ${line.slice(0, line.indexOf('='))} `, 'u'),
+      );
+    }
+    expect(() => checkConfig({ '.npmrc': '=x\n' })).toThrow(/\.npmrc의 \(빈 키\)/);
+  });
+
+  it('작업 공간 · lockfile이 체크아웃 밖을 가리키면 거부하고, 체크아웃 안의 file: · link:는 받는다 (검토 1회차)', () => {
+    const INTEGRITY = 'sha512-' + 'D'.repeat(86) + '==';
+    const lock = (importers: string, packages = '', snapshots = ''): string =>
+      [
+        "lockfileVersion: '9.0'",
+        '',
+        'settings:',
+        '  autoInstallPeers: true',
+        '  excludeLinksFromLockfile: false',
+        '',
+        'importers:',
+        '',
+        '  .:',
+        '    dependencies:',
+        '      is-number:',
+        '        specifier: 7.0.0',
+        '        version: 7.0.0',
+        importers,
+        '',
+        'packages:',
+        '',
+        '  is-number@7.0.0:',
+        `    resolution: {integrity: ${INTEGRITY}}`,
+        packages,
+        '',
+        'snapshots:',
+        '',
+        '  is-number@7.0.0: {}',
+        snapshots,
+        '',
+      ].join('\n');
+    const check = (text: string, workspace = 'packages: []\n'): void => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-inside-'));
+      try {
+        writeFileSync(path.join(dir, 'pnpm-lock.yaml'), text);
+        writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), workspace);
+        assertLockfilePathsInside(dir);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // 체크아웃 안: 루트 file: · 하위 importer의 link:../b(importer 기준) · file:(lockfile 기준)
+    const inside = lock(
+      [
+        '      local:',
+        '        specifier: file:./local',
+        '        version: file:local',
+        '',
+        '  packages/a:',
+        '    dependencies:',
+        '      b:',
+        '        specifier: workspace:*',
+        '        version: link:../b',
+        '      local:',
+        '        specifier: file:../../local',
+        '        version: file:local',
+        '',
+        '  packages/b: {}',
+      ].join('\n'),
+      '\n  local@file:local:\n    resolution: {directory: local, type: directory}',
+      '\n  local@file:local: {}',
+    );
+    expect(() => check(inside, 'packages:\n  - packages/*\n  - "!packages/skip"\n')).not.toThrow();
+    // 작업 공간 packages의 .. · 절대 경로
+    for (const pattern of ['../worktrees/*', '/abs/*', 'packages/../../x']) {
+      expect(() => check(inside, `packages:\n  - '${pattern}'\n`), pattern).toThrow(
+        /체크아웃 밖.*packages/,
+      );
+    }
+    // importers 키 · link: · file: · resolution.directory가 체크아웃 밖
+    expect(() => check(lock('\n  ../../../worktrees/EXE-1: {}'))).toThrow(/importers \.\.\//);
+    expect(() =>
+      check(lock('      wt:\n        specifier: link:../../wt\n        version: link:../../wt')),
+    ).toThrow(/link:\.\.\/\.\.\/wt/);
+    expect(() =>
+      check(
+        lock(
+          '      wt:\n        specifier: file:../wt\n        version: file:../wt',
+          '\n  wt@file:../wt:\n    resolution: {directory: ../wt, type: directory}',
+          '\n  wt@file:../wt: {}',
+        ),
+      ),
+    ).toThrow(/체크아웃 밖.*\.\.\/wt/);
+    expect(() =>
+      check(
+        lock(
+          '',
+          '\n  wt@1.0.0:\n    resolution: {directory: /abs/wt, type: directory}',
+          '\n  wt@1.0.0:\n    dependencies:\n      x: file:/abs/x',
+        ),
+      ),
+    ).toThrow(/체크아웃 밖/);
   });
 
   it(

@@ -549,6 +549,103 @@ export const assertRegistryTestRunner = (dir: string): void => {
   }
 };
 
+/** 체크아웃 밖을 가리키는 상대 · 절대 경로인지 (`base` 기준으로 풀어 `dir` 밖이면 참). */
+const outsideDir = (dir: string, base: string, target: string): boolean => {
+  if (path.isAbsolute(target) || /^[A-Za-z]:/u.test(target) || target.startsWith('\\')) return true;
+  const rel = path.relative(dir, path.resolve(base, target));
+  return rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+};
+
+/**
+ * 작업 공간 · lockfile이 체크아웃 밖 폴더를 가리키지 않는지 확인한다 (#162 검토 1회차). 판정 체크아웃
+ * (`$BIVE_HOME/work/<pid>/judge/<EXE>/<ULID>`)에서 `../../../worktrees/<EXE>`는 무시된 파일이 있는 실행 워크트리다.
+ * - `pnpm-workspace.yaml`의 `packages` 항목(앞의 `!` 제외)이 절대 경로이거나 `..` 조각을 담으면 거부
+ * - lockfile `importers` 키가 체크아웃 밖이면 거부
+ * - `file:` · `link:` 참조가 체크아웃 밖이면 거부. 실측(pnpm 10.28) 기준: importers의 `version`은 `file:`이면 lockfile 폴더,
+ *   `link:`이면 그 importer 폴더 기준(`specifier`는 package.json에 쓴 그대로라 보지 않는다). `packages:` · `snapshots:`의 키
+ *   (`name@file:<경로>`) · 의존성 값 · `resolution.directory` · `resolution.tarball`(`file:`)은 lockfile 폴더 기준
+ * 체크아웃 안의 `file:` · `link:`(닫힘 밖)는 그대로 받아들인다.
+ * @throws {JudgeCheckoutError} (`install`)
+ */
+export const assertLockfilePathsInside = (dir: string): void => {
+  const fail = (what: string): never =>
+    reject(`체크아웃 밖을 가리키는 경로는 받아들이지 않습니다: ${what} (판정 설치 거부)`);
+  const workspaceFile = path.join(dir, 'pnpm-workspace.yaml');
+  if (fs.existsSync(workspaceFile)) {
+    const parsed = parseStrictYaml(fs.readFileSync(workspaceFile, 'utf8'), 'pnpm-workspace.yaml');
+    const packages = isRecord(parsed) ? parsed.packages : undefined;
+    if (packages !== undefined && packages !== null) {
+      if (!Array.isArray(packages)) return fail('pnpm-workspace.yaml packages가 목록이 아님');
+      for (const pattern of packages) {
+        const value = typeof pattern === 'string' ? pattern.replace(/^!/u, '') : null;
+        if (
+          value === null ||
+          path.isAbsolute(value) ||
+          /^[A-Za-z]:/u.test(value) ||
+          value.split(/[\\/]/u).includes('..')
+        ) {
+          fail(`pnpm-workspace.yaml packages ${String(pattern)}`);
+        }
+      }
+    }
+  }
+  const lock = readLockfile(dir);
+  const refPath = (value: string): string | null => {
+    const match = /^(?:file|link):(.*)$/u.exec(value);
+    return match === null ? null : (match[1] ?? '').replace(/\(.*$/u, '');
+  };
+  const checkRef = (value: unknown, base: string, where: string): void => {
+    if (typeof value !== 'string') return;
+    const target = refPath(value);
+    if (target !== null && outsideDir(dir, base, target)) fail(`${where} ${value}`);
+  };
+  for (const [importer, entry] of Object.entries(lock.importers)) {
+    if (outsideDir(dir, dir, importer)) fail(`lockfile importers ${importer}`);
+    const importerDir = path.resolve(dir, importer);
+    if (!isRecord(entry)) continue;
+    for (const field of DEPENDENCY_FIELDS) {
+      const deps = entry[field];
+      if (!isRecord(deps)) continue;
+      for (const [name, dep] of Object.entries(deps)) {
+        const version = isRecord(dep) ? dep.version : dep;
+        if (typeof version !== 'string') continue;
+        checkRef(
+          version,
+          version.startsWith('link:') ? importerDir : dir,
+          `lockfile ${importer} ${name}`,
+        );
+      }
+    }
+  }
+  for (const [section, entries] of [
+    ['packages', lock.packages],
+    ['snapshots', lock.snapshots],
+  ] as const) {
+    for (const [key, entry] of Object.entries(entries)) {
+      const name = lockfileKeyName(key);
+      if (name !== null) checkRef(key.slice(name.length + 1), dir, `lockfile ${section} ${key}`);
+      if (!isRecord(entry)) continue;
+      const resolution = entry.resolution;
+      if (isRecord(resolution)) {
+        if (
+          typeof resolution.directory === 'string' &&
+          outsideDir(dir, dir, resolution.directory)
+        ) {
+          fail(`lockfile ${section} ${key} directory ${resolution.directory}`);
+        }
+        checkRef(resolution.tarball, dir, `lockfile ${section} ${key} tarball`);
+      }
+      for (const field of SNAPSHOT_DEPENDENCY_FIELDS) {
+        const deps = entry[field];
+        if (!isRecord(deps)) continue;
+        for (const [dep, value] of Object.entries(deps)) {
+          checkRef(value, dir, `lockfile ${section} ${key} → ${dep}`);
+        }
+      }
+    }
+  }
+};
+
 /**
  * 판정 설치가 받아들이는 프로젝트 pnpm 설정 키 (#162, ADR-069). 판정 설치는 프로젝트(커밋)가 정한 pnpm 설정을 믿지 않는다:
  * 아래 키 밖의 것이 하나라도 있으면 아무것도 설치 · 실행하지 않고 닫는다. 받아들이는 키는 다음 셋뿐이다.
@@ -575,6 +672,11 @@ export const PROJECT_PNPM_CONFIG_ALLOWLIST = {
     'link-workspace-packages',
     'save-exact',
     'save-prefix',
+    // 출력에만 쓰인다(pnpm 10.28 코드: `fund`는 읽지 않고, `audit`는 `pnpm audit` 명령 밖에서 읽지 않으며, `loglevel`은
+    // 보고 수준). 값은 다른 설정처럼 빌드 스크립트 환경 `npm_config_*`로도 넘어가 node-gyp · prebuild-install의 로그 수준이 된다
+    'fund',
+    'audit',
+    'loglevel',
   ],
   /** `pnpm-workspace.yaml`의 최상위 키 */
   workspace: [
@@ -602,6 +704,9 @@ export const PROJECT_PNPM_CONFIG_ALLOWLIST = {
     'linkWorkspacePackages',
     'saveExact',
     'savePrefix',
+    'fund',
+    'audit',
+    'loglevel',
   ],
   /** 루트 `package.json`의 `pnpm` 칸 키 */
   packageJson: [
@@ -657,7 +762,9 @@ export const assertProjectPnpmConfig = (dir: string): void => {
       const eq = line.indexOf('=');
       const written = (eq === -1 ? line : line.slice(0, eq)).trim();
       const key = written.endsWith('[]') ? written.slice(0, -2) : written;
-      if (!NPMRC_KEY.test(key) || !allowed.has(key)) rejectKey('.npmrc', written);
+      if (!NPMRC_KEY.test(key) || !allowed.has(key)) {
+        rejectKey('.npmrc', written === '' ? '(빈 키)' : written);
+      }
     }
   }
 
@@ -673,7 +780,23 @@ export const assertProjectPnpmConfig = (dir: string): void => {
     }
   }
 
+  // pnpm 10.28은 `package.json`이 없으면 `package.json5` → `package.yaml`을 루트 매니페스트로 읽고 그 `pnpm` 칸은 명령줄보다
+  // 앞선다(검토 1회차). 검사는 `package.json`만 읽으므로 다른 매니페스트가 있거나 `package.json`이 없으면 거부한다
+  for (const other of ['package.json5', 'package.yaml']) {
+    let present = true;
+    try {
+      fs.lstatSync(path.join(dir, other)); // 끊어진 링크도 있는 것으로 본다
+    } catch {
+      present = false;
+    }
+    if (present) {
+      reject(
+        `프로젝트 매니페스트 ${other}는 받아들이지 않습니다 (판정 설치는 package.json만 읽는다)`,
+      );
+    }
+  }
   const manifest = readRegular('package.json');
+  if (manifest === null) reject('프로젝트 최상위에 package.json이 없습니다 (판정 설치 거부)');
   if (manifest !== null) {
     let parsed: unknown;
     try {
@@ -704,6 +827,12 @@ export const assertProjectPnpmConfig = (dir: string): void => {
  * - `virtual-store-dir=node_modules/.pnpm` · `modules-dir=node_modules`: 지문 · bin 확인이 기대는 배치
  * - `manage-package-manager-versions=false`: `package.json`의 `packageManager`가 다른 pnpm 버전을 내려받아 실행하지 않게
  *   한다(실측: `pnpm@10.27.0`이면 그 버전으로 바뀌어 설치했다)
+ * - `verify-store-integrity=true`: 저장소 파일의 integrity 확인을 끄지 못하게 한다(실측: 프로젝트 `false`를 덮음)
+ * - `node-options=` · `script-shell=`(빈 값): 실측에서 이름을 지정한 rebuild는 프로젝트 값을 쓰지 않았지만(ADR-069), 쓰게
+ *   바뀌어도 닫히게 기본값(없음 · `sh`)으로 덮는다(실측: 빈 값이면 `NODE_OPTIONS` 없음 · `sh`)
+ * `use-node-version`은 덮지 못해 허용 목록만 막는다: 빈 값은 install과 레지스트리 패키지 rebuild가
+ * `ERR_PNPM_INVALID_NODE_VERSION`으로 실패했고(실측), 다른 값은 그 Node를 내려받는다(프로젝트 `use-node-version=20.0.0`이면
+ * rebuild가 Node 20을 내려받으려 했다).
  */
 export const pinnedPnpmConfigArgs = (storeDir: string): string[] => [
   '--config.node-linker=isolated',
@@ -715,6 +844,9 @@ export const pinnedPnpmConfigArgs = (storeDir: string): string[] => [
   '--config.virtual-store-dir=node_modules/.pnpm',
   '--config.modules-dir=node_modules',
   '--config.manage-package-manager-versions=false',
+  '--config.verify-store-integrity=true',
+  '--config.node-options=',
+  '--config.script-shell=',
 ];
 
 /** 저장소 경로 조회 제한 시간. */
@@ -914,6 +1046,7 @@ export const installDependencies: InstallDependencies = async (dir, options) => 
   }
   // 허용 목록은 설치 전에 확인한다: 어긋나면 아무것도 설치 · 실행하지 않고 닫는다
   assertProjectPnpmConfig(dir);
+  assertLockfilePathsInside(dir);
   const built = builtDependencyNames(dir);
   assertRegistryBuiltDependencies(dir, built);
   assertRegistryTestRunner(dir);
