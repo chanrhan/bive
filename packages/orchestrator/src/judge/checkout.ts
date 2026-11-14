@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { CommitSha, createUlidGenerator } from '@bive/shared';
-import { parse as parseYaml } from 'yaml';
+import { isScalar, parseAllDocuments, visit } from 'yaml';
 
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import { withGitWorktreeLock } from '../git/worktree-manager.js';
@@ -143,6 +143,37 @@ export type InstallDependencies = (
   },
 ) => Promise<void>;
 
+/**
+ * 판정 설치가 읽는 YAML(`pnpm-lock.yaml` · `pnpm-workspace.yaml`)을 엄격하게 읽는다 (#146 검토 2회차).
+ * `yaml` 패키지 기본값(YAML 1.2)은 병합 키 `<<`를 병합하지 않는데 pnpm 10.28은 병합해 읽는다(실측: snapshot 의존성을
+ * `<<` 아래에 두면 검사는 못 보고 pnpm은 그 `file:` 의존성을 설치했다). 검사와 pnpm이 같은 내용을 보도록, pnpm이 쓰지 않는
+ * 모양은 모두 거부한다: 문서가 하나가 아님 · 파싱 오류 · 경고, 앵커 · 별칭, 병합 키 `<<`, 명시 태그(`!!map` 등), 중복 키
+ * (`uniqueKeys`).
+ * @throws {JudgeCheckoutError} (`install`)
+ */
+export const parseStrictYaml = (text: string, what: string): unknown => {
+  const fail = (reason: string): never => {
+    throw new JudgeCheckoutError('install', `${what}의 YAML을 받아들일 수 없습니다: ${reason}`);
+  };
+  const docs = parseAllDocuments(text, { uniqueKeys: true, merge: false, prettyErrors: false });
+  if (!Array.isArray(docs) || docs.length !== 1) return fail('문서가 하나가 아님');
+  const doc = docs[0];
+  if (doc === undefined) return fail('문서가 하나가 아님');
+  const problem = [...doc.errors, ...doc.warnings][0];
+  if (problem !== undefined) return fail(`${problem.code} ${problem.message.split('\n')[0] ?? ''}`);
+  visit(doc, {
+    Alias: () => fail('앵커 · 별칭'),
+    Node: (_key, node) => {
+      if (node.anchor !== undefined) fail('앵커 · 별칭');
+      if (node.tag !== undefined) fail(`명시 태그 ${node.tag}`);
+    },
+    Pair: (_key, pair) => {
+      if (isScalar(pair.key) && pair.key.value === '<<') fail('병합 키 <<');
+    },
+  });
+  return doc.toJS({ maxAliasCount: 0 }) as unknown;
+};
+
 /** npm 패키지 이름 (범위 포함). 빌드 허용 목록에서 이 모양이 아닌 값은 거부한다. */
 const PACKAGE_NAME = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u;
 
@@ -167,7 +198,7 @@ export const builtDependencyNames = (dir: string): string[] => {
   };
   const workspace = path.join(dir, 'pnpm-workspace.yaml');
   if (fs.existsSync(workspace)) {
-    const parsed: unknown = parseYaml(fs.readFileSync(workspace, 'utf8'));
+    const parsed = parseStrictYaml(fs.readFileSync(workspace, 'utf8'), 'pnpm-workspace.yaml');
     if (typeof parsed === 'object' && parsed !== null) {
       add((parsed as { onlyBuiltDependencies?: unknown }).onlyBuiltDependencies);
     }
@@ -302,14 +333,15 @@ const reject = (message: string): never => {
 
 /** lockfile을 읽는다. 9 계열이 아니거나 읽을 수 없거나 패치 · override 키에서 이름을 뽑을 수 없으면 거부한다. */
 const readLockfile = (dir: string): ParsedLockfile => {
-  let lock: unknown;
+  let text: string;
   try {
-    lock = parseYaml(fs.readFileSync(path.join(dir, 'pnpm-lock.yaml'), 'utf8'));
+    text = fs.readFileSync(path.join(dir, 'pnpm-lock.yaml'), 'utf8');
   } catch (error) {
     return reject(
       `lockfile을 읽지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  const lock = parseStrictYaml(text, 'lockfile(pnpm-lock.yaml)');
   if (
     !isRecord(lock) ||
     typeof lock.lockfileVersion !== 'string' ||
@@ -317,6 +349,13 @@ const readLockfile = (dir: string): ParsedLockfile => {
   ) {
     return reject(
       `지원하지 않는 lockfile 형식입니다 (lockfileVersion ${isRecord(lock) ? String(lock.lockfileVersion) : '없음'})`,
+    );
+  }
+  // `excludeLinksFromLockfile`이 켜지면 `link:` 의존성이 importers에서 빠져 lockfile만 보는 검사가 놓친다 (#146 검토 2회차)
+  const settings = lock.settings;
+  if (!isRecord(settings) || settings.excludeLinksFromLockfile !== false) {
+    return reject(
+      `lockfile settings.excludeLinksFromLockfile이 false가 아닙니다 (${isRecord(settings) ? String(settings.excludeLinksFromLockfile) : 'settings 없음'})`,
     );
   }
   const names = (value: unknown, pick: (key: string) => string[], what: string) => {
@@ -501,6 +540,94 @@ export const assertRegistryTestRunner = (dir: string): void => {
   }
 };
 
+/** 판정 설치의 hoist 설정 고정: 프로젝트 `.npmrc` · `pnpm-workspace.yaml`의 hoist 설정이 bin을 루트로 올리지 못하게 한다. */
+const LAYOUT_FLAGS = [
+  '--config.node-linker=isolated',
+  '--config.shamefully-hoist=false',
+  '--config.public-hoist-pattern=',
+] as const;
+
+/**
+ * 빌드 스크립트 PATH에 드는 공용 bin 폴더(실측 순서: 패키지 자신 · `.pnpm/<id>/node_modules/.bin`(닫힘 검사 대상) → 루트
+ * `node_modules/.bin` → pnpm `node-gyp-bin` → `.pnpm/node_modules/.bin`(내부 hoist))의 각 항목이 레지스트리 패키지 폴더 안을
+ * 가리키는지 확인한다 (#146 검토 2회차). 항목은 pnpm 셸 shim(대상 `"$basedir/<경로>"`) 또는 링크다. 대상 실경로가
+ * `node_modules/.pnpm/<디렉터리>/node_modules/<이름>/` 안이고, `<디렉터리>`가 lockfile `packages:`의 `<이름>@<semver>`
+ * (범위 이름의 `/`는 `+`, 피어 접미는 `_…`)이며 그 패키지가 닫힘 검사의 패키지 규칙(레지스트리 해상도 · 패치 · override 없음)을
+ * 통과해야 한다. 대상을 읽을 수 없는 항목, 프로젝트 폴더 · `file:` · `link:` 패키지를 가리키는 항목은 거부한다.
+ * Windows의 `.cmd` · `.ps1`은 같은 이름의 셸 shim이 확인됐을 때만 받아들인다(Windows 실기기 미확인).
+ * @throws {JudgeCheckoutError} (`install`)
+ */
+export const assertBuildPathBins = (dir: string): void => {
+  const lock = readLockfile(dir);
+  const store = path.join(dir, 'node_modules', '.pnpm');
+  let storeReal: string;
+  try {
+    storeReal = fs.realpathSync(store);
+  } catch {
+    return; // 설치된 의존성이 없다
+  }
+  const allowedTarget = (file: string): boolean => {
+    let real: string;
+    try {
+      real = fs.realpathSync(file);
+    } catch {
+      return false;
+    }
+    const rel = path.relative(storeReal, real).split(path.sep);
+    const [dirName, nodeModules, first, second] = rel;
+    if (
+      dirName === undefined ||
+      dirName === '..' ||
+      path.isAbsolute(path.relative(storeReal, real))
+    ) {
+      return false;
+    }
+    if (nodeModules !== 'node_modules' || first === undefined) return false;
+    const name = first.startsWith('@') && second !== undefined ? `${first}/${second}` : first;
+    const encoded = name.replace('/', '+');
+    if (!dirName.startsWith(`${encoded}@`)) return false;
+    const rest = dirName.slice(encoded.length + 1);
+    const version = rest.split('_')[0] ?? '';
+    if (!REGISTRY_VERSION.test(version) || rest.includes('patch_hash')) return false;
+    return packageProblems(lock, `${name}@${version}`).length === 0;
+  };
+  for (const binDir of [
+    path.join(dir, 'node_modules', '.bin'),
+    path.join(store, 'node_modules', '.bin'),
+  ]) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(binDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const names = new Set(entries.map((entry) => entry.name));
+    for (const entry of entries) {
+      const full = path.join(binDir, entry.name);
+      const where = `${path.relative(dir, binDir)}/${entry.name}`;
+      const windowsShim = /\.(cmd|ps1)$/iu.exec(entry.name);
+      if (windowsShim !== null && names.has(entry.name.slice(0, windowsShim.index))) continue;
+      let targets: string[];
+      if (entry.isSymbolicLink()) {
+        targets = [full];
+      } else if (entry.isFile()) {
+        const body = fs.readFileSync(full, 'utf8');
+        targets = [...body.matchAll(/"\$basedir\/([^"$]+)"/gu)]
+          .map((match) => match[1] ?? '')
+          .filter((target) => target !== 'node' && target !== '')
+          .map((target) => path.resolve(binDir, target));
+      } else {
+        targets = [];
+      }
+      if (targets.length === 0 || !targets.every(allowedTarget)) {
+        reject(
+          `빌드 스크립트 PATH의 실행 파일 ${where}가 레지스트리 패키지 폴더를 가리키지 않습니다 (판정 설치 거부)`,
+        );
+      }
+    }
+  }
+};
+
 /**
  * lockfile 기준 의존성 설치. M1은 pnpm(`pnpm-lock.yaml`)만 지원한다.
  * 1. `pnpm install --frozen-lockfile --prefer-offline --ignore-scripts --ignore-pnpmfile --package-import-method=copy`
@@ -514,6 +641,9 @@ export const assertRegistryTestRunner = (dir: string): void => {
  *    `rebuild`는 `--ignore-pnpmfile` 옵션을 모르며 설정 값으로 줘야 pnpmfile을 건너뛴다(실측). 허용 목록의 이름은 설치 전에
  *    lockfile에서 의존성 닫힘까지 레지스트리 패키지로만 해석되는지, 판정 실행기 vitest와 그 닫힘도 그런지 확인한다
  *    (`assertRegistryBuiltDependencies` · `assertRegistryTestRunner`, #146)
+ *    설치 · rebuild 모두 `node-linker=isolated` · `shamefully-hoist=false` · `public-hoist-pattern=`(빈 값)으로 고정하고,
+ *    rebuild 전에 빌드 스크립트 PATH의 공용 bin 폴더를 `assertBuildPathBins`로 확인한다(#146 검토 2회차). 빌드 허용 목록이
+ *    비어 있으면 rebuild가 없고, 판정 러너는 vitest를 shim 없이 직접 실행하므로 지문 기준값 전에 `.bin`을 거치는 실행이 없다
  * 프로젝트가 설치 때 하던 생성 단계(`prisma generate`)는 스택 프로필이 따로 한다.
  * 셸 없이 PATH의 `pnpm`을 실행하고 환경 변수는 판정 러너와 같은 허용 목록 + `CI=1`만 넘긴다.
  * @throws {JudgeCheckoutError} (`install`) lockfile 없음 · 레지스트리가 아닌 빌드 허용 목록 · 실행기 닫힘 · 설치 실패 · 시간 초과 · 중단
@@ -555,13 +685,22 @@ export const installDependencies: InstallDependencies = async (dir, options) => 
       '--ignore-scripts',
       '--ignore-pnpmfile',
       '--package-import-method=copy',
+      ...LAYOUT_FLAGS,
       '--reporter=append-only',
     ],
     '의존성 설치',
   );
   if (built.length > 0) {
+    // 빌드 스크립트가 PATH에서 찾을 수 있는 bin이 모두 레지스트리 패키지의 것인지 rebuild 전에 확인한다(최종 관문)
+    assertBuildPathBins(dir);
     await run(
-      ['rebuild', '--config.ignore-pnpmfile=true', '--reporter=append-only', ...built],
+      [
+        'rebuild',
+        '--config.ignore-pnpmfile=true',
+        ...LAYOUT_FLAGS,
+        '--reporter=append-only',
+        ...built,
+      ],
       '의존성 빌드',
     );
   }

@@ -25,6 +25,7 @@ import { createUlidGenerator } from '@bive/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
+  assertBuildPathBins,
   assertRegistryBuiltDependencies,
   assertRegistryTestRunner,
   dependencyClosure,
@@ -1096,14 +1097,14 @@ describe('빌드 허용 목록 · 판정 실행기의 의존성 닫힘 검사 (#
       ...lock.snapshots,
     ].join('\n');
   /** 판정 설치와 같은 함수(`installDependencies`)로 검사한다. 검사가 거부하면 pnpm을 띄우기 전에 던진다 */
-  const install = async (
-    lock: Lock,
+  const installText = async (
+    text: string,
     workspace = 'onlyBuiltDependencies:\n  - native\n',
     files: Record<string, string> = {},
   ): Promise<void> => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-closure-'));
     try {
-      writeFileSync(path.join(dir, 'pnpm-lock.yaml'), render(lock));
+      writeFileSync(path.join(dir, 'pnpm-lock.yaml'), text);
       writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'app' }));
       writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), `packages: []\n${workspace}`);
       for (const [rel, body] of Object.entries(files)) {
@@ -1115,6 +1116,11 @@ describe('빌드 허용 목록 · 판정 실행기의 의존성 닫힘 검사 (#
       rmSync(dir, { recursive: true, force: true });
     }
   };
+  const install = (
+    lock: Lock,
+    workspace?: string,
+    files: Record<string, string> = {},
+  ): Promise<void> => installText(render(lock), workspace, files);
   const check = (lock: Lock, names: string[] = ['native']): void => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-closure-'));
     try {
@@ -1273,6 +1279,203 @@ describe('빌드 허용 목록 · 판정 실행기의 의존성 닫힘 검사 (#
     expect(overrideTargetNames('is-number@>7')).toEqual(['7', 'is-number']);
     expect(overrideTargetNames('>>')).toEqual([]);
   });
+
+  it('lockfile의 YAML 병합 키(<<)로 snapshot · importer 의존성을 숨기면 거부한다 (pnpm은 병합해 읽는다, #146 검토 2회차)', async () => {
+    // 검토 재현 모양: native snapshot의 의존성을 `<<` 아래에 둔다
+    const snapshotMerge: Lock = {
+      ...base,
+      packages: [
+        ...base.packages,
+        '  helper@file:evil:\n    resolution: {directory: evil, type: directory}\n',
+      ],
+      snapshots: replace(
+        base.snapshots,
+        '  native@1.0.0:\n    dependencies:\n      helper: 2.0.0\n',
+        '  native@1.0.0:\n    <<:\n      dependencies:\n        helper: file:evil\n',
+      ),
+    };
+    await expect(install(snapshotMerge)).rejects.toThrow(/YAML.*<</);
+    // 루트 importer의 의존성을 `<<` 아래에 숨긴다 (PATH 규칙을 피하려는 모양)
+    const importerMerge = render(base).replace(
+      '  .:\n    dependencies:\n',
+      '  .:\n    <<:\n      dependencies:\n        tool:\n          specifier: file:./tool\n          version: file:tool\n    dependencies:\n',
+    );
+    await expect(installText(importerMerge)).rejects.toThrow(/YAML.*<</);
+  });
+
+  it('lockfile · pnpm-workspace.yaml의 앵커 · 별칭 · 명시 태그 · 중복 키 · 여러 문서는 거부한다', async () => {
+    const text = render(base);
+    await expect(
+      installText(text.replace('  helper@2.0.0: {}\n', '  helper@2.0.0: &h {}\n')),
+    ).rejects.toThrow(/YAML.*앵커/);
+    await expect(
+      installText(
+        text.replace(
+          "  'vitest@5.0.5(vite@8.3.4)':\n    dependencies:\n      tinyrainbow: 3.0.0\n",
+          "  'vitest@5.0.5(vite@8.3.4)':\n    dependencies: &d\n      tinyrainbow: 3.0.0\n",
+        ) + '  extra@1.0.0: *d\n',
+      ),
+    ).rejects.toThrow(/YAML/);
+    await expect(
+      installText(text.replace('  helper@2.0.0: {}\n', '  helper@2.0.0: !!map {}\n')),
+    ).rejects.toThrow(/YAML.*태그/);
+    await expect(
+      installText(text.replace('  helper@2.0.0: {}\n', '  helper@2.0.0: {}\n  helper@2.0.0: {}\n')),
+    ).rejects.toThrow(/YAML/);
+    await expect(installText(`${text}\n---\na: 1\n`)).rejects.toThrow(/YAML/);
+    // pnpm-workspace.yaml도 같은 파서로 읽는다: 별칭으로 빌드 허용 목록을 만들면 거부
+    await expect(
+      installText(text, 'names: &n\n  - native\nonlyBuiltDependencies: *n\n'),
+    ).rejects.toThrow(/pnpm-workspace.yaml.*YAML/);
+    // 정상 모양은 검사를 지나 설치 단계로 간다 (제한 시간 1ms로 끝남)
+    await expect(installText(text)).rejects.toThrow(/의존성 설치 (시간 초과|실패)/);
+  });
+
+  it('lockfile settings.excludeLinksFromLockfile이 false가 아니면 거부한다 (link: 의존성이 importers에서 빠진다)', async () => {
+    const text = render(base);
+    await expect(
+      installText(
+        text.replace('excludeLinksFromLockfile: false', 'excludeLinksFromLockfile: true'),
+      ),
+    ).rejects.toThrow(/excludeLinksFromLockfile/);
+    await expect(
+      installText(text.replace('  excludeLinksFromLockfile: false\n', '')),
+    ).rejects.toThrow(/excludeLinksFromLockfile/);
+  });
+
+  it('빌드 스크립트 PATH의 bin 폴더 항목은 레지스트리 패키지 폴더 안을 가리켜야 한다 (bin 실경로 확인)', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-pathbin-'));
+    try {
+      const put = (rel: string, body: string): void => {
+        mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+        writeFileSync(path.join(dir, rel), body);
+      };
+      const shim = (target: string): string =>
+        `#!/bin/sh\nbasedir=$(dirname "$(echo "$0" | sed -e 's,\\\\,/,g')")\nif [ -x "$basedir/node" ]; then\n  exec "$basedir/node"  "$basedir/${target}" "$@"\nelse\n  exec node  "$basedir/${target}" "$@"\nfi\n`;
+      writeFileSync(path.join(dir, 'pnpm-lock.yaml'), render(base));
+      // 레지스트리 패키지 (pnpm 배치: .pnpm/<키>/node_modules/<이름>, 피어 접미 `_…`)
+      put('node_modules/.pnpm/native@1.0.0/node_modules/native/cli.js', '');
+      put('node_modules/.pnpm/vitest@5.0.5_vite@8.3.4/node_modules/vitest/vitest.mjs', '');
+      symlinkSync('.pnpm/native@1.0.0/node_modules/native', path.join(dir, 'node_modules/native'));
+      mkdirSync(path.join(dir, 'node_modules/.pnpm/node_modules'), { recursive: true });
+      symlinkSync(
+        '../vitest@5.0.5_vite@8.3.4/node_modules/vitest',
+        path.join(dir, 'node_modules/.pnpm/node_modules/vitest'),
+        'dir',
+      );
+      put('node_modules/.bin/native', shim('../native/cli.js'));
+      put('node_modules/.pnpm/node_modules/.bin/vitest', shim('../vitest/vitest.mjs'));
+      expect(() => assertBuildPathBins(dir)).not.toThrow();
+
+      // 레지스트리가 아닌 패키지(file: 폴더)를 가리키는 hoist된 bin
+      put('node_modules/.pnpm/b@file+b/node_modules/b/gyp.js', '');
+      symlinkSync(
+        '../b@file+b/node_modules/b',
+        path.join(dir, 'node_modules/.pnpm/node_modules/b'),
+        'dir',
+      );
+      put('node_modules/.pnpm/node_modules/.bin/node-gyp', shim('../b/gyp.js'));
+      expect(() => assertBuildPathBins(dir)).toThrow(/node-gyp.*레지스트리/);
+      rmSync(path.join(dir, 'node_modules/.pnpm/node_modules/.bin/node-gyp'));
+
+      // 프로젝트 폴더(link:)를 가리키는 루트 bin · 링크 bin · 대상을 읽을 수 없는 shim
+      put('tool/gyp.js', '');
+      symlinkSync('../tool', path.join(dir, 'node_modules/tool'), 'dir');
+      put('node_modules/.bin/node-gyp', shim('../tool/gyp.js'));
+      expect(() => assertBuildPathBins(dir)).toThrow(/node-gyp/);
+      rmSync(path.join(dir, 'node_modules/.bin/node-gyp'));
+      symlinkSync('../../tool/gyp.js', path.join(dir, 'node_modules/.bin/node-gyp'));
+      expect(() => assertBuildPathBins(dir)).toThrow(/node-gyp/);
+      rmSync(path.join(dir, 'node_modules/.bin/node-gyp'));
+      put('node_modules/.bin/odd', '#!/bin/sh\necho hi\n');
+      expect(() => assertBuildPathBins(dir)).toThrow(/odd/);
+      rmSync(path.join(dir, 'node_modules/.bin/odd'));
+      // lockfile에 레지스트리로 없는 키 폴더(패치본 등)
+      put('node_modules/.pnpm/helper@2.0.0_patch_hash=00/node_modules/helper/x.js', '');
+      symlinkSync(
+        '../helper@2.0.0_patch_hash=00/node_modules/helper',
+        path.join(dir, 'node_modules/.pnpm/node_modules/helper'),
+        'dir',
+      );
+      put('node_modules/.pnpm/node_modules/.bin/helper', shim('../helper/x.js'));
+      expect(() => assertBuildPathBins(dir)).toThrow(/helper/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it(
+    'hoist 설정(.npmrc shamefully-hoist · pnpm-workspace.yaml shamefullyHoist)으로 닫힘 밖 file: 패키지의 node-gyp bin을 올려도 빌드 스크립트가 그것을 실행하지 않는다 (#146 검토 2회차 재현)',
+    async () => {
+      for (const [file, body] of [
+        ['.npmrc', 'shamefully-hoist=true\n'],
+        [
+          'pnpm-workspace.yaml',
+          'packages: []\nonlyBuiltDependencies:\n  - better-sqlite3\nshamefullyHoist: true\n',
+        ],
+      ] as const) {
+        const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-hoist-'));
+        const marker = path.join(dir, 'PWNED_HOIST');
+        try {
+          const fixturePkg = JSON.parse(
+            readFileSync(path.join(REPO_ROOT, 'fixtures/sample-next-app/package.json'), 'utf8'),
+          ) as { devDependencies: Record<string, string> };
+          mkdirSync(path.join(dir, 'a'));
+          mkdirSync(path.join(dir, 'b'));
+          writeFileSync(
+            path.join(dir, 'a', 'package.json'),
+            JSON.stringify({ name: 'a', version: '1.0.0', dependencies: { b: 'file:../b' } }),
+          );
+          writeFileSync(
+            path.join(dir, 'b', 'package.json'),
+            JSON.stringify({ name: 'b', version: '1.0.0', bin: { 'node-gyp': 'gyp.js' } }),
+          );
+          writeFileSync(
+            path.join(dir, 'b', 'gyp.js'),
+            `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(marker)}, '');\n`,
+          );
+          writeFileSync(
+            path.join(dir, 'package.json'),
+            JSON.stringify({
+              name: 'hoist-app',
+              private: true,
+              dependencies: {
+                // 픽스처 lockfile에 있는 버전 (전역 저장소 캐시에서 복사 설치)
+                'better-sqlite3': '12.11.1',
+                a: 'file:./a',
+              },
+              devDependencies: { vitest: fixturePkg.devDependencies.vitest },
+            }),
+          );
+          writeFileSync(
+            path.join(dir, 'pnpm-workspace.yaml'),
+            'packages: []\nonlyBuiltDependencies:\n  - better-sqlite3\n',
+          );
+          // prebuild-install을 실패시켜 node-gyp로 넘어가게 한다
+          writeFileSync(path.join(dir, '.prebuild-installrc'), 'buildFromSource=true\n');
+          writeFileSync(path.join(dir, file), body);
+          execFileSync(
+            'pnpm',
+            ['install', '--lockfile-only', '--prefer-offline', '--ignore-scripts'],
+            { cwd: dir, stdio: 'pipe', env: { ...process.env, CI: '1' } },
+          );
+          await expect(
+            installDependencies(dir, {
+              logFile: path.join(dir, 'install.log'),
+              timeoutMs: JUDGE_TIMEOUT_MS,
+            }),
+            file,
+          ).rejects.toThrow(/node-gyp.*레지스트리/);
+          // 루트 .bin에는 올라오지 않았다 (hoist 설정 고정)
+          expect(existsSync(path.join(dir, 'node_modules', '.bin', 'node-gyp')), file).toBe(false);
+          expect(existsSync(marker), file).toBe(false);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
 
   it(
     '픽스처에 허용 패키지 의존성 override(prebuild-install → file: 폴더)를 커밋하면 설치를 거부하고 rebuild가 그 bin을 실행하지 않는다 (검토 재현)',
