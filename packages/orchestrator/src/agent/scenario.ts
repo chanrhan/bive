@@ -80,6 +80,11 @@ const TurnSchema = z.union([ToolTurnSchema, MessageTurnSchema, PauseTurnSchema])
 
 const SessionSchema = z.strictObject({
   description: z.string().optional(),
+  /**
+   * init 보고에 고정 도구 서버(`bive`) 뒤로 더 붙일 MCP 서버 이름. 계정 · 프로젝트 MCP 설정이 섞인 세션을 재현해
+   * 세션 가드(NFR-02)를 시험할 때만 쓴다 (ADR-077)
+   */
+  extraMcpServers: z.array(NonEmptyString).optional(),
   turns: z.array(TurnSchema),
   result: ResultSchema,
 });

@@ -16,8 +16,11 @@ import { isOrchestratorOf, makeBiveHome, sleep } from '../../test/helpers/proces
 import { type AppProcess, cleanupApps, startApp } from './app-process.js';
 import { attempts, cleanupPipeline, git, human, resetFixture, RUN_BRANCH } from './harness.js';
 
-/** 유휴 종료 시간. 앱이 없는 구간(설치 · next build를 하는 Red 확인 포함)보다 짧고, 앱 3이 붙기에는 넉넉하게 */
-const IDLE_MS = 10_000;
+/**
+ * 유휴 종료 시간. 앱 1 종료 뒤 이 시간보다 1초 더 기다린 뒤에도 살아 있어야 하고, 병합 뒤에는 이 시간 안에 앱 3이
+ * 붙어야 하므로 부하에서도 앱 3 기동(tsx 변환 포함)이 넉넉히 들어가게 둔다
+ */
+const IDLE_MS = 20_000;
 
 afterEach(async () => {
   await cleanupApps();
@@ -114,10 +117,13 @@ describe('app-exit: 앱이 끝나도 오케스트레이터와 실행이 계속�
     // 3. 앱 2: 새 오케스트레이터를 띄우지 않고 같은 pid에 붙어 진행 중 상태를 본다
     const app2 = await startApp(env);
     expect(app2.ready).toMatchObject({ launched: false, spawnedPid: null, orchestratorPid: pid });
+    const statusAt = Date.now();
     const status = await app2.call('system.status', undefined);
     expect(status).toMatchObject({ connections: 1, runsInProgress: 1 });
-    // 앱 1이 붙은 때부터 쭉 같은 프로세스 (재기동이면 가동 시간이 짧다)
-    expect(status.uptimeMs).toBeGreaterThanOrEqual(Date.now() - app1ReadyAt - 1000);
+    // 앱 1이 붙은 때부터 쭉 같은 프로세스 (재기동이면 가동 시간이 짧다). 가동 시간은 요청을 받은 뒤에 재므로
+    // 요청 직전까지의 경과가 응답 지연과 무관한 하한이다. 그 경과는 위에서 앱 1 종료 뒤 IDLE_MS + 1초를 기다려 그보다 길다
+    expect(statusAt - app1ReadyAt).toBeGreaterThan(IDLE_MS);
+    expect(status.uptimeMs).toBeGreaterThanOrEqual(statusAt - app1ReadyAt - 1000);
     const paused = await app2.call('run.get', { projectId, id: run.id });
     expect(paused.run).toMatchObject({ status: 'running', currentStep: 'implementation' });
     expect(attempts(paused)).toEqual([

@@ -1,5 +1,5 @@
 // 파이프라인 e2e: happy-path 실행 동안 오케스트레이터 프로세스의 외부 연결 시도 0건 (M1-22 수용 기준 4, NFR-04 · ADR-075).
-// 제품 CLI를 네트워크 감시 진입점(`test/helpers/net-watched-cli.ts`)으로 띄워 같은 프로세스의 `net` · `dns` 호출을 모두 기록하고,
+// 제품 CLI를 네트워크 감시 진입점(`test/helpers/net-watched-cli.ts`)으로 띄워 같은 프로세스의 `net` · `dns` · `dgram`(UDP) 호출을 모두 기록하고,
 // happy-path와 같은 조작(요구사항 저장 → 제안 승인 · 거절 → 실행 → merged)을 실제 git · 실제 판정 러너로 끝낸 뒤 기록을 본다.
 // 허용: 로컬 소켓(파이프)과 127.0.0.1. 범위: 오케스트레이터 프로세스만. 판정 러너 · git의 하위 프로세스(pnpm install ·
 // next build · next start · vitest)는 감시하지 않는다(범위와 근거는 ADR-075).
@@ -35,7 +35,7 @@ afterEach(async () => {
 });
 
 describe('happy-path 실행 동안 오케스트레이터 프로세스의 외부 연결 시도 0건', () => {
-  it('net · dns 감시 기록에 로컬 소켓 · 127.0.0.1 밖 연결 시도가 없고 실행은 merged다', async () => {
+  it('net · dns · dgram 감시 기록에 로컬 소켓 · 127.0.0.1 밖 연결 시도가 없고 실행은 merged다', async () => {
     const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bive-net-'));
     logDirs.push(logDir);
     const log = path.join(logDir, 'net-watch.jsonl');

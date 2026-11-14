@@ -192,7 +192,6 @@ describe('main 세션: 오케스트레이터 기동 · 접속 · app.pid', PROCE
         project: { id: string };
       };
       const before = (await first.link.request('system.status')) as { uptimeMs: number };
-      const beforeAt = Date.now();
       first.dispose();
       expect(existsSync(paths.appPid)).toBe(false);
       await sleep(300);
@@ -213,9 +212,8 @@ describe('main 세션: 오케스트레이터 기동 · 접속 · app.pid', PROCE
         connections: number;
         runsInProgress: number;
       };
-      expect(after.uptimeMs).toBeGreaterThanOrEqual(
-        before.uptimeMs + (Date.now() - beforeAt) - 100,
-      );
+      // 두 조회 사이에 sleep(300)이 있으므로 같은 프로세스면 가동 시간이 적어도 300ms 늘었다 (응답 지연과 무관한 하한)
+      expect(after.uptimeMs).toBeGreaterThanOrEqual(before.uptimeMs + 300);
       expect(after).toMatchObject({ connections: 1, runsInProgress: 0 });
       await expect(second.link.request('project.current')).resolves.toMatchObject({
         project: { id: opened.project.id, rootPath: folder },

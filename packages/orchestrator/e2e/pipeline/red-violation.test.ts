@@ -1,6 +1,7 @@
 // 파이프라인 e2e: Red 위반 (M1-21, architecture.md 8장 "Red 위반 (구현 전 통과 테스트)", RUN-03).
 // 테스트 작성이 매번 이미 있는 동작만 확인하는 인수 테스트를 써서, 실제 판정 러너로 구현 전에도 통과한다.
 // Red 확인을 넘지 못해 테스트 작성 단계가 끝나지 않고(재시도 2회, 테스트 작성 3회) failed여야 한다. 구현 세션은 열리지 않는다.
+// "테스트 작성 단계 미종료"의 해석: Red 확인 미통과로 테스트 작성이 다음 단계(구현)로 넘어가지 못함 (테스트 작성 시도 자체는 passed).
 import fs from 'node:fs';
 
 import { afterEach, describe, expect, it } from 'vitest';
