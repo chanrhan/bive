@@ -1,6 +1,7 @@
 // 검증 화면 요약 RPC (M1-18 수용 기준 1, JDG-03 · COST-02 · SCR-05 · ADR-072).
 // `verification.summary`가 판정 기준 커밋, 준수(통과 수 · 판정 가능 수), 분모 목록, 실행당 비용(없으면 null)과
 // 규칙별 최신 판정 · 실행 링크(비용 합계 · 턴), 최근 실행의 파이프라인을 돌려주는지 본다.
+// 준수 · 목록의 판정은 판정 기준 커밋에서 낸 판정(기준 실행의 병합 재검사, 없으면 검사 단계)뿐이다 (screens.md SCR-05 머리줄).
 // 실제 Unix 소켓 · 임시 BIVE_HOME · 실제 SQLite 저장소. 데이터는 저장소에 바로 넣는다(테스트 전용).
 import {
   type Author,
@@ -41,6 +42,9 @@ const COMPLETE: SettingsPatch = {
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
 const SHA_C = 'c'.repeat(40);
+const SHA_D = 'd'.repeat(40);
+const SHA_E = 'e'.repeat(40);
+const SHA_F = 'f'.repeat(40);
 
 const servers: PipeServer[] = [];
 const clients: TestClient[] = [];
@@ -98,6 +102,8 @@ interface RunSeed {
   sessions?: { costUsd: number | null; turns: number | null }[];
   /** 끝 상태 (생략하면 승인 대기 그대로) */
   status?: Exclude<RunStatus, 'waiting_approval'>;
+  /** 마지막 통과 구현 · 검사 커밋 */
+  headCommit?: string;
   mergeCommit?: string;
 }
 
@@ -144,7 +150,12 @@ const seedRun = (store: ProjectStore, seed: RunSeed): Run => {
       status: seed.status,
       ...(seed.status === 'interrupted'
         ? {}
-        : { currentStep: null, endedAt: end, mergeCommit: seed.mergeCommit ?? null }),
+        : {
+            currentStep: null,
+            endedAt: end,
+            headCommit: seed.headCommit ?? null,
+            mergeCommit: seed.mergeCommit ?? null,
+          }),
     },
     steps: [
       {
@@ -159,9 +170,10 @@ const seedRun = (store: ProjectStore, seed: RunSeed): Run => {
 /** 판정 기록이 가리키는 실행 · 단계 시도 (실행 밖 판정이면 `null`). */
 type JudgedIn = { runId: Ulid; stepId: Ulid } | null;
 
-const judgedIn = (store: ProjectStore, run: Run): JudgedIn => ({
+/** 실행의 `kind` 단계 첫 시도에서 낸 판정 (구현 · 검사 · 병합 재검사). */
+const judgedIn = (store: ProjectStore, run: Run, kind: StepKind = 'check'): JudgedIn => ({
   runId: run.id,
-  stepId: stepOf(store.runs.steps(run.id), 'test_writing').id,
+  stepId: stepOf(store.runs.steps(run.id), kind).id,
 });
 
 const judgment = (
@@ -169,7 +181,7 @@ const judgment = (
   status: JudgmentResult['status'],
   where: JudgedIn,
   at: number,
-  commit = SHA_A,
+  commit: string,
 ): JudgmentResult => ({
   id: newId(),
   ruleId: rule.id,
@@ -185,6 +197,8 @@ const judgment = (
   quarantineReason: status === 'quarantined' ? '불안정한 외부 호출' : null,
 });
 
+const UNJUDGED = { status: 'unjudged', latest: null } as const;
+
 describe('verification.summary', () => {
   it('규칙 · 실행이 없으면 판정 기준 · 실행당 비용 · 파이프라인이 null이고 준수는 0 / 0', async () => {
     expect(await summary()).toEqual({
@@ -197,7 +211,7 @@ describe('verification.summary', () => {
     });
   });
 
-  it('판정 기준 커밋, 준수(통과 / 판정 가능), 분모 목록, 실행당 비용, 규칙별 최신 판정과 실행 링크를 돌려준다', async () => {
+  it('판정 기준 커밋, 준수(통과 / 판정 가능), 분모 목록, 실행당 비용을 돌려주고 준수 · 목록은 기준 실행의 검사 판정만 쓴다', async () => {
     const seeded = h.read((store) => {
       const passed = insertRule(store, '통과 규칙', 'approved');
       const failed = insertRule(store, '실패 규칙', 'approved');
@@ -215,6 +229,7 @@ describe('verification.summary', () => {
           { costUsd: 0.2, turns: 4 },
         ],
         status: 'merged',
+        headCommit: SHA_C,
         mergeCommit: SHA_A,
       });
       const run2 = seedRun(store, {
@@ -225,36 +240,44 @@ describe('verification.summary', () => {
           { costUsd: null, turns: null },
         ],
         status: 'failed',
+        headCommit: SHA_D,
       });
       const run3 = seedRun(store, {
-        ruleIds: [failed.id],
+        ruleIds: [passed.id],
         at: T0 + 30_000,
         sessions: [{ costUsd: 0.1, turns: 2 }],
         status: 'merged',
+        headCommit: SHA_E,
         mergeCommit: SHA_B,
       });
-      seedRun(store, {
-        ruleIds: [fresh.id],
+      const run4 = seedRun(store, {
+        ruleIds: [passed.id],
         at: T0 + 40_000,
         sessions: [{ costUsd: 3, turns: 50 }],
         status: 'running',
       });
-      // 최신 판정: 통과 규칙 = 앞선 실패 뒤 통과(EXE-001), 실패 규칙 = EXE-001 통과 뒤 EXE-002 실패,
-      // 잠정 규칙 = 통과(분모 밖), 격리 규칙 = 격리(분모 밖), 판정 전 규칙 = 기록 없음
-      const in1 = judgedIn(store, run1);
       store.judgments.record([
-        judgment(passed, 'fail', in1, T0 + 11_000),
-        judgment(passed, 'pass', in1, T0 + 12_000),
-        judgment(failed, 'pass', in1, T0 + 12_000),
-        judgment(failed, 'fail', judgedIn(store, run2), T0 + 21_000, SHA_C),
-        judgment(provisional, 'pass', in1, T0 + 12_000),
-        judgment(quarantined, 'quarantined', null, T0 + 12_000),
+        // EXE-001(이전 병합): 기준 커밋의 판정이 아니므로 보이지 않는다
+        judgment(failed, 'pass', judgedIn(store, run1), T0 + 12_000, SHA_C),
+        judgment(fresh, 'pass', judgedIn(store, run1), T0 + 12_000, SHA_C),
+        // EXE-002(병합 안 됨): 검사 실패
+        judgment(failed, 'fail', judgedIn(store, run2), T0 + 21_000, SHA_D),
+        // EXE-003(기준): 구현 1차 시도 실패(되돌린 시도 커밋), 검사 = 통과 · 잠정 · 격리 규칙
+        judgment(passed, 'fail', judgedIn(store, run3, 'implementation'), T0 + 31_000, SHA_D),
+        judgment(passed, 'pass', judgedIn(store, run3), T0 + 32_000, SHA_E),
+        judgment(provisional, 'pass', judgedIn(store, run3), T0 + 32_000, SHA_E),
+        judgment(quarantined, 'quarantined', judgedIn(store, run3), T0 + 32_000, SHA_E),
+        // EXE-004(진행 중): 구현 판정 실패
+        judgment(passed, 'fail', judgedIn(store, run4, 'implementation'), T0 + 41_000, SHA_F),
+        // 실행 밖 판정
+        judgment(fresh, 'fail', null, T0 + 42_000, SHA_B),
       ]);
-      return { passed, failed, fresh, provisional, quarantined, run1, run2, run3 };
+      return { passed, failed, fresh, provisional, quarantined, run3 };
     });
 
     const result = await summary();
     expect(result.basis).toEqual({ branch: 'main', commit: SHA_B, runId: seeded.run3.id });
+    // 분모 = 승인 · 격리 아님(통과 · 실패 · 판정 전 규칙), 통과 = 기준 실행에서 통과한 통과 규칙뿐
     expect(result.compliance).toEqual({ passed: 1, judgeable: 3 });
     expect(result.denominator).toEqual([seeded.passed.id, seeded.failed.id, seeded.fresh.id]);
     // 끝난 실행 중 비용을 모두 아는 EXE-001(0.3) · EXE-003(0.1)의 평균
@@ -269,21 +292,17 @@ describe('verification.summary', () => {
       seeded.quarantined.id,
     ]);
     expect(row(seeded.passed)).toMatchObject({
-      judgment: { status: 'pass' },
-      run: { id: seeded.run1.id, displayId: 'EXE-001', costUsd: 0.3, turns: 7 },
+      judgment: { status: 'pass', latest: { commit: SHA_E, runId: seeded.run3.id } },
+      run: { id: seeded.run3.id, displayId: 'EXE-003', costUsd: 0.1, turns: 2 },
     });
-    // 값 모르는 세션은 0으로 더하지 않는다: 아는 값만의 합 (ADR-067)
-    expect(row(seeded.failed)).toMatchObject({
-      judgment: { status: 'fail', latest: { commit: SHA_C } },
-      run: { id: seeded.run2.id, displayId: 'EXE-002', costUsd: 0.4, turns: 9 },
+    // 병합되지 않은 실행(EXE-002)의 실패 · 이전 병합(EXE-001)의 판정 · 실행 밖 판정은 준수 · 목록에 들지 않는다
+    for (const rule of [seeded.failed, seeded.fresh]) {
+      expect(row(rule)).toEqual({ rule, judgment: UNJUDGED, run: null });
+    }
+    expect(row(seeded.quarantined)).toMatchObject({
+      judgment: { status: 'quarantined' },
+      run: { displayId: 'EXE-003' },
     });
-    expect(row(seeded.fresh)).toEqual({
-      rule: seeded.fresh,
-      judgment: { status: 'unjudged', latest: null },
-      run: null,
-    });
-    // 실행 밖 판정은 실행 링크가 없다
-    expect(row(seeded.quarantined)?.run).toBeNull();
 
     // 파이프라인 = 가장 최근에 만든 실행(EXE-004)의 단계 순서와 현재 단계
     expect(result.pipeline?.run).toMatchObject({
@@ -299,17 +318,98 @@ describe('verification.summary', () => {
     ]);
   });
 
+  it('진행 중 실행의 구현 판정은 준수 · 목록을 바꾸지 않는다', async () => {
+    const rule = h.read((store) => {
+      const created = insertRule(store, '규칙', 'approved');
+      const merged = seedRun(store, {
+        ruleIds: [created.id],
+        at: T0 + 10_000,
+        status: 'merged',
+        headCommit: SHA_C,
+        mergeCommit: SHA_A,
+      });
+      store.judgments.record([
+        judgment(created, 'pass', judgedIn(store, merged), T0 + 11_000, SHA_C),
+      ]);
+      return created;
+    });
+    const before = await summary();
+    expect(before.compliance).toEqual({ passed: 1, judgeable: 1 });
+
+    h.read((store) => {
+      const running = seedRun(store, { ruleIds: [rule.id], at: T0 + 20_000, status: 'running' });
+      store.judgments.record([
+        judgment(rule, 'fail', judgedIn(store, running, 'implementation'), T0 + 21_000, SHA_D),
+      ]);
+    });
+    const after = await summary();
+    expect(after.compliance).toEqual(before.compliance);
+    expect(after.rules).toEqual(before.rules);
+  });
+
+  it('병합 재검사 판정이 있으면 그것(병합 커밋의 판정)만 쓰고, 재검사에 없는 규칙은 미판정이다', async () => {
+    const seeded = h.read((store) => {
+      const a = insertRule(store, '재검사 규칙', 'approved');
+      const b = insertRule(store, '검사만 규칙', 'approved');
+      const run = seedRun(store, {
+        ruleIds: [a.id, b.id],
+        at: T0 + 10_000,
+        status: 'merged',
+        headCommit: SHA_C,
+        mergeCommit: SHA_A,
+      });
+      store.judgments.record([
+        judgment(a, 'pass', judgedIn(store, run), T0 + 11_000, SHA_C),
+        judgment(b, 'pass', judgedIn(store, run), T0 + 11_000, SHA_C),
+        judgment(a, 'pass', judgedIn(store, run, 'merge'), T0 + 12_000, SHA_A),
+      ]);
+      return { a, b };
+    });
+    const result = await summary();
+    expect(result.basis?.commit).toBe(SHA_A);
+    expect(result.compliance).toEqual({ passed: 1, judgeable: 2 });
+    const judgmentOf = (rule: Rule) => result.rules.find((r) => r.rule.id === rule.id)?.judgment;
+    expect(judgmentOf(seeded.a)?.latest?.commit).toBe(SHA_A);
+    expect(judgmentOf(seeded.b)).toEqual(UNJUDGED);
+  });
+
+  it('판정 기준이 없으면(병합된 실행 없음) 판정이 보이지 않는다', async () => {
+    const rule = h.read((store) => {
+      const created = insertRule(store, '규칙', 'approved');
+      const run = seedRun(store, {
+        ruleIds: [created.id],
+        at: T0 + 10_000,
+        status: 'failed',
+        headCommit: SHA_C,
+      });
+      store.judgments.record([
+        judgment(created, 'fail', judgedIn(store, run), T0 + 11_000, SHA_C),
+        judgment(created, 'pass', null, T0 + 12_000, SHA_C),
+      ]);
+      return created;
+    });
+    const result = await summary();
+    expect(result.basis).toBeNull();
+    expect(result.compliance).toEqual({ passed: 0, judgeable: 1 });
+    expect(result.rules).toEqual([{ rule, judgment: UNJUDGED, run: null }]);
+  });
+
   it('실행 비용 값이 없으면 실행당 비용과 실행 링크의 비용 · 턴이 null이다', async () => {
     const rule = h.read((store) => {
       const created = insertRule(store, '규칙', 'approved');
-      const run = seedRun(store, { ruleIds: [created.id], at: T0 + 10_000, status: 'failed' });
-      store.judgments.record([judgment(created, 'fail', judgedIn(store, run), T0 + 11_000)]);
+      const run = seedRun(store, {
+        ruleIds: [created.id],
+        at: T0 + 10_000,
+        status: 'merged',
+        headCommit: SHA_C,
+        mergeCommit: SHA_A,
+      });
+      store.judgments.record([judgment(created, 'pass', judgedIn(store, run), T0 + 11_000, SHA_C)]);
       return created;
     });
     const result = await summary();
     expect(result.costPerRunUsd).toBeNull();
-    expect(result.basis).toBeNull();
-    expect(result.compliance).toEqual({ passed: 0, judgeable: 1 });
+    expect(result.compliance).toEqual({ passed: 1, judgeable: 1 });
     expect(result.rules[0]).toMatchObject({
       rule: { id: rule.id },
       run: { displayId: 'EXE-001', costUsd: null, turns: null },

@@ -8,7 +8,7 @@ import { expect, type Page, test } from '@playwright/test';
 
 import {
   EMPTY_SUMMARY,
-  LINK_2,
+  LINK_1,
   PROJECT,
   RULES,
   run,
@@ -110,16 +110,20 @@ test.describe('파이프라인 · 목록 (수용 기준 2)', () => {
     await expect(stagesEl.nth(4)).toHaveAttribute('data-status', 'pending');
   });
 
-  test('규칙별 최신 판정과 실행 링크: 판정 없는 규칙은 실행 링크가 없다', async ({ page }) => {
+  test('규칙별 최신 판정과 실행 링크: 기준 실행에서 판정되지 않은 규칙은 미판정 · 실행 링크 없음', async ({
+    page,
+  }) => {
     await openScreen(page);
     const rows = page.getByTestId('verification-rule');
     await expect(rows).toHaveCount(5);
     const row = (displayId: string) => rows.filter({ hasText: displayId });
     await expect(row('RULE-001').getByTestId('run-link')).toHaveText('EXE-001$0.307턴');
     await expect(row('RULE-001').getByTestId('status-badge')).toHaveAttribute('title', '통과');
-    await expect(row('RULE-002').getByTestId('status-badge')).toHaveText('실패');
-    await expect(row('RULE-003').getByTestId('status-badge')).toHaveText('미판정');
-    await expect(row('RULE-003').getByTestId('run-link')).toHaveCount(0);
+    await expect(row('RULE-006').getByTestId('run-link-id')).toHaveText('EXE-001');
+    for (const id of ['RULE-002', 'RULE-003', 'RULE-005']) {
+      await expect(row(id).getByTestId('status-badge')).toHaveText('미판정');
+      await expect(row(id).getByTestId('run-link')).toHaveCount(0);
+    }
     // 삭제된 규칙은 요약에 없으므로 보이지 않는다
     await expect(page.getByText('삭제된 규칙')).toHaveCount(0);
   });
@@ -137,9 +141,17 @@ test.describe('미노출 · 값 없음 (수용 기준 3)', () => {
   });
 
   test('실행 링크 비용 · 턴은 값이 없으면 "없음" (0이 아님)', async ({ page }) => {
-    await openScreen(page);
-    const row = page.getByTestId('verification-rule').filter({ hasText: 'RULE-002' });
-    await expect(row.getByTestId('run-link-id')).toHaveText(LINK_2.displayId);
+    const unknown = { ...LINK_1, costUsd: null, turns: null };
+    await openScreen(page, {
+      'verification.summary': {
+        result: {
+          ...SUMMARY,
+          rules: SUMMARY.rules.map((r) => (r.run === null ? r : { ...r, run: unknown })),
+        },
+      },
+    });
+    const row = page.getByTestId('verification-rule').filter({ hasText: 'RULE-001' });
+    await expect(row.getByTestId('run-link-id')).toHaveText(LINK_1.displayId);
     await expect(row.getByTestId('run-link-cost')).toHaveText('없음');
     await expect(row.getByTestId('run-link-turns')).toHaveText('없음');
   });

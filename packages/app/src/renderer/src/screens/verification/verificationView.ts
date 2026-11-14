@@ -82,7 +82,10 @@ export const formatUsd = (usd: number | null): string => {
   if (usd === null) return TEXT.none;
   if (usd === 0) return '$0';
   if (usd >= 0.01) return `$${usd.toFixed(2)}`;
-  return `$${String(Number(usd.toPrecision(2)))}`;
+  // 고정 소수 표기(지수 표기 없음), 유효 숫자 2개까지 · 1e-9 USD(합산 단위) 자리까지, 끝의 0은 지운다
+  const digits = Math.min(9, 1 - Math.floor(Math.log10(usd)));
+  const fixed = usd.toFixed(digits).replace(/0+$/, '');
+  return `$${fixed.endsWith('.') ? usd.toFixed(9) : fixed}`;
 };
 
 /** 턴 표시. 값이 없으면 '없음'. */

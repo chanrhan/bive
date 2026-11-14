@@ -23,21 +23,14 @@ export { RULES } from './scr-03.js';
 export const BASIS_COMMIT = `a1f26b1${'0'.repeat(33)}`;
 
 const RUN_1 = '01JE0000000000000000000001';
-const RUN_2 = '01JE0000000000000000000002';
 const RUN_3 = '01JE0000000000000000000003';
 
-/** 실행 링크 (테스트 전용 데이터). EXE-002는 비용 · 턴 값이 없다. */
+/** 실행 링크 = 판정 기준 실행 EXE-001 (테스트 전용 데이터). */
 export const LINK_1: VerificationRunLink = {
   id: RUN_1,
   displayId: 'EXE-001',
   costUsd: 0.3,
   turns: 7,
-};
-export const LINK_2: VerificationRunLink = {
-  id: RUN_2,
-  displayId: 'EXE-002',
-  costUsd: null,
-  turns: null,
 };
 
 /** 실행 1건 (테스트 전용 데이터). */
@@ -115,19 +108,19 @@ const DENOMINATOR = LIVE.filter(({ rule }) => rule.normState === 'approved').map
   ({ rule }) => rule.id,
 );
 
-/** 규칙 목록 줄: RULE-002의 최신 판정은 EXE-002, 나머지 판정된 규칙은 EXE-001. */
+/**
+ * 규칙 목록 줄: 판정 기준 실행(EXE-001)이 기준 커밋에서 낸 판정만 보인다(ADR-072). 병합된 실행의 검사 · 병합 재검사
+ * 판정은 통과뿐이므로 RULE-001 · 006만 판정(통과, 실행 링크 EXE-001)이고 나머지는 미판정 · 실행 링크 없음.
+ */
 const rows = (items: readonly RuleWithJudgment[]): VerificationSummaryResult['rules'] =>
-  items.map(({ rule, judgment }) => {
-    if (judgment.latest === null) return { rule, judgment, run: null };
-    if (rule.displayId === 'RULE-002') {
-      return {
-        rule,
-        judgment: { ...judgment, latest: { ...judgment.latest, runId: RUN_2 } },
-        run: LINK_2,
-      };
-    }
-    return { rule, judgment, run: LINK_1 };
-  });
+  items.map(({ rule, judgment }) =>
+    judgment.latest !== null &&
+    judgment.status === 'pass' &&
+    judgment.latest.runId === RUN_1 &&
+    judgment.latest.commit === BASIS_COMMIT
+      ? { rule, judgment, run: LINK_1 }
+      : { rule, judgment: { status: 'unjudged', latest: null }, run: null },
+  );
 
 /** `verification.summary` 가짜 응답: 기본 (테스트 전용 데이터, NFR-03). */
 export const SUMMARY: VerificationSummaryResult = {
@@ -208,7 +201,7 @@ export const verificationChecklist = {
         { label: '규칙 줄 (삭제 제외)', testId: 'verification-rule', count: LIVE.length },
         { label: '규칙 제목', testId: 'verification-rule-title', text: LIVE[0]?.rule.title ?? '' },
         { label: '최신 판정 배지', testId: 'status-badge', count: LIVE.length },
-        { label: '실행 링크 (판정된 규칙)', testId: 'run-link', count: 4 },
+        { label: '실행 링크 (기준 실행에서 판정된 규칙)', testId: 'run-link', count: 2 },
         { label: '실행 링크 ID', testId: 'run-link-id', text: 'EXE-001' },
         { label: '실행 링크 비용 합계', testId: 'run-link-cost', text: '$0.30' },
         { label: '실행 링크 턴', testId: 'run-link-turns', text: '7턴' },

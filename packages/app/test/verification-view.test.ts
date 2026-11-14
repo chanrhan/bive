@@ -43,6 +43,10 @@ describe('값 표시', () => {
     expect(formatUsd(0.2)).toBe('$0.20');
     expect(formatUsd(12.345)).toBe('$12.35');
     expect(formatUsd(0.0012345)).toBe('$0.0012');
+    // 아주 작은 값도 지수 표기가 아니라 고정 소수
+    expect(formatUsd(5e-7)).toBe('$0.0000005');
+    expect(formatUsd(1.234e-8)).toBe('$0.000000012');
+    expect(formatUsd(0.001)).toBe('$0.001');
     expect(formatTurns(null)).toBe('없음');
     expect(formatTurns(0)).toBe('0턴');
     expect(formatTurns(14)).toBe('14턴');
