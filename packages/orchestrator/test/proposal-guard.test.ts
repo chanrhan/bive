@@ -2,10 +2,15 @@
 // - 승인은 토큰 인증된 파이프 연결에서만: 인증 전 연결의 `proposal.approve`는 -32020 후 연결 종료
 // - 승인된 규칙 · 계약을 직접 고치는 RPC는 없다: `rule.update` · `contract.update` → -32601
 // - 제안 등록도 파이프 RPC가 없다(내부 API `ProposalService.submit`만)
-import { ErrorCode, METHOD_NAMES, PROTOCOL_VERSION, type Proposal } from '@bive/shared';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+import { AgentRole, ErrorCode, METHOD_NAMES, PROTOCOL_VERSION, type Proposal } from '@bive/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { PipeServer } from '../src/ipc/server.js';
+import { FixedToolExecutor, roleToolNames } from '../src/tools/index.js';
 import { TestClient } from './helpers/client.js';
 import { cleanup } from './helpers/process.js';
 import { startProjectHarness, type ProjectHarness } from './helpers/project-harness.js';
@@ -66,6 +71,19 @@ describe('토큰 없는 연결의 승인 호출', () => {
     expectUntouched();
   });
 
+  it('hello 없이 보낸 toolCall.list도 -32020이고 연결이 닫힌다 (조회도 인증된 파이프에서만, ADR-083)', async () => {
+    const client = await openUnauthenticated();
+    const response = await client.requestRaw({
+      jsonrpc: '2.0',
+      id: 'tc',
+      method: 'toolCall.list',
+      params: { projectId: h.project.id, runId: 'EXE-001' },
+    });
+    expect(response).toMatchObject({ id: 'tc', error: { code: ErrorCode.Unauthorized } });
+    await client.closed;
+    expect(client.isClosed).toBe(true);
+  });
+
   it('틀린 토큰으로 hello한 연결은 -32020으로 닫히고 바로 뒤에 보낸 승인 요청은 처리되지 않는다', async () => {
     const client = await openUnauthenticated();
     const hello = client.requestRaw({
@@ -122,5 +140,38 @@ describe('승인된 규칙 · 계약의 직접 수정 RPC 없음 (NRM-04)', () =
     const judgmentMethods = METHOD_NAMES.filter((name) => /^judgment\./.test(name));
     expect(judgmentMethods).toEqual(['judgment.list']);
     expect(judgmentMethods.filter((name) => !/\.list$/.test(name))).toEqual([]);
+  });
+
+  it('도구 호출 기록 이름 공간(toolCall.*)에는 조회(list)만 있고 역할 세션 도구에는 없다: 기록은 도구 실행기만 쓴다 (NFR-01 · NFR-02 · ADR-083, #166)', () => {
+    const toolCallMethods = METHOD_NAMES.filter((name) => /^toolCall\./.test(name));
+    expect(toolCallMethods).toEqual(['toolCall.list']);
+    expect(toolCallMethods.filter((name) => !/\.list$/.test(name))).toEqual([]);
+    // 에이전트 경로(역할 세션의 고정 도구 · MCP)에는 도구 호출 기록 조회 · 쓰기가 없다
+    for (const role of AgentRole.options) {
+      expect(
+        roleToolNames(role).filter((name) => /tool_?call/i.test(name)),
+        role,
+      ).toEqual([]);
+    }
+  });
+
+  it('역할 세션이 toolCall.list를 도구로 부르면 unknown_tool로 거부되고 기록만 남는다 (NFR-01)', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bive-tc-'));
+    try {
+      for (const role of AgentRole.options) {
+        const executor = new FixedToolExecutor({ role, sessionRoot: root, biveHome: h.biveHome });
+        const result = await executor.execute('toolCall.list', {
+          projectId: h.project.id,
+          runId: 'EXE-001',
+        });
+        expect(result, role).toMatchObject({ status: 'denied', reason: 'unknown_tool' });
+        expect(
+          executor.records.map((r) => [r.name, r.status, r.reason]),
+          role,
+        ).toEqual([['toolCall.list', 'denied', 'unknown_tool']]);
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

@@ -10,6 +10,7 @@ import { type CommandContext, runCommand } from './commands.js';
 import {
   type CommandToolName,
   COMMAND_TOOL_NAMES,
+  FILE_TOOL_NAMES,
   type FileToolName,
   type FixedToolName,
   ListFilesInput,
@@ -90,6 +91,18 @@ const summarizeArgs = (args: Record<string, unknown>): string => {
 const pathSummary = (args: Record<string, unknown>, fallback: string): string =>
   typeof args.path === 'string' ? args.path : fallback;
 
+const isFileToolName = (name: string): name is FileToolName =>
+  (FILE_TOOL_NAMES as readonly string[]).includes(name);
+
+/**
+ * 호출 기록의 인자 요약. 파일 도구 이름이면 역할 허용 · 인자 검증 · 예외 여부와 상관없이 대상 경로만 남긴다
+ * (쓰기 내용이 기록에 섞이지 않게, ADR-083). 경로가 문자열이 아니면 고정 표기(목록 · 검색은 `.`, 그 밖은 빈 값).
+ */
+const summaryOf = (name: string, args: Record<string, unknown>): string =>
+  isFileToolName(name)
+    ? pathSummary(args, name === 'search_files' || name === 'list_files' ? '.' : '')
+    : summarizeArgs(args);
+
 const isCommandTool = (name: FixedToolName): name is CommandToolName =>
   (COMMAND_TOOL_NAMES as readonly string[]).includes(name);
 
@@ -128,7 +141,7 @@ export class FixedToolExecutor implements ToolExecutor {
   async execute(name: string, args: Record<string, unknown>): Promise<ToolResult> {
     const startedAt = this.now();
     const started = performance.now();
-    let summary = summarizeArgs(args);
+    let summary = summaryOf(name, args);
     let result: ToolResult;
     try {
       const outcome = await this.dispatch(name, args);
@@ -160,17 +173,14 @@ export class FixedToolExecutor implements ToolExecutor {
     if (!allowed) {
       return {
         result: denied('unknown_tool', `이 역할(${this.role})에 없는 도구: ${name}`),
-        summary: summarizeArgs(args),
+        summary: summaryOf(name, args),
       };
     }
     const tool = name as FixedToolName;
     if (isCommandTool(tool)) return runCommand(tool, args, this.commandContext);
     if (tool === 'propose_rule')
       return { result: await this.proposeRule(args), summary: summarizeArgs(args) };
-    return {
-      result: await this.fileTool(tool, args),
-      summary: pathSummary(args, tool === 'search_files' || tool === 'list_files' ? '.' : ''),
-    };
+    return { result: await this.fileTool(tool, args), summary: summaryOf(tool, args) };
   }
 
   private async fileTool(name: FileToolName, args: Record<string, unknown>): Promise<ToolResult> {
