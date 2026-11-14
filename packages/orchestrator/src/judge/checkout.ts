@@ -185,6 +185,111 @@ export const builtDependencyNames = (dir: string): string[] => {
   return [...names].sort();
 };
 
+/** lockfile 버전 9 계열(pnpm 9 · 10이 쓰는 `9.0`)만 해석한다. */
+const LOCKFILE_VERSION_PREFIX = '9.';
+
+/**
+ * 레지스트리 패키지의 버전 (lockfile `packages:` 키 `<이름>@<버전>`의 버전, importers의 `version`에서 피어 접미 `(…)`를 뗀 값).
+ * `file:` · `link:` · tarball URL · git은 이 모양이 아니다.
+ */
+const REGISTRY_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
+
+const DEPENDENCY_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies'] as const;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const projectNameAt = (file: string): string | null => {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return isRecord(parsed) && typeof parsed.name === 'string' ? parsed.name : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * 빌드 허용 목록의 이름이 모두 lockfile에서 레지스트리 패키지로만 해석되는지 확인한다 (#146, ADR-069).
+ * 허용 목록은 판정할 커밋의 파일(에이전트가 고칠 수 있음)에서 읽으므로, 이름 형식만 보면 `"evil": "file:./evil"` 같은
+ * 프로젝트 안 코드를 허용 목록에 넣어 그 설치 스크립트를 판정 입력 지문의 기준값보다 먼저 돌리게 할 수 있다(실측: 이름을
+ * 지정한 `pnpm rebuild`가 디렉터리 · 로컬 tarball 의존성의 `postinstall`을 실행한다). 그래서 이름마다 다음을 모두 요구한다:
+ * - lockfile(`lockfileVersion` 9 계열)의 `packages:`에 `<이름>@<버전>` 항목이 하나 이상 있다(없으면 거부)
+ * - 그런 항목(여러 버전이면 전부)의 버전이 semver이고 `resolution`이 `integrity` 하나뿐이다(레지스트리. `directory` ·
+ *   `tarball`(로컬 · 원격 URL) · git(`commit` · `repo`)이 있으면 거부)
+ * - 어느 importer(작업 공간 프로젝트)도 그 이름을 semver가 아닌 버전(`link:` · `file:` · 별칭)으로 가리키지 않는다
+ * - 작업 공간 프로젝트(루트 포함) 자신의 이름이 아니다
+ * - lockfile `patchedDependencies`에 그 이름의 패치가 없다(패치는 프로젝트 파일이라 설치 스크립트를 바꿀 수 있다, 실측:
+ *   `--ignore-scripts` frozen 설치에서도 패치가 적용된다)
+ * frozen 설치라 lockfile은 `package.json`과 맞아야 하므로 lockfile만 본다.
+ * @throws {JudgeCheckoutError} (`install`) 하나라도 어긋나면 (fail closed)
+ */
+export const assertRegistryBuiltDependencies = (dir: string, names: readonly string[]): void => {
+  if (names.length === 0) return;
+  const reject = (message: string): never => {
+    throw new JudgeCheckoutError('install', message);
+  };
+  let lock: unknown;
+  try {
+    lock = parseYaml(fs.readFileSync(path.join(dir, 'pnpm-lock.yaml'), 'utf8'));
+  } catch (error) {
+    return reject(
+      `lockfile을 읽지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (
+    !isRecord(lock) ||
+    typeof lock.lockfileVersion !== 'string' ||
+    !lock.lockfileVersion.startsWith(LOCKFILE_VERSION_PREFIX)
+  ) {
+    return reject(
+      `지원하지 않는 lockfile 형식입니다 (lockfileVersion ${isRecord(lock) ? String(lock.lockfileVersion) : '없음'})`,
+    );
+  }
+  const packages = isRecord(lock.packages) ? lock.packages : {};
+  const importers = isRecord(lock.importers) ? lock.importers : {};
+  const patched = isRecord(lock.patchedDependencies) ? Object.keys(lock.patchedDependencies) : [];
+  const projectNames = new Set<string>();
+  for (const importer of new Set(['.', ...Object.keys(importers)])) {
+    const name = projectNameAt(path.join(dir, importer, 'package.json'));
+    if (name !== null) projectNames.add(name);
+  }
+  for (const name of names) {
+    const problems: string[] = [];
+    if (projectNames.has(name)) problems.push('작업 공간 프로젝트 이름');
+    if (patched.some((key) => key === name || key.startsWith(`${name}@`))) {
+      problems.push('패치(patchedDependencies) 적용');
+    }
+    const prefix = `${name}@`;
+    const entries = Object.entries(packages).filter(([key]) => key.startsWith(prefix));
+    for (const [key, value] of entries) {
+      const resolution = isRecord(value) ? value.resolution : undefined;
+      const registry =
+        REGISTRY_VERSION.test(key.slice(prefix.length)) &&
+        isRecord(resolution) &&
+        Object.keys(resolution).length === 1 &&
+        typeof resolution.integrity === 'string';
+      if (!registry) problems.push(key);
+    }
+    for (const [importer, value] of Object.entries(importers)) {
+      if (!isRecord(value)) continue;
+      for (const field of DEPENDENCY_FIELDS) {
+        const deps = value[field];
+        if (!isRecord(deps) || !(name in deps)) continue;
+        const dep = deps[name];
+        const version = isRecord(dep) ? dep.version : dep;
+        const bare = typeof version === 'string' ? version.replace(/\(.*$/u, '') : '';
+        if (!REGISTRY_VERSION.test(bare)) problems.push(`${importer} ${field} ${String(version)}`);
+      }
+    }
+    if (problems.length > 0) {
+      reject(
+        `빌드 허용 목록의 패키지 ${name}의 lockfile 해상도가 레지스트리가 아닙니다 (${problems.join(', ')})`,
+      );
+    }
+    if (entries.length === 0) reject(`빌드 허용 목록의 패키지 ${name}: lockfile에 없습니다`);
+  }
+};
+
 /**
  * lockfile 기준 의존성 설치. M1은 pnpm(`pnpm-lock.yaml`)만 지원한다.
  * 1. `pnpm install --frozen-lockfile --prefer-offline --ignore-scripts --ignore-pnpmfile --package-import-method=copy`
@@ -195,10 +300,11 @@ export const builtDependencyNames = (dir: string): string[] => {
  *      번지지 않게 (픽스처 기준 약 5초 · 855MB)
  * 2. `pnpm rebuild --config.ignore-pnpmfile=true <허용 목록>`: 빌드 허용 목록(`onlyBuiltDependencies`)에 있는 의존성의
  *    빌드 스크립트만 돌린다(네이티브 모듈 · 엔진 내려받기). 이름을 지정한 rebuild는 프로젝트 스크립트를 돌리지 않고,
- *    `rebuild`는 `--ignore-pnpmfile` 옵션을 모르며 설정 값으로 줘야 pnpmfile을 건너뛴다(실측)
+ *    `rebuild`는 `--ignore-pnpmfile` 옵션을 모르며 설정 값으로 줘야 pnpmfile을 건너뛴다(실측). 허용 목록의 이름은 설치 전에
+ *    lockfile에서 레지스트리 패키지로만 해석되는지 확인한다(`assertRegistryBuiltDependencies`, #146)
  * 프로젝트가 설치 때 하던 생성 단계(`prisma generate`)는 스택 프로필이 따로 한다.
  * 셸 없이 PATH의 `pnpm`을 실행하고 환경 변수는 판정 러너와 같은 허용 목록 + `CI=1`만 넘긴다.
- * @throws {JudgeCheckoutError} (`install`) lockfile 없음 · 설치 실패 · 시간 초과 · 중단
+ * @throws {JudgeCheckoutError} (`install`) lockfile 없음 · 레지스트리가 아닌 빌드 허용 목록 · 설치 실패 · 시간 초과 · 중단
  */
 export const installDependencies: InstallDependencies = async (dir, options) => {
   if (!fs.existsSync(path.join(dir, 'pnpm-lock.yaml'))) {
@@ -207,6 +313,9 @@ export const installDependencies: InstallDependencies = async (dir, options) => 
       '지원하는 lockfile이 없습니다 (M1은 pnpm-lock.yaml만 지원)',
     );
   }
+  // 허용 목록은 설치 전에 확인한다: 어긋나면 아무것도 설치 · 실행하지 않고 닫는다
+  const built = builtDependencyNames(dir);
+  assertRegistryBuiltDependencies(dir, built);
   const started = Date.now();
   const run = async (args: string[], what: string): Promise<void> => {
     const result = await runCommand('pnpm', args, {
@@ -237,7 +346,6 @@ export const installDependencies: InstallDependencies = async (dir, options) => 
     ],
     '의존성 설치',
   );
-  const built = builtDependencyNames(dir);
   if (built.length > 0) {
     await run(
       ['rebuild', '--config.ignore-pnpmfile=true', '--reporter=append-only', ...built],

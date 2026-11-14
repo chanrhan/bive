@@ -7,7 +7,11 @@ import { openDatabase } from '../src/database.js';
 import { beginNormWatch, verifyNormWatch } from '../src/norm-snapshot.js';
 import { bivePaths } from '../src/paths.js';
 import { ConflictError } from '../src/errors.js';
-import { openProjectStore, type ProjectStore } from '../src/project-store.js';
+import {
+  openProjectStore,
+  type ProjectStore,
+  setCloseProbeForTests,
+} from '../src/project-store.js';
 import { newId, useTempHome } from './support/temp-home.js';
 
 const home = useTempHome();
@@ -312,6 +316,27 @@ describe('규범 저장소 쓰기 장부 (#117 기본 조치, 검토 1회차)', 
     expect(mismatches[0]?.detail).toContain('requirements');
   });
 
+  it('닫기의 data_version 비교와 장부 갱신 사이에 별도 연결이 커밋한 위조도 흡수되지 않는다 (#146)', () => {
+    const p = project();
+    const { first } = p.open((store) => seed(store));
+    const watch = p.open((store) => beginNormWatch(store));
+    let probed = 0;
+    // 닫기의 비교 · 갱신 사이 순간에 별도 연결이 커밋한다 (시험 전용 주입 지점)
+    setCloseProbeForTests(() => {
+      probed += 1;
+      p.raw((db) => db.prepare("UPDATE requirements SET text = '위조'").run());
+    });
+    try {
+      p.open((store) => store.judgments.record([judgment({ ruleId: first.id })]));
+    } finally {
+      setCloseProbeForTests(null);
+    }
+    expect(probed).toBe(1);
+    const mismatches = p.open((store) => verifyNormWatch(store, watch));
+    expect(mismatches.map((m) => m.kind)).toEqual(['untrusted_change']);
+    expect(mismatches[0]?.detail).toContain('requirements');
+  });
+
   it('감시 시작 전 단계 사이에 생긴 보고되지 않은 변경도 다음 감시가 잡는다', () => {
     const p = project();
     p.open((store) => seed(store));
@@ -350,6 +375,24 @@ describe('규범 저장소 쓰기 장부 (#117 기본 조치, 검토 1회차)', 
     expect(p.open((store) => store.judgments.latestForRules())).toEqual(new Map());
     const kinds = p.open((store) => verifyNormWatch(store, watch)).map((m) => m.kind);
     expect(kinds).toEqual(['untrusted_change', 'future_judgment']);
+  });
+
+  it('직접 넣은 미래 시각 판정 행은 규칙 이력(listByRule)에도 보이지 않고 건수 제한은 그 행을 빼고 센다 (#146)', () => {
+    const p = project();
+    const { first } = p.open((store) => seed(store));
+    const [old] = p.open((store) =>
+      store.judgments.record([judgment({ ruleId: first.id, judgedAt: T0 })]),
+    );
+    const future = new Date(Date.now() + 10 * 60_000).toISOString();
+    p.raw((db) => {
+      db.exec('DROP TRIGGER judgments_no_future;');
+      db.prepare(
+        "INSERT INTO judgments (id, rule_id, commit_sha, judged_at, status, runner, cases) VALUES (?, ?, ?, ?, 'pass', 'vitest', '[]')",
+      ).run(newId(), first.id, COMMIT_A, future);
+    });
+    expect(p.open((store) => store.judgments.listByRule(first.id))).toEqual([old]);
+    // 최신부터 1건: 미래 행이 자리를 차지하지 않는다 (SQL에서 거른다)
+    expect(p.open((store) => store.judgments.listByRule(first.id, 1))).toEqual([old]);
   });
 
   it('판정 시각은 밀리초 3자리 UTC로 맞춰 저장하고 그 밖 형식은 DB가 거부한다', () => {

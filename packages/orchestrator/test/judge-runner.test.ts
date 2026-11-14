@@ -24,8 +24,12 @@ import { fileURLToPath } from 'node:url';
 import { createUlidGenerator } from '@bive/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { installDependencies } from '../src/judge/checkout.js';
-import { fingerprintChanges, judgeInputFingerprint } from '../src/judge/fingerprint.js';
+import { assertRegistryBuiltDependencies, installDependencies } from '../src/judge/checkout.js';
+import {
+  fingerprintChanges,
+  judgeInputFingerprint,
+  resolveRunnerEntry,
+} from '../src/judge/fingerprint.js';
 import { JudgeRunner, type JudgeRunResult } from '../src/judge/index.js';
 
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -616,6 +620,68 @@ it('스냅숏', () => {
     },
     BUILD_TEST_TIMEOUT_MS,
   );
+
+  it(
+    '빌드 중 에이전트 코드가 node_modules/.bin/node 래퍼를 심어도 vitest는 그 래퍼로 실행되지 않는다 (pnpm 셸 shim 우회, #146)',
+    async () => {
+      const config = path.join(fixtureDir, 'next.config.ts');
+      const original = readFileSync(config, 'utf8');
+      const planted = path.join(fixtureDir, 'node_modules', '.bin', 'node');
+      const marker = path.join(fixtureDir, 'PWNED_BIN_NODE');
+      expect(existsSync(planted)).toBe(false);
+      write(
+        'bive-acceptance/RULE-032/t.acc.ts',
+        "import { expect, it } from 'vitest';\n\nit('실패해야 하는 케이스', () => {\n  expect(1).toBe(2);\n});\n",
+      );
+      // 3차 검토 재현: pnpm 셸 shim은 `[ -x "$basedir/node" ]`이면 그 파일로 실행한다. 래퍼는 vitest로 불릴 때만 표시를 남기고
+      // 진짜 node로 넘긴다(실제 공격은 결과 파일을 바꾼다). 새 파일만 만든다(전역 저장소 · 기존 파일은 건드리지 않음)
+      const wrapper =
+        '#!/bin/sh\n' +
+        `case "$*" in *vitest*) : > ${JSON.stringify(marker)} ;; esac\n` +
+        `exec ${JSON.stringify(process.execPath)} "$@"\n`;
+      writeFileSync(
+        config,
+        `import { writeFileSync } from 'node:fs';\n` +
+          `writeFileSync(${JSON.stringify(planted)}, ${JSON.stringify(wrapper)}, { mode: 0o755 });\n` +
+          original,
+      );
+      try {
+        const result = await runner.run({
+          projectId,
+          runId,
+          worktreeDir: fixtureDir,
+          profile: 'next-prisma-sqlite',
+          ruleIds: ['RULE-032'],
+          timeoutMs: JUDGE_TIMEOUT_MS,
+        });
+        // 래퍼는 빌드 중에 심겼다
+        expect(existsSync(planted)).toBe(true);
+        // vitest(수집 · 실행)는 shim을 거치지 않고 오케스트레이터의 node로 vitest 진입 파일을 직접 실행한다
+        expect(existsSync(marker)).toBe(false);
+        expect(result.tampered).toBeNull();
+        expect(result.status).toBe('completed');
+        expect(result.cases.map((c) => [c.name, c.status])).toEqual([
+          ['실패해야 하는 케이스', 'failed'],
+        ]);
+        const vitestEntry = path.join(
+          realpathSync(path.join(fixtureDir, 'node_modules', 'vitest')),
+          'vitest.mjs',
+        );
+        expect(readFileSync(result.paths.stdout, 'utf8')).toContain(
+          `$ ${process.execPath} ${vitestEntry} run --config ${result.paths.config}`,
+        );
+      } finally {
+        writeFileSync(config, original);
+        rmSync(planted, { force: true });
+        rmSync(marker, { force: true });
+        rmSync(path.join(fixtureDir, 'bive-acceptance', 'RULE-032'), {
+          recursive: true,
+          force: true,
+        });
+      }
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
 });
 
 /** 픽스처의 추적 파일만 `<dir>/app`에 복사한다 (설치 없음). */
@@ -741,9 +807,270 @@ describe('판정 체크아웃 의존성 설치 (검토 1회차)', () => {
     },
     BUILD_TEST_TIMEOUT_MS,
   );
+
+  it(
+    '빌드 허용 목록의 file: 의존성은 lockfile 해상도가 레지스트리가 아니라 거부하고 설치 실패로 닫는다: 그 postinstall은 돌지 않는다 (#146 재현)',
+    async () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-filedep-fx-'));
+      const app = copyFixtureFiles(dir);
+      const marker = path.join(app, 'PWNED_FILE_DEP');
+      try {
+        // 3차 검토 재현: 구현 역할이 커밋할 수 있는 파일만 고친다 (package.json · pnpm-workspace.yaml · lockfile · 새 폴더)
+        mkdirSync(path.join(app, 'evil'));
+        writeFileSync(
+          path.join(app, 'evil', 'package.json'),
+          JSON.stringify({
+            name: 'evil',
+            version: '1.0.0',
+            scripts: {
+              postinstall: `node -e "require('fs').writeFileSync(${JSON.stringify(marker).replaceAll('"', '\\"')}, '')"`,
+            },
+          }),
+        );
+        const pkg = JSON.parse(readFileSync(path.join(app, 'package.json'), 'utf8')) as {
+          dependencies: Record<string, string>;
+        };
+        pkg.dependencies.evil = 'file:./evil';
+        writeFileSync(path.join(app, 'package.json'), JSON.stringify(pkg, null, 2));
+        const workspace = path.join(app, 'pnpm-workspace.yaml');
+        writeFileSync(
+          workspace,
+          readFileSync(workspace, 'utf8').replace(
+            'onlyBuiltDependencies:\n',
+            'onlyBuiltDependencies:\n  - evil\n',
+          ),
+        );
+        execFileSync(
+          'pnpm',
+          ['install', '--lockfile-only', '--prefer-offline', '--ignore-scripts'],
+          { cwd: app, stdio: 'pipe', env: { ...process.env, CI: '1' } },
+        );
+        expect(readFileSync(path.join(app, 'pnpm-lock.yaml'), 'utf8')).toContain(
+          'evil@file:evil:\n    resolution: {directory: evil, type: directory}',
+        );
+        await expect(
+          installDependencies(app, {
+            logFile: path.join(dir, 'install.log'),
+            timeoutMs: JUDGE_TIMEOUT_MS,
+          }),
+        ).rejects.toThrow(/빌드 허용 목록.*evil.*레지스트리/);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('빌드 허용 목록의 lockfile 해상도 검사 (#146)', () => {
+  const INTEGRITY = 'sha512-' + 'A'.repeat(86) + '==';
+  /** 픽스처 모양의 최소 lockfile (pnpm 10.28 · lockfileVersion 9.0 실측 형식). */
+  const lockfile = (packages: string, importers = '', extra = ''): string =>
+    [
+      "lockfileVersion: '9.0'",
+      '',
+      'settings:',
+      '  autoInstallPeers: true',
+      '  excludeLinksFromLockfile: false',
+      extra,
+      'importers:',
+      '',
+      '  .:',
+      '    dependencies:',
+      '      is-number:',
+      '        specifier: 7.0.0',
+      '        version: 7.0.0',
+      importers,
+      '',
+      'packages:',
+      '',
+      '  is-number@7.0.0:',
+      `    resolution: {integrity: ${INTEGRITY}}`,
+      "    engines: {node: '>=0.12.0'}",
+      '',
+      packages,
+      '',
+      'snapshots:',
+      '',
+      '  is-number@7.0.0: {}',
+      '',
+    ].join('\n');
+  const check = (names: string[], lock: string, files: Record<string, string> = {}): void => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-lockcheck-'));
+    try {
+      writeFileSync(path.join(dir, 'pnpm-lock.yaml'), lock);
+      writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'app' }));
+      for (const [rel, body] of Object.entries(files)) {
+        mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+        writeFileSync(path.join(dir, rel), body);
+      }
+      assertRegistryBuiltDependencies(dir, names);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('레지스트리 해상도(integrity만)인 이름은 통과한다 (여러 버전 · 범위 이름 포함)', () => {
+    expect(() =>
+      check(
+        ['is-number', '@scope/native'],
+        lockfile(
+          [
+            '  is-number@6.0.0:',
+            `    resolution: {integrity: ${INTEGRITY}}`,
+            '',
+            "  '@scope/native@1.2.3-beta.1':",
+            `    resolution: {integrity: ${INTEGRITY}}`,
+            '    hasBin: true',
+          ].join('\n'),
+        ),
+      ),
+    ).not.toThrow();
+    expect(() => check([], lockfile(''))).not.toThrow();
+  });
+
+  it.each([
+    ['디렉터리(file:)', 'evil@file:evil', '{directory: evil, type: directory}'],
+    [
+      '로컬 tarball(file:)',
+      'evil@file:evil.tgz',
+      `{integrity: ${INTEGRITY}, tarball: file:evil.tgz}`,
+    ],
+    [
+      '원격 tarball URL',
+      'evil@https://example.com/evil-1.0.0.tgz',
+      `{integrity: ${INTEGRITY}, tarball: https://example.com/evil-1.0.0.tgz}`,
+    ],
+    [
+      'git',
+      'evil@https://codeload.github.com/o/evil/tar.gz/0123456789abcdef0123456789abcdef01234567',
+      '{tarball: https://codeload.github.com/o/evil/tar.gz/0123456789abcdef0123456789abcdef01234567}',
+    ],
+    [
+      'git 저장소',
+      'evil@git+https://example.com/o/evil.git#0123456789abcdef0123456789abcdef01234567',
+      '{commit: 0123456789abcdef0123456789abcdef01234567, repo: https://example.com/o/evil.git, type: git}',
+    ],
+  ])('%s 해상도는 거부한다', (_kind, key, resolution) => {
+    expect(() =>
+      check(['evil'], lockfile(`  '${key}':\n    resolution: ${resolution}\n    version: 1.0.0`)),
+    ).toThrow(/빌드 허용 목록.*evil.*레지스트리/);
+  });
+
+  it('같은 이름의 여러 버전 중 하나라도 레지스트리가 아니면 거부한다', () => {
+    expect(() =>
+      check(
+        ['evil'],
+        lockfile(
+          [
+            '  evil@1.0.0:',
+            `    resolution: {integrity: ${INTEGRITY}}`,
+            '',
+            '  evil@file:evil:',
+            '    resolution: {directory: evil, type: directory}',
+          ].join('\n'),
+        ),
+      ),
+    ).toThrow(/evil/);
+  });
+
+  it('link: · 작업 공간 패키지(importers의 link: 버전) · lockfile에 없는 이름 · 프로젝트 자신의 이름은 거부한다', () => {
+    const linked = [
+      '      evil:',
+      '        specifier: link:./evil',
+      '        version: link:evil',
+    ].join('\n');
+    expect(() => check(['evil'], lockfile('', linked))).toThrow(/evil/);
+    const workspace = [
+      '      ws:',
+      '        specifier: workspace:*',
+      '        version: link:packages/ws',
+    ].join('\n');
+    expect(() => check(['ws'], lockfile('', workspace))).toThrow(/ws/);
+    expect(() => check(['missing'], lockfile(''))).toThrow(/missing.*lockfile에 없/);
+    // 레지스트리 항목이 있어도 같은 이름의 작업 공간 프로젝트(importer)가 있으면 거부한다
+    expect(() =>
+      check(['is-number'], lockfile('', '\n  packages/inner:\n    dependencies: {}'), {
+        'packages/inner/package.json': JSON.stringify({ name: 'is-number' }),
+      }),
+    ).toThrow(/is-number/);
+    expect(() =>
+      check(['is-number'], lockfile(''), {
+        'package.json': JSON.stringify({ name: 'is-number' }),
+      }),
+    ).toThrow(/is-number/);
+  });
+
+  it('패치(patchedDependencies)가 걸린 이름 · 지원하지 않는 lockfile 버전 · 읽을 수 없는 lockfile은 거부한다', () => {
+    const patched = [
+      'patchedDependencies:',
+      '  is-number@7.0.0:',
+      '    hash: 2fbc726474bf6ab1a62986ac3168f21e34fda08bd690b0e33e570e81a613aa3a',
+      '    path: patches/is-number@7.0.0.patch',
+      '',
+    ].join('\n');
+    expect(() => check(['is-number'], lockfile('', '', patched))).toThrow(/is-number.*패치/);
+    expect(() =>
+      check(
+        ['is-number'],
+        lockfile('').replace("lockfileVersion: '9.0'", "lockfileVersion: '6.0'"),
+      ),
+    ).toThrow(/lockfile/);
+    expect(() => check(['is-number'], ': [\n')).toThrow(/lockfile/);
+  });
 });
 
 describe('판정 입력 지문 (검토 1회차)', () => {
+  it('vitest 진입 파일은 package.json bin에서 정하고 패키지 폴더 안이어야 하며, node_modules/vitest를 다른 사본으로 바꾸면 바뀐 항목이다 (#146)', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-fingerprint-'));
+    try {
+      const put = (rel: string, body: string): void => {
+        mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+        writeFileSync(path.join(dir, rel), body);
+      };
+      const store = 'node_modules/.pnpm';
+      const vitest = `${store}/vitest@5/node_modules/vitest`;
+      const manifest = (bin: unknown): string =>
+        JSON.stringify({ name: 'vitest', version: '5', bin });
+      put(`${vitest}/package.json`, manifest({ vitest: './vitest.mjs' }));
+      put(`${vitest}/vitest.mjs`, "import './dist/cli.js';\n");
+      put(`${vitest}/dist/cli.js`, 'export {};\n');
+      put('outside.mjs', 'export {};\n');
+      symlinkSync('.pnpm/vitest@5/node_modules/vitest', path.join(dir, 'node_modules/vitest'));
+      const real = realpathSync(path.join(dir, vitest));
+      expect(resolveRunnerEntry(dir)).toEqual({
+        packageDir: real,
+        entry: path.join(real, 'vitest.mjs'),
+      });
+      // 문자열 bin도 읽는다 (파일 이름을 하드코딩하지 않음)
+      put(`${vitest}/package.json`, manifest('./dist/cli.js'));
+      expect(resolveRunnerEntry(dir)?.entry).toBe(path.join(real, 'dist', 'cli.js'));
+      // bin 없음 · 패키지 밖을 가리키는 bin · 링크로 밖을 가리키는 진입 파일은 찾지 못한 것이다
+      put(`${vitest}/package.json`, manifest(undefined));
+      expect(resolveRunnerEntry(dir)).toBeNull();
+      put(`${vitest}/package.json`, manifest({ vitest: '../../../../outside.mjs' }));
+      expect(resolveRunnerEntry(dir)).toBeNull();
+      symlinkSync(path.join(dir, 'outside.mjs'), path.join(dir, vitest, 'linked.mjs'));
+      put(`${vitest}/package.json`, manifest({ vitest: './linked.mjs' }));
+      expect(resolveRunnerEntry(dir)).toBeNull();
+      rmSync(path.join(dir, vitest, 'linked.mjs'));
+
+      // 진입 파일 경로는 지문 항목이다: 같은 이름 · 버전 · 내용의 사본으로 링크를 바꾸면 runner:entry가 바뀐다
+      put(`${vitest}/package.json`, manifest({ vitest: './vitest.mjs' }));
+      const before = judgeInputFingerprint(dir, []);
+      const copy = `${store}/vitest@5_copy/node_modules/vitest`;
+      put(`${copy}/package.json`, manifest({ vitest: './vitest.mjs' }));
+      put(`${copy}/vitest.mjs`, "import './dist/cli.js';\n");
+      put(`${copy}/dist/cli.js`, 'export {};\n');
+      rmSync(path.join(dir, 'node_modules/vitest'));
+      symlinkSync('.pnpm/vitest@5_copy/node_modules/vitest', path.join(dir, 'node_modules/vitest'));
+      expect(fingerprintChanges(before, judgeInputFingerprint(dir, []))).toEqual(['runner:entry']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('인수 테스트 · vitest와 그 의존성(pnpm 배치) · .bin/vitest · 판정 설정이 바뀌면 바뀐 항목을 돌려준다', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-fingerprint-'));
     try {
@@ -779,6 +1106,7 @@ describe('판정 입력 지문 (검토 1회차)', () => {
         'runner:.bin/vitest',
         'runner:chai@1/index.js',
         'runner:chai@1/package.json',
+        'runner:entry',
         'runner:vitest@5/dist/index.js',
         'runner:vitest@5/package.json',
       ]);
