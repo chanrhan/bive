@@ -220,8 +220,24 @@ export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
 | `BIVE_NODE_PATH` | `source` 방식에서 쓸 Node 실행 파일. 기본 PATH의 `node` |
 | `BIVE_NO_SANDBOX` | `1`이면 Electron에 `--no-sandbox`를 붙인다 (개발 · 테스트 한정, root는 자동) |
 | `BIVE_E2E_PORT` | 화면 e2e의 Vite 서버 포트. 기본은 worktree 경로 해시로 자동 결정(5179 + hash % 500) |
-| `BIVE_AGENT` | 에이전트 어댑터 선택. `claude`(실제 SDK, 기본) · `scripted`(가짜 에이전트). 빈 값은 미설정과 같고 그 밖의 값은 기동 오류 |
-| `BIVE_SCENARIO` | `BIVE_AGENT=scripted`일 때 재생할 시나리오 이름. 기본 `happy-path`. `scripted`가 아니면 읽지 않는다 |
+| `BIVE_AGENT` | 에이전트 어댑터 선택. `claude`(실제 SDK, 기본) · `scripted`(가짜 에이전트). 빈 값은 미설정과 같고 그 밖의 값은 기동 오류(종료 코드 2). API 키 없이 `claude`가 선택되어도 기동은 되고, 세션을 열면 `not_configured`로 끝난다 (ADR-059) |
+| `BIVE_SCENARIO` | `BIVE_AGENT=scripted`일 때 재생할 시나리오 이름(`packages/orchestrator/scenarios/<이름>.yaml`). 기본 `happy-path`. 없는 시나리오나 형식이 틀린 시나리오는 기동 오류(종료 코드 2). `scripted`가 아니면 읽지 않는다 |
+
+### M1 완료 기준 흐름 준비
+
+[`docs/roadmap.md`](docs/roadmap.md) 2.1의 M1 완료 기준 흐름은 `pnpm install --frozen-lockfile && pnpm build` 뒤 아래 블록을 한 셸에서 실행하고 시작한다. 가짜 에이전트(`scripted`)와 새 데이터 폴더 · 새 픽스처 복사본을 쓴다.
+
+```sh
+export BIVE_AGENT=scripted BIVE_HOME=$(mktemp -d) BIVE_IDLE_SHUTDOWN_MS=1000 FX=$(mktemp -d)/fx
+scripts/reset-fixture.sh $FX     # 픽스처의 추적 파일을 $FX로 복사 → 설치 → git 저장소(커밋 1개)
+app()  { BIVE_SCENARIO=${1:-happy-path} xvfb-run -a pnpm --filter @bive/app start -- --open $FX --remote-debugging-port=9222 & sleep 5; }
+quit() { kill $(cat $BIVE_HOME/run/app.pid); sleep 2; }   # 진행 중 실행이 없으면 오케스트레이터도 1초 뒤 종료
+cli()  { pnpm --silent --filter @bive/app cli "$@"; }
+```
+
+- `app [시나리오]`는 그 시나리오로 앱을 띄우고 `$FX`를 바로 연다(시작 화면을 거치지 않음). 시나리오를 바꾸려면 `quit` 뒤 다시 `app <이름>`.
+- `cli rpc <method> [json]`으로 실행 · 승인 기록을 조회한다. 흐름의 단계는 로드맵 2.1에 있다.
+- 실제 SDK로 같은 흐름을 도는 것은 사람이 확인한다(needs-human).
 
 ## 7. 테스트
 
@@ -234,7 +250,7 @@ export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
 | 빌드 | `pnpm build` | `packages/*/dist`, 앱은 electron-vite 출력 |
 | 화면 e2e | `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=<chrome 경로> pnpm e2e` | Playwright로 Vite 개발 서버의 렌더러를 열어 화면 체크리스트 검사 · 스크린샷(`artifacts/screens`). 경로를 주지 않으면 Playwright 기본 브라우저를 쓴다 |
 | Electron 스모크 | `xvfb-run -a pnpm smoke` | 앱을 빌드해 띄우고 preload 노출 · 레이아웃 · 사이드바 하단 연결 상태("연결됨") · 종료 뒤 유휴 종료를 확인 |
-| 파이프라인 e2e | `pnpm e2e:pipeline` | 시험마다 `scripts/reset-fixture.sh`로 픽스처 복사본을 만들고 오케스트레이터를 시나리오(`happy-path` · `fail-check` · `red-violation` · `budget-exceeded`)로 띄워, 요구사항 저장부터 실행 종료까지 실제 git · 실제 판정 러너로 돈다(`packages/orchestrator/e2e/pipeline/`). 단위 테스트(`pnpm test`)에 들어가지 않는다 |
+| 파이프라인 e2e | `pnpm e2e:pipeline` | 시험마다 `scripts/reset-fixture.sh`로 픽스처 복사본을 만들고 오케스트레이터를 시나리오로 띄워, 요구사항 저장부터 실행 종료까지 실제 git · 실제 판정 러너로 돈다(`packages/orchestrator/e2e/pipeline/`). architecture.md 8장 시나리오 9개(정상 완주 · Red 위반 · 구현 실패 · 예산 초과 · 금지 경로 · 추가 MCP · 거짓 통과 보고 · 중단 재개 · 병합 충돌)와 앱 종료 후 유지(`app-exit`) · 외부 연결 0건(`network`). 픽스처 설치(`pnpm -C fixtures/sample-next-app install --frozen-lockfile`)가 먼저 필요하다. 단위 테스트(`pnpm test`)에 들어가지 않는다 |
 | 픽스처 | `pnpm -C fixtures/sample-next-app test` | 임시 SQLite 마이그레이션 → `next build` → `next start` → HTTP 확인 |
 | 픽스처 초기화 | `scripts/reset-fixture.sh <dir> [--verify]` | 픽스처의 추적 파일을 `<dir>`로 복사해 설치하고 git 저장소(커밋 1개)로 만든다. `--verify`는 끝에 픽스처 테스트까지 실행한다 |
 | 초기화 스크립트 검사 | `scripts/test-reset-fixture.sh` | 지우면 안 되는 경로를 거부하는지 검사 |
