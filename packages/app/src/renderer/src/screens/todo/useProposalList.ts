@@ -1,7 +1,11 @@
 // 승인 대기 목록 데이터: 현재 프로젝트의 `proposal.list` (전체 상태, 처리 상태는 목록 필터가 거른다).
-// 조회 시점: 탭이 열릴 때 · refresh() (승인 · 거절 처리 뒤, #40). 폴링 · 이벤트 구독은 하지 않는다.
+// 조회 시점: 탭이 열릴 때 · refresh() (승인 · 거절 처리 뒤, #40) · 이 프로젝트의 제안 알림(`event.proposal.changed`)을
+// 받을 때 · 오케스트레이터에 다시 붙을 때(할 일 배지와 같은 계기, M1-36, ADR-076). 알림 · 재접속 조회는 합친다. 폴링은 하지 않는다.
 import type { Proposal } from '@bive/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
+
+import { PROPOSAL_EVENT_NAMES } from '../../runs/refreshCoalescer.js';
+import { useEventRefresh } from '../../runs/useEventRefresh.js';
 
 export type ProposalListState =
   { status: 'loading' } | { status: 'ready'; proposals: readonly Proposal[] } | { status: 'error' };
@@ -35,6 +39,8 @@ export const useProposalList = (projectId: string): ProposalListView => {
       seq.current += 1;
     };
   }, [refresh]);
+
+  useEventRefresh(projectId, PROPOSAL_EVENT_NAMES, refresh);
 
   const replace = useCallback((proposal: Proposal): void => {
     setState((prev) =>

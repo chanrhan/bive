@@ -1,4 +1,4 @@
-// 실행 알림을 받아 다시 조회할 때의 합치기 규칙 (M1-19, ADR-076). DOM · React에 의존하지 않는다
+// 알림 · 재접속을 받아 다시 조회할 때의 합치기 규칙 (M1-19 · M1-36, ADR-076). DOM · React에 의존하지 않는다
 // (test/refresh-coalescer.test.ts).
 // - 조회 중이 아니면 바로 조회한다(첫 알림은 기다리지 않는다)
 // - 조회 중에 온 요청은 버리지 않고 하나로 합쳐, 지금 조회가 끝난 뒤 1번 더 조회한다. 단계 전이가 짧은 간격으로
@@ -8,6 +8,9 @@
 
 /** 렌더러가 다시 조회하는 실행 알림 이름 (shared `RUN_EVENT_NAMES`와 같음, 시험이 대조한다). */
 export const RUN_EVENT_NAMES = ['event.run.updated', 'event.step.updated'] as const;
+
+/** 할 일 배지 · 할 일 목록이 다시 조회하는 제안 알림 이름 (shared `PROPOSAL_EVENT_NAMES`와 같음, 시험이 대조한다). */
+export const PROPOSAL_EVENT_NAMES = ['event.proposal.changed'] as const;
 
 /** 알림 값이 이 프로젝트의 것인지 (`projectId`). 다른 프로젝트 실행의 알림으로는 조회하지 않는다. */
 export const isProjectEvent = (params: unknown, projectId: string): boolean =>

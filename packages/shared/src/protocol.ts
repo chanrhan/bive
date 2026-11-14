@@ -731,10 +731,29 @@ export type StepUpdatedEvent = z.infer<typeof StepUpdatedEvent>;
 /** 실행 알림 이름. 렌더러는 둘 중 하나를 받으면 실행 · 판정을 보이는 화면을 다시 조회한다. */
 export const RUN_EVENT_NAMES = ['event.run.updated', 'event.step.updated'] as const;
 
+// ── 제안 알림 (TODO-01 · NRM-02, M1-36, ADR-076) ─────────────
+// - 오케스트레이터 → 인증된 모든 연결. 제안 등록(rule-writer `propose_rule`) · 처리(승인 · 수정 후 승인 · 거절)를
+//   저장한 뒤 제안마다 1개. 실행 알림과 같이 기다리지 않는다
+// - 식별자와 상태만 싣는다. 제안 본문(진술 · 근거 · diff)은 싣지 않고 받는 쪽이 다시 조회한다(`proposal.count` 등)
+
+/** `event.proposal.changed`: 제안 1건이 생기거나 처리됨 (architecture.md 5장 알림 표). */
+export const ProposalChangedEvent = z.strictObject({
+  projectId: Ulid,
+  proposalId: Ulid,
+  displayId: displayIdSchema('PRP'),
+  kind: ProposalKind,
+  state: ProposalState,
+});
+export type ProposalChangedEvent = z.infer<typeof ProposalChangedEvent>;
+
+/** 제안 알림 이름. 렌더러는 받으면 할 일 배지 · 할 일 목록을 다시 조회한다. */
+export const PROPOSAL_EVENT_NAMES = ['event.proposal.changed'] as const;
+
 /** 알림 이름 → 파라미터 스키마. `event.*` 알림은 해당 이슈에서 추가한다. */
 export const NOTIFICATIONS = {
   'event.run.updated': { params: RunUpdatedEvent },
   'event.step.updated': { params: StepUpdatedEvent },
+  'event.proposal.changed': { params: ProposalChangedEvent },
 } as const satisfies Record<string, NotificationSpec>;
 
 export type NotificationParams<N extends NotificationName> = z.infer<
