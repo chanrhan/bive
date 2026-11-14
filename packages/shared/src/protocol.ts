@@ -21,6 +21,8 @@ import {
   RunLimits,
   Settings,
   Step,
+  Timestamp,
+  ToolCallStatus,
   UsdOrNull,
 } from './domain.js';
 import {
@@ -570,6 +572,43 @@ export type RunListResult = z.infer<typeof RunListResult>;
 export const RunResumeParams = z.strictObject({ projectId: Ulid, id: RunRef, author: Author });
 export type RunResumeParams = z.infer<typeof RunResumeParams>;
 
+// ── 도구 호출 기록 (NFR-01 · NFR-02 · RUN-08, M1-38, ADR-052 · ADR-083) ──
+// - 사람(앱 · CLI)이 실행의 도구 호출 기록을 읽는 조회 전용 RPC다. 이 이름 공간에는 `list`만 둔다(기록은 도구 실행기만 쓴다)
+// - 역할 세션의 도구(MCP)에는 없다. 인증된 파이프 연결에서만 처리된다
+// - 인자 · 결과 원문은 싣지 않는다. 파일 도구(읽기 · 쓰기 · 목록 · 검색)의 대상 경로만 `path`로 싣는다
+// - 없는 실행 · 다른 프로젝트의 실행 · 등록되지 않은 프로젝트는 -32004
+
+/** 한 번에 돌려주는 도구 호출 기록 상한. 넘으면 앞에서부터 이만큼과 `truncated: true`. */
+export const TOOL_CALL_LIST_LIMIT = 500;
+
+/** `toolCall.list`: 실행(ULID 또는 표시 ID `EXE-NNN`)의 도구 호출 기록. */
+export const ToolCallListParams = z.strictObject({ projectId: Ulid, runId: RunRef });
+export type ToolCallListParams = z.infer<typeof ToolCallListParams>;
+
+/** 도구 호출 1건의 조회 결과. 세션 안 순번 `seq`는 0부터. 단계 시도가 없는 세션이면 `step`이 `null`. */
+export const ToolCallEntry = z.strictObject({
+  sessionId: Ulid,
+  seq: z.int().nonnegative(),
+  at: Timestamp,
+  role: AgentRole,
+  step: z.strictObject({ kind: StepKind, attempt: z.int().positive() }).nullable(),
+  name: z.string().min(1),
+  status: ToolCallStatus,
+  reason: z.string().min(1).nullable(),
+  /** 파일 도구의 대상 경로(에이전트가 넘긴 그대로). 그 밖의 도구 · 경로가 없는 호출은 `null` */
+  path: z.string().min(1).nullable(),
+});
+export type ToolCallEntry = z.infer<typeof ToolCallEntry>;
+
+/** 시각 → 세션 → 순번 순. 상한을 넘으면 `truncated`가 `true`. */
+export const ToolCallListResult = z.strictObject({
+  runId: Ulid,
+  displayId: displayIdSchema('EXE'),
+  calls: z.array(ToolCallEntry).max(TOOL_CALL_LIST_LIMIT),
+  truncated: z.boolean(),
+});
+export type ToolCallListResult = z.infer<typeof ToolCallListResult>;
+
 // ── 검증 (JDG-03, COST-02, SCR-05, M1-18, ADR-072) ───────────
 // - 화면 하나(검증)가 한 번에 읽는 값을 저장소 한 번 열기로 모은다. 값은 규칙 · 판정 기록 · 실행 · 세션 기록에서만 만든다(NFR-03)
 // - 판정 기준 = 가장 최근에 병합된 실행의 기준 브랜치 · 병합 커밋. 병합된 실행이 없으면 `null`
@@ -681,6 +720,7 @@ export const METHODS = {
   'run.get': { params: RunGetParams, result: RunGetResult },
   'run.list': { params: RunListParams, result: RunListResult },
   'run.resume': { params: RunResumeParams, result: RunDetailResult },
+  'toolCall.list': { params: ToolCallListParams, result: ToolCallListResult },
   'verification.summary': {
     params: VerificationSummaryParams,
     result: VerificationSummaryResult,

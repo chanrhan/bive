@@ -224,6 +224,11 @@ describe('sessions', () => {
         [0, 'read_file', 'ok', null],
         [1, 'write_file', 'denied', 'path_denied'],
       ]);
+      // 상한 조회: 같은 순서의 앞 limit건
+      expect(store.sessions.toolCallsLimited(run.id, 1).map((c) => c.seq)).toEqual([0]);
+      expect(store.sessions.toolCallsLimited(run.id, 5)).toEqual(store.sessions.toolCalls(run.id));
+      expect(store.sessions.toolCallsLimited(run.id, 0)).toEqual([]);
+      expect(() => store.sessions.toolCallsLimited(run.id, -1)).toThrow(RangeError);
       expect(() => call('x', 'ok', newId())).toThrow(ConflictError);
       expect(() => store.db.prepare('UPDATE tool_calls SET name = ?').run('y')).toThrow(
         /바꿀 수 없/,

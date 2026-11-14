@@ -166,6 +166,7 @@ export class SessionRepository {
   readonly #insertCall;
   readonly #nextSeq;
   readonly #selectCalls;
+  readonly #selectCallsLimited;
 
   constructor(db: SqliteDatabase) {
     this.#db = db;
@@ -212,6 +213,10 @@ export class SessionRepository {
     );
     this.#selectCalls = db.prepare<[string], ToolCallRow>(
       `SELECT ${TOOL_CALL_COLUMNS} FROM tool_calls WHERE run_id = ? ORDER BY at, session_id, seq`,
+    );
+    this.#selectCallsLimited = db.prepare<[string, number], ToolCallRow>(
+      `SELECT ${TOOL_CALL_COLUMNS} FROM tool_calls WHERE run_id = ? ORDER BY at, session_id, seq
+       LIMIT ?`,
     );
   }
 
@@ -346,6 +351,12 @@ export class SessionRepository {
   /** 실행의 도구 호출 기록 (시각 → 세션 → 순번). */
   toolCalls(runId: string): ToolCall[] {
     return this.#selectCalls.all(runId).map(toToolCall);
+  }
+
+  /** 실행의 도구 호출 기록 앞에서부터 최대 `limit`건 (순서는 `toolCalls`와 같다). 조회 RPC의 상한용. */
+  toolCallsLimited(runId: string, limit: number): ToolCall[] {
+    if (!Number.isInteger(limit) || limit < 0) throw new RangeError('limit은 0 이상 정수');
+    return this.#selectCallsLimited.all(runId, limit).map(toToolCall);
   }
 
   #patch(id: string, patch: Partial<Session>): Session {
