@@ -13,9 +13,11 @@ import {
   EVENT_CHANNEL,
   RPC_CHANNEL,
 } from '../common/bridge.js';
+import { createCodeOpener } from './code-opener.js';
 import { ConnectionMonitor } from './connection-monitor.js';
 import { orchestratorCommand, resolveOrchestratorMode } from './orchestrator-launch.js';
 import { launchCwd } from './open-arg.js';
+import { openExternalUrl } from './open-external.js';
 import { createProjectOpener } from './project-opener.js';
 import { handleRendererRpc } from './rpc-bridge.js';
 import { resolveBiveHome } from './run-paths.js';
@@ -71,9 +73,15 @@ const projects = createProjectOpener({
   emit: broadcast,
 });
 
+// 코드 열기: 기록(codeOpen.record) 뒤 고정 틀의 IDE URL로 연다 (MET-01, ADR-084)
+const codeOpener = createCodeOpener({
+  request: (method, params) => session.link.request(method, params),
+  openUrl: openExternalUrl,
+});
+
 ipcMain.handle(RPC_CHANNEL, (_event, payload: unknown) =>
   handleRendererRpc(session.link, payload, {
-    appMethods: projects.appMethods,
+    appMethods: { ...projects.appMethods, ...codeOpener.appMethods },
     onResult: (method, result) => projects.onResult(method, result),
   }),
 );
