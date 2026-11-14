@@ -1,0 +1,101 @@
+/* 코드 열기 링크 · 사유 모달 (screens.md 1.4 코드 열기). 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+/* 좁은 상세 패널(288px)에서도 긴 경로가 넘치지 않게 공통 버튼의 줄바꿈 방지를 풀고 아무 곳에서나 줄을 바꾼다 */
+.code-link {
+  display: inline;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-1);
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+/* 모달은 내용 크기만큼 (모달 기본 820 × 600은 설정 모달 크기) */
+.modal.code-open-dialog {
+  width: min(420px, 100vw);
+  height: auto;
+}
+
+.code-open-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-5);
+}
+
+.code-open-title {
+  margin: 0;
+  padding-right: var(--space-6);
+  font-size: var(--font-size-4);
+  font-weight: 600;
+}
+
+.code-open-fields {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.code-open-fields dt {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+}
+
+.code-open-fields dd {
+  min-width: 0;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-1);
+  overflow-wrap: anywhere;
+}
+
+.code-open-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.code-open-reason,
+.code-open-cancel {
+  height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--font-size-2);
+  cursor: pointer;
+}
+
+.code-open-reason {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.code-open-reason:disabled,
+.code-open-cancel:disabled {
+  opacity: var(--opacity-dimmed);
+  cursor: default;
+}
+
+.code-open-error {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--font-size-2);
+}
+
+.code-open-buttons {
+  display: flex;
+  justify-content: flex-end;
+}

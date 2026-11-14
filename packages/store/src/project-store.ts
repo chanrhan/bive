@@ -8,6 +8,7 @@ import { observeStoreState, readDigests, trustStoreState } from './norm-snapshot
 import { PROJECT_MIGRATIONS } from './migrations/project/index.js';
 import { bivePaths, assertProjectId } from './paths.js';
 import { ApprovalLogRepository } from './repositories/approval-log-repository.js';
+import { CodeOpenRepository } from './repositories/code-open-repository.js';
 import { DisplayIdSequences } from './repositories/display-id-sequences.js';
 import { JudgmentRepository } from './repositories/judgment-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
@@ -44,6 +45,8 @@ export class ProjectStore {
   readonly sessions: SessionRepository;
   /** 규칙 판정 기록 (JDG-01 · JDG-02, ADR-069). 추가만 하고 규칙의 최신 판정은 판정 시각 기준이다. */
   readonly judgments: JudgmentRepository;
+  /** 코드 열람 기록 (MET-01, ADR-084). 추가만 하고 사람이 사유를 골라 연 때마다 1건이다. */
+  readonly codeOpens: CodeOpenRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -61,6 +64,7 @@ export class ProjectStore {
     this.sessions = new SessionRepository(db);
     this.runs = new RunRepository(db, projectId, this.sequences, this.sessions);
     this.judgments = new JudgmentRepository(db);
+    this.codeOpens = new CodeOpenRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

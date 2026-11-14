@@ -94,6 +94,7 @@ const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => 
             key={selected.rule.id}
             projectId={projectId}
             item={selected}
+            sourceScreen="SCR-03"
             actions={<RunStart projectId={projectId} rule={selected.rule} />}
           />
         )}

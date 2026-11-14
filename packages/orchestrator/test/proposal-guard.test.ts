@@ -2,6 +2,7 @@
 // - 승인은 토큰 인증된 파이프 연결에서만: 인증 전 연결의 `proposal.approve`는 -32020 후 연결 종료
 // - 승인된 규칙 · 계약을 직접 고치는 RPC는 없다: `rule.update` · `contract.update` → -32601
 // - 제안 등록도 파이프 RPC가 없다(내부 API `ProposalService.submit`만)
+// - 코드 열람 기록(`codeOpen.record`)도 인증된 파이프의 사람 요청으로만 남는다: 역할 세션 도구 · 인증 전 연결은 거부 (#43)
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -84,6 +85,28 @@ describe('토큰 없는 연결의 승인 호출', () => {
     expect(client.isClosed).toBe(true);
   });
 
+  it('hello 없이 보낸 codeOpen.record는 -32020이고 연결이 닫히며 열람 기록이 남지 않는다 (ADR-084)', async () => {
+    const client = await openUnauthenticated();
+    const response = await client.requestRaw({
+      jsonrpc: '2.0',
+      id: 'co',
+      method: 'codeOpen.record',
+      params: {
+        projectId: h.project.id,
+        author: human,
+        reason: 'debugging',
+        sourceScreen: 'SCR-03',
+        itemRef: { entity: 'Proposal', id: proposal.id },
+        file: 'src/app.ts',
+        line: 1,
+      },
+    });
+    expect(response).toMatchObject({ id: 'co', error: { code: ErrorCode.Unauthorized } });
+    await client.closed;
+    expect(client.isClosed).toBe(true);
+    h.read((store) => expect(store.codeOpens.listLatest(10)).toEqual([]));
+  });
+
   it('틀린 토큰으로 hello한 연결은 -32020으로 닫히고 바로 뒤에 보낸 승인 요청은 처리되지 않는다', async () => {
     const client = await openUnauthenticated();
     const hello = client.requestRaw({
@@ -153,6 +176,51 @@ describe('승인된 규칙 · 계약의 직접 수정 RPC 없음 (NRM-04)', () =
         role,
       ).toEqual([]);
     }
+  });
+
+  it('코드 열람 기록 이름 공간(codeOpen.*)에는 기록(record) · 조회(list)만 있고 역할 세션 도구에는 없다: 기록은 사람(앱)만 남긴다 (MET-01 · NFR-01 · ADR-084, #43)', () => {
+    const codeOpenMethods = METHOD_NAMES.filter((name) => /^codeOpen\./.test(name));
+    expect(codeOpenMethods).toEqual(['codeOpen.record', 'codeOpen.list']);
+    for (const role of AgentRole.options) {
+      expect(
+        roleToolNames(role).filter((name) => /code_?open/i.test(name)),
+        role,
+      ).toEqual([]);
+    }
+  });
+
+  it('역할 세션이 codeOpen.record · codeOpen.list를 도구로 부르면 unknown_tool로 거부되고 열람 기록이 남지 않는다 (NFR-01 · ADR-084)', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bive-co-'));
+    try {
+      for (const role of AgentRole.options) {
+        const executor = new FixedToolExecutor({ role, sessionRoot: root, biveHome: h.biveHome });
+        for (const name of ['codeOpen.record', 'codeOpen.list']) {
+          const result = await executor.execute(name, {
+            projectId: h.project.id,
+            author: { kind: 'human' },
+            reason: 'debugging',
+            sourceScreen: 'SCR-03',
+            itemRef: { entity: 'Rule', id: proposal.id },
+            file: 'src/app.ts',
+            line: 1,
+          });
+          expect(result, `${role} ${name}`).toMatchObject({
+            status: 'denied',
+            reason: 'unknown_tool',
+          });
+        }
+        expect(
+          executor.records.map((r) => [r.name, r.status, r.reason]),
+          role,
+        ).toEqual([
+          ['codeOpen.record', 'denied', 'unknown_tool'],
+          ['codeOpen.list', 'denied', 'unknown_tool'],
+        ]);
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+    h.read((store) => expect(store.codeOpens.listLatest(10)).toEqual([]));
   });
 
   it('역할 세션이 toolCall.list를 도구로 부르면 unknown_tool로 거부되고 기록만 남는다 (NFR-01)', async () => {

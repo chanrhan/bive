@@ -164,6 +164,7 @@ interface AgentAdapter {
 - 실행 · 단계 (M1-12, ADR-061): 마이그레이션 `project/0005_runs`(`runs` · `run_target_rules` · `steps`). 생성 = 실행 · 대상 규칙 · 단계 시도 · 승인 기록 `run_start`를 트랜잭션 1개로(`orchestrator/src/runs/run-service.ts` `createRun`). 상태 저장 단위는 `ProjectStore.runs.transition` 1회 = 트랜잭션 1회이고 상태 기계(`RUN_STATUS_TRANSITIONS`) 밖 전이 · 종료된 실행 · 끝난 단계 시도의 변경은 거부한다. 순서대로 다음 단계로 가는 저장은 `completeStep`, 승인 단계 판정은 `evaluateApprovalStep`(엔진용 창구 `RunService`). 실행 · 단계 · 대상 규칙의 삭제, 생성 정보 · 끝난 기록의 변경, 덮어쓰기는 DB 트리거로 막는다. 회귀 · 재시도 · 중단 저장은 `runs.regress`, 끝나지 않은 시도의 상태 역행과 `STEP_ROLES`와 다른 역할은 거부한다(ADR-066)
 - 세션 · 도구 호출 기록 (M1-14, ADR-066): 마이그레이션 `project/0006_sessions_tool_calls`(`sessions` · `tool_calls`). 세션을 열 때 행을 만들고 init 보고 · 결과를 채우며, 도구 호출은 호출마다 추가만 한다(`ProjectStore.sessions`). 실행 상태가 아닌 기록이라 세션 도중에 바로 저장한다(재기동 뒤 세션 순번 · 거부 기록). 규칙 작성 세션(ADR-062)도 실행 · 단계 없이 같은 테이블에 남는다. 끝난 세션 · 호출 기록의 변경 · 삭제는 DB 트리거로 막는다
 - 판정 기록 (M1-16, ADR-069): 마이그레이션 `project/0008_judgments`(`judgments`). 판정 러너가 `completed`로 끝난 판정(구현 · 검사 · 병합 재검사) 1회마다 다룬 규칙별 1건을 바로 남긴다(`ProjectStore.judgments.record`, 세션 기록처럼 실행 상태 저장과 별개). 상태는 규칙 케이스가 1개 이상이고 전부 통과면 `pass`, 아니면 `fail`. 수집 · 러너 오류는 기록하지 않는다. 수정 · 삭제 · 덮어쓰기는 트리거로 막는다. 규칙의 최신 판정 = 판정 시각이 가장 늦은 기록(같으면 ID가 큰 것): `latestByRule` · `latestForRules`, 이력 `listByRun` · `listByRule`, RPC 결합 `orchestrator/src/judgments/latest-judgment.ts`의 `storedLatestJudgments`(ADR-060)
+- 코드 열람 기록 (M2-01, ADR-084): 마이그레이션 `project/0009_code_open_records`(`code_open_records`). 사람이 `file:line` 링크에서 사유를 골라 연 1회마다 1건(`ProjectStore.codeOpens.record`), 수정 · 삭제 · 덮어쓰기는 트리거로 막는다. 조회는 최신부터 `listLatest`
 - 마이그레이션 (M0-04): `packages/store/src/migrations/<project|registry>/<NNNN>_<snake_name>.ts` (`export const migration`)를 다음 번호로 추가하고 같은 폴더 `index.ts` 배열 끝에 넣는다. 적용 기록 `schema_migrations`에 SQL 해시를 남기므로 머지된 파일은 고치지 않는다. 테이블은 `STRICT`, 연결은 WAL · `foreign_keys` ON · `synchronous` FULL · `recursive_triggers` ON(ADR-050)
 
 ## 4. 실행 파이프라인 상태 기계
@@ -233,7 +234,7 @@ stateDiagram-v2
 - 연결 수립: `system.hello { protocolVersion, token }`. 토큰 = `~/.bive/run/token` (0600, 기동마다 갱신). 불일치 시 연결 종료
 - 인증 전 메시지 처리 · 프레임 상한(1 MiB) · 유휴 종료(`BIVE_IDLE_SHUTDOWN_MS`) · 단일 인스턴스 잠금(`run/orchestrator.pid`)은 ADR-041. 구현 `orchestrator/src/ipc/{transport,server}.ts` · `lifecycle.ts` · `lock.ts`
 - 렌더러 경로: renderer `window.bive.invoke(method, params)` → preload(그대로 전달) → `ipcRenderer.invoke('bive:rpc')` → main(허용 목록 확인 · zod 검증, 접속 전) → 파이프. 알림은 main → `webContents.send('bive:event')` → `window.bive.on(event, cb)`. 샌드박스 preload는 electron 외 모듈을 불러올 수 없어 검증은 main이 맡는다 (ADR-042)
-- main 전용 (파이프 아님): `app.pickFolder` (OS 대화상자 → `{path \| null}`, ADR-055), `app.openInIde` (MET-01, P1)
+- main 전용 (파이프 아님): `app.pickFolder` (OS 대화상자 → `{path \| null}`, ADR-055), `app.openInIde` (`{projectId, reason, sourceScreen, itemRef, file, line}` → 기록 `codeOpen.record` 뒤 고정 틀의 IDE URL로 연다, 렌더러는 URL을 넘기지 않음, MET-01 · ADR-084)
 - main이 만드는 알림 (파이프 아님): `system.connection` `{state: 'connected', status}` · `{state: 'disconnected'}`. main이 1초마다 `system.status`를 부른 결과와 연결이 끊긴 순간에 보낸다. 끊기면 오케스트레이터를 다시 띄우지 않고 1초 간격으로 붙기만 한다 (ADR-045). `project.opened`는 main을 거친 `project.open`의 성공 결과다 (기동 인자 · 렌더러 요청, ADR-055)
 
 | 메서드 | 파라미터 → 결과 | 출처 | 단계 |
@@ -266,7 +267,8 @@ stateDiagram-v2
 | `run.resume` | `{projectId, id, author}` → `{run, steps}` (사람만 -32020, `interrupted`만 · 이미 구동 중 · 되돌리기 실패 -32009, 없음 -32004. 워크트리를 마지막 완료 단계 커밋으로 hard reset + clean 뒤 새 세션) | PRD 5.1, ADR-011, ADR-027, ADR-066 | M1 |
 | `settings.get` · `settings.update` | `{projectId}` / `{projectId, patch, author}` → `{settings}` (사람만, 미설정 저장 허용) | COST-01, NFR-07, ADR-010, ADR-057 | M1 |
 | `settings.validateForRun` | `{projectId, roles?}` → `{ok: true}` 또는 `{ok: false, code: -32010, reason: 'SETTINGS_INCOMPLETE', message, missing[]}` | NFR-07, ADR-057 | M1 |
-| `codeOpen.record` | `{reason, sourceScreen, itemRef, file, line}` | MET-01 | M1 직후 |
+| `codeOpen.record` | `{projectId, author, reason, sourceScreen, itemRef, file, line}` → `{record}` (사람만 -32020, 시각은 오케스트레이터 시계, `file`은 프로젝트 루트 기준 상대 경로만, 추가만. main의 `app.openInIde`가 IDE를 열기 전에 부르고 기록이 실패하면 열지 않는다) | MET-01, ADR-084 | M2 |
+| `codeOpen.list` | `{projectId}` → `{records, truncated}` (조회 전용, 최신부터 500건) | MET-01, ADR-084 | M2 |
 | `chat.ask` · `chat.instruct` | `{refs[], text}` → 답변 / 제안 | DSN-07, DSN-08 | M2 |
 | `events.subscribe` | `{projectId}` → 알림 구독. M1은 만들지 않고 인증된 모든 연결에 보낸다(알림의 `projectId`로 받는 쪽이 거름, ADR-076) | — | 필요한 이슈에서 |
 
