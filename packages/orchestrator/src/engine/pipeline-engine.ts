@@ -112,8 +112,11 @@ export interface PipelineEngineOptions {
   runs?: RunTracker;
   /** 시계 (ms) */
   now?: () => number;
-  /** 저장 · 알림 이벤트 (#32가 `event.*` 알림으로 잇는다) */
-  onEvent?: (event: EngineEvent) => void;
+  /**
+   * 저장 · 알림 이벤트 (`event.run.updated` · `event.step.updated` 알림, ADR-076). 약속을 돌려주면 저장 이벤트는
+   * 기다리지 않고(실패는 기록만), 화면 갱신 단계의 `notify`는 그 약속이 풀릴 때까지 단계를 끝내지 않는다
+   */
+  onEvent?: (event: EngineEvent) => void | Promise<void>;
   /** 진행 기록 한 줄 */
   log?: (line: string) => void;
 }
@@ -122,15 +125,20 @@ export interface PipelineEngineOptions {
 export const skipMutationStep: StepExecutor = () =>
   Promise.resolve({ status: 'skipped', exitDetail: { reason: 'not_in_scope', scope: 'P1' } });
 
-/** 화면 갱신: 알림만 보내고 통과한다. 판정 결과 저장 뒤 알림 송신 확인은 #32가 이 실행기를 바꿔 넣는다. */
-export const notifyScreenUpdateStep: StepExecutor = (context) => {
-  context.notify('screen_update', { runId: context.run.id });
-  return Promise.resolve({ status: 'passed', exitDetail: { notified: true } });
+/**
+ * 화면 갱신 (RUN-02 8단계 "판정 결과 저장 + `event.*` 알림 전송", ADR-076). 판정 결과는 검사 · 병합 재검사가 판정마다
+ * 바로 저장했으므로(ADR-069) 그 기록을 읽은 뒤 `event.run.updated`를 보내고, 송신이 끝나야 통과를 돌려준다. 그래서
+ * 이 단계가 완료로 저장되기 전에 화면은 저장된 판정을 다시 조회할 수 있다. 송신이 실패하면 예외 → 실행 `failed`.
+ */
+export const screenUpdateStep: StepExecutor = async (context) => {
+  const judgments = context.read((store) => store.judgments.listByRun(context.run.id).length);
+  await context.notify('screen_update', { runId: context.run.id });
+  return { status: 'passed', exitDetail: { notified: true, judgments } };
 };
 
 /**
  * 기본 실행기: 유형 A 전체. 테스트 작성 · Red 확인(#28, ADR-068) · 구현 · 검사 · 병합(#29, ADR-069) · 변이 주입 `skipped` ·
- * 화면 갱신 알림(#32가 교체). 제품 오케스트레이터의 실행은 이 목록으로 유형 A 끝(병합 · 화면 갱신)까지 간다.
+ * 화면 갱신(#32, ADR-076). 제품 오케스트레이터의 실행은 이 목록으로 유형 A 끝(병합 · 화면 갱신)까지 간다.
  */
 export const DEFAULT_STEP_EXECUTORS: StepExecutors = {
   test_writing: createTestWritingExecutor(),
@@ -139,7 +147,7 @@ export const DEFAULT_STEP_EXECUTORS: StepExecutors = {
   check: createCheckExecutor(),
   mutation: skipMutationStep,
   merge: createMergeExecutor(),
-  screen_update: notifyScreenUpdateStep,
+  screen_update: screenUpdateStep,
 };
 
 const errorMessage = (error: unknown): string =>
@@ -201,7 +209,7 @@ export class PipelineEngine {
   readonly #tracker: RunTracker | undefined;
   readonly #now: () => number;
   readonly #newId: () => Ulid;
-  readonly #onEvent: ((event: EngineEvent) => void) | undefined;
+  readonly #onEvent: ((event: EngineEvent) => void | Promise<void>) | undefined;
   readonly #log: (line: string) => void;
   readonly #active = new Map<string, ActiveRun>();
   readonly #pending = new Set<Promise<void>>();
@@ -315,9 +323,14 @@ export class PipelineEngine {
 
   // ── 승인 단계 ─────────────────────────────────────────
 
-  /** 실행 생성(`run.create`) 뒤: 응답을 보낸 다음 승인 단계를 판정한다. */
+  /**
+   * 실행 생성(`run.create`) 뒤: 응답을 보낸 다음 생성 저장을 알리고(`run.saved`, 승인 대기 실행도 화면에 보이게,
+   * ADR-076) 승인 단계를 판정한다.
+   */
   onRunCreated(projectId: string, runId: string): void {
     this.#defer(() => {
+      const created = this.#store(projectId, (store) => store.runs.getDetail(runId));
+      if (created !== null) this.#emit({ type: 'run.saved', projectId, detail: created });
       this.evaluateApproval(projectId, runId);
     });
   }
@@ -690,8 +703,8 @@ export class PipelineEngine {
       signal,
       read: (fn) => this.#store(projectId, fn),
       runSession: (request) => this.#runSession(projectId, detail.run, step, request, signal),
-      notify: (topic, data) => {
-        this.#emit({ type: 'notify', projectId, runId: detail.run.id, topic, data });
+      notify: async (topic, data) => {
+        await this.#onEvent?.({ type: 'notify', projectId, runId: detail.run.id, topic, data });
       },
     };
     try {
@@ -1091,8 +1104,16 @@ export class PipelineEngine {
     return detail;
   }
 
+  /** 저장 이벤트: 기다리지 않는다. 전달 실패는 실행 상태에 영향이 없고 기록만 남긴다. */
   #emit(event: EngineEvent): void {
-    this.#quietly('실행 이벤트 전달', () => this.#onEvent?.(event));
+    this.#quietly('실행 이벤트 전달', () => {
+      const delivered = this.#onEvent?.(event);
+      if (delivered !== undefined) {
+        delivered.catch((error: unknown) => {
+          this.#log(`실행 이벤트 전달 실패: ${errorMessage(error)}`);
+        });
+      }
+    });
   }
 
   #quietly(what: string, fn: () => void): void {

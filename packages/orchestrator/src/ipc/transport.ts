@@ -84,6 +84,11 @@ export class LineFramer {
 export interface FrameConnection {
   /** 프레임 1개(개행 없는 한 줄)를 보낸다. 닫힌 연결이면 무시. */
   send(frame: string): void;
+  /**
+   * `send`와 같고, 프레임을 운영체제에 넘겨 쓰기가 끝나면 풀린다 (알림 송신 완료, ADR-076).
+   * 닫힌 연결이거나 쓰는 도중 연결이 끊기면 보낼 상대가 없으므로 거부하지 않고 바로 풀린다.
+   */
+  sendFlushed(frame: string): Promise<void>;
   /** 보낸 내용을 흘려보낸 뒤 닫는다. */
   end(): void;
   /** 즉시 닫는다. */
@@ -142,6 +147,15 @@ class NetFrameConnection implements FrameConnection {
     if (frame.includes('\n')) throw new Error('프레임에 개행을 넣을 수 없음');
     if (this.#closed || this.#socket.writableEnded) return;
     this.#socket.write(`${frame}\n`);
+  }
+
+  sendFlushed(frame: string): Promise<void> {
+    if (frame.includes('\n')) throw new Error('프레임에 개행을 넣을 수 없음');
+    if (this.#closed || this.#socket.writableEnded) return Promise.resolve();
+    return new Promise((resolve) => {
+      // 쓰기 오류(상대가 끊음)도 콜백으로 온다. 연결이 사라진 것이므로 완료로 본다
+      this.#socket.write(`${frame}\n`, () => resolve());
+    });
   }
 
   end(): void {

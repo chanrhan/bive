@@ -699,8 +699,47 @@ export interface NotificationSpec {
   params: z.ZodType;
 }
 
+// ── 실행 알림 (RUN-01 · RUN-02 · COST-02, M1-19, ADR-076) ─────
+// - 오케스트레이터 → 인증된 모든 연결. 실행 상태 저장(단계 전이)마다 바뀐 단계 시도마다 `event.step.updated`, 그다음
+//   `event.run.updated` 1개. 화면 갱신 단계는 판정 결과 저장 뒤 `event.run.updated`를 보내고 송신이 끝나야 완료된다
+// - 값은 저장된 실행 · 단계 시도 그대로의 요약이다. 받는 쪽은 알림만으로 화면을 그리지 않고 다시 조회한다
+// - 종료 조건 결과 원문(`exitDetail`)은 크기가 정해지지 않아 싣지 않는다(프레임 상한 1 MiB). 단계 상태가 결과다
+
+/** `event.run.updated`: 실행 상태 · 현재 단계 · 회귀 수 · 비용 (architecture.md 5장 알림 표). */
+export const RunUpdatedEvent = z.strictObject({
+  projectId: Ulid,
+  runId: Ulid,
+  displayId: displayIdSchema('EXE'),
+  status: RunStatus,
+  currentStep: StepKind.nullable(),
+  regressionCount: z.int().nonnegative(),
+  costUsd: UsdOrNull,
+});
+export type RunUpdatedEvent = z.infer<typeof RunUpdatedEvent>;
+
+/** `event.step.updated`: 단계 시도 하나의 상태 (종료 조건 결과 = `passed` · `skipped` · `failed`). */
+export const StepUpdatedEvent = z.strictObject({
+  projectId: Ulid,
+  runId: Ulid,
+  stepId: Ulid,
+  kind: StepKind,
+  attempt: z.int().positive(),
+  status: StepStatus,
+});
+export type StepUpdatedEvent = z.infer<typeof StepUpdatedEvent>;
+
+/** 실행 알림 이름. 렌더러는 둘 중 하나를 받으면 실행 · 판정을 보이는 화면을 다시 조회한다. */
+export const RUN_EVENT_NAMES = ['event.run.updated', 'event.step.updated'] as const;
+
 /** 알림 이름 → 파라미터 스키마. `event.*` 알림은 해당 이슈에서 추가한다. */
-export const NOTIFICATIONS = {} as const satisfies Record<string, NotificationSpec>;
+export const NOTIFICATIONS = {
+  'event.run.updated': { params: RunUpdatedEvent },
+  'event.step.updated': { params: StepUpdatedEvent },
+} as const satisfies Record<string, NotificationSpec>;
+
+export type NotificationParams<N extends NotificationName> = z.infer<
+  (typeof NOTIFICATIONS)[N]['params']
+>;
 
 export type NotificationName = keyof typeof NOTIFICATIONS;
 
@@ -756,6 +795,18 @@ export const createSuccessResponse = <M extends MethodName>(
   jsonrpc: JSONRPC_VERSION,
   id,
   result: METHODS[method].result.parse(result),
+});
+
+/** 알림을 만든다. 파라미터가 알림 스키마와 맞지 않으면 예외 (보내는 쪽 검증). */
+export const createNotification = <N extends NotificationName>(
+  method: N,
+  params: NotificationParams<N>,
+): JsonRpcNotification => ({
+  jsonrpc: JSONRPC_VERSION,
+  method,
+  params: (NOTIFICATIONS[method].params as z.ZodType).parse(
+    params,
+  ) as JsonRpcNotification['params'],
 });
 
 export const createErrorResponse = (

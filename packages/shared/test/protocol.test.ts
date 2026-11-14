@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   createErrorResponse,
+  createNotification,
   createRequest,
   createSuccessResponse,
   ERROR_MESSAGES,
@@ -23,6 +24,7 @@ import {
   parseResponse,
   PROTOCOL_VERSION,
   rpcError,
+  RUN_EVENT_NAMES,
   type Rule,
   type RuleJudgment,
 } from '../src/index.js';
@@ -153,6 +155,44 @@ describe('알림 스키마', () => {
     const malformed = parseNotification({ jsonrpc: '2.0', method: 1 });
     expect(malformed.ok).toBe(false);
     if (!malformed.ok) expect(malformed.error.code).toBe(-32600);
+  });
+
+  it('실행 알림 (M1-19, ADR-076): event.run.updated · event.step.updated 왕복과 스키마 위반 -32602', () => {
+    expect(RUN_EVENT_NAMES).toEqual(['event.run.updated', 'event.step.updated']);
+    const run = {
+      projectId: '01JA0000000000000000000001',
+      runId: '01JE0000000000000000000001',
+      displayId: 'EXE-001',
+      status: 'running',
+      currentStep: 'check',
+      regressionCount: 1,
+      costUsd: null,
+    } as const;
+    const runEvent = parseNotification(throughFrame(createNotification('event.run.updated', run)));
+    expect(runEvent).toEqual({ ok: true, method: 'event.run.updated', params: run });
+    const step = {
+      projectId: run.projectId,
+      runId: run.runId,
+      stepId: '01JF0000000000000000000001',
+      kind: 'check',
+      attempt: 2,
+      status: 'passed',
+    } as const;
+    const stepEvent = parseNotification(
+      throughFrame(createNotification('event.step.updated', step)),
+    );
+    expect(stepEvent).toEqual({ ok: true, method: 'event.step.updated', params: step });
+    // 보내는 쪽 검증: 스키마와 다르면 만들지 않는다
+    expect(() =>
+      createNotification('event.run.updated', { ...run, status: 'done' } as never),
+    ).toThrow();
+    const wrong = parseNotification({
+      jsonrpc: '2.0',
+      method: 'event.step.updated',
+      params: { ...step, exitDetail: {} },
+    });
+    expect(wrong.ok).toBe(false);
+    if (!wrong.ok) expect(wrong.error.code).toBe(ErrorCode.InvalidParams);
   });
 });
 

@@ -2,7 +2,7 @@
 // 규칙 화면(SCR-03) 목록 + 상세 2단의 상세 영역이다(별도 화면 아님). 요구사항 상세(#38)는 같은 파일에 상태를 더한다.
 // - 기본(규칙): 진술 · 종류 · 검사 · 부모 요구사항 · 생성 주체(이름), 테스트 실행 결과(판정 · 시각 · 커밋 · 실행 · 케이스),
 //   테스트 출력(최신 판정이 실패라 자동 펼침: 실패 원인 = 케이스 이름 · `file:line` · 메시지), 실행 이력(최신부터).
-//   변경 이력(P1) · 변이 상태 · [실행]은 미노출 (ADR-035)
+//   변경 이력(P1) · 변이 상태는 미노출 (ADR-035). 규칙 화면 상세의 머리에는 [실행] (ADR-076)
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-073 (실행 이력 자리만 비움 · "실행 이력 불러오기 실패", 나머지 상세는 그대로)
 import type {
   JudgmentCase,
@@ -167,7 +167,7 @@ export const FAILING_RULE = failingRule;
 export const PASSING_RULE = passingRule;
 export const UNJUDGED_RULE = unjudgedRule;
 
-/** 미노출 요소 (ADR-035): 변경 이력(P1) · 변이 상태(P1) · [실행](#32) · 대상 블록 · 위험도(P1). */
+/** 미노출 요소 (ADR-035): 변경 이력(P1) · 변이 상태(P1) · 대상 블록 · 위험도(P1). [실행]은 규칙 화면 상세에 있다(ADR-076). */
 const hidden: ElementCheck[] = [
   { label: '변경 이력 미노출', text: /변경 이력/, absent: true },
   {
@@ -178,7 +178,6 @@ const hidden: ElementCheck[] = [
     absent: true,
   },
   { label: '변이 상태 미노출 (글자)', text: /변이 생존/, absent: true },
-  { label: '실행 버튼 미노출', role: 'button', name: '실행', absent: true },
   { label: '대상 블록 미노출', testId: 'rule-field-blocks', absent: true },
   { label: '위험도 미노출', testId: 'rule-field-risk', absent: true },
 ];
@@ -225,6 +224,7 @@ const detail: ElementCheck[] = [
   },
   { label: '전체 케이스', testId: 'test-case', count: 2 },
   { label: '실행 이력', testId: 'rule-history', role: 'region', name: '실행 이력' },
+  { label: '실행 버튼 (규칙 화면 상세 머리)', testId: 'run-start', role: 'button', name: '실행' },
   ...hidden,
 ];
 

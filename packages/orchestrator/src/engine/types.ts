@@ -1,6 +1,6 @@
 // 파이프라인 엔진의 단계 실행기 계약 (RUN-01 · RUN-02 · RUN-08, ADR-026 · ADR-061 · ADR-066).
 // 엔진은 상태 기계 · 단계 진행 · 회귀 · 중단 · 재개 · 세션 실행 틀을 맡고, 단계별 종료 조건 판단은 주입받은
-// 단계 실행기(단계 종류 → 함수)가 맡는다: 테스트 작성 · Red 확인(#28), 구현 · 검사 · 병합(#29), 화면 갱신(#32).
+// 단계 실행기(단계 종류 → 함수)가 맡는다: 테스트 작성 · Red 확인(#28), 구현 · 검사 · 병합(#29), 화면 갱신(#32, ADR-076).
 // 실행기는 상태를 직접 저장하지 않고 결과(`StepOutcome`)만 돌려준다. 저장은 엔진이 단계 종료마다 트랜잭션 1회로 한다.
 import {
   type AgentRole,
@@ -160,14 +160,17 @@ export interface StepContext {
   read<T>(fn: (store: ProjectStore) => T): T;
   /** 이 단계 역할의 에이전트 세션을 연다 (세션 가드 · 예산 · 도구 호출 기록 · 세션 순번은 엔진이 맡는다) */
   runSession(request: StepSessionRequest): Promise<StepSessionResult>;
-  /** 화면 갱신 알림 (`EngineEvent`의 `notify`, #32가 `event.*` 알림으로 잇는다) */
-  notify(topic: string, data?: unknown): void;
+  /**
+   * 알림 (`EngineEvent`의 `notify`). 화면 갱신 단계는 `screen_update`로 `event.run.updated`를 보낸다. 송신이 끝나면
+   * 풀리고, 실패하면 거부된다 (ADR-076)
+   */
+  notify(topic: string, data?: unknown): Promise<void>;
 }
 
 export type StepExecutor = (context: StepContext) => Promise<StepOutcome>;
 export type StepExecutors = Partial<Record<EngineStepKind, StepExecutor>>;
 
-/** 엔진 이벤트 (#32가 `event.run.updated` · `event.step.updated` 알림으로 잇는다). */
+/** 엔진 이벤트. 오케스트레이터가 `event.run.updated` · `event.step.updated` 알림으로 잇는다 (`events/run-events.ts`). */
 export type EngineEvent =
   | { readonly type: 'run.saved'; readonly projectId: Ulid; readonly detail: RunDetail }
   | {
