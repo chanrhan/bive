@@ -8,6 +8,7 @@ import { createRuleHandlers } from './rule-handlers.js';
 import { createRunHandlers } from './run-handlers.js';
 import type { MethodHandlers } from './server.js';
 import { createSettingsHandlers } from './settings-handlers.js';
+import { createVerificationHandlers } from './verification-handlers.js';
 
 /** `system.status`가 읽는 오케스트레이터 상태 (ADR-045). */
 export interface StatusSource {
@@ -58,4 +59,5 @@ export const createHandlers = ({
   ...createProposalHandlers({ biveHome, now, ...(engine === undefined ? {} : { engine }) }),
   ...createSettingsHandlers({ biveHome, now }),
   ...createRunHandlers({ biveHome, now, ...(engine === undefined ? {} : { engine }) }),
+  ...createVerificationHandlers({ biveHome }),
 });
