@@ -3,7 +3,10 @@
 // - 값은 `verification.summary` 결과에서만 만든다(NFR-03). 값이 없으면 '없음'(0 표시 금지, COST-02 · ADR-029)
 // - renderer는 shared를 import type으로만 가져오므로(architecture.md 2장) 표시명을 다시 적고 단위 테스트가 대조한다
 // - 지표 카드는 준수 · 실행당 비용만. 잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드는 기능 이슈 전까지 미노출 (ADR-035)
+// - 코드 열람 영역 = `codeOpen.summary`의 사유별 건수. 기록이 하나도 없으면 '없음' (MET-01, M2-02 · ADR-088)
 import type {
+  CodeOpenReason,
+  CodeOpenSummaryResult,
   RunStatus,
   StepKind,
   StepStatus,
@@ -12,6 +15,7 @@ import type {
   VerificationSummaryResult,
 } from '@bive/shared';
 
+import { CODE_OPEN_REASON_LABELS } from '../../components/CodeLink/codeLinkView.js';
 import type { FilterState } from '../../components/ListView/filter.js';
 
 /** 화면 문구 (screens.md 1.1: 명사형 · 짧은 문구). */
@@ -30,6 +34,9 @@ export const TEXT = {
   noRules: '규칙 없음',
   turnsSuffix: '턴',
   loadFailed: '검증 불러오기 실패',
+  codeOpen: '코드 열람',
+  codeOpenHint: '링크 경유 열기 시도 수 · 링크 밖 열람 미집계',
+  codeOpenLoadFailed: '코드 열람 불러오기 실패',
   noProject: '프로젝트 없음',
 } as const;
 
@@ -117,3 +124,24 @@ export const COMPLIANCE_FILTER: FilterState = Object.freeze({
 
 /** [재개]를 보일지: 최근 실행이 중단(`interrupted`)일 때만 (ADR-011). */
 export const canResume = (status: RunStatus): boolean => status === 'interrupted';
+
+/** 코드 열람 영역의 사유 한 칸: 표시명 · 건수. */
+export interface CodeOpenReasonRow {
+  reason: CodeOpenReason;
+  label: string;
+  count: number;
+}
+
+/**
+ * 코드 열람 영역 값 (ADR-088). 기록이 하나도 없으면 `null`(영역 값 '없음'). 있으면 사유 3종을 응답 순서
+ * (화면 오류 · 정보 부족 · 디버깅) 그대로 싣고 0건인 사유도 0으로 보인다(세어 본 값이므로 '없음'이 아니다).
+ * 화면에서 다시 세지 않고 응답의 건수만 쓴다.
+ */
+export const codeOpenRows = (summary: CodeOpenSummaryResult): CodeOpenReasonRow[] | null =>
+  summary.total === 0
+    ? null
+    : summary.reasons.map(({ reason, count }) => ({
+        reason,
+        label: CODE_OPEN_REASON_LABELS[reason],
+        count,
+      }));

@@ -1,7 +1,9 @@
-// 검증 화면 (screens.md SCR-05): 머리줄 · 지표 카드 · 파이프라인 · 규칙별 최신 판정 목록.
-// - 값은 verification.summary 결과에서만 그린다(NFR-03). 표시 규칙은 verificationView.ts
-// - 지표 카드는 준수 · 실행당 비용만. 잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드, 준수 추이 그래프, 코드 열람 영역은
+// 검증 화면 (screens.md SCR-05): 머리줄 · 지표 카드 · 코드 열람 · 파이프라인 · 규칙별 최신 판정 목록.
+// - 값은 verification.summary · codeOpen.summary 결과에서만 그린다(NFR-03). 표시 규칙은 verificationView.ts
+// - 지표 카드는 준수 · 실행당 비용만. 잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드, 준수 추이 그래프는
 //   기능 이슈 전까지 미노출 (ADR-035)
+// - 코드 열람 = 열람 사유 분포(MET-01, M2-02 · ADR-088): 사유 3종의 건수, 기록이 없으면 '없음'. 검증 요약과 따로 불러
+//   이 영역의 로딩 · 실패는 이 영역 안에서만 보인다(로딩 = 자리 비움, 실패 = "코드 열람 불러오기 실패")
 // - 준수 카드 → 규칙 화면 `준수 집계: 판정 가능` 필터 (분모 목록, JDG-03)
 // - 파이프라인 = 최근 실행의 단계 순서와 현재 단계, 생략 단계는 흐림 + 보이는 "생략"(#165). 중단이면 [재개] → run.resume (ADR-011)
 // - 실행 알림(event.run.updated · event.step.updated)을 받으면 요약을 다시 읽는다(useVerification, ADR-076)
@@ -10,6 +12,7 @@
 import './VerificationScreen.css';
 
 import type {
+  CodeOpenSummaryResult,
   VerificationPipeline,
   VerificationRuleRow,
   VerificationSummaryResult,
@@ -22,10 +25,12 @@ import { EmptyState } from '../../layout/EmptyState.js';
 import { useNavigation } from '../../navigation/NavigationContext.js';
 import { useProject } from '../../project/ProjectContext.js';
 import { RULES_LIST_ID } from '../rules/rulesView.js';
+import { type CodeOpenSummaryLoad, useCodeOpenSummary } from './useCodeOpenSummary.js';
 import { useVerification } from './useVerification.js';
 import {
   basisText,
   canResume,
+  codeOpenRows,
   COMPLIANCE_FILTER,
   complianceText,
   formatUsd,
@@ -53,7 +58,9 @@ export const VerificationScreen = (): React.JSX.Element => {
 };
 
 const VerificationBody = ({ projectId }: { projectId: string }): React.JSX.Element => {
-  const { load, reload } = useVerification(projectId);
+  // 코드 열람은 검증 요약과 같은 때 따로 부르기 시작한다(영역은 요약이 준비된 뒤 보인다). 알림 · 재접속 때는 함께 다시 부른다
+  const { load: codeOpen, refresh: refreshCodeOpen } = useCodeOpenSummary(projectId);
+  const { load, reload } = useVerification(projectId, refreshCodeOpen);
   return (
     <div className="verification-screen" data-testid="verification-screen" data-state={load.state}>
       {load.state === 'loading' && (
@@ -65,7 +72,12 @@ const VerificationBody = ({ projectId }: { projectId: string }): React.JSX.Eleme
         </p>
       )}
       {load.state === 'ready' && (
-        <VerificationContent projectId={projectId} summary={load.summary} onChanged={reload} />
+        <VerificationContent
+          projectId={projectId}
+          summary={load.summary}
+          codeOpen={codeOpen}
+          onChanged={reload}
+        />
       )}
     </div>
   );
@@ -74,10 +86,12 @@ const VerificationBody = ({ projectId }: { projectId: string }): React.JSX.Eleme
 const VerificationContent = ({
   projectId,
   summary,
+  codeOpen,
   onChanged,
 }: {
   projectId: string;
   summary: VerificationSummaryResult;
+  codeOpen: CodeOpenSummaryLoad;
   onChanged: () => void;
 }): React.JSX.Element => {
   const { navigate } = useNavigation();
@@ -119,6 +133,7 @@ const VerificationContent = ({
           </span>
         </div>
       </section>
+      <CodeOpenArea load={codeOpen} />
       <section className="verification-pipeline" data-testid="pipeline" aria-label={TEXT.pipeline}>
         <h2 className="verification-heading">{TEXT.pipeline}</h2>
         {summary.pipeline === null ? (
@@ -144,6 +159,53 @@ const VerificationContent = ({
         )}
       </section>
     </div>
+  );
+};
+
+const CodeOpenArea = ({ load }: { load: CodeOpenSummaryLoad }): React.JSX.Element => (
+  <section className="verification-code-open" data-testid="code-open" aria-label={TEXT.codeOpen}>
+    <h2 className="verification-heading" title={TEXT.codeOpenHint}>
+      {TEXT.codeOpen}
+    </h2>
+    {load.state === 'loading' && (
+      <div className="code-open-loading" data-testid="code-open-loading" aria-busy="true" />
+    )}
+    {load.state === 'error' && (
+      <p className="code-open-error" data-testid="code-open-load-error" role="alert">
+        {TEXT.codeOpenLoadFailed}
+      </p>
+    )}
+    {load.state === 'ready' && <CodeOpenValue summary={load.summary} />}
+  </section>
+);
+
+const CodeOpenValue = ({ summary }: { summary: CodeOpenSummaryResult }): React.JSX.Element => {
+  const rows = codeOpenRows(summary);
+  if (rows === null) {
+    return (
+      <p className="code-open-none" data-testid="code-open-none">
+        {TEXT.none}
+      </p>
+    );
+  }
+  return (
+    <ul className="code-open-reasons">
+      {rows.map(({ reason, label, count }) => (
+        <li
+          key={reason}
+          className="code-open-reason"
+          data-testid="code-open-reason"
+          data-reason={reason}
+        >
+          <span className="code-open-label" data-testid="code-open-label">
+            {label}
+          </span>{' '}
+          <span className="code-open-count" data-testid="code-open-count">
+            {count}
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 };
 

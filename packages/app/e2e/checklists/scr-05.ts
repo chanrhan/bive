@@ -1,10 +1,12 @@
 // SCR-05 검증 (screens.md SCR-05 · 1.1, JDG-03 · COST-02, ADR-011 · ADR-029 · ADR-035 · ADR-072).
-// - 기본: 머리줄 "판정 기준 main@커밋" · 지표 카드(준수 · 실행당 비용) · 파이프라인(최근 실행의 단계 순서 · 현재 단계) ·
-//   규칙별 최신 판정 + 실행 링크(비용 합계 · 턴, 값 없으면 '없음'). 잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드,
-//   준수 추이 그래프, 코드 열람 영역은 미노출 (ADR-035). [재개]는 최근 실행이 중단일 때만 (ADR-011)
-// - 빈: 실행이 없으면 파이프라인 자리 "실행 없음"(ADR-029), 머리줄 "판정 기준 없음", 실행당 비용 '없음'
+// - 기본: 머리줄 "판정 기준 main@커밋" · 지표 카드(준수 · 실행당 비용) · 코드 열람(사유 3종 건수, M2-02 · ADR-088) ·
+//   파이프라인(최근 실행의 단계 순서 · 현재 단계) · 규칙별 최신 판정 + 실행 링크(비용 합계 · 턴, 값 없으면 '없음').
+//   잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드, 준수 추이 그래프는 미노출 (ADR-035). [재개]는 최근 실행이 중단일 때만 (ADR-011)
+// - 빈: 실행이 없으면 파이프라인 자리 "실행 없음"(ADR-029), 머리줄 "판정 기준 없음", 실행당 비용 '없음',
+//   열람 기록이 없으면 코드 열람 영역 값 '없음'(ADR-088)
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-072 (ADR-060과 같음: 로딩 = 자리 비움, 에러 = "검증 불러오기 실패")
 import type {
+  CodeOpenSummaryResult,
   Run,
   RuleWithJudgment,
   StepKind,
@@ -167,7 +169,27 @@ export const EMPTY_SUMMARY: VerificationSummaryResult = {
   pipeline: null,
 };
 
-/** 미노출 요소 (ADR-035): 다음 마일스톤 카드 · 그래프 · 영역. */
+/** `codeOpen.summary` 가짜 응답: 기록 있음 (화면 오류 2 · 정보 부족 0 · 디버깅 5, 테스트 전용 데이터, NFR-03). */
+export const CODE_OPEN_SUMMARY: CodeOpenSummaryResult = {
+  reasons: [
+    { reason: 'screen_error', count: 2 },
+    { reason: 'info_lacking', count: 0 },
+    { reason: 'debugging', count: 5 },
+  ],
+  total: 7,
+};
+
+/** `codeOpen.summary` 가짜 응답: 기록 없음. */
+export const EMPTY_CODE_OPEN_SUMMARY: CodeOpenSummaryResult = {
+  reasons: [
+    { reason: 'screen_error', count: 0 },
+    { reason: 'info_lacking', count: 0 },
+    { reason: 'debugging', count: 0 },
+  ],
+  total: 0,
+};
+
+/** 미노출 요소 (ADR-035): 다음 마일스톤 카드 · 그래프. */
 const hidden: ElementCheck[] = [
   { label: '잠정 카드 미노출', testId: 'metric-provisional', absent: true },
   { label: '변이 카드 미노출', testId: 'metric-mutation', absent: true },
@@ -178,7 +200,6 @@ const hidden: ElementCheck[] = [
   { label: '규칙화 불가 문구 없음', text: /규칙화 불가/, absent: true },
   { label: '추적성 결함 문구 없음', text: /추적성 결함/, absent: true },
   { label: '준수 추이 미노출', text: /추이/, absent: true },
-  { label: '코드 열람 미노출', text: /코드 열람/, absent: true },
 ];
 
 const metrics = (compliance: string, cost: string): ElementCheck[] => [
@@ -206,6 +227,12 @@ export const verificationChecklist = {
       elements: [
         { label: '머리줄', testId: 'verification-basis', text: '판정 기준 main@a1f26b1' },
         ...metrics('1 / 4', '$0.20'),
+        { label: '코드 열람 영역', testId: 'code-open', role: 'region', name: '코드 열람' },
+        { label: '코드 열람 사유 3종', testId: 'code-open-label', count: 3 },
+        { label: '화면 오류 건수', text: '화면 오류 2' },
+        { label: '정보 부족 건수 (0건도 0)', text: '정보 부족 0' },
+        { label: '디버깅 건수', text: '디버깅 5' },
+        { label: '코드 열람 없음 미표시', testId: 'code-open-none', absent: true },
         { label: '파이프라인 영역', testId: 'pipeline', role: 'region', name: '파이프라인' },
         { label: '최근 실행', testId: 'pipeline-run', text: 'EXE-003' },
         { label: '최근 실행 상태', testId: 'pipeline-run-status', text: '진행 중' },
@@ -235,6 +262,9 @@ export const verificationChecklist = {
       elements: [
         { label: '머리줄', testId: 'verification-basis', text: '판정 기준 없음' },
         ...metrics('0 / 2', '없음'),
+        { label: '코드 열람 영역', testId: 'code-open', role: 'region', name: '코드 열람' },
+        { label: '코드 열람 값 없음', testId: 'code-open-none', text: '없음' },
+        { label: '코드 열람 사유 미표시', testId: 'code-open-reason', absent: true },
         { label: '파이프라인 영역', testId: 'pipeline', role: 'region', name: '파이프라인' },
         { label: '빈 상태', testId: 'empty-state', text: '실행 없음' },
         { label: '단계 없음', testId: 'pipeline-stage', absent: true },

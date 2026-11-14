@@ -2,6 +2,7 @@
 // - `codeOpen.record`가 시각(오케스트레이터 시계) · 출발 화면 · 항목 · 사유 · 파일 · 줄을 저장하고 `codeOpen.list`가 돌려준다
 // - 사람 주체만 받는다(에이전트 -32020). 파일은 프로젝트 루트 기준 상대 경로만(절대 경로 · `..` · 제어 문자 등 -32602)
 // - 목록은 최신부터, 상한을 넘으면 `truncated`
+// - `codeOpen.summary`는 전체 기록을 사유별로 센다(고정 순서, 0건 포함, 목록 상한과 무관) (M2-02 수용 기준 3, ADR-088)
 // 에이전트 경로(역할 세션 도구 · 인증 전 연결)의 쓰기 불가는 proposal-guard.test.ts가 단언한다.
 // 실제 Unix 소켓 · 임시 BIVE_HOME · 실제 SQLite 저장소.
 import {
@@ -199,5 +200,112 @@ describe('파일 경로 · 줄 · 화면 · 사유 검증: 프로젝트 루트 �
     });
     expect(record.file).toBe('src/화면 목록/.config/a.b.ts');
     expect(storedCount()).toBe(1);
+  });
+});
+
+describe('codeOpen.summary: 사유별 건수 (M2-02 수용 기준 3, ADR-088)', () => {
+  const summary = () => h.client.call('codeOpen.summary', { projectId: h.project.id });
+
+  it('기록이 없으면 사유 3종 모두 0이고 합계 0', async () => {
+    await expect(summary()).resolves.toEqual({
+      reasons: [
+        { reason: 'screen_error', count: 0 },
+        { reason: 'info_lacking', count: 0 },
+        { reason: 'debugging', count: 0 },
+      ],
+      total: 0,
+    });
+  });
+
+  it('"디버깅"으로 1번 열면 디버깅 1 · 나머지 0 (로드맵 2.2 흐름 2)', async () => {
+    await h.client.call('codeOpen.record', debugging());
+    await expect(summary()).resolves.toEqual({
+      reasons: [
+        { reason: 'screen_error', count: 0 },
+        { reason: 'info_lacking', count: 0 },
+        { reason: 'debugging', count: 1 },
+      ],
+      total: 1,
+    });
+  });
+
+  it('record로 남긴 기록을 사유별로 센다: 순서는 기록 순서와 무관하게 화면 오류 · 정보 부족 · 디버깅', async () => {
+    for (const reason of [
+      'debugging',
+      'info_lacking',
+      'debugging',
+      'screen_error',
+      'debugging',
+      'info_lacking',
+    ] as const) {
+      await h.client.call('codeOpen.record', { ...debugging(), reason });
+    }
+    await expect(summary()).resolves.toEqual({
+      reasons: [
+        { reason: 'screen_error', count: 1 },
+        { reason: 'info_lacking', count: 2 },
+        { reason: 'debugging', count: 3 },
+      ],
+      total: 6,
+    });
+  });
+
+  it(`목록 상한(${String(CODE_OPEN_LIST_LIMIT)}건)을 넘어도 전체를 센다`, async () => {
+    const newId = createUlidGenerator();
+    const reasons = ['screen_error', 'info_lacking', 'debugging'] as const;
+    const n = CODE_OPEN_LIST_LIMIT + 10;
+    h.read((store) => {
+      for (let i = 0; i < n; i += 1) {
+        store.codeOpens.record({
+          id: newId(),
+          at: iso(T0 + i),
+          reason: reasons[i % 3] ?? 'debugging',
+          sourceScreen: 'SCR-03',
+          itemRef: { entity: 'Rule', id: RULE_ID },
+          file: 'src/app.ts',
+          line: i + 1,
+        });
+      }
+    });
+    const { reasons: counts, total } = await summary();
+    expect(total).toBe(n);
+    // 510 = 170 × 3
+    expect(counts).toEqual([
+      { reason: 'screen_error', count: n / 3 },
+      { reason: 'info_lacking', count: n / 3 },
+      { reason: 'debugging', count: n / 3 },
+    ]);
+    // 목록은 상한에서 잘린다
+    expect((await h.client.call('codeOpen.list', { projectId: h.project.id })).truncated).toBe(
+      true,
+    );
+  });
+
+  it('프로젝트마다 따로 센다: 다른 프로젝트 기록은 들어가지 않고, 등록되지 않은 프로젝트는 -32004', async () => {
+    await h.client.call('codeOpen.record', debugging());
+    expect(
+      (await rpcError(h.client.call('codeOpen.summary', { projectId: createUlidGenerator()() })))
+        .code,
+    ).toBe(ErrorCode.NotFound);
+    expect((await summary()).total).toBe(1);
+  });
+
+  it('조회 전용: 부른 뒤에도 기록 수가 그대로다', async () => {
+    await h.client.call('codeOpen.record', debugging());
+    await summary();
+    await summary();
+    expect(storedCount()).toBe(1);
+  });
+
+  it('파라미터는 엄격 객체: projectId가 없거나 다른 키가 있으면 -32602', async () => {
+    for (const params of [{}, { projectId: h.project.id, reason: 'debugging' }]) {
+      const response = await h.client.requestRaw({
+        jsonrpc: '2.0',
+        id: 'sum',
+        method: 'codeOpen.summary',
+        params,
+      });
+      expect(response).toMatchObject({ id: 'sum', error: { code: ErrorCode.InvalidParams } });
+    }
   });
 });

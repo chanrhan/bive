@@ -221,3 +221,42 @@ button.metric-card:focus-visible {
   color: var(--color-text-muted);
   font-variant-numeric: tabular-nums;
 }
+
+/* 코드 열람 (M2-02 · ADR-088): 사유 3종 건수를 한 줄에 나열, 좁으면 줄바꿈 */
+.verification-code-open {
+  display: flex;
+  flex-direction: column;
+}
+
+.code-open-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.code-open-reason {
+  white-space: nowrap;
+  font-size: var(--font-size-2);
+}
+
+.code-open-label {
+  color: var(--color-text-muted);
+}
+
+.code-open-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.code-open-none,
+.code-open-error {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+}
+
+.code-open-error {
+  color: var(--color-danger);
+}
