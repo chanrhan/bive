@@ -234,6 +234,7 @@ export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
 | 빌드 | `pnpm build` | `packages/*/dist`, 앱은 electron-vite 출력 |
 | 화면 e2e | `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=<chrome 경로> pnpm e2e` | Playwright로 Vite 개발 서버의 렌더러를 열어 화면 체크리스트 검사 · 스크린샷(`artifacts/screens`). 경로를 주지 않으면 Playwright 기본 브라우저를 쓴다 |
 | Electron 스모크 | `xvfb-run -a pnpm smoke` | 앱을 빌드해 띄우고 preload 노출 · 레이아웃 · 사이드바 하단 연결 상태("연결됨") · 종료 뒤 유휴 종료를 확인 |
+| 파이프라인 e2e | `pnpm e2e:pipeline` | 시험마다 `scripts/reset-fixture.sh`로 픽스처 복사본을 만들고 오케스트레이터를 시나리오(`happy-path` · `fail-check` · `red-violation` · `budget-exceeded`)로 띄워, 요구사항 저장부터 실행 종료까지 실제 git · 실제 판정 러너로 돈다(`packages/orchestrator/e2e/pipeline/`). 단위 테스트(`pnpm test`)에 들어가지 않는다 |
 | 픽스처 | `pnpm -C fixtures/sample-next-app test` | 임시 SQLite 마이그레이션 → `next build` → `next start` → HTTP 확인 |
 | 픽스처 초기화 | `scripts/reset-fixture.sh <dir> [--verify]` | 픽스처의 추적 파일을 `<dir>`로 복사해 설치하고 git 저장소(커밋 1개)로 만든다. `--verify`는 끝에 픽스처 테스트까지 실행한다 |
 | 초기화 스크립트 검사 | `scripts/test-reset-fixture.sh` | 지우면 안 되는 경로를 거부하는지 검사 |

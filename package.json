@@ -14,6 +14,7 @@
     "build": "pnpm -r run build",
     "smoke": "pnpm --filter @bive/app smoke",
     "e2e": "pnpm --filter @bive/app e2e",
+    "e2e:pipeline": "pnpm --filter @bive/orchestrator e2e:pipeline",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
