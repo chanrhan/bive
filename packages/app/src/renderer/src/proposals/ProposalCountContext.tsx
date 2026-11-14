@@ -1,7 +1,8 @@
 // 할 일 배지용 승인 대기 건수 (screens.md 6장 할 일, TODO-01, ADR-056).
 // - 현재 프로젝트의 `proposal.count`를 부른다. 프로젝트가 없으면 부르지 않고 null
-// - 조회 시점: 프로젝트가 바뀔 때 · 화면(경로)에 들어갈 때 · 명시적 refresh() (승인 · 거절 처리 뒤, #40)
-// - 폴링 · 이벤트 구독은 하지 않는다 (제안 알림 이벤트가 생기면 그 이슈가 구독을 더한다)
+// - 조회 시점: 프로젝트가 바뀔 때 · 화면(경로)에 들어갈 때 · 명시적 refresh() (승인 · 거절 처리 뒤, #40) · 이 프로젝트의
+//   제안 알림(`event.proposal.changed`)을 받을 때 · 오케스트레이터에 다시 붙을 때(M1-36, ADR-076, useEventRefresh)
+// - 알림 · 재접속 조회는 합친다(동시 조회 1개 · 뒤따르는 조회 최대 1개). 폴링은 하지 않는다
 // - 늦게 도착한 이전 조회 결과는 버린다. 실패하면 null (근거 없는 값 미표시, NFR-03)
 import type { ProposalCountResult } from '@bive/shared';
 import {
@@ -17,6 +18,8 @@ import {
 
 import { useNavigation } from '../navigation/NavigationContext.js';
 import { useProject } from '../project/ProjectContext.js';
+import { PROPOSAL_EVENT_NAMES } from '../runs/refreshCoalescer.js';
+import { useEventRefresh } from '../runs/useEventRefresh.js';
 
 export interface ProposalCountView {
   /** 현재 프로젝트의 마지막 조회 결과. 프로젝트 없음 · 조회 전 · 실패면 null */
@@ -59,6 +62,9 @@ export const ProposalCountProvider = ({ children }: { children: ReactNode }): Re
   useEffect(() => {
     void refresh();
   }, [refresh, route]);
+
+  // 제안이 생기거나 처리되면 · 다시 붙으면 다시 센다 (화면 이동 없이 배지 갱신, M1-36)
+  useEventRefresh(projectId, PROPOSAL_EVENT_NAMES, refresh);
 
   // 사라진 뒤 도착한 응답은 버린다
   useEffect(

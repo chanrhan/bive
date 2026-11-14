@@ -27,6 +27,7 @@ import {
 } from '@bive/shared';
 import { canonicalJson, ConflictError, NotFoundError, type ProjectStore } from '@bive/store';
 
+import type { ProposalChangeListener } from '../events/proposal-events.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import { earsStatementProblem } from '../tools/ears.js';
@@ -322,6 +323,8 @@ export interface ProposalServiceDeps {
   readonly biveHome: string;
   /** 시계 (ms, 기본 `Date.now`) */
   readonly now?: () => number;
+  /** 등록이 저장된 뒤(저장소를 닫은 뒤) 부른다. 제안 알림(M1-36, ADR-076). 던지지 않아야 한다 */
+  readonly onChanged?: ProposalChangeListener;
 }
 
 /**
@@ -331,10 +334,12 @@ export interface ProposalServiceDeps {
 export class ProposalService {
   readonly #biveHome: string;
   readonly #clock: ProposalClock;
+  readonly #onChanged: ProposalChangeListener | undefined;
 
-  constructor({ biveHome, now = Date.now }: ProposalServiceDeps) {
+  constructor({ biveHome, now = Date.now, onChanged }: ProposalServiceDeps) {
     this.#biveHome = biveHome;
     this.#clock = { now, newId: createUlidGenerator(now) };
+    this.#onChanged = onChanged;
   }
 
   /**
@@ -345,8 +350,11 @@ export class ProposalService {
    * @throws {ConflictError} 규칙 신규의 부모 요구사항이 삭제됨
    */
   submit(projectId: string, input: ProposalSubmitInput): Proposal {
-    return withRegisteredProjectStore(this.#biveHome, projectId, (store) =>
+    const proposal = withRegisteredProjectStore(this.#biveHome, projectId, (store) =>
       submitProposal(store, input, this.#clock),
     );
+    // 저장소를 닫은 뒤에 알린다 (열림 구간은 동기, ADR-069)
+    this.#onChanged?.(projectId, proposal);
+    return proposal;
   }
 }

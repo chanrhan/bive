@@ -2,8 +2,10 @@
 // - 이 처리기는 토큰 인증된 파이프 연결에서만 불린다. 인증 전 연결의 요청은 파이프 서버가 -32020으로 거부한다
 // - 승인 · 거절은 사람 주체만 받는다(에이전트 주체 -32020). 제안 등록은 RPC가 없다(`ProposalService.submit`)
 // - 승인된 규칙 · 계약을 직접 고치는 RPC는 없다 (NRM-04: 변경은 지시 → 제안 → 승인)
-import { createUlidGenerator, ErrorCode, ProposalKind } from '@bive/shared';
+// - 처리가 저장되면(저장소를 닫은 뒤) `event.proposal.changed`를 보낸다(M1-36, ADR-076). 기다리지 않는다
+import { createUlidGenerator, ErrorCode, type Proposal, ProposalKind } from '@bive/shared';
 
+import type { ProposalChangeListener } from '../events/proposal-events.js';
 import {
   approveProposal,
   type DecisionContext,
@@ -21,6 +23,8 @@ export interface ProposalHandlerDeps {
   now: () => number;
   /** 승인 뒤 승인 대기 실행을 다시 판정할 실행 엔진 (M1-14) */
   engine?: Pick<RunEngineHooks, 'onNormsApproved'>;
+  /** 처리(승인 · 수정 후 승인 · 거절)가 저장된 뒤(저장소를 닫은 뒤) 부른다. 제안 알림(M1-36, ADR-076) */
+  onProposalChanged?: ProposalChangeListener;
 }
 
 type ProposalMethods = Pick<
@@ -44,8 +48,14 @@ export const createProposalHandlers = ({
   biveHome,
   now,
   engine,
+  onProposalChanged,
 }: ProposalHandlerDeps): ProposalMethods => {
   const clock: ProposalClock = { now, newId: createUlidGenerator(now) };
+  // 저장소를 닫은 뒤 처리 결과를 알린다 (열림 구간은 동기, ADR-069). 알림은 읽기 신호일 뿐이다
+  const decided = <R extends { proposal: Proposal }>(projectId: string, result: R): R => {
+    onProposalChanged?.(projectId, result.proposal);
+    return result;
+  };
 
   return {
     'proposal.list': ({ projectId, state, kind }) =>
@@ -76,6 +86,7 @@ export const createProposalHandlers = ({
       const approved = withProjectStore(biveHome, projectId, (store) =>
         approveProposal(store, { id, author, edited }, decisionContext(context), clock),
       );
+      decided(projectId, approved);
       engine?.onNormsApproved(projectId);
       return approved;
     },
@@ -83,12 +94,16 @@ export const createProposalHandlers = ({
       const approved = withProjectStore(biveHome, projectId, (store) =>
         approveProposal(store, { id, author, edited }, decisionContext(context), clock),
       );
+      decided(projectId, approved);
       engine?.onNormsApproved(projectId);
       return approved;
     },
     'proposal.reject': ({ projectId, id, author, reason }, context) =>
-      withProjectStore(biveHome, projectId, (store) =>
-        rejectProposal(store, { id, author, reason }, decisionContext(context), clock),
+      decided(
+        projectId,
+        withProjectStore(biveHome, projectId, (store) =>
+          rejectProposal(store, { id, author, reason }, decisionContext(context), clock),
+        ),
       ),
     'approvalLog.list': ({ projectId, targetRef }) =>
       withProjectStore(biveHome, projectId, (store) => {

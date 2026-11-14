@@ -1,4 +1,5 @@
 // 인증된 연결이 부를 수 있는 메서드 처리기. 메서드는 각 이슈에서 여기에 더한다.
+import type { ProposalChangeListener } from '../events/proposal-events.js';
 import type { RuleWriterLauncher } from '../rule-writer/rule-writer-service.js';
 import type { RunEngineHooks } from './run-handlers.js';
 import { createProjectHandlers } from './project-handlers.js';
@@ -31,6 +32,8 @@ export interface HandlerDeps {
   ruleWriter?: RuleWriterLauncher;
   /** 실행 엔진 (M1-14): 실행 생성 · 규칙 승인 뒤 승인 단계 판정, `run.resume`. 생략하면 실행이 진행되지 않는다 */
   engine?: RunEngineHooks;
+  /** 제안 처리가 저장된 뒤 부른다 (제안 알림 `event.proposal.changed`, M1-36, ADR-076). 생략하면 알리지 않는다 */
+  onProposalChanged?: ProposalChangeListener;
 }
 
 export const createHandlers = ({
@@ -40,6 +43,7 @@ export const createHandlers = ({
   now = Date.now,
   ruleWriter,
   engine,
+  onProposalChanged,
 }: HandlerDeps): MethodHandlers => ({
   ping: () => ({ pong: true, version: orchestratorVersion }),
   'system.status': () => ({
@@ -56,7 +60,12 @@ export const createHandlers = ({
     ...(ruleWriter === undefined ? {} : { ruleWriter }),
   }),
   ...createRuleHandlers({ biveHome }),
-  ...createProposalHandlers({ biveHome, now, ...(engine === undefined ? {} : { engine }) }),
+  ...createProposalHandlers({
+    biveHome,
+    now,
+    ...(engine === undefined ? {} : { engine }),
+    ...(onProposalChanged === undefined ? {} : { onProposalChanged }),
+  }),
   ...createSettingsHandlers({ biveHome, now }),
   ...createRunHandlers({ biveHome, now, ...(engine === undefined ? {} : { engine }) }),
   ...createVerificationHandlers({ biveHome }),
