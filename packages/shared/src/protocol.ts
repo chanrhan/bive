@@ -590,9 +590,11 @@ export type RunResumeParams = z.infer<typeof RunResumeParams>;
 export const TOOL_CALL_LIST_LIMIT = 500;
 
 /**
- * `toolCall.list` 항목의 도구 이름 · 경로 길이 상한 (UTF-16 코드 단위, M2-06, ADR-089). 값은 보이지 않거나 줄 · 표시 방향을
- * 바꾸는 글자(제어 문자 · 줄 구분 · 양방향 제어 · 짝 없는 서로게이트)를 `\n` · `\uXXXX` 표기로, 역슬래시를 `\\`로 바꾼
- * 표시용 문자열이고, 바꾼 결과가 상한을 넘으면 잘라 끝에 `…`를 붙인다(`nameTruncated` · `pathTruncated`가 `true`).
+ * `toolCall.list` 항목의 도구 이름 · 경로 길이 상한 (UTF-16 코드 단위, M2-06, ADR-089). 값은 제어 문자(Cc) · 서식 문자(Cf:
+ * 양방향 제어 · 영폭 문자 · 태그 문자 등) · 줄 · 문단 구분(Zl · Zp) · 짝 없는 서로게이트 · 한글 채움 문자를 `\n` · `\uXXXX`
+ * 표기로(BMP 밖은 서로게이트 쌍 두 표기), 역슬래시를 `\\`로 바꾼 표시용 문자열이다. 변형 선택자 · 결합 문자는 그대로다.
+ * 바꾼 결과가 상한을 넘으면 도구 이름은 앞을 남기고 끝에 `…`, 경로는 앞 1/3과 뒤 2/3를 남기고 가운데에 `…`를 넣는다
+ * (`nameTruncated` · `pathTruncated`가 `true`).
  */
 export const TOOL_CALL_NAME_DISPLAY_MAX = 128;
 export const TOOL_CALL_PATH_DISPLAY_MAX = 1024;

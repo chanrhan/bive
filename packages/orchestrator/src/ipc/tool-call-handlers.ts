@@ -76,7 +76,8 @@ export const createToolCallHandlers = ({ biveHome }: ToolCallHandlerDeps): ToolC
       const calls = rows.slice(0, TOOL_CALL_LIST_LIMIT).map((call): ToolCallEntry => {
         const name = displayText(call.name, TOOL_CALL_NAME_DISPLAY_MAX);
         const rawPath = pathOf(call);
-        const shown = rawPath === null ? null : displayText(rawPath, TOOL_CALL_PATH_DISPLAY_MAX);
+        const shown =
+          rawPath === null ? null : displayText(rawPath, TOOL_CALL_PATH_DISPLAY_MAX, 'ends');
         return {
           sessionId: call.sessionId,
           seq: call.seq,

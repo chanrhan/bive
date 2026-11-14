@@ -709,7 +709,11 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
         return result.calls.map((c) => [c.name, c.nameTruncated, c.path, c.pathTruncated]);
       };
 
-      it('경로: 상한 바로 아래 · 정확히 상한은 그대로, 넘으면 상한 길이로 잘라 …와 pathTruncated', async () => {
+      /** 경로 표시 값의 앞 · 뒤 몫: 남길 몫(상한 - 1)의 1/3과 나머지 (ADR-089) */
+      const HEAD = Math.floor((PATH_MAX - 1) / 3);
+      const TAIL = PATH_MAX - 1 - HEAD;
+
+      it('경로: 상한 바로 아래 · 정확히 상한은 그대로, 넘으면 앞 · 뒤를 남기고 가운데를 …로 줄여 pathTruncated', async () => {
         const below = `src/${'a'.repeat(PATH_MAX - 5)}`;
         const exact = `src/${'b'.repeat(PATH_MAX - 4)}`;
         const over = `src/${'c'.repeat(6000)}`;
@@ -723,50 +727,79 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
         expect(shown).toEqual([
           ['read_file', false, below, false],
           ['read_file', false, exact, false],
-          ['write_file', false, `${over.slice(0, PATH_MAX - 1)}…`, true],
+          ['write_file', false, `${over.slice(0, HEAD)}…${over.slice(-TAIL)}`, true],
           // 정상 길이의 경로는 글자까지 그대로다 (roadmap 2.1 흐름 12번)
           ['write_file', false, '/tmp/bh/projects/forbidden-write.txt', false],
         ]);
       });
 
-      it('경로: 제어 문자 · 줄 구분 · 양방향 제어를 표기로 바꾸고 역슬래시를 \\\\로 적는다', async () => {
+      it('경로: `./`를 2030번 반복한 4069자 경로도 조회 값의 끝에 실제 대상 src/ok.ts가 보인다', async () => {
+        const padded = `${'./'.repeat(2030)}src/ok.ts`;
+        expect(padded).toHaveLength(4069);
+        const shown = await listShown([['write_file', padded]]);
+        const [[name, nameTruncated, path, pathTruncated]] = shown as [
+          [string, boolean, string, boolean],
+        ];
+        expect([name, nameTruncated, pathTruncated]).toEqual(['write_file', false, true]);
+        expect(path).toHaveLength(PATH_MAX);
+        expect(path.endsWith('/./src/ok.ts')).toBe(true);
+        expect(path).toBe(`${padded.slice(0, HEAD)}…${padded.slice(-TAIL)}`);
+      });
+
+      it('경로: 제어 · 서식 · 줄 구분 · 양방향 제어 · 한글 채움 문자를 표기로 바꾸고 역슬래시를 \\\\로 적는다', async () => {
         // 짝 없는 서로게이트(\ud800)는 저장소(UTF-8)가 U+FFFD로 바꿔 저장한다: 조회 값은 그 글자다
         const raw =
-          'a\nb\rc\td\u001be\u0000f\u007fg\u0085h\u2028i\u2029j\u202ek\u2066l\u200fm\u061cn\ud800o\\np\\q😀r';
+          'a\nb\rc\td\u001be\u0000f\u007fg\u0085h\u2028i\u2029j\u202ek\u2066l\u200fm\u061cn\ud800o\\np\\q😀r\u200bs\ufefft\u3164u\u00advw';
         const shown = await listShown([['write_file', raw]]);
         expect(shown).toEqual([
           [
             'write_file',
             false,
-            'a\\nb\\rc\\td\\u001be\\u0000f\\u007fg\\u0085h\\u2028i\\u2029j\\u202ek\\u2066l\\u200fm\\u061cn\ufffdo\\\\np\\\\q😀r',
+            'a\\nb\\rc\\td\\u001be\\u0000f\\u007fg\\u0085h\\u2028i\\u2029j\\u202ek\\u2066l\\u200fm\\u061cn�o\\\\np\\\\q😀r\\u200bs\\ufefft\\u3164u\\u00advw',
             false,
           ],
         ]);
-        // 응답에는 제어 문자 · 줄 구분 · 양방향 제어 글자가 남지 않는다
-        const path = String(shown[0]?.[2]);
-        expect(path).not.toMatch(
-          // eslint-disable-next-line no-control-regex
-          /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/,
-        );
+        // 응답에는 제어 · 서식 · 줄 구분 글자가 남지 않는다
+        expect(String(shown[0]?.[2])).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
       });
 
-      it('경로: 이스케이프로 늘어난 길이로 상한을 재고, 표기 · 서로게이트 쌍 중간에서 자르지 않는다', async () => {
-        // 줄바꿈 하나가 `\n` 두 글자가 되어 원래 길이(정확히 상한)가 상한을 넘는다
-        const grown = `${'a'.repeat(PATH_MAX - 1)}\n`;
-        // `\u001b`(6글자)가 상한에 걸친다: 표기 전체를 빼고 자른다
-        const esc = `${'b'.repeat(PATH_MAX - 4)}\u001b`;
-        // 서로게이트 쌍(2 코드 단위)이 상한에 걸친다: 쌍 전체를 빼고 자른다
-        const pair = `${'c'.repeat(PATH_MAX - 2)}😀😀`;
+      it('경로: 태그 문자를 붙여 src/a.ts와 똑같아 보이게 만든 경로가 조회 값에서 구분된다', async () => {
         const shown = await listShown([
-          ['read_file', grown],
-          ['read_file', esc],
-          ['read_file', pair],
+          ['write_file', 'src/a.ts'],
+          ['write_file', 'src/a.ts\u{e0061}\u{e0062}'],
         ]);
         expect(shown).toEqual([
-          ['read_file', false, `${'a'.repeat(PATH_MAX - 1)}…`, true],
-          ['read_file', false, `${'b'.repeat(PATH_MAX - 4)}…`, true],
-          ['read_file', false, `${'c'.repeat(PATH_MAX - 2)}…`, true],
+          ['write_file', false, 'src/a.ts', false],
+          ['write_file', false, 'src/a.ts\\udb40\\udc61\\udb40\\udc62', false],
         ]);
+      });
+
+      it('경로: 이스케이프로 늘어난 길이로 상한을 재고, 앞 · 뒤 경계 모두 표기 · 서로게이트 쌍 중간에서 자르지 않는다', async () => {
+        const rows: [string, string][] = [
+          // 줄바꿈 하나가 `\n` 두 글자가 되어 원래 길이(정확히 상한)가 상한을 넘는다
+          [`${'a'.repeat(PATH_MAX - 1)}\n`, `${'a'.repeat(HEAD)}…${'a'.repeat(TAIL - 2)}\\n`],
+          // 앞 경계에 `\u001b`(6글자)가 걸친다: 통째로 빼고 남는 몫은 뒤가 쓴다
+          [
+            `${'h'.repeat(HEAD - 3)}\u001b${'z'.repeat(3000)}`,
+            `${'h'.repeat(HEAD - 3)}…${'z'.repeat(TAIL + 3)}`,
+          ],
+          // 뒤 경계에 `\u001b`가 걸친다
+          [
+            `${'x'.repeat(3000)}\u001b${'y'.repeat(TAIL - 3)}`,
+            `${'x'.repeat(HEAD)}…${'y'.repeat(TAIL - 3)}`,
+          ],
+          // 앞 경계 · 뒤 경계의 서로게이트 쌍(2 코드 단위)
+          [
+            `${'h'.repeat(HEAD - 1)}😀${'z'.repeat(3000)}`,
+            `${'h'.repeat(HEAD - 1)}…${'z'.repeat(TAIL + 1)}`,
+          ],
+          [
+            `${'x'.repeat(3000)}😀${'y'.repeat(TAIL - 1)}`,
+            `${'x'.repeat(HEAD)}…${'y'.repeat(TAIL - 1)}`,
+          ],
+        ];
+        const shown = await listShown(rows.map(([raw]) => ['read_file', raw] as const));
+        expect(shown).toEqual(rows.map(([, expected]) => ['read_file', false, expected, true]));
         for (const [, , path] of shown) expect(String(path).length).toBeLessThanOrEqual(PATH_MAX);
       });
 

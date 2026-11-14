@@ -471,7 +471,7 @@ describe('도구 호출 기록', () => {
     });
   });
 
-  it('저장할 경로 요약 · 도구 이름에도 길이 상한이 있다: 글자는 그대로 두고 잘라 …를 붙인다 (ADR-089)', async () => {
+  it('저장할 경로 요약 · 도구 이름에도 길이 상한이 있다: 글자는 그대로 두고 경로는 가운데, 이름은 끝을 …로 줄인다 (ADR-089)', async () => {
     const tools = createRoleTools({ role: 'implementer', sessionRoot: worktree, biveHome: home });
     const longPath = `src/${'a'.repeat(5000)}\n.ts`;
     await tools.execute('write_file', { path: longPath, content: 'x' });
@@ -480,13 +480,21 @@ describe('도구 호출 기록', () => {
     const shortPath = `src/${'b'.repeat(4092)}`;
     await tools.execute('read_file', { path: shortPath });
 
-    const [write, unknown, read] = tools.records;
-    expect(write?.argsSummary).toBe(`${longPath.slice(0, 4095)}…`);
+    // 경로 인자 상한(4096)을 넘어 거부되는 호출도 저장 요약의 끝에 노린 대상이 남는다
+    const padded = `${'./'.repeat(3000)}src/missing.ts`;
+    await tools.execute('read_file', { path: padded });
+
+    const [write, unknown, read, paddedRead] = tools.records;
+    // 경로는 앞 1/3 · 뒤 2/3 (남길 몫 4095 = 1365 + 2730)
+    expect(write?.argsSummary).toBe(`${longPath.slice(0, 1365)}…${longPath.slice(-2730)}`);
     expect(write?.status).not.toBe('ok');
     expect(unknown).toMatchObject({ name: `${longName.slice(0, 1023)}…`, reason: 'unknown_tool' });
     // 정확히 상한(4096)이면 자르지 않는다
     expect(read?.argsSummary).toBe(shortPath);
     expect(shortPath).toHaveLength(4096);
+    expect(paddedRead).toMatchObject({ status: 'denied', reason: 'invalid_args' });
+    expect(paddedRead?.argsSummary).toHaveLength(4096);
+    expect(paddedRead?.argsSummary.endsWith('/./src/missing.ts')).toBe(true);
   });
 });
 

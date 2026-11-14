@@ -34,7 +34,7 @@ export interface ToolCallRecord {
   sessionId: string | null;
   /** 모델이 요청한 도구 이름 (허용 목록 밖 이름 포함, 1024자 상한 · 넘으면 잘라 `…`, ADR-089) */
   name: string;
-  /** 파일 도구는 경로(4096자 상한), 명령 도구는 argv, 그 밖은 요청 인자 요약 */
+  /** 파일 도구는 경로(4096자 상한, 넘으면 가운데를 `…`로 줄임), 명령 도구는 argv, 그 밖은 요청 인자 요약 */
   argsSummary: string;
   status: ToolResult['status'];
   reason?: string;
@@ -111,12 +111,12 @@ const isFileToolName = (name: string): name is FileToolName =>
  * 호출 기록의 인자 요약. 파일 도구 이름이면 역할 허용 · 인자 검증 · 예외 여부와 상관없이 대상 경로만 남긴다
  * (쓰기 내용이 기록에 섞이지 않게, ADR-083). 경로가 문자열이 아니면 고정 표기(목록 · 검색은 `.`, 그 밖은 빈 값).
  * 인자가 객체가 아니거나(`null` · 배열 · 원시 값) 읽기가 예외를 던져도 예외 없이 요약을 만든다. 경로는 글자를 바꾸지 않고
- * 길이만 제한한다(ADR-089).
+ * 길이만 제한한다(앞 · 뒤를 남기고 가운데를 줄인다. 뒤쪽에 실제 대상 파일 이름이 온다, ADR-089).
  */
 const summaryOf = (name: string, args: unknown): string => {
   if (!isFileToolName(name)) return summarizeArgs(args);
   const target = pathArg(args);
-  if (target !== undefined) return clipText(target, PATH_SUMMARY_MAX);
+  if (target !== undefined) return clipText(target, PATH_SUMMARY_MAX, 'ends');
   return name === 'search_files' || name === 'list_files' ? '.' : '';
 };
 
