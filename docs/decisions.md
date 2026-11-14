@@ -939,3 +939,15 @@
   - 링크 위치: 이 이슈는 규칙 상세 실패 원인의 케이스 위치에만 붙인다(수용 기준 3). 전체 케이스 목록 · 다른 화면(SCR-08 · 11 · 14)은 그 화면 이슈가 같은 `CodeLink`를 쓴다.
   - 모달: 공통 `Modal`을 쓴다. 취소 · Esc · 바깥 클릭 · ×는 모두 "선택 없이 닫음"이고 기록 · 열기가 없다. 사유는 버튼 3개(화면 정의서 순서)라 Tab으로 옮겨 Enter · Space로 고른다.
 - 결과: M2-01. `packages/shared`(`CodeOpenRecord` · `ScreenId` · `CodeFilePath` · `isProjectRelativePath` · `CODE_OPEN_REASON_LABELS` · `CodeOpenTarget` · `codeOpen.record` · `codeOpen.list`), `packages/store`(마이그레이션 0009 · `CodeOpenRepository`), `packages/orchestrator/src/ipc/code-open-handlers.ts`, `packages/app/src/main`(`code-opener.ts` · `ide-url.ts` · `open-external.ts` · `rpc-bridge.ts`의 main 메서드 파라미터 검증), `packages/app/src/renderer/src/components/CodeLink`, 규칙 상세. 시험 `orchestrator/test/code-open.test.ts` · `proposal-guard.test.ts` · `store/test/code-opens.test.ts` · `shared/test/domain.test.ts` · `app/test/code-opener.test.ts` · `code-link-view.test.ts` · `app/e2e/code-link.spec.ts` · `scr-06-rule.spec.ts`. 한계: 링크를 거치지 않은 열람은 집계하지 않는다(PRD가 지표 한계로 명시). 판정 기록의 케이스 경로는 실행 워크트리 기준이라 프로젝트 루트의 현재 파일과 내용 · 줄이 다를 수 있다(병합 전 실패 케이스 등). 열기 성공은 OS가 URL을 넘겨받은 것까지이고 IDE가 실제로 열렸는지는 알 수 없다. 로드맵 2.2 흐름 1번의 `cli rpc codeOpen.list`는 `projectId`가 없으면 `-32602`다(`'{"projectId":"'$PRJ'"}'`를 넣어야 한다). 기각 시: RPC는 `METHODS` 두 줄과 처리기, 열기는 `app.openInIde` 처리기와 `RuleDetail`의 `CaseLocation`만 되돌린다(마이그레이션은 새 번호로 테이블을 지운다).
+
+## ADR-085 로드맵 재발행의 기존 이슈 대조: 행 번호 우선 · 닫힌 이슈 포함 · 닫힌 본문 불변 · 행 대응 검증
+
+- 상태: 제안 (에이전트) · 2026-11-14
+- 맥락: M2-05(#171). `scripts/publish-roadmap.py`는 마일스톤 이슈를 `state=all`로 읽고도 열린 이슈만 "기존"으로 잡아, 재발행하면 닫힌 이슈 50개(M0 · M1)가 같은 제목으로 다시 만들어진다. `docs/roadmap-format.md` 4장은 "같은 제목이 이미 있으면 만들지 않고 번호만 기록"만 말하고, 로드맵 행 `이슈` 열에 이미 적힌 번호 · 같은 제목 여러 개 · 계획 없음으로 닫은 이슈 · 닫힌 이슈 본문 · 검증 기준은 정하지 않았다. 기존 검증은 마일스톤의 `open_issues`와 표 행 수를 비교해, 닫힌 행과 표 밖 이슈(needs-human 등)가 있으면 늘 "차이"였다.
+- 결정:
+  - 행의 `이슈` 열이 `#번호`면 그 번호가 식별자다. 그 이슈가 같은 마일스톤(열림 · 닫힘, PR 제외)에 있으면 제목이 달라도 그것을 쓰고 제목 차이를 출력한다. 없으면 새로 만들지 않고 실패로 보고한다(종료 코드 1, 행 번호는 그대로 둔다).
+  - 행에 번호가 없을 때만 같은 제목 `[Mn] 제목`으로 찾는다. 후보가 여럿이면 열린 것을 먼저, 그 안에서 번호가 가장 작은(먼저 발행된) 것을 쓰고 후보 목록을 출력한다. 계획 없음(`state_reason` `not_planned`)으로 닫힌 이슈도 기존으로 보고 "닫힘, 계획 없음"으로 표시한다.
+  - 닫힌 이슈의 본문은 고치지 않는다. 로드맵 본문 틀과 다르면 "닫힌 이슈 본문 차이"로 출력만 한다. 열린 이슈 본문 갱신은 그대로다.
+  - 검증은 `--dry-run`에서도 돌고, 마일스톤마다 표의 모든 행에 그 마일스톤의 대응 이슈(열림 · 닫힘)가 있는지 본다. 열림 · 닫힘 수와 표 밖 이슈 수는 정보로 출력한다. 요약은 "이슈 생성 N건"(dry-run이면 예정 건수)을 낸다.
+  - `gh()`는 `--dry-run`이면 GET이 아닌 호출을 보내기 전에 예외(`DryRunWriteBlocked`)로 멈춘다.
+- 결과: `scripts/publish-roadmap.py`, 시험 `scripts/test_publish_roadmap.py`(표준 `unittest`, 가짜 `gh` 응답)를 CI `checks`의 한 단계로 돈다(ADR-077의 잡 구조는 그대로). `publish-roadmap` 스킬에 한 줄. 2026-11-14 `main`에 대한 `--dry-run`은 생성 0건. 한계: 본문 비교는 기존대로 글자 그대로라 생성 때 붙은 꼬리말과 사람이 더한 절 때문에 거의 모든 이슈가 "본문 갱신" · "닫힌 이슈 본문 차이"로 나오고, 실제 재발행은 열린 이슈의 사람이 더한 절을 지운다(이 결정 전과 같은 동작). 기각 시: `find_existing` · `refresh_bodies`의 닫힌 이슈 분기 · `verify`만 되돌린다.
