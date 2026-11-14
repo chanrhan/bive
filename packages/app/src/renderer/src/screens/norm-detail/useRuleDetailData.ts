@@ -1,5 +1,5 @@
 // 규칙 상세가 목록 항목 밖에서 더 읽는 값 (SCR-03 상세 · SCR-06, NFR-03: 값은 RPC 결과에서만).
-// - 실행 이력: `rule.judgments` 1회 → 판정 기록(최신부터) + 실행 표시 ID (ADR-073)
+// - 실행 이력: `judgment.list` 1회 → 판정 기록(최신부터) + 실행 표시 ID (ADR-073)
 // - 부모 요구사항: 부모가 있으면 `requirement.get` 1회 → 표시 ID · 문장. 실패하면 보이지 않는다
 // 규칙이 바뀌면 다시 읽고, 늦게 온 이전 응답은 버린다.
 import type { Requirement, RuleJudgmentEntry } from '@bive/shared';
@@ -15,7 +15,7 @@ export const useRuleHistory = (projectId: string, ruleId: string): RuleHistoryLo
 
   useEffect(() => {
     let live = true;
-    window.bive.invoke('rule.judgments', { projectId, id: ruleId }).then(
+    window.bive.invoke('judgment.list', { projectId, ruleId }).then(
       ({ judgments }) => {
         if (live) setLoaded({ ruleId, load: { state: 'ready', entries: judgments } });
       },

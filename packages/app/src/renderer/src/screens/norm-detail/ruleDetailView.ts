@@ -1,6 +1,6 @@
 // 규칙 상세의 표시 규칙 (screens.md SCR-03 상세 · SCR-06 · 1.4 상세 접힘, ADR-073). DOM · React에 의존하지 않는다
 // (test/rule-detail-view.test.ts).
-// - 값은 rule.list 항목(규칙 · 최신 판정) · rule.judgments(판정 이력) · requirement.get(부모)에서만 만든다(NFR-03)
+// - 값은 rule.list 항목(규칙 · 최신 판정) · judgment.list(판정 이력) · requirement.get(부모)에서만 만든다(NFR-03)
 // - 테스트 출력은 기본 접힘, 최신 판정이 실패면 자동 펼침 (1.4)
 // - 실패 원인 = 최신 판정의 통과하지 않은 케이스(실행기 출력: 케이스 이름 · 메시지 · `file:line`)
 import type {

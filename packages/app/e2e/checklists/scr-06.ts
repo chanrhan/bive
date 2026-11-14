@@ -156,7 +156,7 @@ export const RULES: RuleWithJudgment[] = [
   { rule: unjudgedRule, judgment: { status: 'unjudged', latest: null } },
 ];
 
-/** `rule.judgments` 가짜 응답: 규칙 ID → 이력. */
+/** `judgment.list` 가짜 응답: 규칙 ID → 이력. */
 export const HISTORY: Record<string, RuleJudgmentEntry[]> = {
   [passingRule.id]: PASSING_HISTORY,
   [failingRule.id]: FAILING_HISTORY,
@@ -228,7 +228,7 @@ const detail: ElementCheck[] = [
   ...hidden,
 ];
 
-/** 최신 판정의 실행 ID는 실행 이력(`rule.judgments`)에서 찾으므로 이력이 있을 때만 보인다. */
+/** 최신 판정의 실행 ID는 실행 이력(`judgment.list`)에서 찾으므로 이력이 있을 때만 보인다. */
 const latestRun: ElementCheck = {
   label: '결과 실행',
   testId: 'rule-field-result-run',

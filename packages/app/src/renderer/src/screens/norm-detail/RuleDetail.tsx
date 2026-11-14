@@ -3,7 +3,7 @@
 // - 순서: 제목 · ID · 판정 → 진술 · 종류 · 검사 · 부모 요구사항 · 생성 주체 → 테스트 실행 결과 → 테스트 출력(접힘) → 실행 이력
 // - 테스트 출력은 기본 접힘, 최신 판정이 실패면 자동 펼침. 안에 실패 원인(케이스 이름 · `file:line` · 메시지) · 전체 케이스
 // - 변경 이력(P1) · 변이 상태 · 대상 블록 · 위험도 · [실행] · 코드 열기 링크는 해당 이슈 전 미노출 (ADR-035)
-// - 값은 rule.list 항목 · rule.judgments · requirement.get 결과에서만 (NFR-03)
+// - 값은 rule.list 항목 · judgment.list · requirement.get 결과에서만 (NFR-03)
 import './RuleDetail.css';
 
 import type { JudgmentCase, RuleWithJudgment } from '@bive/shared';

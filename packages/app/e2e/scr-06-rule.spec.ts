@@ -2,7 +2,7 @@
 // 1) checklists/scr-06.ts의 규칙 기본 상태(진술, 테스트 실행 결과, 실행 이력)를 통과하고 변경 이력 영역이 미노출
 // 2) 테스트 출력은 기본 접힘이고 최신 판정이 실패면 자동으로 펼쳐짐
 // 3) 실패 원인에 실행기 출력(실패 케이스 이름, 메시지, file:line)이 보임
-// 규칙 화면(SCR-03)에서 카드를 눌러 들어온다. 데이터는 가짜 브리지의 rule.list · rule.judgments · requirement.get 응답뿐이다.
+// 규칙 화면(SCR-03)에서 카드를 눌러 들어온다. 데이터는 가짜 브리지의 rule.list · judgment.list · requirement.get 응답뿐이다.
 import { expect, type Page, test } from '@playwright/test';
 
 import {
@@ -28,7 +28,7 @@ const openRules = async (page: Page, responses: MockResponses = {}): Promise<Biv
       'system.status': { result: STATUS },
       'project.current': { result: { project: PROJECT } },
       'rule.list': { result: { rules: RULES } },
-      'rule.judgments': { result: { judgments: FAILING_HISTORY } },
+      'judgment.list': { result: { judgments: FAILING_HISTORY } },
       'requirement.get': { result: { requirement: PARENT } },
       ...responses,
     },
@@ -46,7 +46,7 @@ const selectRule = async (
   displayId: string,
   ruleId: string,
 ): Promise<void> => {
-  await bive.setResponse('rule.judgments', { result: { judgments: HISTORY[ruleId] ?? [] } });
+  await bive.setResponse('judgment.list', { result: { judgments: HISTORY[ruleId] ?? [] } });
   await page.getByTestId('card').filter({ hasText: displayId }).click();
   await expect(page.getByTestId('rule-detail')).toHaveAttribute('data-selected-id', ruleId);
 };
@@ -71,7 +71,7 @@ test.describe('체크리스트 (수용 기준 1)', () => {
 
   test('로딩: 실행 이력 자리만 비우고 나머지 상세는 보인다', async ({ page }) => {
     const bive = await openRules(page);
-    await bive.setResponse('rule.judgments', { pending: true });
+    await bive.setResponse('judgment.list', { pending: true });
     await page.getByTestId('card').filter({ hasText: 'RULE-002' }).click();
     await expectScreen(page, 'SCR-06', '로딩');
     await expect(page.getByTestId('rule-history-loading')).toHaveText('');
@@ -81,23 +81,23 @@ test.describe('체크리스트 (수용 기준 1)', () => {
     page,
   }) => {
     const bive = await openRules(page);
-    await bive.setResponse('rule.judgments', {
+    await bive.setResponse('judgment.list', {
       error: { code: -32603, message: '내부 오류' },
     });
     await page.getByTestId('card').filter({ hasText: 'RULE-002' }).click();
     await expectScreen(page, 'SCR-06', '에러');
   });
 
-  test('SCR-03에서 카드를 누르면 그 규칙으로 rule.judgments · requirement.get을 부른다', async ({
+  test('SCR-03에서 카드를 누르면 그 규칙으로 judgment.list · requirement.get을 부른다', async ({
     page,
   }) => {
     const bive = await openRules(page);
     await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
     await expect(page.getByTestId('history-row')).toHaveCount(FAILING_HISTORY.length);
-    const history = await callsOf(bive, 'rule.judgments');
+    const history = await callsOf(bive, 'judgment.list');
     expect(history.length).toBeGreaterThan(0);
     for (const call of history) {
-      expect(call.params).toEqual({ projectId: PROJECT.id, id: FAILING_RULE.id });
+      expect(call.params).toEqual({ projectId: PROJECT.id, ruleId: FAILING_RULE.id });
     }
     const parent = await callsOf(bive, 'requirement.get');
     expect(parent.length).toBeGreaterThan(0);
