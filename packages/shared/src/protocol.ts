@@ -7,6 +7,7 @@ import {
   ApprovalLogBreakReason,
   ApprovalLogEntry,
   Author,
+  CommitSha,
   EntityRef,
   JudgmentResult,
   MissingSettingPath,
@@ -20,8 +21,17 @@ import {
   RunLimits,
   Settings,
   Step,
+  UsdOrNull,
 } from './domain.js';
-import { AgentRole, JudgmentStatus, ProposalKind, ProposalState, RunStatus } from './enums.js';
+import {
+  AgentRole,
+  JudgmentStatus,
+  ProposalKind,
+  ProposalState,
+  RunStatus,
+  StepKind,
+  StepStatus,
+} from './enums.js';
 import { displayIdSchema, Ulid } from './id.js';
 import { RunUsage } from './usage.js';
 
@@ -545,6 +555,81 @@ export type RunListResult = z.infer<typeof RunListResult>;
 export const RunResumeParams = z.strictObject({ projectId: Ulid, id: RunRef, author: Author });
 export type RunResumeParams = z.infer<typeof RunResumeParams>;
 
+// ── 검증 (JDG-03, COST-02, SCR-05, M1-18, ADR-072) ───────────
+// - 화면 하나(검증)가 한 번에 읽는 값을 저장소 한 번 열기로 모은다. 값은 규칙 · 판정 기록 · 실행 · 세션 기록에서만 만든다(NFR-03)
+// - 판정 기준 = 가장 최근에 병합된 실행의 기준 브랜치 · 병합 커밋. 병합된 실행이 없으면 `null`
+// - 준수 = 판정 가능(분모) 규칙 중 최신 판정이 통과인 수 / 분모 수. 분모 = 승인된(잠정 승인 제외) 규칙 중 최신 판정이
+//   격리가 아닌 것 (규칙 화면의 `준수 집계: 판정 가능`과 같은 기준, JDG-03 · ADR-060)
+// - 실행당 비용 = 끝난 실행 중 세션 비용을 모두 아는 실행의 비용 평균. 그런 실행이 없으면 `null` ('없음', COST-02)
+// - 규칙 목록의 실행 링크 = 최신 판정의 실행과 그 실행의 비용 합계 · 턴(값 없으면 `null`)
+// - 파이프라인 = 가장 최근에 만든 실행의 단계 순서(유형의 단계 계획)와 단계별 마지막 시도 상태. 실행이 없으면 `null`
+
+/** 판정 기준: 병합된 실행이 병합한 기준 브랜치와 병합 커밋. */
+export const VerificationBasis = z.strictObject({
+  branch: z.string().min(1),
+  commit: CommitSha,
+  runId: Ulid,
+});
+export type VerificationBasis = z.infer<typeof VerificationBasis>;
+
+/** 실행 링크: 실행 표시 ID와 비용 합계 · 턴 (ADR-067 `usage.run`, 값 없으면 `null`). */
+export const VerificationRunLink = z.strictObject({
+  id: Ulid,
+  displayId: displayIdSchema('EXE'),
+  costUsd: UsdOrNull,
+  turns: z.int().nonnegative().nullable(),
+});
+export type VerificationRunLink = z.infer<typeof VerificationRunLink>;
+
+/** 규칙 목록의 한 줄: 규칙 · 최신 판정 · 최신 판정의 실행 링크(실행 밖 판정 · 판정 없음이면 `null`). */
+export const VerificationRuleRow = z.strictObject({
+  rule: Rule,
+  judgment: RuleJudgment,
+  run: VerificationRunLink.nullable(),
+});
+export type VerificationRuleRow = z.infer<typeof VerificationRuleRow>;
+
+/** 파이프라인 단계 하나: 단계 계획의 단계와 그 단계의 마지막 시도 상태 (시도가 없으면 `pending`). */
+export const VerificationStage = z.strictObject({
+  kind: StepKind,
+  status: StepStatus,
+  attempt: z.int().nonnegative(),
+});
+export type VerificationStage = z.infer<typeof VerificationStage>;
+
+/** 파이프라인: 최근 실행과 단계 계획 순서의 단계 (현재 단계는 `run.currentStep`). */
+export const VerificationPipeline = z.strictObject({
+  run: Run,
+  stages: z.array(VerificationStage).min(1),
+});
+export type VerificationPipeline = z.infer<typeof VerificationPipeline>;
+
+export const VerificationSummaryParams = z.strictObject({ projectId: Ulid });
+export type VerificationSummaryParams = z.infer<typeof VerificationSummaryParams>;
+
+export const VerificationSummaryResult = z
+  .strictObject({
+    basis: VerificationBasis.nullable(),
+    compliance: z.strictObject({
+      passed: z.int().nonnegative(),
+      judgeable: z.int().nonnegative(),
+    }),
+    /** 분모 목록: 판정 가능 규칙 ID (표시 ID 순) */
+    denominator: z.array(Ulid),
+    costPerRunUsd: UsdOrNull,
+    rules: z.array(VerificationRuleRow),
+    pipeline: VerificationPipeline.nullable(),
+  })
+  .refine(({ compliance }) => compliance.passed <= compliance.judgeable, {
+    message: '통과 수가 판정 가능 수보다 큽니다',
+    path: ['compliance'],
+  })
+  .refine(({ compliance, denominator }) => compliance.judgeable === denominator.length, {
+    message: '판정 가능 수가 분모 목록과 다릅니다',
+    path: ['denominator'],
+  });
+export type VerificationSummaryResult = z.infer<typeof VerificationSummaryResult>;
+
 /**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
@@ -578,6 +663,10 @@ export const METHODS = {
   'run.get': { params: RunGetParams, result: RunGetResult },
   'run.list': { params: RunListParams, result: RunListResult },
   'run.resume': { params: RunResumeParams, result: RunDetailResult },
+  'verification.summary': {
+    params: VerificationSummaryParams,
+    result: VerificationSummaryResult,
+  },
 } as const satisfies Record<string, MethodSpec>;
 
 export type MethodName = keyof typeof METHODS;

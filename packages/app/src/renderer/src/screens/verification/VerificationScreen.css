@@ -1,0 +1,218 @@
+/* 검증 화면 (SCR-05): 머리줄 · 지표 카드 · 파이프라인 · 규칙 목록. 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.verification-screen {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.verification-loading {
+  flex: 1;
+}
+
+.verification-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.verification-basis {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2);
+}
+
+.verification-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.metric-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 160px;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+}
+
+button.metric-card {
+  cursor: pointer;
+}
+
+button.metric-card:hover {
+  background: var(--color-surface-raised);
+}
+
+button.metric-card:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.metric-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+}
+
+.metric-value {
+  font-size: var(--font-size-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.verification-heading {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+  font-weight: 600;
+}
+
+.verification-pipeline,
+.verification-rules {
+  display: flex;
+  flex-direction: column;
+}
+
+.pipeline-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  font-size: var(--font-size-2);
+}
+
+.pipeline-run {
+  font-family: var(--font-mono);
+}
+
+.pipeline-run-status {
+  color: var(--color-text-muted);
+}
+
+.pipeline-run-status[data-status='failed'],
+.pipeline-run-status[data-status='budget_exceeded'] {
+  color: var(--color-danger);
+}
+
+.pipeline-run-status[data-status='interrupted'] {
+  color: var(--color-warning);
+}
+
+.pipeline-resume {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--color-accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.pipeline-resume:disabled {
+  opacity: var(--opacity-dimmed);
+  cursor: default;
+}
+
+.pipeline-resume-error {
+  color: var(--color-danger);
+}
+
+.pipeline-stepper {
+  display: flex;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pipeline-stage {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: var(--stepper-cell-min);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  text-align: center;
+}
+
+.pipeline-label {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--stepper-label-lines);
+}
+
+.pipeline-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--color-pending);
+}
+
+.pipeline-stage[data-status='passed'] .pipeline-dot {
+  background: var(--color-success);
+}
+
+.pipeline-stage[data-status='failed'] .pipeline-dot {
+  background: var(--color-danger);
+}
+
+.pipeline-stage[data-status='skipped'] {
+  opacity: var(--opacity-dimmed);
+}
+
+.pipeline-stage[aria-current='step'] {
+  color: var(--color-text);
+}
+
+.pipeline-stage[aria-current='step'] .pipeline-dot {
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+
+.verification-rule-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verification-rule {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--font-size-2);
+}
+
+.verification-rule-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verification-rule-id {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+}
+
+.run-link {
+  display: inline-flex;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
