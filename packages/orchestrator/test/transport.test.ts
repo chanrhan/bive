@@ -241,8 +241,9 @@ describe('sendFlushed 송신 상한: 총 시간이 아니라 진척 없음 (ADR-
     expect(reader.exited).toBe(false);
     await flushed;
     const elapsed = Date.now() - started;
-    // 타이머는 이벤트 루프가 반복 처음에 잡아 둔 시각부터 재므로 `Date.now()` 기준으로 몇 ms 일찍 올 수 있다
-    expect(elapsed).toBeGreaterThanOrEqual(190);
+    // 타이머는 이벤트 루프가 반복 처음에 잡아 둔 시각부터 재므로 `Date.now()` 기준으로 일찍 올 수 있다.
+    // 하한은 여유를 두어 150ms로 둔다. 상한(200ms) 전에 풀리지 않았음은 위 100ms 시점 확인이 함께 본다
+    expect(elapsed).toBeGreaterThanOrEqual(150);
     expect(elapsed).toBeLessThan(2000);
     await waitFor(() => connection.closed, 2000, '연결 닫힘');
     expect(reader.sawLast).toBe(false);

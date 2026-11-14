@@ -68,9 +68,9 @@ describe('forbidden-write: 금지 경로 쓰기는 거부 · 기록되고 인수
     const calls = readStore(e, (store) => store.sessions.toolCalls(done.run.id));
     const denied = calls.filter((call) => call.status === 'denied');
     expect(denied).toHaveLength(2);
-    expect(denied.map((call) => [call.role, call.name])).toEqual([
-      ['implementer', 'write_file'],
-      ['implementer', 'write_file'],
+    expect(denied.map((call) => [call.role, call.name, call.reason])).toEqual([
+      ['implementer', 'write_file', 'path_denied'],
+      ['implementer', 'write_file', 'path_denied'],
     ]);
     expect(denied[0]?.argsSummary).toContain(planted);
     expect(denied[1]?.argsSummary).toContain(acceptanceFile);

@@ -34,7 +34,7 @@ pnpm 워크스페이스 · TypeScript strict · ESM. 패키지 5개(`packages/sh
 <!-- KICKOFF -->
 ## 5. 완료 조건 명령 (이 VM에서 실제로 실행해 확인한 것만 적는다)
 
-구현 PR은 아래를 모두 통과해야 한다(화면을 고치지 않았으면 e2e · 스모크 제외). 단위 테스트를 뺀 7개는 2026-11-13 `main`(`224e914`)에서 순서대로 실행해 종료 코드 0을 확인했다. 단위 테스트는 같은 날 이 VM에서 다시 돌리지 못했고(이유는 `dev-env` 스킬), 같은 커밋의 CI(`ci`) 성공으로 확인했다. 실측 시간 · 테스트 개수는 금방 낡으므로 적지 않는다.
+구현 PR은 아래를 모두 통과해야 한다(화면을 고치지 않았으면 e2e · 스모크 제외, 파이프라인 e2e는 그 행의 조건일 때). 9개 모두 2026-11-14 `main`(`2074c67`)에서 순서대로 실행해 종료 코드 0을 확인했다(단위 테스트 · 파이프라인 e2e는 `TMPDIR` 격리, 파이프라인 e2e는 픽스처 설치 뒤). 실측 시간 · 테스트 개수는 금방 낡으므로 적지 않는다.
 
 | 작업 | 명령 |
 |---|---|
@@ -46,7 +46,9 @@ pnpm 워크스페이스 · TypeScript strict · ESM. 패키지 5개(`packages/sh
 | 형식 검사 | `pnpm format:check` (`*.md` · `docs/` · `scripts/` · `fixtures/`는 대상 아님) |
 | 화면 e2e (헤드리스) | `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome pnpm e2e` |
 | Electron 스모크 | `xvfb-run -a pnpm smoke` |
+| 파이프라인 e2e | `pnpm e2e:pipeline` (오케스트레이터의 엔진 · 판정 · IPC를 고쳤을 때. 픽스처 설치 `pnpm -C fixtures/sample-next-app install --frozen-lockfile`가 먼저 필요) |
 
+- CI는 세 검사다: `checks`(린트 · 타입 · 단위 · 빌드 · 형식 · 픽스처 · 화면 e2e) · `pipeline-e2e`(파이프라인 e2e, 모든 PR에서 늘 돈다) · 둘을 모으는 `ci`. 완료 판단은 `ci` 성공이다 (ADR-077).
 - GitHub 호출은 `scripts/gh-rest.sh <METHOD> <경로>`(= `gh api`)로 한다. `git push`는 그대로 동작한다.
 - 이 VM에는 `ANTHROPIC_API_KEY`가 없어 실제 에이전트 SDK를 부를 수 없다. 테스트는 가짜 에이전트 어댑터로 한다 (ADR-016).
 - 앱 · 오케스트레이터 기동, 픽스처, 환경 변수, VM 제약, 자주 겪는 오류(브라우저 경로 · Electron 샌드박스 · 소켓 경로 길이 · 포트 충돌 · 커밋 서명)는 `dev-env` 스킬에 있다.

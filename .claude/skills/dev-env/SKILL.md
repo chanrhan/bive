@@ -5,7 +5,7 @@ description: 이 VM에서 화면 e2e · Electron 스모크 · 앱이나 오케�
 
 # dev-env
 
-CLAUDE.md 5장의 완료 조건 명령 8개로 부족할 때 읽는다. 여기 적는 것은 이 VM에서 실제로 실행해 확인한 것만이다. 환경 변수 전체 목록과 각 명령이 하는 일은 README 5~7장에 있다.
+CLAUDE.md 5장의 완료 조건 명령 9개로 부족할 때 읽는다. 여기 적는 것은 이 VM에서 실제로 실행해 확인한 것만이다. 환경 변수 전체 목록과 각 명령이 하는 일은 README 5~7장에 있다.
 
 ## 이 VM
 
@@ -23,7 +23,7 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 
 ## 명령
 
-2026-11-13 `main`(`224e914`)에서 실행해 확인했다(`--open` 포함).
+2026-11-14 `main`(`2074c67`)에서 아래 표의 명령을 모두 실행해 기대 결과를 확인했다(`--open`은 README 6장 "M1 완료 기준 흐름 준비" 블록으로 띄워 원격 디버깅 포트로 요구사항 화면을 확인, 파이프라인 e2e 한 파일은 `forbidden-write.test.ts`).
 
 | 작업 | 명령 | 기대 결과 |
 |---|---|---|
@@ -35,6 +35,7 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 | 픽스처 테스트 | `pnpm -C fixtures/sample-next-app test` | 임시 SQLite 마이그레이션 → `next build` → `next start` → HTTP 확인 |
 | 픽스처 초기화 | `scripts/reset-fixture.sh $(mktemp -d)/fx --verify` | 복사 → 설치 → git 커밋 → 테스트 통과 |
 | 초기화 스크립트 검사 | `scripts/test-reset-fixture.sh` | 지우면 안 되는 경로를 거부하는지 검사 |
+| 파이프라인 e2e 한 파일 | `packages/orchestrator`에서 `pnpm exec vitest run --config vitest.pipeline.config.ts e2e/pipeline/<파일>` | 그 시험 하나만 통과. 픽스처 설치가 먼저 필요하다. 파일마다 실제 설치 · `next build`를 해서 한 파일에 1분 남짓, 전체(`pnpm e2e:pipeline`)는 10분을 넘는다 |
 | GitHub REST | `scripts/gh-rest.sh GET repos/chanrhan/bive/milestones` | 마일스톤 목록 JSON |
 
 오케스트레이터의 개발 기동은 `packages/orchestrator`에서 `node --conditions=@bive/source --import tsx src/cli.ts`이고 `pnpm --filter @bive/orchestrator start`와 같다. 앱은 개발 중 같은 명령으로 분리 프로세스를 띄운다 (ADR-042).
@@ -48,4 +49,6 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 - **오케스트레이터가 "소켓 경로가 너무 김"으로 기동하지 않는다**: Unix 소켓 경로는 Linux 107바이트, macOS 103바이트까지다. `BIVE_HOME`을 `mktemp -d /tmp/bh.XXXX`처럼 짧은 경로로 준다. worktree 안에 임시 폴더를 만들면 걸리기 쉽다.
 - **`pnpm e2e`의 Vite 서버가 뜨지 않는다** (`--strictPort`): e2e의 Vite 서버는 매번 새로 뜨고 포트가 차 있으면 실패한다 (ADR-043). 기본 포트는 worktree 경로 해시로 정해져(5179 + hash % 500) 보통 겹치지 않는다. 겹치면 `BIVE_E2E_PORT`로 다른 포트를 준다 (ADR-046).
 - **테스트의 `git commit`이 "failed to write commit object"로 실패한다** (출력에 `code-sign` · `failed to call MCP server`): 로컬 서명 서버가 응답하지 않는 것이다. 컨테이너 재시작 직후에 생긴다. 제품 결함이 아니므로 잠시 뒤 같은 테스트를 다시 실행해 확인한다. `worktree-reset.test.ts` · `test-writer.test.ts`처럼 테스트 보조의 사용자 git으로 커밋하는 시험에서 난다.
+- **PR을 만들었는데 CI 검사가 생기지 않는다**: PR의 `mergeable_state`가 `dirty`(main과 충돌)면 CI가 아예 생기지 않는다. PR을 만든 직후 `scripts/gh-rest.sh GET repos/chanrhan/bive/pulls/<번호>`로 확인하고, `dirty`면 `git fetch origin main && git merge origin/main`으로 충돌을 풀고 다시 푸시한다.
+- **변조 재현 때 다른 작업 공간까지 바뀐다**: `node_modules`의 파일은 전역 pnpm 저장소에서 하드 링크된 것이라 고치면 저장소 원본과 다른 작업 공간이 함께 바뀐다. 의존성 파일을 고쳐 재현할 때는 별도 `--store-dir`이나 복사 설치(`--package-import-method=copy`)에서 한다. `pnpm store status`가 `esbuild`를 수정됨으로 보고하는 것은 esbuild 설치 스크립트가 자기 파일을 바꾸는 알려진 동작이라 변조가 아니다.
 - **병렬 worktree의 테스트가 서로 간섭한다**: 테스트는 `TMPDIR=$(mktemp -d /tmp/t<이슈>.XXXX) pnpm test`처럼 임시 폴더를 따로 준다. 로그 · PR 본문 같은 임시 파일을 공용 scratchpad에 둘 때는 이슈 번호를 파일 이름에 넣는다. 부하가 높아 프로세스 기동 시험이 시간 초과되면 그 파일만 단독으로 다시 실행해 판단한다 (ADR-064).
