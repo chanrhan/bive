@@ -755,7 +755,7 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
           [
             'write_file',
             false,
-            'a\\nb\\rc\\td\\u001be\\u0000f\\u007fg\\u0085h\\u2028i\\u2029j\\u202ek\\u2066l\\u200fm\\u061cn�o\\\\np\\\\q😀r\\u200bs\\ufefft\\u3164u\\u00advw',
+            'a\\nb\\rc\\td\\u001be\\u0000f\\u007fg\\u0085h\\u2028i\\u2029j\\u202ek\\u2066l\\u200fm\\u061cn\ufffdo\\\\np\\\\q😀r\\u200bs\\ufefft\\u3164u\\u00advw',
             false,
           ],
         ]);
