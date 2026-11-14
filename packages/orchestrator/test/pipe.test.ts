@@ -1,9 +1,9 @@
 // 파이프 서버 실연결: Unix 소켓 · system.hello 토큰 · ping · 오류 코드 (M0-05 수용 기준 1, ADR-027 · ADR-039).
-import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 
-import { ErrorCode, PROTOCOL_VERSION } from '@bive/shared';
+import { createRequest, ErrorCode, PROTOCOL_VERSION } from '@bive/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { createHandlers } from '../src/ipc/handlers.js';
@@ -12,12 +12,15 @@ import { NetPipeTransport } from '../src/ipc/transport.js';
 import { type Orchestrator, startOrchestrator } from '../src/orchestrator.js';
 import { ORCHESTRATOR_VERSION } from '../src/version.js';
 import { connect, RpcCallError, TestClient } from './helpers/client.js';
+import { copyFixture, seedProject } from './helpers/engine-harness.js';
 import { cleanup, makeBiveHome, waitFor } from './helpers/process.js';
 
 const unixOnly = process.platform === 'win32' ? it.skip : it;
 
 const running: Orchestrator[] = [];
 const clients: TestClient[] = [];
+const temps: string[] = [];
+const sockets: net.Socket[] = [];
 
 const start = async (
   options: Partial<Parameters<typeof startOrchestrator>[0]> = {},
@@ -46,9 +49,11 @@ const expectRejected = async (client: TestClient): Promise<unknown> => {
 };
 
 afterEach(async () => {
+  for (const socket of sockets.splice(0)) socket.destroy();
   for (const client of clients.splice(0)) client.destroy();
   for (const orchestrator of running.splice(0)) await orchestrator.stop();
   await cleanup();
+  for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe('Unix 소켓 · 인증 · ping', () => {
@@ -339,6 +344,94 @@ describe('system.status (실제 오케스트레이터)', () => {
       connections: 1,
       runsInProgress: 0,
     });
+  });
+});
+
+/**
+ * 인증한 날 소켓. 받은 응답을 차례대로 `responses`에 모은다(응답 순서 확인용). `TestClient`는 id로 짝지으므로 순서를
+ * 볼 수 없어 따로 둔다.
+ */
+const rawAuthed = async (
+  orchestrator: Orchestrator,
+): Promise<{ socket: net.Socket; responses: { id: unknown; error?: { code: number } }[] }> => {
+  const socket = net.createConnection(orchestrator.paths.pipe);
+  sockets.push(socket);
+  await new Promise<void>((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('error', reject);
+  });
+  socket.on('error', () => undefined);
+  socket.setEncoding('utf8');
+  const responses: { id: unknown; error?: { code: number } }[] = [];
+  let buffered = '';
+  socket.on('data', (chunk: string) => {
+    buffered += chunk;
+    const lines = buffered.split('\n');
+    buffered = lines.pop() ?? '';
+    for (const line of lines) {
+      if (line !== '')
+        responses.push(JSON.parse(line) as { id: unknown; error?: { code: number } });
+    }
+  });
+  socket.write(
+    `${JSON.stringify(
+      createRequest(0, 'system.hello', {
+        protocolVersion: PROTOCOL_VERSION,
+        token: orchestrator.token,
+      }),
+    )}\n`,
+  );
+  await waitFor(() => responses.length === 1, 5_000, 'hello 응답');
+  responses.length = 0;
+  return { socket, responses };
+};
+
+describe('연결 하나의 요청 폭주 (ADR-076 보강)', () => {
+  it('한 연결이 요청 3000건을 몰아 보내도, 처리하는 동안 다른 연결의 system.status 응답이 1초 안에 온다', async () => {
+    const biveHome = makeBiveHome();
+    const seeded = seedProject(biveHome, copyFixture(temps));
+    const orchestrator = await start({ biveHome });
+    const other = await connect(orchestrator.paths.pipe, orchestrator.token);
+    clients.push(other);
+    const flood = await rawAuthed(orchestrator);
+    const lines: string[] = [];
+    for (let id = 1; id <= 3000; id += 1) {
+      lines.push(JSON.stringify(createRequest(id, 'rule.list', { projectId: seeded.project.id })));
+    }
+    flood.socket.write(`${lines.join('\n')}\n`);
+    // 폭주 요청 처리가 시작된 뒤에 잰다
+    await waitFor(() => flood.responses.length > 0, 20_000, '폭주 연결의 첫 응답');
+    const started = Date.now();
+    await expect(other.call('system.status')).resolves.toMatchObject({ connections: 2 });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // 그사이 폭주 연결의 요청은 계속 처리되고, 응답은 보낸 순서 그대로다
+    expect(flood.responses.length).toBeLessThan(3000);
+    const ids = flood.responses.map((response) => response.id);
+    expect(ids).toEqual(ids.map((_, index) => index + 1));
+    expect(flood.responses.every((response) => response.error === undefined)).toBe(true);
+  }, 60_000);
+
+  it('한 조각에 섞여 온 요청 · 해석 실패 · 알림의 응답은 보낸 순서대로 나간다', async () => {
+    const orchestrator = await start();
+    const { socket, responses } = await rawAuthed(orchestrator);
+    socket.write(
+      [
+        JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+        '{"jsonrpc":',
+        JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping', params: { x: 1 } }),
+        JSON.stringify({ jsonrpc: '2.0', method: 'ping' }),
+        JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'nope' }),
+        JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'ping' }),
+      ].join('\n') + '\n',
+    );
+    await waitFor(() => responses.length === 5, 5_000, '응답 5건');
+    expect(responses.map((r) => [r.id, r.error?.code ?? 'ok'])).toEqual([
+      [1, 'ok'],
+      [null, ErrorCode.ParseError],
+      [2, ErrorCode.InvalidParams],
+      [3, ErrorCode.MethodNotFound],
+      [4, 'ok'],
+    ]);
   });
 });
 

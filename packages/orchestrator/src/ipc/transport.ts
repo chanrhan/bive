@@ -87,7 +87,9 @@ export interface FrameConnection {
   /**
    * `send`와 같고, 프레임을 운영체제에 넘겨 쓰기가 끝나면 풀린다 (알림 송신 완료, ADR-076).
    * 닫힌 연결이거나 쓰는 도중 연결이 끊기면 보낼 상대가 없으므로 거부하지 않고 바로 풀린다.
-   * `timeoutMs` 안에 쓰기가 끝나지 않으면(상대가 읽지 않아 버퍼가 참) 그 연결을 끊고 풀린다(끊긴 연결과 같음).
+   * 쓰기가 `timeoutMs` 동안 진척이 없으면(상대가 읽지 않아 버퍼가 참) 그 연결을 끊고 풀린다(끊긴 연결과 같음).
+   * 진척 = 이 연결의 쓰기 하나가 끝나거나 진행 중인 쓰기의 일부가 운영체제에 넘어감. 총 시간이 아니므로 느려도 계속
+   * 읽는 상대는 끊지 않는다. 이벤트 루프가 막혀 있던 시간은 진척을 잴 수 없으므로 상한 만료 뒤 I/O를 한 번 처리하고 판단한다.
    */
   sendFlushed(frame: string, timeoutMs: number): Promise<void>;
   /** 보낸 내용을 흘려보낸 뒤 닫는다. */
@@ -112,6 +114,21 @@ export interface PipeTransport {
   connect(path: string): Promise<FrameConnection>;
 }
 
+interface WriteProgress {
+  completedWrites: number;
+  queuedBytes: number | null;
+}
+
+/**
+ * `before` 뒤로 쓰기가 진척됐는지: 쓰기가 하나라도 끝났거나, 진행 중인 쓰기의 남은 바이트가 줄었다.
+ * Node는 쓰기를 한 번에 하나만 libuv에 넘기므로 끝난 쓰기 수가 같으면 같은 쓰기의 남은 양을 비교하는 것이다.
+ */
+const advanced = (before: WriteProgress, after: WriteProgress): boolean =>
+  after.completedWrites !== before.completedWrites ||
+  (before.queuedBytes !== null &&
+    after.queuedBytes !== null &&
+    after.queuedBytes < before.queuedBytes);
+
 class NetFrameConnection implements FrameConnection {
   readonly #socket: net.Socket;
   readonly #framer: LineFramer;
@@ -119,6 +136,11 @@ class NetFrameConnection implements FrameConnection {
   readonly #errorListeners: ((error: FrameErrorKind) => void)[] = [];
   readonly #closeListeners: (() => void)[] = [];
   #closed = false;
+  /** 끝난(쓰기 콜백이 온) 쓰기 수. 송신 진척을 잰다 */
+  #completedWrites = 0;
+  readonly #onWriteDone = (): void => {
+    this.#completedWrites += 1;
+  };
 
   constructor(socket: net.Socket, maxFrameBytes: number) {
     this.#socket = socket;
@@ -147,25 +169,65 @@ class NetFrameConnection implements FrameConnection {
   send(frame: string): void {
     if (frame.includes('\n')) throw new Error('프레임에 개행을 넣을 수 없음');
     if (this.#closed || this.#socket.writableEnded) return;
-    this.#socket.write(`${frame}\n`);
+    this.#socket.write(`${frame}\n`, this.#onWriteDone);
   }
 
   sendFlushed(frame: string, timeoutMs: number): Promise<void> {
     if (frame.includes('\n')) throw new Error('프레임에 개행을 넣을 수 없음');
     if (this.#closed || this.#socket.writableEnded) return Promise.resolve();
     return new Promise((resolve) => {
-      // 읽지 않는 상대: 끊어서 쌓인 쓰기 버퍼를 버린다. 끊긴 연결은 보낼 상대가 없으므로 완료로 본다
-      const timer = setTimeout(() => {
-        this.#socket.destroy();
+      let done = false;
+      let timer: NodeJS.Timeout | null = null;
+      let seen = this.#progress();
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        if (timer !== null) clearTimeout(timer);
         resolve();
-      }, timeoutMs);
-      timer.unref();
+      };
+      const judge = (): void => {
+        if (done) return;
+        const now = this.#progress();
+        if (advanced(seen, now)) {
+          // 상한 동안 쓰기가 진척됐다: 그때부터 다시 잰다
+          seen = now;
+          arm();
+          return;
+        }
+        // 읽지 않는 상대: 끊어서 쌓인 쓰기 버퍼를 버린다. 끊긴 연결은 보낼 상대가 없으므로 완료로 본다
+        this.#socket.destroy();
+        finish();
+      };
+      const arm = (): void => {
+        timer = setTimeout(() => {
+          timer = null;
+          // 이벤트 루프가 막혔다 다시 돌면 libuv는 타이머 단계를 쓰기 가능(poll 단계) 처리보다 먼저 돈다. 막힌 동안
+          // 상대가 읽었다면 그 진척은 이번 반복의 poll 단계에서야 보이므로, 판단은 poll 뒤 check 단계로 미룬다
+          setImmediate(judge);
+        }, timeoutMs);
+        timer.unref();
+      };
+      arm();
       // 쓰기 오류(상대가 끊음)도 콜백으로 온다. 연결이 사라진 것이므로 완료로 본다
       this.#socket.write(`${frame}\n`, () => {
-        clearTimeout(timer);
-        resolve();
+        this.#onWriteDone();
+        finish();
       });
     });
+  }
+
+  /** 지금까지의 송신 진척 표시. {@link advanced}로 비교한다 */
+  #progress(): WriteProgress {
+    // libuv 쓰기 대기열에 남은 바이트(`uv_stream_t.write_queue_size`). 큰 쓰기 1건이 여러 번에 나뉘어 나가는 동안에는
+    // 쓰기 콜백이 오지 않으므로 이 값이 줄어드는 것으로 진척을 본다. Node 문서에 없는 값이라 없으면 콜백 수만 쓴다.
+    // (`bytesWritten`은 Node가 받아 둔 바이트까지 세므로 운영체제에 넘어간 양을 재지 못한다)
+    const handle = (this.#socket as unknown as { _handle?: { writeQueueSize?: unknown } | null })
+      ._handle;
+    const queued = handle?.writeQueueSize;
+    return {
+      completedWrites: this.#completedWrites,
+      queuedBytes: typeof queued === 'number' ? queued : null,
+    };
   }
 
   end(): void {
