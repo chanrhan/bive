@@ -259,6 +259,21 @@ export type RuleGetParams = z.infer<typeof RuleGetParams>;
 export const RuleGetResult = RuleWithJudgment;
 export type RuleGetResult = RuleWithJudgment;
 
+/**
+ * `rule.judgments`: 규칙의 판정 이력(규칙 상세의 실행 이력, M1-28 · ADR-073). 판정 기록 테이블의 기록만
+ * 최신부터 50건까지(같은 시각이면 ID가 큰 것 먼저). 실행 안의 판정이면 그 실행의 표시 ID(`EXE-NNN`)를 함께 싣고,
+ * 실행 밖 판정이면 `null`. 삭제된 규칙도 돌려주고, 없는 규칙 · 제안 ID는 -32004.
+ */
+export const RuleJudgmentsParams = z.strictObject({ projectId: Ulid, id: Ulid });
+export type RuleJudgmentsParams = z.infer<typeof RuleJudgmentsParams>;
+export const RuleJudgmentEntry = z.strictObject({
+  judgment: JudgmentResult,
+  runDisplayId: displayIdSchema('EXE').nullable(),
+});
+export type RuleJudgmentEntry = z.infer<typeof RuleJudgmentEntry>;
+export const RuleJudgmentsResult = z.strictObject({ judgments: z.array(RuleJudgmentEntry) });
+export type RuleJudgmentsResult = z.infer<typeof RuleJudgmentsResult>;
+
 // ── 제안 · 승인 기록 (NRM-04, TODO-01, NFR-01, M1-09, ADR-050) ──
 // - 모든 요청에 `projectId`가 필수다. 등록되지 않은 프로젝트 · 없는 제안은 -32004
 // - 처리 요청(approve · amend · reject)은 주체 `author`를 싣고 사람(`human`)만 받는다. 에이전트 주체는 -32020.
@@ -560,6 +575,7 @@ export const METHODS = {
   'requirement.list': { params: RequirementListParams, result: RequirementListResult },
   'rule.list': { params: RuleListParams, result: RuleListResult },
   'rule.get': { params: RuleGetParams, result: RuleGetResult },
+  'rule.judgments': { params: RuleJudgmentsParams, result: RuleJudgmentsResult },
   'proposal.list': { params: ProposalListParams, result: ProposalListResult },
   'proposal.count': { params: ProposalCountParams, result: ProposalCountResult },
   'proposal.get': { params: ProposalGetParams, result: ProposalResult },

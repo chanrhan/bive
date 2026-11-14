@@ -406,6 +406,37 @@ describe('rule.list · rule.get (M1-11, ADR-060)', () => {
       parseResponse('rule.get', { jsonrpc: '2.0', id: 3, result: { rule, judgment } }),
     ).toMatchObject({ ok: false, error: { code: -32602 } });
   });
+
+  it('rule.judgments (M1-28, ADR-073): { projectId, id } → { judgments: [{ judgment, runDisplayId }] }', () => {
+    expect(isMethodName('rule.judgments')).toBe(true);
+    expect(request('rule.judgments', { projectId: PROJECT, id: RULE }).ok).toBe(true);
+    for (const params of [
+      { projectId: PROJECT },
+      { projectId: PROJECT, id: 'RULE-001' },
+      { projectId: PROJECT, id: RULE, limit: 10 },
+    ]) {
+      const result = request('rule.judgments', params);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe(-32602);
+    }
+    const judgments = [
+      { judgment: judgmentRecord, runDisplayId: 'EXE-001' },
+      { judgment: { ...judgmentRecord, runId: null }, runDisplayId: null },
+    ];
+    const ok = createSuccessResponse(4, 'rule.judgments', { judgments });
+    expect(parseResponse('rule.judgments', throughFrame(ok))).toEqual({
+      ok: true,
+      id: 4,
+      result: { judgments },
+    });
+    expect(
+      parseResponse('rule.judgments', {
+        jsonrpc: '2.0',
+        id: 5,
+        result: { judgments: [{ judgment: judgmentRecord, runDisplayId: 'RUN-1' }] },
+      }),
+    ).toMatchObject({ ok: false, error: { code: -32602 } });
+  });
 });
 
 describe('settings.* (M1-05, ADR-057)', () => {
