@@ -78,6 +78,9 @@ export const buildJudgeConfig = (input: JudgeConfigInput) => ({
   resolve: { alias: { [BIVE_HTTP_HELPER_MODULE]: input.httpHelperPath } },
   test: {
     include: includePatterns(input.ruleIds),
+    // 실행 환경은 node로 고정한다(#162). 파일의 `@vitest-environment <이름>` docblock은 이 값보다 앞서고 내장 환경이 아니면
+    // 판정 루트에서 `vitest-environment-<이름>` 패키지를 불러오므로 인수 테스트 검사가 거부한다(acceptance-lint)
+    environment: 'node',
     exclude: ['**/node_modules/**'],
     globalSetup: [input.globalSetupPath],
     setupFiles: [],
