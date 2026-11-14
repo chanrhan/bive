@@ -230,13 +230,16 @@ export BIVE_HOME=$(mktemp -d /tmp/bh.XXXX)
 ```sh
 export BIVE_AGENT=scripted BIVE_HOME=$(mktemp -d) BIVE_IDLE_SHUTDOWN_MS=1000 FX=$(mktemp -d)/fx
 scripts/reset-fixture.sh $FX     # 픽스처의 추적 파일을 $FX로 복사 → 설치 → git 저장소(커밋 1개)
-app()  { BIVE_SCENARIO=${1:-happy-path} xvfb-run -a pnpm --filter @bive/app start -- --open $FX --remote-debugging-port=9222 & sleep 5; }
+app()  { BIVE_SCENARIO=${1:-happy-path} xvfb-run -a pnpm --filter @bive/app start -- --open $FX --remote-debugging-port=9222 &
+         for i in $(seq 60); do [ -s $BIVE_HOME/run/app.pid ] && [ -s $FX/.bive.json ] && break; sleep 1; done; sleep 3
+         PRJ=$(node -p "require('$FX/.bive.json').projectId"); }   # 앱 기동 · 프로젝트 열림(최대 60초)을 기다리고 PRJ = 프로젝트 ID
 quit() { kill $(cat $BIVE_HOME/run/app.pid); sleep 2; }   # 진행 중 실행이 없으면 오케스트레이터도 1초 뒤 종료
 cli()  { pnpm --silent --filter @bive/app cli "$@"; }
+fresh() { quit; FX=$(mktemp -d)/fx; scripts/reset-fixture.sh $FX; }   # 10~13번: 새 픽스처 복사본 = 새 프로젝트
 ```
 
 - `app [시나리오]`는 그 시나리오로 앱을 띄우고 `$FX`를 바로 연다(시작 화면을 거치지 않음). 시나리오를 바꾸려면 `quit` 뒤 다시 `app <이름>`.
-- `cli rpc <method> [json]`으로 실행 · 승인 기록을 조회한다. 흐름의 단계는 로드맵 2.1에 있다.
+- `cli rpc <method> '<json>'`으로 실행 · 승인 기록 · 도구 호출 기록(`toolCall.list`)을 조회한다. 모든 요청에 `projectId`가 필수라 `'{"projectId":"'$PRJ'"}'`처럼 넣는다. 흐름의 단계는 로드맵 2.1에 있다.
 - 실제 SDK로 같은 흐름을 도는 것은 사람이 확인한다(needs-human).
 
 ## 7. 테스트
