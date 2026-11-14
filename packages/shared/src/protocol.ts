@@ -595,7 +595,7 @@ export const ToolCallEntry = z.strictObject({
   name: z.string().min(1),
   status: ToolCallStatus,
   reason: z.string().min(1).nullable(),
-  /** 파일 도구의 대상 경로(에이전트가 넘긴 그대로). 그 밖의 도구 · 경로가 없는 호출은 `null` */
+  /** 파일 도구의 대상 경로(에이전트가 넘긴 그대로). 그 밖의 도구 · 경로가 없거나 경로로 읽을 수 없는 기록은 `null` */
   path: z.string().min(1).nullable(),
 });
 export type ToolCallEntry = z.infer<typeof ToolCallEntry>;

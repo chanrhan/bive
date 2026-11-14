@@ -594,6 +594,95 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
       expect(result.calls.map((c) => c.seq)).toEqual(Array.from({ length: 500 }, (_, i) => i));
     });
 
+    /** 실행 1개와 구현 단계 세션을 만들고, 그 세션 ID와 기록을 남기는 함수를 돌려준다. */
+    const runWithSessions = async (count: number) => {
+      const rule = await approvedRule();
+      await saveSettings(COMPLETE);
+      const created = await create([rule.id]);
+      const sessionIds = Array.from({ length: count }, () => newId()).sort();
+      h.read((store) => {
+        for (const id of sessionIds) {
+          store.sessions.start({
+            id,
+            runId: created.run.id,
+            stepId: stepOf(created.steps, 'implementation').id,
+            role: 'implementer',
+            model: 'impl-model',
+            workDir: '/work/tree',
+            startedAt: iso(T0),
+          });
+        }
+      });
+      /** 기록을 주어진 순서대로 남긴다 (저장소 한 번 열기). */
+      const append = (entries: readonly (readonly [string, number, string, string])[]) =>
+        h.read((store) => {
+          for (const [sessionId, at, name, argsSummary] of entries) {
+            store.sessions.appendToolCall({
+              id: newId(),
+              runId: created.run.id,
+              sessionId,
+              at: iso(at),
+              role: 'implementer',
+              name,
+              argsSummary,
+              status: 'error',
+              reason: 'tool_failed',
+              durationMs: 0,
+            });
+          }
+        });
+      return { created, sessionIds, append };
+    };
+
+    it('정확히 500건이면 truncated가 false, 같은 시각이면 세션 → 순번 순으로 결정적이다', async () => {
+      const { sessionIds, append } = await runWithSessions(2);
+      const [first, second] = sessionIds as [string, string];
+      // 같은 시각에 두 세션의 기록을 엇갈려 남긴다: 결과는 세션 ID → 순번 순이어야 한다
+      append(
+        Array.from({ length: 250 }, (_, i) => [
+          [second, T0, 'read_file', `src/b${String(i)}.ts`] as const,
+          [first, T0, 'read_file', `src/a${String(i)}.ts`] as const,
+        ]).flat(),
+      );
+      const call = () =>
+        h.client.call('toolCall.list', { projectId: h.project.id, runId: 'EXE-001' });
+      const result = await call();
+      expect(result.truncated).toBe(false);
+      expect(result.calls).toHaveLength(500);
+      expect(result.calls.map((c) => [c.sessionId, c.seq])).toEqual([
+        ...Array.from({ length: 250 }, (_, i) => [first, i]),
+        ...Array.from({ length: 250 }, (_, i) => [second, i]),
+      ]);
+      expect(await call()).toEqual(result);
+    });
+
+    it('이미 저장된 파일 도구 기록의 인자 요약이 경로가 아닌 JSON이어도 내용을 싣지 않는다 (ADR-083)', async () => {
+      const { sessionIds, append } = await runWithSessions(1);
+      const [sessionId] = sessionIds as [string];
+      const rows: [string, string, string | null][] = [
+        // 실행기 수정 전, 파일 도구가 예외를 던지면 인자 JSON 앞 200자가 기록됐다
+        ['write_file', '{"path":"src/x.ts","content":"SECRET-WRITE-1"}', 'src/x.ts'],
+        [
+          'write_file',
+          `{"path":"src/y.ts","content":"SECRET-WRITE-2${'x'.repeat(200)}`.slice(0, 200) + '…',
+          null,
+        ],
+        ['read_file', '{"path":{"nested":"SECRET-READ"}}', null],
+        ['write_file', '{"content":"SECRET-NO-PATH"}', null],
+        ['search_files', '{"query":"SECRET-QUERY","path":7}', null],
+        ['list_files', '.', '.'],
+      ];
+      append(rows.map(([name, summary], i) => [sessionId, T0 + i, name, summary] as const));
+      const result = await h.client.call('toolCall.list', {
+        projectId: h.project.id,
+        runId: 'EXE-001',
+      });
+      expect(result.calls.map((c) => [c.name, c.path])).toEqual(
+        rows.map(([name, , expected]) => [name, expected]),
+      );
+      expect(JSON.stringify(result)).not.toContain('SECRET');
+    });
+
     it('없는 실행 · 다른 프로젝트의 실행 · 등록되지 않은 프로젝트는 -32004, projectId 없으면 -32602', async () => {
       const { created } = await runWithCalls();
       const other = registerProject(

@@ -33,9 +33,25 @@ const findRun = (store: ProjectStore, id: string): RunDetail => {
   return detail;
 };
 
-/** 파일 도구의 인자 요약은 대상 경로다(`FixedToolExecutor`). 그 밖의 도구는 내용이 섞일 수 있어 싣지 않는다. */
-const pathOf = (call: ToolCall): string | null =>
-  FILE_TOOLS.includes(call.name) && call.argsSummary.length > 0 ? call.argsSummary : null;
+/**
+ * 파일 도구의 인자 요약은 대상 경로다(`FixedToolExecutor`). 그 밖의 도구는 내용이 섞일 수 있어 싣지 않는다.
+ * 실행기 수정 전에 저장된 기록에는 파일 도구라도 인자 JSON(쓰기 내용 포함)이 요약으로 남은 행이 있을 수 있다:
+ * `{`로 시작하면 JSON으로 읽어 문자열 `path`만 꺼내고, 읽을 수 없거나(잘린 JSON) 없으면 `null` (ADR-083).
+ */
+const pathOf = (call: ToolCall): string | null => {
+  if (!FILE_TOOLS.includes(call.name) || call.argsSummary.length === 0) return null;
+  if (!call.argsSummary.startsWith('{')) return call.argsSummary;
+  try {
+    const parsed: unknown = JSON.parse(call.argsSummary);
+    const candidate =
+      typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>).path
+        : undefined;
+    return typeof candidate === 'string' && candidate.length > 0 ? candidate : null;
+  } catch {
+    return null;
+  }
+};
 
 export const createToolCallHandlers = ({ biveHome }: ToolCallHandlerDeps): ToolCallMethods => ({
   'toolCall.list': ({ projectId, runId }) =>

@@ -335,6 +335,43 @@ describe('도구 호출 기록', () => {
     }
   });
 
+  it('파일 도구가 예외를 던져도 인자 요약은 경로뿐이다 (쓰기 내용이 기록에 섞이지 않음, ADR-083)', async () => {
+    // 세션 루트의 파일 아래 경로에 쓰면 폴더 만들기가 예외를 던진다(ENOTDIR · EEXIST) → tool_failed
+    writeFileSync(path.join(worktree, 'package.json'), '{}\n');
+    const tools = createRoleTools({ role: 'implementer', sessionRoot: worktree, biveHome: home });
+    await tools.execute('write_file', {
+      path: 'package.json/x.ts',
+      content: 'SECRET_CONTENT_LINE',
+    });
+    expect(tools.records[0]).toMatchObject({
+      name: 'write_file',
+      status: 'error',
+      reason: 'tool_failed',
+      argsSummary: 'package.json/x.ts',
+    });
+    expect(JSON.stringify(tools.records)).not.toContain('SECRET');
+  });
+
+  it('파일 도구 이름이면 역할에 없어 거부돼도 · 경로가 문자열이 아니어도 내용을 남기지 않는다', async () => {
+    const writer = createRoleTools({ role: 'rule-writer', sessionRoot: session, biveHome: home });
+    await writer.execute('write_file', { path: 'a.ts', content: 'SECRET_DENIED' });
+    expect(writer.records[0]).toMatchObject({
+      name: 'write_file',
+      status: 'denied',
+      reason: 'unknown_tool',
+      argsSummary: 'a.ts',
+    });
+
+    const implementer = createRoleTools({
+      role: 'implementer',
+      sessionRoot: worktree,
+      biveHome: home,
+    });
+    await implementer.execute('write_file', { path: { nested: 'SECRET_PATH' }, content: 'SECRET' });
+    expect(implementer.records[0]).toMatchObject({ status: 'denied', reason: 'invalid_args' });
+    expect(JSON.stringify([...writer.records, ...implementer.records])).not.toContain('SECRET');
+  });
+
   it('기록 요약은 길이가 제한된다', async () => {
     const tools = createRoleTools({ role: 'chat', sessionRoot: session, biveHome: home });
     await tools.execute('anything', { blob: 'x'.repeat(5000) });
