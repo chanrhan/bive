@@ -22,6 +22,7 @@ import {
   parseNotification,
   parseRequest,
   parseResponse,
+  PROPOSAL_EVENT_NAMES,
   PROTOCOL_VERSION,
   rpcError,
   RUN_EVENT_NAMES,
@@ -193,6 +194,37 @@ describe('알림 스키마', () => {
     });
     expect(wrong.ok).toBe(false);
     if (!wrong.ok) expect(wrong.error.code).toBe(ErrorCode.InvalidParams);
+  });
+
+  it('제안 알림 (M1-36, ADR-076): event.proposal.changed 왕복, 본문 · 근거는 싣지 않음, 요청 메서드가 아님', () => {
+    expect(PROPOSAL_EVENT_NAMES).toEqual(['event.proposal.changed']);
+    const changed = {
+      projectId: '01JA0000000000000000000001',
+      proposalId: '01JP0000000000000000000001',
+      displayId: 'PRP-001',
+      kind: 'rule_new',
+      state: 'pending',
+    } as const;
+    const event = parseNotification(
+      throughFrame(createNotification('event.proposal.changed', changed)),
+    );
+    expect(event).toEqual({ ok: true, method: 'event.proposal.changed', params: changed });
+    // 제안 본문 · 근거는 받는 쪽이 다시 조회한다 (알림에 실으면 스키마 위반)
+    for (const extra of [{ payload: { title: 'x' } }, { rationale: '근거' }]) {
+      const wrong = parseNotification({
+        jsonrpc: '2.0',
+        method: 'event.proposal.changed',
+        params: { ...changed, ...extra },
+      });
+      expect(wrong.ok).toBe(false);
+      if (!wrong.ok) expect(wrong.error.code).toBe(ErrorCode.InvalidParams);
+    }
+    expect(() =>
+      createNotification('event.proposal.changed', { ...changed, state: 'done' } as never),
+    ).toThrow();
+    // 알림 목록에만 있고 요청 메서드(쓰기 경로)에는 없다
+    expect(METHOD_NAMES as readonly string[]).not.toContain('event.proposal.changed');
+    expect(isMethodName('event.proposal.changed')).toBe(false);
   });
 });
 

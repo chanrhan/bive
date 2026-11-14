@@ -3,16 +3,10 @@
 // 상태(연결됨 · 끊김)가 바뀔 때만 다시 그린다 (매초 알림마다 레이아웃 전체를 다시 그리지 않음).
 import { useEffect, useState } from 'react';
 
-import { CONNECTION_EVENT, type ConnectionEventParams } from '../../../common/bridge.js';
+import { CONNECTION_EVENT } from '../../../common/bridge.js';
+import { isConnectionEvent } from './reconnect.js';
 
 export type ConnectionView = 'checking' | 'connected' | 'disconnected';
-
-const isConnectionEvent = (value: unknown): value is ConnectionEventParams => {
-  if (typeof value !== 'object' || value === null) return false;
-  const { state, status } = value as { state?: unknown; status?: unknown };
-  if (state === 'disconnected') return true;
-  return state === 'connected' && typeof status === 'object' && status !== null;
-};
 
 export const useConnection = (): ConnectionView => {
   // 같은 값이면 React가 다시 그리지 않는다

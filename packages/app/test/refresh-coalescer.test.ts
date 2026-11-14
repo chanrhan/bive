@@ -1,12 +1,19 @@
 // 실행 알림 재조회의 합치기 규칙 (이슈 #32 수용 기준 3의 렌더러 쪽, ADR-076).
 // 연속 알림으로 조회가 폭주하지 않으면서(동시 조회 1개 · 뒤따르는 조회 최대 1개), 조회 중에 온 알림을 버리지 않아
 // 마지막 알림 뒤의 상태가 화면에 남는지 고정한다. 화면에서 실제로 다시 조회하는지는 e2e/run-start.spec.ts.
-import { RUN_EVENT_NAMES as SHARED_RUN_EVENT_NAMES } from '@bive/shared';
+// 제안 알림 · 재접속(M1-36)도 같은 합치기를 쓴다: 이름 대조 · 재접속 전이 판단은 여기, 화면 쪽은 e2e/todo-badge.spec.ts ·
+// e2e/reconnect.spec.ts.
+import {
+  PROPOSAL_EVENT_NAMES as SHARED_PROPOSAL_EVENT_NAMES,
+  RUN_EVENT_NAMES as SHARED_RUN_EVENT_NAMES,
+} from '@bive/shared';
 import { describe, expect, it } from 'vitest';
 
+import { createReconnectDetector } from '../src/renderer/src/connection/reconnect.js';
 import {
   createRefreshCoalescer,
   isProjectEvent,
+  PROPOSAL_EVENT_NAMES,
   RUN_EVENT_NAMES,
 } from '../src/renderer/src/runs/refreshCoalescer.js';
 
@@ -155,6 +162,7 @@ describe('createRefreshCoalescer', () => {
 describe('실행 알림 이름 · 프로젝트 거르기', () => {
   it('알림 이름이 shared와 같다', () => {
     expect(RUN_EVENT_NAMES).toEqual(SHARED_RUN_EVENT_NAMES);
+    expect(PROPOSAL_EVENT_NAMES).toEqual(SHARED_PROPOSAL_EVENT_NAMES);
   });
 
   it('이 프로젝트의 알림만 받는다', () => {
@@ -164,5 +172,30 @@ describe('실행 알림 이름 · 프로젝트 거르기', () => {
     expect(isProjectEvent(null, id)).toBe(false);
     expect(isProjectEvent('x', id)).toBe(false);
     expect(isProjectEvent({}, id)).toBe(false);
+  });
+});
+
+describe('재접속 전이 (M1-36, ADR-076)', () => {
+  const STATUS = { version: '0.0.0', uptimeMs: 0, connections: 1, runsInProgress: 0 };
+  const connected = { state: 'connected', status: STATUS };
+  const disconnected = { state: 'disconnected' };
+
+  it('끊김 → 연결됨에서만 참이고, 구독 뒤 처음 값(앱 시작의 연결됨)은 전이가 아니다', () => {
+    const detect = createReconnectDetector();
+    expect(
+      [connected, connected, disconnected, disconnected, connected, connected].map(detect),
+    ).toEqual([false, false, false, false, true, false]);
+  });
+
+  it('끊긴 채로 구독을 시작해도 다음 연결됨에서 참', () => {
+    const detect = createReconnectDetector();
+    expect([disconnected, connected].map(detect)).toEqual([false, true]);
+  });
+
+  it('형식이 틀린 값은 무시하고 직전 상태를 바꾸지 않는다', () => {
+    const detect = createReconnectDetector();
+    expect(
+      [disconnected, { state: 'connected' }, { state: 'unknown' }, null, connected].map(detect),
+    ).toEqual([false, false, false, false, true]);
   });
 });

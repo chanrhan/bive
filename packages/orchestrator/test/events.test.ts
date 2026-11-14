@@ -5,6 +5,8 @@
 // - 알림을 받은 순간 규칙(SCR-03 `rule.list`) · 검증(SCR-05 `verification.summary`)을 다시 조회하면 그 알림의 상태가 보인다
 // 렌더러가 알림을 받아 두 화면을 다시 조회하는 것은 앱 쪽에서 단언한다(`packages/app/e2e/run-start.spec.ts`의
 // "실행 알림" · `packages/app/test/refresh-coalescer.test.ts`). 파일이 프로세스 경계를 넘을 수 없어 나눴다(ADR-076).
+// 제안 알림(M1-36): 실제 rule-writer 세션(scripted happy-path)이 제안을 만들 때와 사람이 처리할 때 `event.proposal.changed`가
+// 저장 뒤에 나가 받은 순간 `proposal.count`가 그 상태임을 단언한다. 배지 · 할 일 목록 쪽은 `packages/app/e2e/todo-badge.spec.ts`.
 import fs from 'node:fs';
 import net from 'node:net';
 
@@ -13,6 +15,8 @@ import {
   type JudgmentResult,
   PROTOCOL_VERSION,
   parseNotification,
+  type Proposal,
+  type ProposalChangedEvent,
   RUN_STEP_PLANS,
   type RunUpdatedEvent,
   type StepUpdatedEvent,
@@ -21,8 +25,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { selectAgent } from '../src/agent/select.js';
 import type { StepExecutors } from '../src/engine/types.js';
+import { ProposalEventPublisher } from '../src/events/proposal-events.js';
 import { RunEventPublisher } from '../src/events/run-events.js';
 import { type Orchestrator, startOrchestrator } from '../src/orchestrator.js';
+import { submitProposal } from '../src/proposals/proposal-service.js';
 import { createRun } from '../src/runs/run-service.js';
 import { connect, TestClient } from './helpers/client.js';
 import {
@@ -49,7 +55,8 @@ afterEach(async () => {
 
 type Received =
   | { method: 'event.run.updated'; params: RunUpdatedEvent }
-  | { method: 'event.step.updated'; params: StepUpdatedEvent };
+  | { method: 'event.step.updated'; params: StepUpdatedEvent }
+  | { method: 'event.proposal.changed'; params: ProposalChangedEvent };
 
 /** 받은 알림을 차례대로 모은다. 알림을 받을 때마다 `onNotice`를 부른다(받은 순간의 재조회). */
 const collect = (
@@ -142,10 +149,16 @@ const client = async (s: Started): Promise<TestClient> => {
   return c;
 };
 
-const runState = (notice: Received): string =>
-  notice.method === 'event.run.updated'
-    ? `run ${notice.params.status}:${String(notice.params.currentStep)}`
-    : `step ${notice.params.kind}#${String(notice.params.attempt)}:${notice.params.status}`;
+const runState = (notice: Received): string => {
+  switch (notice.method) {
+    case 'event.run.updated':
+      return `run ${notice.params.status}:${String(notice.params.currentStep)}`;
+    case 'event.step.updated':
+      return `step ${notice.params.kind}#${String(notice.params.attempt)}:${notice.params.status}`;
+    case 'event.proposal.changed':
+      return `proposal ${notice.params.displayId}:${notice.params.state}`;
+  }
+};
 
 describe('단계 전이마다 event.step.updated · event.run.updated (수용 기준 3)', () => {
   it('실행 생성부터 병합까지: 저장마다 바뀐 단계 시도 알림 뒤 실행 알림, 화면 갱신 단계의 실행 알림 포함', async () => {
@@ -208,7 +221,8 @@ describe('단계 전이마다 event.step.updated · event.run.updated (수용 �
     ]);
     for (const notice of received) {
       expect(notice.params.projectId).toBe(s.project.id);
-      expect(notice.params.runId).toBe(runId);
+      // 실행 알림만 온다 (제안 알림이 섞이면 runId가 없어 실패)
+      expect('runId' in notice.params ? notice.params.runId : null).toBe(runId);
     }
     // 단계 계획의 모든 단계가 끝남 알림을 받는다
     const ended = received.filter(
@@ -428,6 +442,173 @@ describe('읽지 않는 연결 · 종료 (검토 1회차, ADR-076)', () => {
       withProject(s.biveHome, s.project.id, (store) => store.runs.get(created.run.id)),
     ).toMatchObject({ status: 'running', currentStep: 'screen_update' });
   }, 60_000);
+});
+
+describe('제안 생성 · 처리마다 event.proposal.changed (M1-36, TODO-01 · NRM-02)', () => {
+  /** 실제 rule-writer 세션(scripted happy-path)이 `propose_rule`을 2번 부른다. */
+  const startWithRuleWriter = () =>
+    start().then(async (s) => {
+      const watcher = await client(s);
+      const caller = await client(s);
+      return { s, watcher, caller };
+    });
+
+  it('요구사항 저장 뒤 rule-writer가 제안 2개를 만들면 제안마다 알림이 가고, 받은 순간 proposal.count가 그 수다', async () => {
+    const { s, watcher, caller } = await startWithRuleWriter();
+    const anonymous = await TestClient.open(s.orchestrator.paths.pipe);
+    clients.push(anonymous);
+    // 알림을 받은 순간 할 일 배지가 다시 세는 값 (렌더러의 proposal.count 재조회와 같다)
+    const counts: Promise<number>[] = [];
+    const received = collect(watcher, (notice) => {
+      if (notice.method !== 'event.proposal.changed') return;
+      counts.push(
+        caller.call('proposal.count', { projectId: s.project.id }).then(({ pending }) => pending),
+      );
+    });
+    expect((await caller.call('proposal.count', { projectId: s.project.id })).pending).toBe(0);
+
+    const { requirement } = await caller.call('requirement.create', {
+      projectId: s.project.id,
+      text: '헬스 체크 응답에 서버 시각 포함',
+      author: human,
+    });
+    await waitFor(() => counts.length === 2, 30_000, '제안 알림 2건');
+    // 알림은 저장 뒤에 나가므로 받은 순간 다시 세면 그 제안까지 들어 있다(두 제안은 연달아 생겨 첫 재조회에 둘 다
+    // 보일 수 있다). 마지막 알림 뒤의 재조회는 마지막 상태(2)다
+    const seen = await Promise.all(counts);
+    expect(seen[0]).toBeGreaterThanOrEqual(1);
+    expect(seen[1]).toBe(2);
+
+    const { proposals } = await caller.call('proposal.list', { projectId: s.project.id });
+    expect(proposals.map((p) => p.targetRef)).toEqual([
+      { entity: 'Requirement', id: requirement.id },
+      { entity: 'Requirement', id: requirement.id },
+    ]);
+    // 알림은 식별자 · 상태만 싣는다 (본문 · 근거는 다시 조회)
+    expect(received.filter((n) => n.method === 'event.proposal.changed')).toEqual(
+      proposals.map((p) => ({
+        method: 'event.proposal.changed',
+        params: {
+          projectId: s.project.id,
+          proposalId: p.id,
+          displayId: p.displayId,
+          kind: 'rule_new',
+          state: 'pending',
+        },
+      })),
+    );
+    // 인증 전 연결은 받지 않는다
+    expect(anonymous.unmatched).toEqual([]);
+  }, 60_000);
+
+  it('승인 · 수정 후 승인 · 거절이 저장되면 그 제안의 처리 상태로 알림이 가고, 받은 순간 proposal.count가 줄어 있다', async () => {
+    const { s, watcher, caller } = await startWithRuleWriter();
+    const counts: Promise<string>[] = [];
+    const received = collect(watcher, (notice) => {
+      if (notice.method !== 'event.proposal.changed' || notice.params.state === 'pending') return;
+      counts.push(
+        caller
+          .call('proposal.count', { projectId: s.project.id })
+          .then(
+            ({ pending }) =>
+              `${notice.params.displayId} ${notice.params.state} 대기 ${String(pending)}`,
+          ),
+      );
+    });
+    const { requirement } = await caller.call('requirement.create', {
+      projectId: s.project.id,
+      text: '헬스 체크 응답에 서버 시각 포함',
+      author: human,
+    });
+    await s.orchestrator.ruleWriter.whenSettled(s.project.id, requirement.id);
+    // 세 번째 제안은 저장소에 바로 넣는다(준비 단계, 알림 대상 아님): 승인 · 수정 후 승인 · 거절을 하나씩 하려고
+    const first = await caller.call('proposal.list', { projectId: s.project.id });
+    const template = first.proposals[1];
+    if (template === undefined) throw new Error('제안 부족');
+    withProject(s.biveHome, s.project.id, (store) =>
+      submitProposal(
+        store,
+        {
+          kind: 'rule_new',
+          payload: { ...(template.payload as object), title: '헬스 체크 응답 형식 (별안)' },
+          rationale: template.rationale,
+          author: { kind: 'agent', role: 'rule-writer' },
+          source: 'rule_generation',
+        },
+        { now: Date.now, newId },
+      ),
+    );
+    const { proposals } = await caller.call('proposal.list', {
+      projectId: s.project.id,
+      state: 'pending',
+    });
+    expect(proposals).toHaveLength(3);
+    const [a, b, c] = proposals;
+    if (a === undefined || b === undefined || c === undefined) throw new Error('제안 부족');
+    const total = proposals.length;
+
+    // 처리 하나마다 그 알림의 재조회가 끝난 뒤 다음 처리를 한다(받은 순간의 수를 처리별로 본다)
+    const nextCount = async (n: number): Promise<void> => {
+      await waitFor(() => counts.length === n, 10_000, `처리 알림 ${String(n)}건`);
+      await counts[n - 1];
+    };
+    await caller.call('proposal.approve', { projectId: s.project.id, id: a.id, author: human });
+    await nextCount(1);
+    await caller.call('proposal.amend', {
+      projectId: s.project.id,
+      id: b.id,
+      author: human,
+      edited: { ...(b.payload as object), title: '헬스 체크 응답 형식 유지 (수정)' } as never,
+    });
+    await nextCount(2);
+    await caller.call('proposal.reject', {
+      projectId: s.project.id,
+      id: c.id,
+      author: human,
+      reason: '범위 밖',
+    });
+    await nextCount(3);
+    expect(await Promise.all(counts)).toEqual([
+      `${a.displayId} approved 대기 ${String(total - 1)}`,
+      `${b.displayId} approved 대기 ${String(total - 2)}`,
+      `${c.displayId} rejected 대기 ${String(total - 3)}`,
+    ]);
+    // 실패한 처리(이미 처리된 제안 재승인)는 저장이 없으므로 알리지 않는다
+    const before = received.length;
+    await expect(
+      caller.call('proposal.approve', { projectId: s.project.id, id: a.id, author: human }),
+    ).rejects.toMatchObject({ code: -32009 });
+    await caller.call('ping');
+    expect(received).toHaveLength(before);
+  }, 60_000);
+});
+
+describe('ProposalEventPublisher', () => {
+  it('서버가 없으면 보내지 않고, 송신이 거부되거나 던져도 부른 쪽에 예외를 넘기지 않고 기록만 남긴다', async () => {
+    const logs: string[] = [];
+    let sink: { notify: (method: string, params: unknown) => Promise<void> } | null = null;
+    const publisher = new ProposalEventPublisher({
+      sink: () => sink as never,
+      log: (line) => logs.push(line),
+    });
+    const proposal = {
+      id: '01JP0000000000000000000001',
+      displayId: 'PRP-001',
+      kind: 'rule_new',
+      state: 'pending',
+    } as Proposal;
+    expect(() => publisher.changed('01JA0000000000000000000001', proposal)).not.toThrow();
+    sink = { notify: () => Promise.reject(new Error('끊김')) };
+    publisher.changed('01JA0000000000000000000001', proposal);
+    sink = {
+      notify: () => {
+        throw new Error('스키마');
+      },
+    };
+    publisher.changed('01JA0000000000000000000001', proposal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(logs.sort()).toEqual(['제안 알림 전달 실패: 끊김', '제안 알림 전달 실패: 스키마']);
+  });
 });
 
 describe('RunEventPublisher', () => {

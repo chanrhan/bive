@@ -1,13 +1,15 @@
 // 오케스트레이터 기동 · 종료: 어댑터 선택 → 단일 인스턴스 잠금 → 토큰 → 파이프 서버 → 수명 감시
 // (PRD 5.1, ADR-027 · ADR-041 · ADR-049). 규칙 자동 생성 세션(ADR-062)은 선택된 어댑터로 돈다.
 // 연결을 받기 전에 `running` 실행을 `interrupted`로 바꾸고(자동 재개 없음) 실행 엔진(ADR-066)을 붙인다.
-// 실행 상태 저장마다 인증된 연결에 `event.step.updated` · `event.run.updated`를 보낸다 (ADR-076).
+// 실행 상태 저장마다 인증된 연결에 `event.step.updated` · `event.run.updated`를, 제안 등록 · 처리 저장마다
+// `event.proposal.changed`를 보낸다 (ADR-076).
 import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 
 import { type AgentSelection, selectAgent } from './agent/select.js';
 import { type InterruptedRun, PipelineEngine } from './engine/pipeline-engine.js';
 import type { StepExecutors } from './engine/types.js';
+import { ProposalEventPublisher } from './events/proposal-events.js';
 import { RunEventPublisher } from './events/run-events.js';
 import { createHandlers } from './ipc/handlers.js';
 import { PipeServer } from './ipc/server.js';
@@ -15,6 +17,7 @@ import { NetPipeTransport, type PipeTransport } from './ipc/transport.js';
 import { DEFAULT_IDLE_SHUTDOWN_MS, Lifecycle, type RunTracker } from './lifecycle.js';
 import { acquirePidLock } from './lock.js';
 import { assertSocketPathLength } from './pipe-path.js';
+import { ProposalService } from './proposals/proposal-service.js';
 import { RuleWriterService } from './rule-writer/rule-writer-service.js';
 import { type RunPaths, runPaths } from './run-paths.js';
 import { writeTokenFile } from './token.js';
@@ -185,11 +188,17 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       onIdle: () => void stop('idle'),
     });
     const log = options.log ?? ((line: string) => console.log(line));
+    // 제안 등록 · 처리 저장 뒤 → event.proposal.changed (M1-36, ADR-076). 기다리지 않는다
+    const proposalEvents = new ProposalEventPublisher({ sink: () => server, log });
     const ruleWriter = new RuleWriterService({
       biveHome: options.biveHome,
       adapter: agent.adapter,
       tasks: lifecycle,
       log,
+      proposals: new ProposalService({
+        biveHome: options.biveHome,
+        onChanged: proposalEvents.changed,
+      }),
     });
     // 실행 저장 · 화면 갱신 단계 → event.step.updated · event.run.updated (ADR-076). 서버를 만들기 전(기동 중
     // 중단 표시)에는 받을 연결이 없으므로 보내지 않는다
@@ -223,6 +232,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         },
         ruleWriter,
         engine,
+        onProposalChanged: proposalEvents.changed,
       }),
       ...(options.helloTimeoutMs === undefined ? {} : { helloTimeoutMs: options.helloTimeoutMs }),
       ...(options.notifyTimeoutMs === undefined
