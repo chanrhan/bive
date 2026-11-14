@@ -4,10 +4,11 @@
 // - 테스트 출력은 기본 접힘, 최신 판정이 실패면 자동 펼침. 안에 실패 원인(케이스 이름 · `file:line` · 메시지) · 전체 케이스
 // - 변경 이력(P1) · 변이 상태 · 대상 블록 · 위험도 · 코드 열기 링크는 해당 이슈 전 미노출 (ADR-035)
 // - 머리 오른쪽 동작(`actions`)은 놓는 화면이 정한다: 규칙 화면은 [실행] (M1-19, ADR-076)
+// - 요구사항 상세가 자식 규칙으로 펼칠 때는 부모(`parent`)를 넘겨 requirement.get을 다시 부르지 않는다 (ADR-078)
 // - 값은 rule.list 항목 · judgment.list · requirement.get 결과에서만 (NFR-03)
 import './RuleDetail.css';
 
-import type { JudgmentCase, RuleWithJudgment } from '@bive/shared';
+import type { JudgmentCase, Requirement, RuleWithJudgment } from '@bive/shared';
 import type { ReactNode } from 'react';
 
 import { AuthorMark } from '../../components/AuthorMark/AuthorMark.js';
@@ -34,14 +35,23 @@ export interface RuleDetailProps {
   item: RuleWithJudgment;
   /** 머리 오른쪽에 둘 동작 (규칙 화면의 [실행]) */
   actions?: ReactNode;
+  /** 이미 가진 부모 요구사항 (요구사항 상세에서 펼칠 때). 주면 `requirement.get`을 부르지 않는다 */
+  parent?: Requirement;
 }
 
 /** 규칙이 바뀌면 접힘 상태 · 불러온 값을 새로 시작하도록 호출하는 쪽이 `key={rule.id}`를 준다. */
-export const RuleDetail = ({ projectId, item, actions }: RuleDetailProps): React.JSX.Element => {
+export const RuleDetail = ({
+  projectId,
+  item,
+  actions,
+  parent: knownParent,
+}: RuleDetailProps): React.JSX.Element => {
   const { rule, judgment } = item;
   const latest = judgment.latest;
   const history = useRuleHistory(projectId, rule.id, latest?.id ?? null);
-  const parent = useRuleParent(projectId, rule.parentRequirementId);
+  const knownMatches = knownParent !== undefined && knownParent.id === rule.parentRequirementId;
+  const fetchedParent = useRuleParent(projectId, knownMatches ? null : rule.parentRequirementId);
+  const parent = knownMatches ? knownParent : fetchedParent;
   const entries = history.state === 'ready' ? history.entries : null;
   const runId = latestRunDisplayId(latest, entries);
   const counts = latest === null ? null : caseCountText(latest.cases);

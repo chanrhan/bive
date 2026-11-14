@@ -1,9 +1,12 @@
 // SCR-06 규범 상세 (screens.md SCR-06 · SCR-03 상세 · 1.4 상세 접힘, ADR-035 · ADR-073).
-// 규칙 화면(SCR-03) 목록 + 상세 2단의 상세 영역이다(별도 화면 아님). 요구사항 상세(#38)는 같은 파일에 상태를 더한다.
+// 규칙 화면(SCR-03) · 요구사항 화면(SCR-02) 목록 + 상세 2단의 상세 영역이다(별도 화면 아님).
+// 규칙 상세는 `ruleDetailChecklist`(index.ts에 등록), 요구사항 상세는 `requirementDetailChecklist`(spec이 넘김)
 // - 기본(규칙): 진술 · 종류 · 검사 · 부모 요구사항 · 생성 주체(이름), 테스트 실행 결과(판정 · 시각 · 커밋 · 실행 · 케이스),
 //   테스트 출력(최신 판정이 실패라 자동 펼침: 실패 원인 = 케이스 이름 · `file:line` · 메시지), 실행 이력(최신부터).
 //   변경 이력(P1) · 변이 상태는 미노출 (ADR-035). 규칙 화면 상세의 머리에는 [실행] (ADR-076)
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-073 (실행 이력 자리만 비움 · "실행 이력 불러오기 실패", 나머지 상세는 그대로)
+// - 기본(요구사항): 표시 ID · [편집] · [삭제], 본문, 생성 주체(이름), 자식 규칙 목록(접힘). 변경 이력 · 구현 위치(P1)는
+//   미노출 (ADR-035). 로딩 · 에러는 ADR-078 (자식 규칙 자리만 비움 · "자식 규칙 불러오기 실패", 나머지 상세는 그대로)
 import type {
   JudgmentCase,
   JudgmentResult,
@@ -279,6 +282,83 @@ export const ruleDetailChecklist = {
         },
         { label: '실행 이력 행 없음', testId: 'history-row', absent: true },
         noLatestRun,
+      ],
+    },
+  },
+} satisfies ScreenChecklist;
+
+// ── 요구사항 상세 ─────────────────────────────────────────
+
+/** 요구사항 상세의 기본 요소 (자식 규칙 자리 밖, 상태와 무관하게 같다). PARENT = REQ-001 (사람이 씀). */
+const requirementDetail: ElementCheck[] = [
+  {
+    label: '상세 영역',
+    testId: 'requirement-detail',
+    role: 'region',
+    name: '상세',
+    attributes: { 'data-selected-id': PARENT.id },
+  },
+  { label: '상세 빈 상태 없음', text: '선택 항목 없음', absent: true },
+  { label: '표시 ID', testId: 'requirement-detail-id', text: PARENT.displayId },
+  { label: '편집 버튼', testId: 'requirement-edit', role: 'button', name: '편집' },
+  {
+    label: '삭제 버튼 (확인 대기 아님)',
+    testId: 'requirement-delete',
+    role: 'button',
+    name: '삭제',
+  },
+  { label: '본문', testId: 'requirement-field-text', text: `본문${PARENT.text}` },
+  { label: '생성 주체 (이름)', testId: 'requirement-field-author', text: '생성 주체사람' },
+  { label: '자식 규칙 영역', testId: 'requirement-rules', role: 'region', name: '자식 규칙' },
+  { label: '편집 입력 닫힘', testId: 'requirement-editor', absent: true },
+  { label: '동작 실패 문구 없음', testId: 'requirement-action-error', absent: true },
+  // 미노출 (ADR-035): 변경 이력(P1) · 구현 위치(자식 규칙의 대상 블록, P1)
+  { label: '변경 이력 미노출', text: /변경 이력/, absent: true },
+  { label: '구현 위치 미노출', text: /구현 위치/, absent: true },
+];
+
+export const requirementDetailChecklist = {
+  id: 'SCR-06',
+  name: '규범 상세',
+  states: {
+    기본: {
+      title: 'BIVE',
+      elements: [
+        ...requirementDetail,
+        { label: '자식 규칙 (표시 ID 순)', testId: 'child-rule', count: RULES.length },
+        {
+          label: '자식 규칙 줄 (접힘)',
+          testId: 'child-rule-toggle',
+          role: 'button',
+          attributes: { 'aria-expanded': 'false' },
+        },
+        { label: '펼친 규칙 없음', testId: 'child-rule-detail', absent: true },
+        { label: '자식 규칙 불러오기 실패 없음', testId: 'requirement-rules-error', absent: true },
+      ],
+    },
+    로딩: {
+      title: 'BIVE',
+      elements: [
+        ...requirementDetail,
+        {
+          label: '자식 규칙 자리 (대기)',
+          testId: 'requirement-rules-loading',
+          attributes: { 'aria-busy': 'true' },
+        },
+        { label: '자식 규칙 없음', testId: 'child-rule', absent: true },
+      ],
+    },
+    에러: {
+      title: 'BIVE',
+      elements: [
+        ...requirementDetail,
+        {
+          label: '자식 규칙 불러오기 실패',
+          testId: 'requirement-rules-error',
+          role: 'alert',
+          text: '자식 규칙 불러오기 실패',
+        },
+        { label: '자식 규칙 없음', testId: 'child-rule', absent: true },
       ],
     },
   },
