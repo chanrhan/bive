@@ -12,6 +12,7 @@ import {
   CodeOpenReason,
   CodeOpenRecord,
   CodeOpenRecordParams,
+  CodeOpenSummaryResult,
   CommitSha,
   compareSteps,
   defaultSettings,
@@ -646,6 +647,30 @@ describe('코드 열람 기록 (MET-01, ADR-084)', () => {
   it('사유 표시명은 화면 정의서 1.4의 세 가지(화면 오류 · 정보 부족 · 디버깅)이고 순서도 같다', () => {
     expect(Object.keys(CODE_OPEN_REASON_LABELS)).toEqual(CodeOpenReason.options);
     expect(Object.values(CODE_OPEN_REASON_LABELS)).toEqual(['화면 오류', '정보 부족', '디버깅']);
+  });
+
+  it('codeOpen.summary 결과: 사유 3종 고정 순서 · 0건 포함 · 합계 = 건수 합만 받는다 (ADR-088)', () => {
+    const ok = {
+      reasons: [
+        { reason: 'screen_error', count: 1 },
+        { reason: 'info_lacking', count: 0 },
+        { reason: 'debugging', count: 2 },
+      ],
+      total: 3,
+    };
+    expect(CodeOpenSummaryResult.safeParse(ok).success).toBe(true);
+    for (const [label, bad] of [
+      ['사유 빠짐', { reasons: ok.reasons.slice(0, 2), total: 1 }],
+      ['순서 다름', { ...ok, reasons: [...ok.reasons].reverse() }],
+      ['합계 틀림', { ...ok, total: 4 }],
+      [
+        '음수 건수',
+        { reasons: [{ reason: 'screen_error', count: -1 }, ...ok.reasons.slice(1)], total: 1 },
+      ],
+      ['다른 키', { ...ok, truncated: false }],
+    ] as const) {
+      expect(CodeOpenSummaryResult.safeParse(bad).success, label).toBe(false);
+    }
   });
 
   it('화면 ID는 SCR-01 ~ SCR-21만', () => {

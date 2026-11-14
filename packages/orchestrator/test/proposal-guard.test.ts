@@ -179,9 +179,9 @@ describe('승인된 규칙 · 계약의 직접 수정 RPC 없음 (NRM-04)', () =
     }
   });
 
-  it('코드 열람 기록 이름 공간(codeOpen.*)에는 기록(record) · 조회(list)만 있고 역할 세션 도구에는 없다: 기록은 사람(앱)만 남긴다 (MET-01 · NFR-01 · ADR-084, #43)', () => {
+  it('코드 열람 기록 이름 공간(codeOpen.*)에는 기록(record) · 조회(list · summary)만 있고 역할 세션 도구에는 없다: 기록은 사람(앱)만 남긴다 (MET-01 · NFR-01 · ADR-084 · ADR-088, #43 · #44)', () => {
     const codeOpenMethods = METHOD_NAMES.filter((name) => /^codeOpen\./.test(name));
-    expect(codeOpenMethods).toEqual(['codeOpen.record', 'codeOpen.list']);
+    expect(codeOpenMethods).toEqual(['codeOpen.record', 'codeOpen.list', 'codeOpen.summary']);
     for (const role of AgentRole.options) {
       expect(
         roleToolNames(role).filter((name) => /code_?open/i.test(name)),
@@ -190,12 +190,12 @@ describe('승인된 규칙 · 계약의 직접 수정 RPC 없음 (NRM-04)', () =
     }
   });
 
-  it('역할 세션이 codeOpen.record · codeOpen.list를 도구로 부르면 unknown_tool로 거부되고 열람 기록이 남지 않는다 (NFR-01 · ADR-084)', async () => {
+  it('역할 세션이 codeOpen.record · codeOpen.list · codeOpen.summary를 도구로 부르면 unknown_tool로 거부되고 열람 기록이 남지 않는다 (NFR-01 · ADR-084)', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bive-co-'));
     try {
       for (const role of AgentRole.options) {
         const executor = new FixedToolExecutor({ role, sessionRoot: root, biveHome: h.biveHome });
-        for (const name of ['codeOpen.record', 'codeOpen.list']) {
+        for (const name of ['codeOpen.record', 'codeOpen.list', 'codeOpen.summary']) {
           const result = await executor.execute(name, {
             projectId: h.project.id,
             author: { kind: 'human' },
@@ -216,6 +216,7 @@ describe('승인된 규칙 · 계약의 직접 수정 RPC 없음 (NRM-04)', () =
         ).toEqual([
           ['codeOpen.record', 'denied', 'unknown_tool'],
           ['codeOpen.list', 'denied', 'unknown_tool'],
+          ['codeOpen.summary', 'denied', 'unknown_tool'],
         ]);
       }
     } finally {
