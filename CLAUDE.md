@@ -34,17 +34,17 @@ pnpm 워크스페이스 · TypeScript strict · ESM. 패키지 5개(`packages/sh
 <!-- KICKOFF -->
 ## 5. 완료 조건 명령 (이 VM에서 실제로 실행해 확인한 것만 적는다)
 
-구현 PR은 아래를 모두 통과해야 한다(화면을 고치지 않았으면 e2e · 스모크 제외, 파이프라인 e2e는 그 행의 조건일 때). 9개 모두 2026-11-14 새 컨테이너의 `main`(`6626b6b`)에서 순서대로 실행했다(단위 테스트 · 파이프라인 e2e는 `TMPDIR` 격리, 파이프라인 e2e는 픽스처 설치 뒤). 단위 테스트만 아래 행의 두 시험이 이 VM의 프록시 때문에 실패해 종료 코드 1이고, 나머지 8개는 종료 코드 0이다. 실측 시간 · 테스트 개수는 금방 낡으므로 적지 않는다.
+구현 PR은 아래를 모두 통과해야 한다(화면을 고치지 않았으면 e2e · 스모크 제외, 파이프라인 e2e는 그 행의 조건일 때). 9개 모두 2026-11-14 새 컨테이너의 `main`(`6626b6b`)에서 순서대로 실행했다(단위 테스트 · 파이프라인 e2e는 `TMPDIR` 격리, 파이프라인 e2e는 픽스처 설치 뒤). 단위 테스트 전체 실행만 종료 코드 1이고(아래 행의 두 시험. 같은 실행에서 부하로 1건이 더 실패했고 그 파일만 다시 돌리면 두 시험만 실패), 나머지 8개는 종료 코드 0이다. 실측 시간 · 테스트 개수는 금방 낡으므로 적지 않는다.
 
 | 작업 | 명령 |
 |---|---|
 | 설치 | `pnpm install --frozen-lockfile` |
 | 린트 | `pnpm lint` |
 | 타입 검사 | `pnpm typecheck` |
-| 단위 테스트 | `pnpm test` (작업 트리가 커밋 `97b4d86`을 포함할 때만. 이유는 `dev-env` 스킬). 프록시가 필요한 VM에서는 `judge-runner.test.ts`의 실제 설치 시험 두 개("hoist 설정(…)으로 닫힘 밖 file: 패키지의 node-gyp bin을 …" · "닫힘 밖 file: 패키지의 python3 bin이 …")가 설치 시간 초과로 실패한다. 그 둘만 실패하면 로컬은 통과로 보고 `ci`가 기준이다 (`dev-env`) |
+| 단위 테스트 | `pnpm test` (작업 트리가 커밋 `97b4d86`을 포함할 때만. 이유는 `dev-env` 스킬). 프록시가 필요한 VM에서는 `judge-runner.test.ts`의 실제 설치 시험 두 개("hoist 설정(…)으로 닫힘 밖 file: 패키지의 node-gyp bin을 …" · "닫힘 밖 file: 패키지의 python3 bin이 …")가 설치 시간 초과로 실패한다. 그 둘이 '의존성 설치 시간 초과'로만 실패하면 로컬은 통과로 보고 `ci`가 기준이다 (`dev-env`) |
 | 빌드 | `pnpm build` |
 | 형식 검사 | `pnpm format:check` (`*.md` · `docs/` · `scripts/` · `fixtures/`는 대상 아님) |
-| 화면 e2e (헤드리스) | `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=$(ls -d /opt/pw-browsers/chromium-*/chrome-linux*/chrome \| head -n 1) pnpm e2e` |
+| 화면 e2e (헤드리스) | `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=$(ls -d /opt/pw-browsers/chromium-*/chrome-linux*/chrome) pnpm e2e` |
 | Electron 스모크 | `xvfb-run -a pnpm smoke` |
 | 파이프라인 e2e | `pnpm e2e:pipeline` (오케스트레이터의 엔진 · 판정 · IPC를 고쳤을 때. 픽스처 설치 `pnpm -C fixtures/sample-next-app install --frozen-lockfile`가 먼저 필요) |
 
