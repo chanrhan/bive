@@ -27,11 +27,22 @@ import type { FrameConnection, FrameErrorKind, PipeListener, PipeTransport } fro
 export const DEFAULT_HELLO_TIMEOUT_MS = 10_000;
 
 /**
- * 연결 하나에 알림 1개를 쓰는 데 기다리는 최대 시간 기본값 (ADR-076). 넘기면 읽지 않는(멈춘) 연결로 보고 끊는다.
- * 앱 main은 받는 즉시 읽고, 연결 감시가 1초마다 `system.status`를 부르므로 정상 연결이 5초 동안 한 줄도 비우지 못하는
- * 일은 없다고 본다. 화면 갱신 단계가 기다리는 최대 시간도 이 값이다.
+ * 연결 하나에 알림 1개를 쓰는 동안 쓰기 진척 없이 기다리는 최대 시간 기본값 (ADR-076). 넘기면 읽지 않는(멈춘) 연결로
+ * 보고 끊는다. 앱 main은 받는 즉시 읽고, 연결 감시가 1초마다 `system.status`를 부르므로 정상 연결이 5초 동안 한 줄도
+ * 비우지 못하는 일은 없다고 본다. 멈춘 연결 때문에 화면 갱신 단계가 기다리는 최대 시간도 이 값이다.
  */
 export const DEFAULT_NOTIFY_TIMEOUT_MS = 5_000;
+
+/**
+ * 한 연결의 처리 대기 프레임 수 상한 기본값 (ADR-076 보강). 넘으면 그 연결의 소켓 읽기를 멈추고, 대기열이
+ * {@link resumeBelow} 이하로 줄면 다시 읽는다. 앱 렌더러는 화면마다 조회 1개 · 뒤따르는 조회 1개만 두고(합치기)
+ * CLI는 요청 1건씩 응답을 기다리므로 정상 연결은 이 값에 닿지 않는다. 읽기를 멈춰도 이미 읽은 조각(최대 64KB)의
+ * 프레임은 들어오므로 대기열은 상한 + 한 조각의 프레임까지 찰 수 있다.
+ */
+export const DEFAULT_MAX_PENDING_FRAMES = 256;
+
+/** 읽기를 다시 시작하는 대기열 길이 (상한의 1/4). */
+const resumeBelow = (max: number): number => Math.floor(max / 4);
 
 const HELLO_METHOD = 'system.hello' satisfies MethodName;
 
@@ -77,6 +88,8 @@ export interface PipeServerOptions {
   helloTimeoutMs?: number;
   /** 연결별 알림 쓰기 상한 (기본 {@link DEFAULT_NOTIFY_TIMEOUT_MS}) */
   notifyTimeoutMs?: number;
+  /** 연결별 처리 대기 프레임 수 상한 (기본 {@link DEFAULT_MAX_PENDING_FRAMES}) */
+  maxPendingFrames?: number;
   onConnectionOpened?: () => void;
   onConnectionClosed?: () => void;
 }
@@ -112,14 +125,27 @@ class Session {
   readonly #options: PipeServerOptions;
   #state: SessionState = 'awaiting-hello';
   #helloTimer: NodeJS.Timeout | null;
+  /**
+   * 처리 차례를 기다리는 프레임. 프레임은 받은 순서대로 하나씩 처리하고, 다음 프레임 전에 이벤트 루프를 양보한다
+   * (`setImmediate`). 한 연결이 요청을 몰아 보내도 다른 연결의 요청 · 알림 송신 · 타이머가 그 사이에 돈다.
+   */
+  readonly #backlog: (() => void)[] = [];
+  /** 프레임 하나를 처리했고 양보 뒤 다음 차례를 기다리는 중 */
+  #yielding = false;
+  /** 대기열이 상한을 넘어 소켓 읽기를 멈춘 상태 */
+  #readingPaused = false;
 
   constructor(id: number, connection: FrameConnection, options: PipeServerOptions) {
     this.#id = id;
     this.#connection = connection;
     this.#options = options;
-    connection.onFrame((frame) => this.#onFrame(frame));
-    connection.onFrameError((error) => this.#onFrameError(error));
-    connection.onClose(() => this.#clearHelloTimer());
+    connection.onFrame((frame) => this.#enqueue(() => this.#onFrame(frame)));
+    connection.onFrameError((error) => this.#enqueue(() => this.#onFrameError(error)));
+    connection.onClose(() => {
+      this.#clearHelloTimer();
+      // 응답을 받을 상대가 없다. 아직 처리하지 않은 요청은 실행하지 않고 버린다
+      this.#backlog.length = 0;
+    });
     this.#helloTimer = setTimeout(() => {
       this.#helloTimer = null;
       if (this.#state === 'awaiting-hello') {
@@ -140,6 +166,50 @@ class Session {
       this.#options.notifyTimeoutMs ?? DEFAULT_NOTIFY_TIMEOUT_MS,
     );
   }
+
+  /**
+   * 프레임 처리를 차례에 넣는다. 쉬고 있으면 바로 처리하고, 아니면 앞 프레임들이 끝난 뒤 처리한다. 처리기의 동기 부분과
+   * 응답 송신(마이크로태스크)은 다음 차례 전에 끝나므로 한 연결의 응답 순서는 요청 순서와 같다(비동기 처리기 제외).
+   * 처리기는 동기라 저장소를 여는 구간이 양보를 사이에 두고 걸치지 않는다(ADR-069).
+   */
+  #enqueue(work: () => void): void {
+    if (this.#yielding) {
+      this.#backlog.push(work);
+      if (
+        !this.#readingPaused &&
+        this.#backlog.length > (this.#options.maxPendingFrames ?? DEFAULT_MAX_PENDING_FRAMES)
+      ) {
+        this.#readingPaused = true;
+        this.#connection.pauseReading();
+      }
+      return;
+    }
+    this.#runThenYield(work);
+  }
+
+  #runThenYield(work: () => void): void {
+    this.#yielding = true;
+    try {
+      work();
+    } finally {
+      setImmediate(this.#next);
+    }
+  }
+
+  readonly #next = (): void => {
+    this.#yielding = false;
+    const work = this.#backlog.shift();
+    if (
+      this.#readingPaused &&
+      this.#backlog.length <=
+        resumeBelow(this.#options.maxPendingFrames ?? DEFAULT_MAX_PENDING_FRAMES)
+    ) {
+      // 다시 읽어야 상대가 닫은 것(EOF)도 알 수 있다
+      this.#readingPaused = false;
+      this.#connection.resumeReading();
+    }
+    if (work !== undefined) this.#runThenYield(work);
+  };
 
   #clearHelloTimer(): void {
     if (this.#helloTimer !== null) {
