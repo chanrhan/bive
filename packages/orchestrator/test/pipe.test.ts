@@ -1,23 +1,30 @@
 // 파이프 서버 실연결: Unix 소켓 · system.hello 토큰 · ping · 오류 코드 (M0-05 수용 기준 1, ADR-027 · ADR-039).
-import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 
-import { ErrorCode, PROTOCOL_VERSION } from '@bive/shared';
+import { createRequest, ErrorCode, PROTOCOL_VERSION } from '@bive/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { createHandlers } from '../src/ipc/handlers.js';
 import { type MethodHandlers, PipeServer, RpcError } from '../src/ipc/server.js';
-import { NetPipeTransport } from '../src/ipc/transport.js';
+import {
+  type FrameConnection,
+  NetPipeTransport,
+  type PipeTransport,
+} from '../src/ipc/transport.js';
 import { type Orchestrator, startOrchestrator } from '../src/orchestrator.js';
 import { ORCHESTRATOR_VERSION } from '../src/version.js';
 import { connect, RpcCallError, TestClient } from './helpers/client.js';
+import { copyFixture, seedProject } from './helpers/engine-harness.js';
 import { cleanup, makeBiveHome, waitFor } from './helpers/process.js';
 
 const unixOnly = process.platform === 'win32' ? it.skip : it;
 
 const running: Orchestrator[] = [];
 const clients: TestClient[] = [];
+const temps: string[] = [];
+const sockets: net.Socket[] = [];
 
 const start = async (
   options: Partial<Parameters<typeof startOrchestrator>[0]> = {},
@@ -46,9 +53,11 @@ const expectRejected = async (client: TestClient): Promise<unknown> => {
 };
 
 afterEach(async () => {
+  for (const socket of sockets.splice(0)) socket.destroy();
   for (const client of clients.splice(0)) client.destroy();
   for (const orchestrator of running.splice(0)) await orchestrator.stop();
   await cleanup();
+  for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe('Unix 소켓 · 인증 · ping', () => {
@@ -340,6 +349,213 @@ describe('system.status (실제 오케스트레이터)', () => {
       runsInProgress: 0,
     });
   });
+});
+
+/**
+ * 인증한 날 소켓. 받은 응답을 차례대로 `responses`에 모은다(응답 순서 확인용). `TestClient`는 id로 짝지으므로 순서를
+ * 볼 수 없어 따로 둔다.
+ */
+const rawAuthed = async (target: {
+  paths: { pipe: string };
+  token: string;
+}): Promise<{ socket: net.Socket; responses: { id: unknown; error?: { code: number } }[] }> => {
+  const socket = net.createConnection(target.paths.pipe);
+  sockets.push(socket);
+  await new Promise<void>((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('error', reject);
+  });
+  socket.on('error', () => undefined);
+  socket.setEncoding('utf8');
+  const responses: { id: unknown; error?: { code: number } }[] = [];
+  let buffered = '';
+  socket.on('data', (chunk: string) => {
+    buffered += chunk;
+    const lines = buffered.split('\n');
+    buffered = lines.pop() ?? '';
+    for (const line of lines) {
+      if (line !== '')
+        responses.push(JSON.parse(line) as { id: unknown; error?: { code: number } });
+    }
+  });
+  socket.write(
+    `${JSON.stringify(
+      createRequest(0, 'system.hello', {
+        protocolVersion: PROTOCOL_VERSION,
+        token: target.token,
+      }),
+    )}\n`,
+  );
+  await waitFor(() => responses.length === 1, 5_000, 'hello 응답');
+  responses.length = 0;
+  return { socket, responses };
+};
+
+describe('연결 하나의 요청 폭주 (ADR-076 보강)', () => {
+  it('한 연결이 요청 3000건을 몰아 보내도, 처리하는 동안 다른 연결의 system.status 응답이 1초 안에 온다', async () => {
+    const biveHome = makeBiveHome();
+    const seeded = seedProject(biveHome, copyFixture(temps));
+    const orchestrator = await start({ biveHome });
+    const other = await connect(orchestrator.paths.pipe, orchestrator.token);
+    clients.push(other);
+    const flood = await rawAuthed(orchestrator);
+    const lines: string[] = [];
+    for (let id = 1; id <= 3000; id += 1) {
+      lines.push(JSON.stringify(createRequest(id, 'rule.list', { projectId: seeded.project.id })));
+    }
+    flood.socket.write(`${lines.join('\n')}\n`);
+    // 폭주 요청 처리가 시작된 뒤에 잰다
+    await waitFor(() => flood.responses.length > 0, 20_000, '폭주 연결의 첫 응답');
+    const started = Date.now();
+    await expect(other.call('system.status')).resolves.toMatchObject({ connections: 2 });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // 그사이 폭주 연결의 요청은 계속 처리되고, 응답은 보낸 순서 그대로다
+    expect(flood.responses.length).toBeLessThan(3000);
+    const ids = flood.responses.map((response) => response.id);
+    expect(ids).toEqual(ids.map((_, index) => index + 1));
+    expect(flood.responses.every((response) => response.error === undefined)).toBe(true);
+  }, 60_000);
+
+  it('한 조각에 섞여 온 요청 · 해석 실패 · 알림의 응답은 보낸 순서대로 나간다', async () => {
+    const orchestrator = await start();
+    const { socket, responses } = await rawAuthed(orchestrator);
+    socket.write(
+      [
+        JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+        '{"jsonrpc":',
+        JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping', params: { x: 1 } }),
+        JSON.stringify({ jsonrpc: '2.0', method: 'ping' }),
+        JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'nope' }),
+        JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'ping' }),
+      ].join('\n') + '\n',
+    );
+    await waitFor(() => responses.length === 5, 5_000, '응답 5건');
+    expect(responses.map((r) => [r.id, r.error?.code ?? 'ok'])).toEqual([
+      [1, 'ok'],
+      [null, ErrorCode.ParseError],
+      [2, ErrorCode.InvalidParams],
+      [3, ErrorCode.MethodNotFound],
+      [4, 'ok'],
+    ]);
+  });
+});
+
+/** 연결마다 받기 멈춤 · 다시 받기 횟수와 처리 대기 프레임 수(받은 프레임 - 보낸 응답)의 최댓값을 잰다. */
+interface FlowProbe {
+  pauses: number;
+  resumes: number;
+  maxPending: number;
+}
+
+const probingTransport = (probe: FlowProbe): PipeTransport => {
+  const inner = new NetPipeTransport();
+  return {
+    connect: (socketPath) => inner.connect(socketPath),
+    listen: (socketPath, onConnection) =>
+      inner.listen(socketPath, (connection) => {
+        let delivered = 0;
+        let sent = 0;
+        const wrapped: FrameConnection = {
+          send: (frame) => {
+            sent += 1;
+            connection.send(frame);
+          },
+          sendFlushed: (frame, timeoutMs) => connection.sendFlushed(frame, timeoutMs),
+          pauseReading: () => {
+            probe.pauses += 1;
+            connection.pauseReading();
+          },
+          resumeReading: () => {
+            probe.resumes += 1;
+            connection.resumeReading();
+          },
+          end: () => connection.end(),
+          destroy: () => connection.destroy(),
+          get closed() {
+            return connection.closed;
+          },
+          onFrame: (listener) =>
+            connection.onFrame((frame) => {
+              delivered += 1;
+              probe.maxPending = Math.max(probe.maxPending, delivered - sent);
+              listener(frame);
+            }),
+          onFrameError: (listener) => connection.onFrameError(listener),
+          onClose: (listener) => connection.onClose(listener),
+        };
+        onConnection(wrapped);
+      }),
+  };
+};
+
+describe('처리 대기열 역압 (ADR-076 보강)', () => {
+  const MAX_PENDING = 16;
+  /** id에 실어 프레임을 약 1KB로 키운다: 소켓 한 번 읽기(최대 64KB)에 든 프레임 수를 작게 */
+  const PAD = 'x'.repeat(1000);
+  const FRAMES_PER_READ = Math.ceil((64 * 1024) / PAD.length);
+
+  const serveProbed = async (pinged: {
+    count: number;
+  }): Promise<{
+    server: PipeServer;
+    probe: FlowProbe;
+    target: { paths: { pipe: string }; token: string };
+  }> => {
+    const socketPath = path.join(makeBiveHome(), 'b.sock');
+    const probe: FlowProbe = { pauses: 0, resumes: 0, maxPending: 0 };
+    const server = new PipeServer({
+      transport: probingTransport(probe),
+      path: socketPath,
+      token: 't',
+      orchestratorVersion: '9.9.9',
+      maxPendingFrames: MAX_PENDING,
+      handlers: {
+        ping: () => {
+          pinged.count += 1;
+          return { pong: true, version: '9.9.9' };
+        },
+      },
+    });
+    await server.listen();
+    return { server, probe, target: { paths: { pipe: socketPath }, token: 't' } };
+  };
+
+  const pings = (count: number): string =>
+    Array.from({ length: count }, (_, i) =>
+      JSON.stringify({ jsonrpc: '2.0', id: `${String(i + 1)}:${PAD}`, method: 'ping' }),
+    ).join('\n') + '\n';
+
+  it('대기열이 상한을 넘으면 그 연결의 읽기를 멈추고, 줄면 다시 읽어 모든 요청에 보낸 순서대로 응답한다', async () => {
+    const pinged = { count: 0 };
+    const { server, probe, target } = await serveProbed(pinged);
+    const { socket, responses } = await rawAuthed(target);
+    socket.write(pings(3000));
+    await waitFor(() => responses.length === 3000, 20_000, '응답 3000건');
+    expect(responses.map((r) => String(r.id).split(':')[0])).toEqual(
+      Array.from({ length: 3000 }, (_, i) => String(i + 1)),
+    );
+    expect(pinged.count).toBe(3000);
+    // 상한 + 이미 읽은 한 조각의 프레임 + 처리 중 1건을 넘지 않는다 (역압이 없으면 수천 건까지 찬다)
+    expect(probe.maxPending).toBeLessThanOrEqual(MAX_PENDING + FRAMES_PER_READ + 2);
+    expect(probe.pauses).toBeGreaterThan(0);
+    expect(probe.resumes).toBe(probe.pauses);
+    await server.close();
+  }, 30_000);
+
+  it('읽기를 멈춘 동안 상대가 끊어도 닫힘을 놓치지 않고, 남은 요청은 실행하지 않는다', async () => {
+    const pinged = { count: 0 };
+    const { server, probe, target } = await serveProbed(pinged);
+    const { socket } = await rawAuthed(target);
+    socket.write(pings(3000));
+    await waitFor(() => probe.pauses > 0, 5_000, '읽기 멈춤');
+    socket.destroy();
+    await waitFor(() => server.connectionCount === 0, 5_000, '서버 쪽 연결 닫힘');
+    const after = pinged.count;
+    expect(after).toBeLessThan(3000);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(pinged.count).toBe(after);
+    await server.close();
+  }, 30_000);
 });
 
 describe('토큰 파일 · 종료 정리', () => {

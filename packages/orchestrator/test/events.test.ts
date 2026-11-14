@@ -321,8 +321,9 @@ describe('알림을 받은 순간 다시 조회하면 그 상태가 보인다 (�
 });
 
 /**
- * 인증만 하고 소켓을 읽지 않는 연결 (멈춘 앱). 응답을 읽지 않는 `rule.list` 요청을 많이 보내 그 연결의 송신 버퍼를
- * 채운다(검토 1회차 재현과 같은 방법). 닫히면 `closed`가 풀린다.
+ * 인증만 하고 소켓을 읽지 않는 연결 (멈춘 앱). 응답이 큰 요청 몇 건을 보내 그 연결의 송신 버퍼(커널 버퍼 포함)를
+ * 채운다: id는 응답에 그대로 실려 오므로 512KB 문자열 id의 `ping` 8건이면 응답이 4MB다. 요청이 가벼워 금방
+ * 쌓인다(#153. 이전에는 `rule.list` 3000건을 보내 처리에 15초쯤 걸렸다). 닫히면 `closed`가 풀린다.
  */
 const stalledConnection = async (
   s: Started,
@@ -354,10 +355,10 @@ const stalledConnection = async (
     )}\n`,
   );
   await hello;
-  const request = (id: number): string =>
-    JSON.stringify(createRequest(id, 'rule.list', { projectId: s.project.id }));
   const lines: string[] = [];
-  for (let id = 1; id <= 3000; id += 1) lines.push(request(id));
+  for (let n = 1; n <= 8; n += 1) {
+    lines.push(JSON.stringify(createRequest(`${String(n)}:${'x'.repeat(512 * 1024)}`, 'ping')));
+  }
   socket.write(`${lines.join('\n')}\n`);
   return { socket, closed };
 };
@@ -367,7 +368,7 @@ describe('읽지 않는 연결 · 종료 (검토 1회차, ADR-076)', () => {
     const s = await start({ notifyTimeoutMs: 300 });
     const stalled = await stalledConnection(s);
     // 서버가 요청을 처리해 응답이 그 연결의 버퍼에 쌓일 시간
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await new Promise((resolve) => setTimeout(resolve, 200));
     const received = collect(await client(s));
     const caller = await client(s);
     const created = await caller.call('run.create', {
@@ -392,7 +393,7 @@ describe('읽지 않는 연결 · 종료 (검토 1회차, ADR-076)', () => {
   it('송신을 기다리는 화면 갱신 단계에서 orchestrator.stop()이 제한 시간 안에 끝나고, 실행은 다음 기동 때 중단으로 남는다', async () => {
     const s = await start({ notifyTimeoutMs: 120_000 });
     const stalled = await stalledConnection(s);
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await new Promise((resolve) => setTimeout(resolve, 200));
     const caller = await client(s);
     const created = await caller.call('run.create', {
       projectId: s.project.id,
