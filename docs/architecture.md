@@ -258,7 +258,7 @@ stateDiagram-v2
 | `proposal.reject` | `{projectId, id, author, reason}` → `{proposal, approvalLog}` (빈 사유 `-32001` `REJECT_REASON_REQUIRED`) | NRM-04, ADR-050 | M1 |
 | `proposal.markRead` | `{projectId, id}` → `{proposal}` (처음 읽은 시각만) | SCR-17 | M1 |
 | `approvalLog.list` | `{projectId, targetRef?}` → `{entries, chain: {valid, brokenAtSeq}}` (체인 검증은 전체 기록 기준) | NFR-01, ADR-027, ADR-050 | M1 |
-| `verification.summary` | `{projectId}` → 판정 기준 커밋 · 준수(통과/판정 가능) · 분모 목록 | JDG-03, SCR-05 | M1 |
+| `verification.summary` | `{projectId}` → `{basis, compliance: {passed, judgeable}, denominator, costPerRunUsd, rules, pipeline}` (판정 기준 = 최근 병합 실행의 기준 브랜치 · 병합 커밋, 없으면 `null` · 준수(통과/판정 가능) · 분모 목록 · 실행당 비용(없으면 `null`) · 규칙별 판정(판정 기준 커밋에서 낸 판정만, 없으면 미판정)과 실행 링크(비용 합계 · 턴) · 최근 실행의 단계와 현재 단계) | JDG-03, COST-02, SCR-05, ADR-072 | M1 |
 | `run.create` | `{projectId, ruleIds, author}` → `{run, steps, approvalLog}` (실행 시작 확인, 사람만, 유형 A · `waiting_approval` · 승인 기록 `run_start`. 설정 미비 `-32010` · 없는 규칙 `-32004` · 삭제된 규칙 `-32009`이면 아무것도 만들지 않음) | RUN-01, RUN-02, NFR-07, ADR-061 | M1 |
 | `run.list` · `run.get` | `{projectId, status?}` → `{runs}` (표시 ID 순) / `{projectId, id}`(ULID 또는 `EXE-NNN`) → `{run, steps, usage}` (`usage` = 실행 · 역할 · 에이전트 단계 시도별 비용 · 턴 · 모델별 사용량, 값 없으면 `null`, ADR-067) | RUN-01, SCR-05, COST-02, ADR-061, ADR-067 | M1 |
 | `run.resume` | `{projectId, id, author}` → `{run, steps}` (사람만 -32020, `interrupted`만 · 이미 구동 중 · 되돌리기 실패 -32009, 없음 -32004. 워크트리를 마지막 완료 단계 커밋으로 hard reset + clean 뒤 새 세션) | PRD 5.1, ADR-011, ADR-027, ADR-066 | M1 |

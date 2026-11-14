@@ -8,9 +8,11 @@ import { ProjectStartScreen } from './project-start/ProjectStartScreen.js';
 import { RequirementsScreen } from './requirements/RequirementsScreen.js';
 import { RulesScreen } from './rules/RulesScreen.js';
 import { TodoScreen } from './todo/TodoScreen.js';
+import { VerificationScreen } from './verification/VerificationScreen.js';
 
 export const SCREENS: Partial<Record<RouteId, ComponentType>> = {
   start: ProjectStartScreen,
+  verification: VerificationScreen,
   requirements: RequirementsScreen,
   rules: RulesScreen,
   todo: TodoScreen,
