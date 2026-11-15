@@ -14,7 +14,12 @@ import type { AgentAdapter, SessionEvent, SessionSpec } from '../../src/agent/ad
 import { loadScenario } from '../../src/agent/scenario.js';
 import { ScriptedAdapter } from '../../src/agent/scripted-adapter.js';
 import { PipelineEngine } from '../../src/engine/pipeline-engine.js';
-import type { StepContext, StepExecutor, StepExecutors } from '../../src/engine/types.js';
+import type {
+  EngineEvent,
+  StepContext,
+  StepExecutor,
+  StepExecutors,
+} from '../../src/engine/types.js';
 import type { WorktreeManager } from '../../src/git/worktree-manager.js';
 import type { JudgeRunInput, JudgeRunResult, JudgeRunStatus } from '../../src/judge/runner.js';
 import { createRun } from '../../src/runs/run-service.js';
@@ -244,6 +249,8 @@ export interface PipelineSetupOptions {
   /** 워크트리 관리자 (기본 엔진 기본값). 같은 하네스의 엔진들이 같은 관리자를 쓴다 */
   worktrees?: (biveHome: string) => WorktreeManager;
   merge?: { checkTimeoutMs?: number };
+  /** 엔진의 저장 · 알림 이벤트 (기본 없음). 같은 하네스의 엔진들이 같은 처리기를 쓴다 */
+  onEvent?: (biveHome: string) => (event: EngineEvent) => void | Promise<void>;
   /** 실제 설치 · 판정 러너 (판정 1회 제한 시간 ms). 지정하면 `decide` · `onJudge`는 쓰지 않는다 */
   realJudgeTimeoutMs?: number;
   temps: string[];
@@ -319,12 +326,14 @@ export const setupPipeline = (options: PipelineSetupOptions): PipelineHarness =>
   };
   const executors: StepExecutors = options.executors?.(defaults) ?? defaults;
   const worktrees = options.worktrees?.(biveHome);
+  const onEvent = options.onEvent?.(biveHome);
   const newEngine = (): PipelineEngine => {
     const engine = new PipelineEngine({
       biveHome,
       agent: adapter,
       executors,
       ...(worktrees === undefined ? {} : { worktrees }),
+      ...(onEvent === undefined ? {} : { onEvent }),
     });
     options.engines.push(engine);
     return engine;

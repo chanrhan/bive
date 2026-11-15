@@ -1070,7 +1070,7 @@ describe('화면 갱신 단계 (M1-19 수용 기준 4, RUN-02 8단계, ADR-076)'
     expect(h.saves.slice(-2)).toEqual(['running:screen_update', 'merged:null']);
   }, 60_000);
 
-  it('송신이 실패하면 화면 갱신 단계를 완료로 저장하지 않고 실행 failed (step_error)', async () => {
+  it('송신이 실패하면 화면 갱신 단계를 완료로 저장하지 않고(failed, step_error) 실행은 병합 완료 merged (ADR-091)', async () => {
     const h = setup();
     const { engine, probe } = probedEngine(h);
     h.engine = engine;
@@ -1083,7 +1083,13 @@ describe('화면 갱신 단계 (M1-19 수용 기준 4, RUN-02 8단계, ADR-076)'
       status: 'failed',
       exitDetail: { reason: 'step_error', detail: { message: '송신 실패' } },
     });
-    expect(done.run).toMatchObject({ status: 'failed', failureReason: 'step_error' });
+    // 기준 브랜치에는 이미 병합 커밋이 있으므로 실행은 병합 완료다. 실패는 화면 갱신 단계 시도에만 남는다 (ADR-091)
+    expect(done.run).toMatchObject({
+      status: 'merged',
+      failureReason: null,
+      currentStep: null,
+      mergeCommit: mainTip(h),
+    });
     expect(done.run.lastCompletedStep).toBe('merge');
   }, 60_000);
 
