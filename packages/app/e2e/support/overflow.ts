@@ -91,10 +91,10 @@ export const textClipping = (pane: Locator, testIds: readonly string[]): Promise
   }, testIds);
 
 /**
- * 좁은 창 검사 폭 (#179): 채팅이 고정 360px로 남는 가장 좁은 창(1100px)부터 기본 창(1280px)까지와,
- * 채팅이 44px 띠로 접히는 창(1024px). 높이는 기본 창과 같은 800px.
+ * 좁은 창 검사 폭 (#179): 채팅이 고정 360px로 남는 가장 좁은 창(1100px)부터 기본 창(1280px)까지
+ * (PR #177 검토의 임시 확인 폭 1120 · 1150px 포함)와, 채팅이 44px 띠로 접히는 창(1024px). 높이는 800px.
  */
-export const NARROW_WIDTHS = [1024, 1100, 1180, 1280] as const;
+export const NARROW_WIDTHS = [1024, 1100, 1120, 1150, 1180, 1280] as const;
 /** 목록 칸이 줄지 않는 창 (기존 e2e의 기본 뷰포트) */
 export const WIDE_WIDTH = 1440;
 /** 목록 칸 최대 폭(--list-pane-width) · 최소 폭과 상세 칸 최소 폭 (ADR-090) */
@@ -179,8 +179,49 @@ export const listPaneOverflow = (pane: Locator): Promise<string[]> =>
         }
       });
     });
+    // 예외 배지 · 안 읽음 점은 통째로 보인다: 말줄임도 잘림도 없고, 카드 안에서 overflow를 자르는 조상(카드 줄 등)의
+    // 보이는 영역 안에 경계 상자가 다 들어온다 (1.1 "예외만 강조")
+    el.querySelectorAll<HTMLElement>(
+      '[data-testid="card-exception"], [data-testid="card-unread"]',
+    ).forEach((mark) => {
+      const id = mark.getAttribute('data-testid') ?? '';
+      const name = `${id}(${mark.textContent ?? ''})`;
+      const box = mark.getBoundingClientRect();
+      if (box.width === 0 || box.height === 0) {
+        problems.push(`${name}: 보이지 않음 (폭 ${box.width} · 높이 ${box.height})`);
+        return;
+      }
+      if (mark.scrollWidth > mark.clientWidth + 0.5) {
+        problems.push(`${name}: 글자 잘림 (내용 ${mark.scrollWidth}px > 폭 ${mark.clientWidth}px)`);
+      }
+      const card = mark.closest('[data-testid="card"]');
+      for (let up = mark.parentElement; up !== null; up = up.parentElement) {
+        const style = getComputedStyle(up);
+        if (style.overflowX !== 'visible' || style.overflowY !== 'visible' || up === card) {
+          const outer = up.getBoundingClientRect();
+          const inner = {
+            left: outer.left + up.clientLeft,
+            top: outer.top + up.clientTop,
+            right: outer.left + up.clientLeft + up.clientWidth,
+            bottom: outer.top + up.clientTop + up.clientHeight,
+          };
+          if (
+            box.left < inner.left - 0.5 ||
+            box.top < inner.top - 0.5 ||
+            box.right > inner.right + 0.5 ||
+            box.bottom > inner.bottom + 0.5
+          ) {
+            problems.push(
+              `${name}: ${up.className} 밖으로 잘림 (가로 ${Math.round(box.left)}~${Math.round(box.right)} / ${Math.round(inner.left)}~${Math.round(inner.right)})`,
+            );
+            break;
+          }
+        }
+        if (up === card) break;
+      }
+    });
     const texts = el.querySelectorAll<HTMLElement>(
-      '.card-title, .card-note, .card-time, .filter-chip-text',
+      '.card-title, .card-id, .card-note, .card-time, .filter-chip-text',
     );
     texts.forEach((text) => {
       if (text.scrollWidth <= text.clientWidth + 0.5) return;

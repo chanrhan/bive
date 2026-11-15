@@ -1013,6 +1013,38 @@ test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
   const FLOATING = ['action-reject', 'action-edit', 'action-approve'] as const;
   const listPane = (page: Page): Locator => page.getByTestId('todo-list-pane');
 
+  // 2줄째가 가장 긴 카드 (테스트 전용 데이터): 4자리 ID · 예외 2개(위험 높음 · 구현 중 제안) · 시각 · 안 읽음,
+  // 처리된 것은 예외 3개(거절 · 위험 높음 · 구현 중 제안)
+  const MANY_PAYLOAD = rulePayload('헬스 응답에 디스크 사용량 포함');
+  const P_MANY: Proposal = {
+    ...base,
+    id: '01JBVE0000000000000000P012',
+    displayId: 'PRP-1234',
+    kind: 'rule_new',
+    payload: MANY_PAYLOAD,
+    diff: { before: null, after: MANY_PAYLOAD },
+    risk: 'high',
+    source: 'implementation',
+    createdAt: '2026-10-16T04:00:00.000Z',
+  };
+  const P_MANY_DONE: Proposal = {
+    ...base,
+    id: '01JBVE0000000000000000P013',
+    displayId: 'PRP-1235',
+    kind: 'requirement_change',
+    targetRef: { entity: 'Requirement', id: ID.req },
+    payload: { text: '헬스 응답에 디스크 사용량을 포함한다' },
+    diff: {
+      before: { text: REQUIREMENT.text },
+      after: { text: '헬스 응답에 디스크 사용량을 포함한다' },
+    },
+    risk: 'high',
+    source: 'implementation',
+    state: 'rejected',
+    decision: { at: '2026-10-16T04:30:00.000Z', by: HUMAN, rejectReason: '범위 밖' },
+    createdAt: '2026-10-16T04:10:00.000Z',
+  };
+
   /** 상세에 가로 스크롤이 없고, 받은 버튼이 한 줄 · 잘림 없음 · 상세 안이며, 가운데를 누르면 그 버튼에 닿는다. */
   const expectDetailLayout = async (page: Page, testIds: readonly string[]): Promise<void> => {
     for (const id of ['todo-detail', 'proposal-detail']) {
@@ -1029,6 +1061,28 @@ test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
     test.describe(`${width}×800`, () => {
       test.use({ viewport: { width, height: 800 } });
       const shot: Shot = (name) => `좁은-${width}-${name}`;
+
+      test('예외가 많은 카드(4자리 ID · 예외 2~3개 · 안 읽음)도 예외 배지 · 안 읽음 점이 통째로 보인다', async ({
+        page,
+      }) => {
+        await setup(page, [...PROPOSALS, P_MANY, P_MANY_DONE]);
+        await expect(card(page, P_MANY.displayId).getByTestId('card-exception')).toHaveText([
+          '위험 높음',
+          '구현 중 제안',
+        ]);
+        await expect(card(page, P_MANY.displayId).getByTestId('card-unread')).toHaveCount(1);
+        expect(await listPaneOverflow(listPane(page))).toEqual([]);
+        await snapshot(page, shot('목록-예외'));
+
+        await chooseStates(page, ['pending', 'approved', 'rejected']);
+        await expect(card(page, P_MANY_DONE.displayId).getByTestId('card-exception')).toHaveText([
+          '거절',
+          '위험 높음',
+          '구현 중 제안',
+        ]);
+        expect(await listPaneOverflow(listPane(page))).toEqual([]);
+        await snapshot(page, shot('목록-예외-처리됨'));
+      });
 
       test('상세 칸은 최소 폭 이상이고 목록 칸은 넘치지 않는다, 떠 있는 버튼 · 입력 카드 버튼은 상세 안에서 눌린다', async ({
         page,

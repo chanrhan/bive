@@ -18,6 +18,8 @@ import {
   RULES,
   UNJUDGED_RULE,
 } from './checklists/scr-06.js';
+import type { RuleWithJudgment } from '@bive/shared';
+
 import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
 import {
   collectVisibleText,
@@ -40,7 +42,11 @@ import {
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
-const openRules = async (page: Page, responses: MockResponses = {}): Promise<BiveMock> => {
+const openRules = async (
+  page: Page,
+  responses: MockResponses = {},
+  cardCount = RULES.length,
+): Promise<BiveMock> => {
   const bive = await mockBive(page, {
     responses: {
       'system.status': { result: STATUS },
@@ -53,7 +59,7 @@ const openRules = async (page: Page, responses: MockResponses = {}): Promise<Biv
   });
   await page.goto('/');
   await page.getByRole('button', { name: '규칙', exact: true }).click();
-  await expect(page.getByTestId('card')).toHaveCount(RULES.length);
+  await expect(page.getByTestId('card')).toHaveCount(cardCount);
   return bive;
 };
 
@@ -295,13 +301,30 @@ test.describe('1280px 창의 상세 폭 (#165)', () => {
 test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
   const listPane = (page: Page) => page.getByTestId('rules-list-pane');
   const detailPane = (page: Page) => page.getByTestId('rule-detail');
+  // 2줄째가 가장 긴 규칙 카드 (테스트 전용 데이터): 4자리 ID · WHEN 조건 · 판정 예외(재검증 필요) · 규범 예외(잠정)
+  const MANY_RULE: RuleWithJudgment = {
+    rule: {
+      ...FAILING_RULE,
+      id: '01JC0000000000000000001234',
+      displayId: 'RULE-1234',
+      normState: 'provisional',
+    },
+    judgment: { status: 'needs_recheck', latest: null },
+  };
 
   for (const width of NARROW_WIDTHS) {
     test(`${width}×800: 상세 칸은 최소 폭 이상이고 목록 칸은 넘치지 않는다, 규칙 상세에 가로 스크롤이 없고 [실행] · 코드 열기 링크는 상세 안에서 눌린다`, async ({
       page,
     }) => {
       await page.setViewportSize({ width, height: 800 });
-      const bive = await openRules(page);
+      const bive = await openRules(
+        page,
+        { 'rule.list': { result: { rules: [...RULES, MANY_RULE] } } },
+        RULES.length + 1,
+      );
+      await expect(
+        page.locator('[data-testid="card"][data-id="RULE-1234"] [data-testid="card-exception"]'),
+      ).toHaveText(['재검증 필요', '잠정']);
       await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
       await expect(page.getByTestId('history-row')).toHaveCount(FAILING_HISTORY.length);
       await expect(page.getByTestId('failure-case')).toBeVisible();
