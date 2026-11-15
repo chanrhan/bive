@@ -21,6 +21,7 @@ import {
   type Requirement,
   type SessionEndReason,
   SettingsIncompleteData,
+  TOOL_CALL_NAME_DISPLAY_MAX,
   type ToolManifestEntry,
 } from '@bive/shared';
 import { ConflictError, NotFoundError, type ProjectStore } from '@bive/store';
@@ -37,6 +38,7 @@ import { RpcError } from '../ipc/server.js';
 import type { TaskTracker } from '../lifecycle.js';
 import { ProposalService } from '../proposals/proposal-service.js';
 import { roleSessionSettings } from '../settings/settings-service.js';
+import { displayText } from '../text-limit.js';
 import type { ProposeRuleInput } from '../tools/definitions.js';
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
 import { denied, failed, invalidArgs, type IssueList, ok } from '../tools/result.js';
@@ -396,8 +398,10 @@ export class RuleWriterService implements RuleWriterLauncher {
           onToolCall: (call) => {
             record.toolCalls.push(call);
             this.#persistToolCall(record, call);
+            // 도구 이름은 에이전트가 정한 임의 문자열이다: 줄바꿈 등으로 로그 줄을 꾸미지 못하게 표시 값으로 (ADR-089)
+            const name = displayText(call.name, TOOL_CALL_NAME_DISPLAY_MAX).text;
             this.#log(
-              `규칙 작성 도구 호출 (${record.requirementDisplayId}, ${call.name} ${call.status}` +
+              `규칙 작성 도구 호출 (${record.requirementDisplayId}, ${name} ${call.status}` +
                 `${call.reason === undefined ? '' : ` ${call.reason}`})`,
             );
           },
