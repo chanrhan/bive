@@ -220,6 +220,24 @@ export const listPaneOverflow = (pane: Locator): Promise<string[]> =>
         if (up === card) break;
       }
     });
+    // ID는 줄 폭보다 길 때만 말줄임된다. 보조 문구 · 시각이 보이는 동안(또는 그것들이 다음 줄로 넘어가도) 온전하다
+    el.querySelectorAll<HTMLElement>('.card-id').forEach((cardId) => {
+      const line = cardId.parentElement;
+      if (line === null) return;
+      // 말줄임은 1/64px만 모자라도 끝 글자를 "…"로 바꾸므로 정수인 scrollWidth가 아니라 글자 범위의 실수 폭으로 잰다
+      const range = document.createRange();
+      range.selectNodeContents(cardId);
+      const textWidth = range.getBoundingClientRect().width;
+      const boxWidth = cardId.getBoundingClientRect().width;
+      if (textWidth > boxWidth + 0.01 && textWidth <= line.clientWidth) {
+        const others = [...line.querySelectorAll<HTMLElement>('.card-note, .card-time')]
+          .map((o) => `${o.className} ${Math.round(o.getBoundingClientRect().width)}px`)
+          .join(', ');
+        problems.push(
+          `card-id(${cardId.textContent ?? ''}): 줄 폭 ${line.clientWidth}px 안인데 말줄임 (폭 ${boxWidth.toFixed(3)}px < 글자 ${textWidth.toFixed(3)}px${others === '' ? '' : `, ${others}`})`,
+        );
+      }
+    });
     const texts = el.querySelectorAll<HTMLElement>(
       '.card-title, .card-id, .card-note, .card-time, .filter-chip-text',
     );

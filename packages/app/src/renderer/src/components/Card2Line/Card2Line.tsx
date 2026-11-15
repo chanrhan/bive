@@ -67,19 +67,14 @@ export const Card2Line = ({
             {note}
           </span>
         )}
-        {/* 예외 묶음: 줄지 않고, 줄에 다 못 들어가면 묶음 안에서 다음 줄로 넘어간다 (ADR-090) */}
-        {marks.length > 0 && (
-          <span className="card-exceptions">
-            {marks.map((mark) => (
-              <ExceptionLabel
-                key={mark.key}
-                label={mark.label}
-                tone={mark.tone}
-                testId="card-exception"
-              />
-            ))}
-          </span>
-        )}
+        {marks.map((mark) => (
+          <ExceptionLabel
+            key={mark.key}
+            label={mark.label}
+            tone={mark.tone}
+            testId="card-exception"
+          />
+        ))}
         {time !== null && (
           <time className="card-time" dateTime={dateTime}>
             {time}
