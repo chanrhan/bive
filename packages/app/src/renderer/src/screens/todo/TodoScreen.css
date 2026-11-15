@@ -46,7 +46,9 @@
 .todo-body {
   display: grid;
   flex: 1;
-  grid-template-columns: var(--list-pane-width) minmax(0, 1fr);
+  /* 목록은 최대 --list-pane-width에서 220px까지 줄고, 상세는 288px 아래로 줄지 않는다.
+     좁은 창(1100px ~ 1280px)에서는 목록이 먼저 준다 (ADR-090) */
+  grid-template-columns: minmax(220px, var(--list-pane-width)) minmax(288px, 1fr);
   min-height: 0;
 }
 

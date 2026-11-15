@@ -121,7 +121,7 @@ export const ApprovalTab = ({ projectId }: { projectId: string }): React.JSX.Ele
 
   return (
     <div className="todo-body" data-testid="todo-approval" data-state={state.status}>
-      <div className="todo-list-pane">
+      <div className="todo-list-pane" data-testid="todo-list-pane">
         {state.status === 'ready' && (
           <ListView
             listId={APPROVAL_LIST_ID}

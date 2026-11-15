@@ -11,11 +11,13 @@
   flex-direction: column;
 }
 
+/* 목록은 최대 --list-pane-width에서 220px까지 줄고, 상세는 288px 아래로 줄지 않는다.
+   좁은 창(1100px ~ 1280px)에서는 목록이 먼저 준다 (ADR-090) */
 .requirements-list-pane {
   display: flex;
-  flex: none;
+  flex: 0 1 var(--list-pane-width);
   flex-direction: column;
-  width: var(--list-pane-width);
+  min-width: 220px;
   min-height: 0;
   border-right: 1px solid var(--color-border);
 }
@@ -28,7 +30,7 @@
   display: flex;
   flex: 1;
   flex-direction: column;
-  min-width: 0;
+  min-width: 288px;
   min-height: 0;
   overflow: auto;
 }
