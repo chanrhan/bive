@@ -128,8 +128,9 @@ export const skipMutationStep: StepExecutor = () =>
 /**
  * 화면 갱신 (RUN-02 8단계 "판정 결과 저장 + `event.*` 알림 전송", ADR-076). 판정 결과는 검사 · 병합 재검사가 판정마다
  * 바로 저장했으므로(ADR-069) 그 기록을 읽은 뒤 `event.run.updated`를 보내고, 송신이 끝나야 통과를 돌려준다. 그래서
- * 이 단계가 완료로 저장되기 전에 화면은 저장된 판정을 다시 조회할 수 있다. 송신이 실패하면 예외 → 실행 `failed`.
- * 송신 대기는 연결마다 상한이 있고(넘기면 그 연결을 끊음, `PipeServer.notify`), 종료 신호가 오면 저장 없이 끝난다.
+ * 이 단계가 완료로 저장되기 전에 화면은 저장된 판정을 다시 조회할 수 있다. 송신이 실패하면 예외 → 이 단계 시도 `failed`,
+ * 실행은 이미 병합됐으므로 `merged`(ADR-091, 엔진 `#halt`). 송신 대기는 연결마다 상한이 있고(넘기면 그 연결을 끊음,
+ * `PipeServer.notify`), 종료 신호가 오면 저장 없이 끝난다.
  */
 export const screenUpdateStep: StepExecutor = async (context) => {
   const judgments = context.read((store) => store.judgments.listByRun(context.run.id).length);
@@ -584,7 +585,8 @@ export class PipelineEngine {
 
   /**
    * 구동 중 예외 뒤: 실행이 아직 `running`이면 `failed`(`step_error`)로 끝낸다. 지금 시도가 아직 열려 있으면 그
-   * 시도를 실패로, 아니면 실행만 바꾼다. 그것도 실패하면 로그만 남긴다(다음 기동 때 `interrupted`).
+   * 시도를 실패로(병합 커밋이 기록된 뒤면 실행은 `merged`, `#halt` · ADR-091), 아니면 실행만 바꾼다. 그것도 실패하면
+   * 로그만 남긴다(다음 기동 때 `interrupted`).
    */
   async #failAfterError(projectId: string, current: DriveState, error: unknown): Promise<void> {
     const exitDetail = { message: errorMessage(error) };
@@ -899,7 +901,11 @@ export class PipelineEngine {
     );
   }
 
-  /** 실행을 끝낸다(`failed` · `budget_exceeded`): 지금 시도 실패 · 사유 저장 뒤 브랜치 · 워크트리 보존 (RUN-08). */
+  /**
+   * 실행을 끝낸다(`failed` · `budget_exceeded`): 지금 시도 실패 · 사유 저장 뒤 브랜치 · 워크트리 보존 (RUN-08).
+   * 병합 커밋이 이미 기록된 실행(병합 단계 뒤의 화면 갱신 단계)이면 기준 브랜치에 병합 커밋이 있으므로 실행은 `merged`로
+   * 끝내고(실패 사유 없음, 마지막 완료 단계는 병합 그대로) 지금 시도만 `failed` + 사유로 남긴다. 보존은 하지 않는다(ADR-091).
+   */
   async #halt(
     projectId: string,
     run: Run,
@@ -910,6 +916,7 @@ export class PipelineEngine {
     git: RunGitRef | null,
   ): Promise<void> {
     const at = this.#timestamp();
+    const merged = run.mergeCommit !== null;
     this.#save(projectId, (store) =>
       store.runs.transition(run.id, {
         expectedStatus: 'running',
@@ -923,13 +930,18 @@ export class PipelineEngine {
           },
         ],
         run: {
-          status: runStatus,
-          failureReason: reason,
+          ...(merged
+            ? { status: 'merged', currentStep: null }
+            : { status: runStatus, failureReason: reason }),
           endedAt: at,
           toolManifest: store.sessions.manifest(run.id),
         },
       }),
     );
+    if (merged) {
+      this.#log(`실행 병합 완료 (${run.displayId}, ${step.kind} 단계 실패: ${reason})`);
+      return;
+    }
     this.#log(`실행 종료 (${run.displayId}, ${runStatus}: ${reason})`);
     if (git === null) return;
     try {

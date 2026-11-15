@@ -18,10 +18,12 @@ import {
   PROJECT,
   RULES,
   run,
+  SCREEN_UPDATE_FAILED_SUMMARY,
   SKIPPED_SUMMARY,
   STAGE_LABELS,
   stages,
   SUMMARY,
+  verificationScreenUpdateFailedChecklist,
   verificationSkippedChecklist,
 } from './checklists/scr-05.js';
 import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
@@ -155,6 +157,36 @@ test.describe('파이프라인 · 목록 (수용 기준 2)', () => {
       page.locator('[data-testid="pipeline-stage"]:not([data-status="skipped"])'),
     ).not.toContainText(['생략']);
     const file = path.join(SCREENSHOT_DIR, 'SCR-05', '생략-단계.png');
+    await mkdir(path.dirname(file), { recursive: true });
+    await page.screenshot({ path: file, fullPage: true });
+  });
+
+  test('병합 뒤 화면 갱신만 실패한 실행: 상태 "병합 완료", 머리줄은 그 병합 커밋, 화면 갱신 단계만 실패 표시 (ADR-091)', async ({
+    page,
+  }) => {
+    await openScreen(page, { 'verification.summary': { result: SCREEN_UPDATE_FAILED_SUMMARY } });
+    await expectScreen(page, 'SCR-05', '기본', {
+      checklist: verificationScreenUpdateFailedChecklist,
+      screenshot: false,
+    });
+    const status = page.getByTestId('pipeline-run-status');
+    await expect(status).toHaveText('병합 완료');
+    await expect(status).toHaveAttribute('data-status', 'merged');
+    await expect(page.locator('.pipeline')).toHaveAttribute('data-run-status', 'merged');
+    // 실패는 화면 갱신 단계 한 칸에만: 점 색(예외 강조)과 툴팁, 병합 단계는 통과
+    const failed = page.locator('[data-testid="pipeline-stage"][data-status="failed"]');
+    await expect(failed).toHaveCount(1);
+    await expect(failed).toHaveAttribute('data-kind', 'screen_update');
+    await expect(failed).toHaveAttribute('title', '화면 갱신 · 실패');
+    const merge = page.locator('[data-testid="pipeline-stage"][data-kind="merge"]');
+    await expect(merge).toHaveAttribute('data-status', 'passed');
+    const dotColor = (kind: string) =>
+      page
+        .locator(`[data-testid="pipeline-stage"][data-kind="${kind}"] .pipeline-dot`)
+        .evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(await dotColor('screen_update')).not.toBe(await dotColor('merge'));
+    await expect(page.getByRole('button', { name: '재개' })).toHaveCount(0);
+    const file = path.join(SCREENSHOT_DIR, 'SCR-05', '화면-갱신-실패.png');
     await mkdir(path.dirname(file), { recursive: true });
     await page.screenshot({ path: file, fullPage: true });
   });

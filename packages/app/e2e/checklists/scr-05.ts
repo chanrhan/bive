@@ -155,6 +155,54 @@ export const SKIPPED_SUMMARY: VerificationSummaryResult = {
   },
 };
 
+/** 병합 커밋 (테스트 전용 데이터). */
+export const MERGE_COMMIT_3 = `b2c37d4${'0'.repeat(33)}`;
+
+/** 실행 링크 = 판정 기준 실행 EXE-003 (테스트 전용 데이터). */
+export const LINK_3: VerificationRunLink = {
+  id: RUN_3,
+  displayId: 'EXE-003',
+  costUsd: 0.25,
+  turns: 5,
+};
+
+/**
+ * `verification.summary` 가짜 응답: 최근 실행 EXE-003이 병합된 뒤 화면 갱신 단계만 실패 (ADR-091). 실행은 병합 완료이고
+ * 판정 기준은 그 실행의 병합 커밋, 목록의 판정 · 실행 링크도 그 실행이다. 파이프라인의 화면 갱신 단계만 실패.
+ */
+export const SCREEN_UPDATE_FAILED_SUMMARY: VerificationSummaryResult = {
+  ...SUMMARY,
+  basis: { branch: 'main', commit: MERGE_COMMIT_3, runId: RUN_3 },
+  rules: SUMMARY.rules.map((row) =>
+    row.run === null || row.judgment.latest === null
+      ? row
+      : {
+          ...row,
+          judgment: { ...row.judgment, latest: { ...row.judgment.latest, runId: RUN_3 } },
+          run: LINK_3,
+        },
+  ),
+  pipeline: {
+    run: run({
+      status: 'merged',
+      currentStep: null,
+      lastCompletedStep: 'merge',
+      mergeCommit: MERGE_COMMIT_3,
+      endedAt: '2026-10-16T03:20:00.000Z',
+    }),
+    stages: PLAN.map((kind) => ({
+      kind,
+      status:
+        kind === 'mutation'
+          ? ('skipped' as const)
+          : kind === 'screen_update'
+            ? ('failed' as const)
+            : ('passed' as const),
+      attempt: 1,
+    })),
+  },
+};
+
 /** `verification.summary` 가짜 응답: 실행 없음 (규칙은 있고 판정 전). */
 export const EMPTY_SUMMARY: VerificationSummaryResult = {
   basis: null,
@@ -319,6 +367,34 @@ export const verificationSkippedChecklist = {
         { label: '단계 순서', testId: 'pipeline-stage', count: STAGE_LABELS.length },
         { label: '생략 단계 이름', text: '변이 주입' },
         { label: '생략 단계 문구 (보이는 글자)', testId: 'pipeline-skip', text: '생략', count: 1 },
+      ],
+    },
+  },
+} satisfies ScreenChecklist;
+
+/**
+ * 병합 뒤 화면 갱신 단계만 실패한 실행 (`SCREEN_UPDATE_FAILED_SUMMARY`, ADR-091). 실행 상태는 "병합 완료", 머리줄은 그 실행의
+ * 병합 커밋, 목록의 실행 링크는 그 실행. 상태 이름은 기본이지만 데이터가 다르므로 scr-05.spec.ts가 이 표를 직접 넘긴다.
+ */
+export const verificationScreenUpdateFailedChecklist = {
+  id: 'SCR-05',
+  name: '검증 (병합 뒤 화면 갱신 실패)',
+  states: {
+    기본: {
+      title: 'BIVE',
+      elements: [
+        {
+          label: '머리줄 (그 실행의 병합 커밋)',
+          testId: 'verification-basis',
+          text: '판정 기준 main@b2c37d4',
+        },
+        { label: '파이프라인 영역', testId: 'pipeline', role: 'region', name: '파이프라인' },
+        { label: '최근 실행', testId: 'pipeline-run', text: 'EXE-003' },
+        { label: '최근 실행 상태', testId: 'pipeline-run-status', text: '병합 완료' },
+        { label: '현재 단계 없음 (끝난 실행)', testId: 'pipeline-current', absent: true },
+        { label: '단계 순서', testId: 'pipeline-stage', count: STAGE_LABELS.length },
+        { label: '재개 버튼 미노출 (중단 아님)', role: 'button', name: '재개', absent: true },
+        { label: '실행 링크 ID (그 실행)', testId: 'run-link-id', text: 'EXE-003' },
       ],
     },
   },
