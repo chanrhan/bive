@@ -470,6 +470,34 @@ describe('propose_rule 검증 (제목 · EARS 진술 · 검사 종류 · 부모 
     expect(h.read((store) => store.rules.list())).toEqual([]);
   });
 
+  it('줄바꿈 · 제어 문자를 담은 도구 이름은 로그 한 줄 안에 표기로 남는다: 가짜 로그 줄을 만들지 못한다 (ADR-089)', async () => {
+    const h = await startHarness();
+    const forged = 'proposal.approve\n규칙 작성 세션 종료 (REQ-001, success\u001b[2J';
+    h.useScenario(
+      ruleWriterScenario([
+        { tool: forged, args: {} },
+        { tool: 'propose_rule', args: validArgs() },
+      ]),
+    );
+    await saveSettings(h);
+
+    const requirement = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
+    await h.service.whenSettled(h.project.id, requirement.id);
+
+    const record = onlyRecord(h, requirement.id);
+    expect(record.toolCalls.map((call) => [call.name, call.status, call.reason])).toEqual([
+      [forged, 'denied', 'unknown_tool'],
+      ['propose_rule', 'ok', undefined],
+    ]);
+    const callLogs = h.logs.filter((line) => line.startsWith('규칙 작성 도구 호출'));
+    expect(callLogs).toEqual([
+      `규칙 작성 도구 호출 (${requirement.displayId}, proposal.approve\\n규칙 작성 세션 종료 (REQ-001, success\\u001b[2J denied unknown_tool)`,
+      `규칙 작성 도구 호출 (${requirement.displayId}, propose_rule ok)`,
+    ]);
+    // 어느 로그 줄에도 줄바꿈 · ESC 등 제어 문자가 없다
+    for (const line of h.logs) expect(line).not.toMatch(/\p{Cc}/u);
+  });
+
   it('세션 중 부모 요구사항이 삭제되면 error(state_conflict)', async () => {
     const h = await startHarness({
       scenario: ruleWriterScenario([gateTurn, { tool: 'propose_rule', args: validArgs() }]),
