@@ -407,8 +407,14 @@ export const runCommand = async (
 
 /** 실행 전에 거부된 명령의 기록 요약: 도구 이름 + 요청 인자. */
 const requestSummary = (name: string, rawArgs: Record<string, unknown>): string => {
-  const args = JSON.stringify(rawArgs);
-  return args === '{}' ? name : `${name} ${truncate(args, 200)}`;
+  let args: string;
+  try {
+    // 순환 참조 · 매우 깊은 객체도 거부 결과를 바꾸지 않는다 (ADR-089)
+    args = JSON.stringify(rawArgs) ?? '';
+  } catch {
+    args = '(직렬화 불가 인자)';
+  }
+  return args === '{}' || args === '' ? name : `${name} ${truncate(args, 200)}`;
 };
 
 const truncate = (text: string, max: number): string =>
