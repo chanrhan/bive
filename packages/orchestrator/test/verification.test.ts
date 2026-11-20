@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { PipeServer } from '../src/ipc/server.js';
 import { createRun } from '../src/runs/run-service.js';
-import { basisOf, costPerRun, type MergeRecord, pipelineOf } from '../src/verification/summary.js';
+import { costPerRun, pipelineOf } from '../src/verification/summary.js';
 import type { TestClient } from './helpers/client.js';
 import { cleanup } from './helpers/process.js';
 import { iso, startProjectHarness, T0, type ProjectHarness } from './helpers/project-harness.js';
@@ -431,40 +431,9 @@ describe('verification.summary', () => {
     expect(pipeline?.stages[1]).toEqual({ kind: 'test_writing', status: 'failed', attempt: 1 });
   });
 
-  it('병합 뒤 화면 갱신 도중 중단된 실행(interrupted · 병합 커밋 기록)도 판정 기준이 되고, 순서는 병합 단계가 끝난 시각이다 (M2-11 #190 · ADR-094)', async () => {
-    /** 병합 단계까지 통과(병합 단계 끝 = `mergedAt`)하고 화면 갱신 도중 중단된 실행. `mergeCommit`이 없으면 병합 전 중단. */
-    const interruptedAfter = (
-      store: ProjectStore,
-      ruleIds: Ulid[],
-      at: number,
-      mergeCommit: string | null,
-    ): Run => {
-      const run = seedRun(store, { ruleIds, at, status: 'running' });
-      const steps = store.runs.steps(run.id);
-      const until = mergeCommit === null ? 'check' : 'merge';
-      const plan = RUN_STEP_PLANS.A;
-      const done = plan.slice(1, plan.indexOf(until) + 1);
-      const next = plan[plan.indexOf(until) + 1] as StepKind;
-      store.runs.transition(run.id, {
-        run: { currentStep: next, headCommit: SHA_C, mergeCommit },
-        steps: [
-          ...done.map((kind) => ({
-            id: stepOf(steps, kind).id,
-            status: 'passed' as const,
-            startedAt: iso(at),
-            endedAt: iso(at + 1_000),
-          })),
-          { id: stepOf(steps, next).id, status: 'running' as const, startedAt: iso(at + 1_000) },
-        ],
-      });
-      return store.runs.transition(run.id, {
-        run: { status: 'interrupted' },
-        steps: [{ id: stepOf(steps, next).id, status: 'failed', endedAt: iso(at + 1_500) }],
-      }).run;
-    };
+  it('지금 동작 (#195에서 바꾼다): 병합 커밋이 기록된 interrupted 실행(병합 뒤 화면 갱신 도중 종료)은 재개 전까지 판정 기준 후보가 아니다 (M2-11 #190 배경 17 · ADR-094)', async () => {
     const seeded = h.read((store) => {
       const rule = insertRule(store, '규칙', 'approved');
-      // EXE-001: 앞서 병합 완료 (종료 T0 + 12초)
       seedRun(store, {
         ruleIds: [rule.id],
         at: T0 + 10_000,
@@ -472,138 +441,42 @@ describe('verification.summary', () => {
         headCommit: SHA_E,
         mergeCommit: SHA_A,
       });
-      // EXE-002: 병합(T0 + 21초) 뒤 화면 갱신 도중 중단 → 기준 브랜치 끝은 SHA_B
-      const run2 = interruptedAfter(store, [rule.id], T0 + 20_000, SHA_B);
-      store.judgments.record([judgment(rule, 'pass', judgedIn(store, run2), T0 + 20_500, SHA_C)]);
-      return { rule, run2 };
-    });
-    let result = await summary();
-    expect(result.basis).toEqual({ branch: 'main', commit: SHA_B, runId: seeded.run2.id });
-    expect(result.compliance).toEqual({ passed: 1, judgeable: 1 });
-    expect(result.rules[0]).toMatchObject({
-      judgment: { status: 'pass', latest: { runId: seeded.run2.id, commit: SHA_C } },
-      run: { displayId: 'EXE-002' },
-    });
-    // 파이프라인은 그 실행의 중단 상태 그대로 (재개 버튼 근거)
-    expect(result.pipeline?.run).toMatchObject({
-      displayId: 'EXE-002',
-      status: 'interrupted',
-      currentStep: 'screen_update',
-    });
-
-    // 대조: 병합 전에 중단된 실행(병합 커밋 없음)은 기준이 아니다
-    h.read((store) => interruptedAfter(store, [seeded.rule.id], T0 + 30_000, null));
-    result = await summary();
-    expect(result.basis).toEqual({ branch: 'main', commit: SHA_B, runId: seeded.run2.id });
-
-    // 그 뒤에 병합된 실행이 있으면 그것이 기준이다
-    const run4 = h.read((store) =>
-      seedRun(store, {
-        ruleIds: [seeded.rule.id],
-        at: T0 + 40_000,
-        status: 'merged',
-        headCommit: SHA_E,
-        mergeCommit: SHA_D,
-      }),
-    );
-    result = await summary();
-    expect(result.basis).toEqual({ branch: 'main', commit: SHA_D, runId: run4.id });
-  });
-
-  describe('판정 기준의 순서 값은 병합 단계의 통과 시도에서만 읽는다 (M2-11 #190 검토 2회차 · ADR-094)', () => {
-    interface MergeAttempt {
-      status: 'passed' | 'failed';
-      /** 끝난 시각 (T0 기준 ms) */
-      end: number;
-      /** 병합 단계 결과의 `mergeOrder` (생략하면 칸 없음) */
-      order?: number;
-    }
-    /** 병합 단계 시도들을 남기고 `merged`로 끝난 실행 (테스트 전용 저장 형태). */
-    const mergedWith = (
-      store: ProjectStore,
-      ruleId: Ulid,
-      at: number,
-      mergeCommit: string,
-      tries: MergeAttempt[],
-    ): Run => {
-      const created = seedRun(store, { ruleIds: [ruleId], at, status: 'running' });
-      const steps = store.runs.steps(created.id);
+      // 병합 단계까지 통과하고(병합 커밋 SHA_B 기록) 화면 갱신 도중 중단된 실행
+      const run = seedRun(store, { ruleIds: [rule.id], at: T0 + 20_000, status: 'running' });
+      const steps = store.runs.steps(run.id);
       const plan = RUN_STEP_PLANS.A;
-      const before = plan.slice(1, plan.indexOf('merge'));
-      const merge = stepOf(steps, 'merge');
-      const exitOf = (t: MergeAttempt) =>
-        t.order === undefined ? { mergeCommit } : { mergeCommit, mergeOrder: t.order };
-      const [first, ...rest] = tries;
-      if (first === undefined) throw new Error('병합 시도 없음');
-      store.runs.transition(created.id, {
-        run: { currentStep: 'merge', headCommit: SHA_C },
+      store.runs.transition(run.id, {
+        run: { currentStep: 'screen_update', headCommit: SHA_C, mergeCommit: SHA_B },
         steps: [
-          ...before.map((kind) => ({
+          ...plan.slice(1, plan.indexOf('screen_update')).map((kind) => ({
             id: stepOf(steps, kind).id,
             status: 'passed' as const,
-            startedAt: iso(at),
-            endedAt: iso(at + 1),
+            startedAt: iso(T0 + 20_000),
+            endedAt: iso(T0 + 21_000),
           })),
           {
-            id: merge.id,
-            status: first.status,
-            startedAt: iso(at + 1),
-            endedAt: iso(T0 + first.end),
-            exitDetail: exitOf(first),
+            id: stepOf(steps, 'screen_update').id,
+            status: 'running' as const,
+            startedAt: iso(T0 + 21_000),
           },
         ],
-        addSteps: rest.map((t, i) => ({
-          id: newId(),
-          kind: 'merge' as const,
-          attempt: i + 2,
-          status: t.status,
-          role: merge.role,
-          startedAt: iso(T0 + t.end - 1),
-          endedAt: iso(T0 + t.end),
-          exitDetail: exitOf(t),
-        })),
       });
-      return store.runs.transition(created.id, {
-        run: { status: 'merged', currentStep: null, mergeCommit, endedAt: iso(T0 + 90_000) },
+      const interrupted = store.runs.transition(run.id, {
+        run: { status: 'interrupted' },
         steps: [
-          {
-            id: stepOf(steps, 'screen_update').id,
-            status: 'passed',
-            startedAt: iso(T0 + 89_000),
-            endedAt: iso(T0 + 90_000),
-          },
+          { id: stepOf(steps, 'screen_update').id, status: 'failed', endedAt: iso(T0 + 21_500) },
         ],
       }).run;
-    };
-
-    it('통과하지 않은 병합 시도의 시각은 쓰지 않는다: X(실패 시도 t60 · 통과 t15) · Y(통과 t20) → Y', async () => {
-      const { y } = h.read((store) => {
-        const rule = insertRule(store, '규칙', 'approved');
-        mergedWith(store, rule.id, T0, SHA_A, [
-          { status: 'failed', end: 60_000 },
-          { status: 'passed', end: 15_000 },
-        ]);
-        return {
-          y: mergedWith(store, rule.id, T0 + 1, SHA_B, [{ status: 'passed', end: 20_000 }]),
-        };
-      });
-      expect((await summary()).basis).toEqual({ branch: 'main', commit: SHA_B, runId: y.id });
+      return { interrupted };
     });
-
-    it('통과 시도에 저장된 병합 순서 값이 있으면 그것으로: X(순서 5, 재개 복구로 t50) · Y(순서 6, t20) → Y', async () => {
-      const { y } = h.read((store) => {
-        const rule = insertRule(store, '규칙', 'approved');
-        mergedWith(store, rule.id, T0, SHA_A, [
-          { status: 'failed', end: 5_000 },
-          { status: 'passed', end: 50_000, order: 5 },
-        ]);
-        return {
-          y: mergedWith(store, rule.id, T0 + 1, SHA_B, [
-            { status: 'passed', end: 20_000, order: 6 },
-          ]),
-        };
-      });
-      expect((await summary()).basis).toEqual({ branch: 'main', commit: SHA_B, runId: y.id });
+    expect(seeded.interrupted).toMatchObject({ status: 'interrupted', mergeCommit: SHA_B });
+    const result = await summary();
+    // 기준 브랜치 끝은 SHA_B지만 머리줄은 이전 병합(SHA_A)이다 (재개해서 merged가 되면 맞춰진다)
+    expect(result.basis).toMatchObject({ branch: 'main', commit: SHA_A });
+    expect(result.basis?.runId).not.toBe(seeded.interrupted.id);
+    expect(result.pipeline?.run).toMatchObject({
+      status: 'interrupted',
+      currentStep: 'screen_update',
     });
   });
 
@@ -611,114 +484,6 @@ describe('verification.summary', () => {
     await expect(
       h.client.call('verification.summary', { projectId: newId() }),
     ).rejects.toMatchObject({ code: ErrorCode.NotFound });
-  });
-});
-
-describe('basisOf: 판정 기준 = 가장 나중에 병합된 실행 (후보 전체에 한 가지 순서 기준, M2-11 #190 검토 1 · 2회차 · ADR-094)', () => {
-  const A = '01JE0000000000000000000A01';
-  const B = '01JE0000000000000000000B01';
-  const C = '01JE0000000000000000000C01';
-  /** 순서에 쓰는 칸만 채운 실행 (테스트 전용). */
-  const run = (
-    id: string,
-    status: RunStatus,
-    mergeCommit: string | null,
-    endedAt: number | null,
-    createdAt = 0,
-  ): Run =>
-    ({
-      id,
-      status,
-      baseBranch: 'main',
-      mergeCommit,
-      createdAt: iso(T0 + createdAt),
-      endedAt: endedAt === null ? null : iso(T0 + endedAt),
-    }) as Run;
-  /** 병합 단계 기록 (통과 시각 · 병합 순서 값) 표. */
-  const recordsOf =
-    (table: Record<string, [number | null, number | null]>) =>
-    (r: Run): MergeRecord | null => {
-      const row = table[r.id];
-      if (row === undefined || r.mergeCommit === null) return null;
-      return { at: row[0] === null ? null : iso(T0 + row[0]), order: row[1] };
-    };
-  const basisRun = (runs: Run[], records: (r: Run) => MergeRecord | null) => {
-    const forward = basisOf(runs, records)?.runId ?? null;
-    // 목록 순서와 무관하다
-    expect(basisOf([...runs].reverse(), records)?.runId ?? null).toBe(forward);
-    return forward;
-  };
-
-  // 시각만 있는 기록(병합 순서 값 저장 전): A 병합 t10, B 병합 t20
-  const byTime = recordsOf({ [A]: [10, null], [B]: [20, null] });
-  it.each([
-    [
-      '① A merged(종료 t40) · B merged(종료 t30)',
-      [run(A, 'merged', SHA_A, 40), run(B, 'merged', SHA_B, 30)],
-    ],
-    [
-      '② A merged(종료 t40) · B interrupted',
-      [run(A, 'merged', SHA_A, 40), run(B, 'interrupted', SHA_B, null)],
-    ],
-    [
-      '③ A interrupted · B merged(종료 t30)',
-      [run(A, 'interrupted', SHA_A, null), run(B, 'merged', SHA_B, 30)],
-    ],
-    [
-      '④ A failed(병합 커밋 있음, 종료 t40) · B merged(종료 t30)',
-      [run(A, 'failed', SHA_A, 40), run(B, 'merged', SHA_B, 30)],
-    ],
-  ])('%s: 판정 기준은 나중에 병합한 B (목록 순서와 무관)', (_label, runs) => {
-    expect(basisRun(runs, byTime)).toBe(B);
-    expect(basisOf(runs, byTime)).toEqual({ branch: 'main', commit: SHA_B, runId: B });
-  });
-
-  it('⑤ 병합 커밋이 기록된 interrupted 실행 하나뿐이면 그 실행 · ⑥ 병합 커밋 없는 interrupted 실행뿐이면 null', () => {
-    expect(basisRun([run(A, 'interrupted', SHA_A, null)], byTime)).toBe(A);
-    expect(basisOf([run(A, 'interrupted', null, null)], byTime)).toBeNull();
-  });
-
-  it('⑧ 재개 복구: A가 먼저 병합(순서 값 5)했지만 통과 기록은 재개한 t50, B는 나중에 병합(순서 값 6) t20 → 판정 기준 B', () => {
-    const runs = [run(A, 'merged', SHA_A, 55), run(B, 'merged', SHA_B, 30)];
-    expect(basisRun(runs, recordsOf({ [A]: [50, 5], [B]: [20, 6] }))).toBe(B);
-    // 순서 값이 없으면(저장 전 기록) 시각 규칙이라 A가 된다: 순서 값이 이 경우를 바로잡는다
-    expect(basisRun(runs, recordsOf({ [A]: [50, null], [B]: [20, null] }))).toBe(A);
-  });
-
-  it('순서 값이 있는 행과 없는 행이 섞이면 후보 모두를 시각으로 비교한다 (결정적, 순환 없음)', () => {
-    const runs = [
-      run(A, 'merged', SHA_A, 60),
-      run(B, 'merged', SHA_B, 30),
-      run(C, 'merged', SHA_C, 40),
-    ];
-    // 순서 값만 보면 A(1) < B(2), 시각만 보면 B(t20) < C(t30) < A(t50): 섞이면 시각 → A
-    const mixed = recordsOf({ [A]: [50, 1], [B]: [20, 2], [C]: [30, null] });
-    expect(basisRun(runs, mixed)).toBe(A);
-    for (const order of [
-      [A, B, C],
-      [B, C, A],
-      [C, A, B],
-      [C, B, A],
-    ]) {
-      const shuffled = order.map((id) => runs.find((r) => r.id === id) as Run);
-      expect(basisOf(shuffled, mixed)?.runId).toBe(A);
-    }
-    // 모두 있으면 순서 값 → C(3)
-    expect(basisRun(runs, recordsOf({ [A]: [50, 1], [B]: [20, 2], [C]: [30, 3] }))).toBe(C);
-  });
-
-  it('병합 단계 기록이 없으면 종료 시각으로 대신하고, 같으면 생성 시각(ID보다 먼저) → ID 순', () => {
-    expect(basisRun([run(A, 'merged', SHA_A, 40), run(B, 'merged', SHA_B, 30)], () => null)).toBe(
-      A,
-    );
-    // 같은 시각: 생성 시각이 늦은 A가 ID가 큰 B보다 앞선다
-    const sameTime = [run(A, 'merged', SHA_A, 10, 5), run(B, 'merged', SHA_B, 10, 1)];
-    expect(basisRun(sameTime, () => null)).toBe(A);
-    expect(basisRun(sameTime, recordsOf({ [A]: [10, 3], [B]: [10, 3] }))).toBe(A);
-    // 생성 시각도 같으면 ID가 큰 쪽
-    expect(basisRun([run(A, 'merged', SHA_A, 10), run(B, 'merged', SHA_B, 10)], () => null)).toBe(
-      B,
-    );
   });
 });
 
