@@ -1,8 +1,9 @@
 // 검증 화면 요약 (JDG-03, COST-02, SCR-05, M1-18, ADR-072).
 // 값은 규칙 · 판정 기록 · 실행 · 세션 기록에서만 만든다(NFR-03). 꾸며 낸 값 · 추정 공식 없음.
-// - 판정 기준: 가장 최근에 병합된 실행(종료 시각 → 표시 ID 순)의 기준 브랜치 · 병합 커밋. 없으면 `null`.
+// - 판정 기준: 가장 나중에 병합된 실행의 기준 브랜치 · 병합 커밋. 없으면 `null`.
 //   병합된 실행 = 병합 커밋이 기록된 실행(상태와 무관, ADR-094): 병합 뒤 화면 갱신 도중 종료돼 `interrupted`인 실행도
-//   기준 브랜치에는 그 병합 커밋이 있으므로 기준이 된다. 끝나지 않은 실행의 순서 값은 병합 단계가 끝난 시각이다
+//   기준 브랜치에는 그 병합 커밋이 있으므로 기준이 된다. 순서 값은 모든 후보에 같은 것을 쓴다: 병합 단계가 통과로 끝난
+//   시각(없으면 종료 시각), 같으면 생성 시각 → ID. 실행은 동시에 여럿 돌 수 있어 종료 시각은 병합 순서가 아니다
 // - 판정: 화면의 모든 판정은 판정 기준 커밋에서 낸 판정이다(screens.md SCR-05 머리줄). 기준 실행의 병합 재검사 판정
 //   (병합 커밋)이 있으면 그것, 없으면 기준 실행의 검사 단계 판정(`headCommit`, 기준 브랜치가 움직이지 않아 병합 커밋의
 //   트리와 같다, ADR-069). 규칙별로 그중 최신(판정 시각 → ID). 구현 단계 판정 · 다른 실행 · 실행 밖 판정 · 미래 시각
@@ -47,25 +48,43 @@ export const isJudgeable = (rule: Rule, judgment: RuleJudgment): boolean =>
 const timeOf = (iso: string | null): number => (iso === null ? -Infinity : Date.parse(iso));
 
 /**
- * 가장 최근에 병합된 실행의 판정 기준. 병합 커밋이 기록된 실행이 없으면 `null`.
+ * 가장 나중에 병합된 실행의 판정 기준. 병합 커밋이 기록된 실행이 없으면 `null`.
  * 병합 커밋이 기록된 실행은 상태와 무관하게 후보다(ADR-094: 병합은 이미 기준 브랜치의 사실이다. 그 값은 병합 실행기가
- * 기준 브랜치를 확인한 `passed`일 때만 채워진다, ADR-091). 순서 값은 종료 시각이고, 아직 끝나지 않은 실행
- * (`interrupted` 등)은 `mergedAt`(병합 단계가 끝난 시각)이다.
+ * 기준 브랜치를 확인한 `passed`일 때만 채워진다, ADR-091). 순서 값은 모든 후보에 같은 기준이다: `mergedAt`(병합 단계가
+ * 통과로 끝난 시각, `mergeCommit`과 같은 저장에서 남는다). 그 값이 없는 후보(병합 단계 기록 없이 저장된 행)만 종료
+ * 시각으로 대신한다. 같으면 생성 시각, 그다음 ID(ULID)가 큰 쪽이다.
  */
 export const basisOf = (
   runs: readonly Run[],
   mergedAt: (run: Run) => string | null = () => null,
 ): VerificationBasis | null => {
-  let latest: { run: Run; mergeCommit: string; at: number } | null = null;
+  let latest: { run: Run; mergeCommit: string; key: [number, number, string] } | null = null;
   for (const run of runs) {
     if (run.mergeCommit === null) continue;
-    const at = timeOf(run.endedAt ?? mergedAt(run));
-    if (latest === null || at >= latest.at) latest = { run, mergeCommit: run.mergeCommit, at };
+    const key: [number, number, string] = [
+      timeOf(mergedAt(run) ?? run.endedAt),
+      timeOf(run.createdAt),
+      run.id,
+    ];
+    if (latest === null || compareKey(key, latest.key) > 0) {
+      latest = { run, mergeCommit: run.mergeCommit, key };
+    }
   }
   return latest === null
     ? null
     : { branch: latest.run.baseBranch, commit: latest.mergeCommit, runId: latest.run.id };
 };
+
+const compareKey = (a: [number, number, string], b: [number, number, string]): number =>
+  a[0] !== b[0]
+    ? a[0] - b[0]
+    : a[1] !== b[1]
+      ? a[1] - b[1]
+      : a[2] < b[2]
+        ? -1
+        : a[2] > b[2]
+          ? 1
+          : 0;
 
 /** 실행의 병합 단계가 통과로 끝난 시각 (마지막 통과 시도). 없으면 `null`. */
 const mergeEndedAt = (store: ProjectStore, run: Run): string | null =>

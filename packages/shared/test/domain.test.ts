@@ -40,6 +40,7 @@ import {
   Session,
   Settings,
   Step,
+  StoredCodeOpenRecord,
   stepRoles,
   SupportedProposalKind,
   Timestamp,
@@ -642,6 +643,14 @@ describe('코드 열람 기록 (MET-01, ADR-084)', () => {
     expect(CodeOpenRecord.safeParse(record).success).toBe(true);
     expect(EntityName.options).toContain('CodeOpenRecord');
     expect(RESERVED_ENTITY_NAMES).not.toContain('CodeOpenRecord');
+  });
+
+  it('읽기 형식(StoredCodeOpenRecord)은 경로 세부 규칙을 다시 적용하지 않지만 빈 경로 · 문자열 아닌 경로는 거부한다 (ADR-094)', () => {
+    expect(StoredCodeOpenRecord.safeParse({ ...record, file: 'src/a%20b.ts' }).success).toBe(true);
+    expect(CodeOpenRecord.safeParse({ ...record, file: 'src/a%20b.ts' }).success).toBe(false);
+    expect(StoredCodeOpenRecord.safeParse({ ...record, file: '' }).success).toBe(false);
+    expect(StoredCodeOpenRecord.safeParse({ ...record, file: 7 }).success).toBe(false);
+    expect(StoredCodeOpenRecord.safeParse({ ...record, reason: 'curiosity' }).success).toBe(false);
   });
 
   it('사유 표시명은 화면 정의서 1.4의 세 가지(화면 오류 · 정보 부족 · 디버깅)이고 순서도 같다', () => {

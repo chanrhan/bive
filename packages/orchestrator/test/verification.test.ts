@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { PipeServer } from '../src/ipc/server.js';
 import { createRun } from '../src/runs/run-service.js';
-import { costPerRun, pipelineOf } from '../src/verification/summary.js';
+import { basisOf, costPerRun, pipelineOf } from '../src/verification/summary.js';
 import type { TestClient } from './helpers/client.js';
 import { cleanup } from './helpers/process.js';
 import { iso, startProjectHarness, T0, type ProjectHarness } from './helpers/project-harness.js';
@@ -514,6 +514,65 @@ describe('verification.summary', () => {
     await expect(
       h.client.call('verification.summary', { projectId: newId() }),
     ).rejects.toMatchObject({ code: ErrorCode.NotFound });
+  });
+});
+
+describe('basisOf: 판정 기준 = 가장 나중에 병합된 실행 (모든 후보에 같은 순서 값, M2-11 #190 검토 1회차 · ADR-094)', () => {
+  const A = '01JE0000000000000000000A01';
+  const B = '01JE0000000000000000000B01';
+  /** 순서 값에 쓰는 칸만 채운 실행 (테스트 전용). */
+  const run = (
+    id: string,
+    status: RunStatus,
+    mergeCommit: string | null,
+    endedAt: number | null,
+  ): Run =>
+    ({
+      id,
+      status,
+      baseBranch: 'main',
+      mergeCommit,
+      createdAt: iso(T0),
+      endedAt: endedAt === null ? null : iso(T0 + endedAt),
+    }) as Run;
+  /** 병합 단계가 통과로 끝난 시각: A = t10, B = t20 (기준 브랜치 끝은 늘 B). */
+  const mergedAt = (r: Run): string | null =>
+    r.mergeCommit === null ? null : iso(T0 + (r.id === A ? 10 : 20));
+  const basisRun = (runs: Run[]) => basisOf(runs, mergedAt)?.runId ?? null;
+
+  it.each([
+    [
+      '① A merged(종료 t40) · B merged(종료 t30)',
+      [run(A, 'merged', SHA_A, 40), run(B, 'merged', SHA_B, 30)],
+    ],
+    [
+      '② A merged(종료 t40) · B interrupted',
+      [run(A, 'merged', SHA_A, 40), run(B, 'interrupted', SHA_B, null)],
+    ],
+    [
+      '③ A interrupted · B merged(종료 t30)',
+      [run(A, 'interrupted', SHA_A, null), run(B, 'merged', SHA_B, 30)],
+    ],
+    [
+      '④ A failed(병합 커밋 있음, 종료 t40) · B merged(종료 t30)',
+      [run(A, 'failed', SHA_A, 40), run(B, 'merged', SHA_B, 30)],
+    ],
+  ])('%s: 판정 기준은 나중에 병합한 B (목록 순서와 무관)', (_label, runs) => {
+    expect(basisRun(runs)).toBe(B);
+    expect(basisRun([...runs].reverse())).toBe(B);
+    expect(basisOf(runs, mergedAt)).toEqual({ branch: 'main', commit: SHA_B, runId: B });
+  });
+
+  it('⑤ 병합 커밋이 기록된 interrupted 실행 하나뿐이면 그 실행 · ⑥ 병합 커밋 없는 interrupted 실행뿐이면 null', () => {
+    expect(basisRun([run(A, 'interrupted', SHA_A, null)])).toBe(A);
+    expect(basisOf([run(A, 'interrupted', null, null)], mergedAt)).toBeNull();
+  });
+
+  it('병합 단계 시각이 없는 후보만 종료 시각으로 대신하고, 같은 시각이면 생성 시각 → ID 순', () => {
+    expect(basisOf([run(A, 'merged', SHA_A, 40), run(B, 'merged', SHA_B, 30)])?.runId).toBe(A);
+    const same = (id: string) => run(id, 'merged', SHA_A, 10);
+    expect(basisOf([same(B), same(A)])?.runId).toBe(B);
+    expect(basisOf([same(A), same(B)])?.runId).toBe(B);
   });
 });
 

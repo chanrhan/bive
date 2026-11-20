@@ -245,6 +245,15 @@ describe('0010 tool_call_empty_name: 빈 도구 이름 기록 (M2-11 #190, ADR-0
       // 0009까지는 빈 이름을 DB CHECK가 막는다 (기록이 사라지던 원인)
       expect(() => insertCall(db, newId(), 1, '')).toThrow(/CHECK/);
       const before = db.prepare('SELECT * FROM tool_calls').all();
+      // 트리거 · 색인의 SQL 본문 (0006 때)
+      const objectSql = () =>
+        db
+          .prepare(
+            "SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'tool_calls' AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY name",
+          )
+          .all();
+      const sqlBefore = objectSql();
+      expect(sqlBefore).toHaveLength(5);
 
       expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([10]);
       expect(db.prepare('SELECT * FROM tool_calls').all()).toEqual(before);
@@ -282,6 +291,17 @@ describe('0010 tool_call_empty_name: 빈 도구 이름 기록 (M2-11 #190, ADR-0
         db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'tool_calls_v10%'").all(),
       ).toEqual([]);
       expect(db.pragma('foreign_key_check')).toEqual([]);
+      // 트리거 3개 · 색인 2개의 SQL 본문은 0006과 글자까지 같다
+      expect(objectSql()).toEqual(sqlBefore);
+      // 이름의 NOT NULL은 그대로다 (빈 문자열만 받는다)
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO tool_calls (id, run_id, session_id, seq, at, role, name, args_summary, status, reason, duration_ms)
+             VALUES (?, NULL, ?, 6, '2026-11-14T00:00:01.000Z', 'implementer', NULL, '{}', 'denied', 'unknown_tool', 0)`,
+          )
+          .run(newId(), SESSION),
+      ).toThrow(/NOT NULL/);
     });
   });
 });
