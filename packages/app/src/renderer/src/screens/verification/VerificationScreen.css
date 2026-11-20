@@ -77,6 +77,22 @@ button.metric-card:focus-visible {
   font-weight: 600;
 }
 
+/* 제목 글자 그대로 보이는 툴팁 버튼 (코드 열람 한계 문구, #191) */
+.verification-hint {
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-1);
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: help;
+}
+
+.verification-hint:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 .verification-pipeline,
 .verification-rules {
   display: flex;

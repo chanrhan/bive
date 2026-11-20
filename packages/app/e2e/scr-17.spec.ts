@@ -39,6 +39,7 @@ import {
   listPaneOverflow,
   NARROW_WIDTHS,
   paneWidths,
+  sameRow,
   textClipping,
   WIDE_WIDTH,
 } from './support/overflow.js';
@@ -935,6 +936,11 @@ test.describe('1280×800 창의 버튼 문구 (#175)', () => {
     expect(await textClipping(detail(page), testIds)).toEqual([]);
   };
 
+  /** 한 묶음의 버튼들이 같은 줄에 왼쪽부터 차례로 놓인다 (#191). */
+  const expectSameRow = async (page: Page, testIds: readonly string[]): Promise<void> => {
+    expect(await sameRow(detail(page), testIds)).toEqual([]);
+  };
+
   /** 입력 카드의 끝이 떠 있는 버튼에 가리지 않는다. 자동 스크롤 자리와 상세를 끝까지 내린 자리 둘 다. */
   const expectCardAboveBar = async (page: Page, cardTestId: string): Promise<void> => {
     const check = async (): Promise<void> => {
@@ -961,6 +967,7 @@ test.describe('1280×800 창의 버튼 문구 (#175)', () => {
     await card(page, 'PRP-001').click();
     await expect(page.getByTestId('detail-if-reject')).toBeVisible();
     await expectOneLine(page, FLOATING);
+    await expectSameRow(page, FLOATING);
 
     // 수정 중: 떠 있는 버튼 + "수정 중", 수정 카드의 [취소] · [수정 후 승인]
     await action(page, 'edit').click();
@@ -974,6 +981,8 @@ test.describe('1280×800 창의 버튼 문구 (#175)', () => {
       'edit-cancel',
       'edit-confirm',
     ]);
+    await expectSameRow(page, FLOATING);
+    await expectSameRow(page, ['edit-cancel', 'edit-confirm']);
     await expectCardAboveBar(page, 'edit-card');
     await snapshot(page, '1280-수정-중');
 
@@ -986,6 +995,7 @@ test.describe('1280×800 창의 버튼 문구 (#175)', () => {
       'edit-keep',
       'edit-discard-confirm',
     ]);
+    await expectSameRow(page, ['edit-keep', 'edit-discard-confirm']);
     await expectCardAboveBar(page, 'edit-card');
     await snapshot(page, '1280-수정-버리기-확인');
 
@@ -995,6 +1005,7 @@ test.describe('1280×800 창의 버튼 문구 (#175)', () => {
     await action(page, 'reject').click();
     await expect(page.getByTestId('reject-reason')).toBeFocused();
     await expectOneLine(page, [...FLOATING, 'reject-cancel', 'reject-confirm']);
+    await expectSameRow(page, ['reject-cancel', 'reject-confirm']);
     await expectCardAboveBar(page, 'reject-card');
     await snapshot(page, '1280-거절');
 

@@ -164,8 +164,16 @@ const VerificationContent = ({
 
 const CodeOpenArea = ({ load }: { load: CodeOpenSummaryLoad }): React.JSX.Element => (
   <section className="verification-code-open" data-testid="code-open" aria-label={TEXT.codeOpen}>
-    <h2 className="verification-heading" title={TEXT.codeOpenHint}>
-      {TEXT.codeOpen}
+    <h2 className="verification-heading">
+      {/* 한계 문구는 준수 카드처럼 초점을 받는 버튼의 툴팁(설명)에 둔다. 키보드 초점으로도 닿는다 (ADR-088, #191) */}
+      <button
+        type="button"
+        className="verification-hint"
+        data-testid="code-open-hint"
+        title={TEXT.codeOpenHint}
+      >
+        {TEXT.codeOpen}
+      </button>
     </h2>
     {load.state === 'loading' && (
       <div className="code-open-loading" data-testid="code-open-loading" aria-busy="true" />

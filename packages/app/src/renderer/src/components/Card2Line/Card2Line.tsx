@@ -42,6 +42,20 @@ export const Card2Line = ({
     ...marks.map((e) => e.label),
     ...(time === null ? [] : [time]),
   ].join(' · ');
+  const timeCell = time !== null && (
+    <time className="card-time" dateTime={dateTime}>
+      {time}
+    </time>
+  );
+  const unreadCell = unread && (
+    <span
+      className="card-unread"
+      data-testid="card-unread"
+      role="img"
+      aria-label="안 읽음"
+      title="안 읽음"
+    />
+  );
   const body = (
     <>
       <span className="card-line card-line-1">
@@ -75,19 +89,17 @@ export const Card2Line = ({
             testId="card-exception"
           />
         ))}
-        {time !== null && (
-          <time className="card-time" dateTime={dateTime}>
-            {time}
-          </time>
-        )}
-        {unread && (
-          <span
-            className="card-unread"
-            data-testid="card-unread"
-            role="img"
-            aria-label="안 읽음"
-            title="안 읽음"
-          />
+        {time !== null && unread ? (
+          // 시각과 안 읽음 점은 한 덩어리로 줄바꿈된다. 좁은 줄에서 점만 다음 줄 왼쪽에 혼자 남지 않게 (#191, ADR-090)
+          <span className="card-end">
+            {timeCell}
+            {unreadCell}
+          </span>
+        ) : (
+          <>
+            {timeCell}
+            {unreadCell}
+          </>
         )}
       </span>
     </>

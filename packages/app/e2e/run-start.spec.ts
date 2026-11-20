@@ -165,6 +165,11 @@ test.describe('[실행] · 실행 시작 확인 (수용 기준 1)', () => {
     ],
     ['Esc', (page: Page) => page.keyboard.press('Escape')],
     ['닫기(×)', (page: Page) => dialog(page).getByRole('button', { name: '닫기' }).click()],
+    [
+      '바깥 누르기',
+      (page: Page) =>
+        page.getByTestId('run-start-dialog-backdrop').click({ position: { x: 5, y: 5 } }),
+    ],
   ] as const) {
     test(`${how}로 닫으면 run.create를 부르지 않는다 (0회)`, async ({ page }) => {
       const bive = await openRules(page);
@@ -172,6 +177,8 @@ test.describe('[실행] · 실행 시작 확인 (수용 기준 1)', () => {
       await openDialog(page);
       await cancel(page);
       await expect(dialog(page)).toHaveCount(0);
+      // 어느 방법으로 닫아도(바깥 누르기 포함) 초점이 [실행]으로 돌아온다
+      await expect(page.getByTestId('run-start')).toBeFocused();
       // 다시 열어도 이전 대화의 결과 · 오류는 남지 않는다
       await openDialog(page);
       await expect(dialog(page).getByTestId('run-start-error')).toHaveCount(0);
