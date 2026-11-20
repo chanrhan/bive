@@ -35,7 +35,7 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 | 픽스처 테스트 | `pnpm -C fixtures/sample-next-app test` | 임시 SQLite 마이그레이션 → `next build` → `next start` → HTTP 확인 |
 | 픽스처 초기화 | `scripts/reset-fixture.sh $(mktemp -d)/fx --verify` | 복사 → 설치 → git 커밋 → 테스트 통과 |
 | 초기화 스크립트 검사 | `scripts/test-reset-fixture.sh` | 지우면 안 되는 경로를 거부하는지 검사 |
-| 파이프라인 e2e 한 파일 | `packages/orchestrator`에서 `pnpm exec vitest run --config vitest.pipeline.config.ts e2e/pipeline/<파일>` | 그 시험 하나만 통과. 픽스처 설치가 먼저 필요하다. 파일마다 실제 설치 · `next build`를 해서 오래 걸린다(2026-11-14 새 컨테이너에서 전체 `pnpm e2e:pipeline` 11개 파일이 약 19분, 한 파일 평균 2분 가까이) |
+| 파이프라인 e2e 한 파일 | `packages/orchestrator`에서 `pnpm exec vitest run --config vitest.pipeline.config.ts e2e/pipeline/<파일>` | 그 시험 하나만 통과. 픽스처 설치가 먼저 필요하다. 파일마다 실제 설치 · `next build`를 해서 오래 걸린다(2026-11-14 새 컨테이너에서 전체 `pnpm e2e:pipeline` 11개 파일이 약 19분, 한 파일 평균 2분 가까이. 2026-11-15 `multi-rule.test.ts`가 더해져 12개 파일이 되었고 CI에서 약 20분 30초, 실행을 두 번 하는 그 파일 하나가 약 7분으로 가장 느리다) |
 | GitHub REST | `scripts/gh-rest.sh GET repos/chanrhan/bive/milestones` | 마일스톤 목록 JSON |
 
 코드 열기(IDE URL)는 화면 없는 VM에서 열 곳이 없으므로 앱을 `BIVE_OPEN_URL_LOG=$BIVE_HOME/open-url.log`(절대 경로, 빈 값은 미설정과 같음)를 더해 띄우면 URL을 열지 않고 그 파일에 한 줄씩 적는다(로드맵 2.2 흐름, ADR-087). IDE 설정은 프로젝트별이라 새 프로젝트의 첫 열기는 IDE 선택 단계가 먼저 나온다.
