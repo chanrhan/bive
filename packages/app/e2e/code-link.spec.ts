@@ -2,12 +2,13 @@
 // 1) 공통 CodeLink(`file:line`)를 누르면 사유 3종(화면 오류, 정보 부족, 디버깅) 모달이 열린다
 // 2) 선택 없이 닫으면(취소 · Esc · 바깥 클릭 · ×) IDE 호출(`app.openInIde`)이 0회다
 // 3) 사유를 고르면 `app.openInIde`를 1회, 출발 화면 · 항목 · 사유 · 파일 · 줄과 함께 부르고 모달을 닫는다. 키보드로도 고른다
+//    출발 화면은 규칙 화면이면 SCR-03, 요구사항 화면에서 펼친 자식 규칙이면 SCR-02다 (#191)
 // 4) 실패하면 모달에 "IDE 열기 실패", 부르는 동안은 사유 · 닫기를 막는다
 // 5) 1280 × 800 창에서 링크 · 모달 문구가 잘리거나 가로 스크롤을 만들지 않는다
 // 6) IDE 미설정이면 처음 열 때 IDE 선택을 먼저 요구한다(VS Code가 미리 골라져 있음). 고르면 설정에 저장하고 사유 단계로
 //    넘어간다. 선택 단계에서 닫으면 저장 · 기록 · 열기가 없다 (이슈 #45 수용 기준 3, ADR-018 · ADR-087)
 // 기록 · 열기 순서(기록 실패면 열지 않음)는 main의 test/code-opener.test.ts, 기록 저장은 orchestrator/test/code-open.test.ts.
-// 데이터는 가짜 브리지의 rule.list · judgment.list · requirement.get · settings.get 응답(규칙 상세의 실패 케이스, IDE 설정)뿐이다.
+// 데이터는 가짜 브리지의 rule.list · judgment.list · requirement.get · requirement.list · settings.get 응답(규칙 상세의 실패 케이스, IDE 설정)뿐이다.
 import type { CodeOpenRecordResult, IdeSetting, Settings } from '@bive/shared';
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
@@ -150,8 +151,8 @@ test.describe('사유 모달 (수용 기준 1)', () => {
       await close(page);
       await expect(dialog(page)).toHaveCount(0);
       expect(await ideCalls(bive)).toEqual([]);
-      // 키보드 · 버튼으로 닫으면 초점이 링크로 돌아온다 (바깥 클릭은 누른 곳으로 초점이 가는 브라우저 기본 동작을 따른다)
-      if (how !== '바깥 클릭') await expect(codeLink(page)).toBeFocused();
+      // 어느 방법으로 닫아도(바깥 클릭 포함) 초점이 링크로 돌아온다
+      await expect(codeLink(page)).toBeFocused();
     });
   }
 });
@@ -177,6 +178,50 @@ test.describe('사유 선택', () => {
         },
       },
     ]);
+  });
+
+  test('요구사항 화면(SCR-02)에서 펼친 자식 규칙의 링크는 출발 화면 SCR-02 · 항목 그 규칙으로 app.openInIde를 부른다 (ADR-084, #191)', async ({
+    page,
+  }) => {
+    const bive = await mockBive(page, {
+      responses: {
+        'system.status': { result: STATUS },
+        'project.current': { result: { project: PROJECT } },
+        'requirement.list': { result: { requirements: [PARENT] } },
+        'rule.list': { result: { rules: RULES } },
+        'judgment.list': { result: { judgments: FAILING_HISTORY } },
+        'settings.get': { result: settingsWithIde({ kind: 'vscode' }) },
+        'app.openInIde': { result: { record: { ...OPENED.record, sourceScreen: 'SCR-02' } } },
+      },
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: '요구사항', exact: true }).click();
+    await page.getByTestId('card').filter({ hasText: PARENT.displayId }).click();
+    await expect(page.getByTestId('requirement-detail')).toHaveAttribute(
+      'data-selected-id',
+      PARENT.id,
+    );
+    const row = page.getByTestId('child-rule').filter({ hasText: FAILING_RULE.displayId });
+    await row.getByTestId('child-rule-toggle').click();
+    const link = row.getByTestId('failure-case').getByTestId('code-link');
+    await expect(link).toHaveText(LOCATION);
+    await link.click();
+    await dialog(page).getByTestId('code-open-reason-debugging').click();
+    await expect(dialog(page)).toHaveCount(0);
+    expect(await ideCalls(bive)).toEqual([
+      {
+        method: 'app.openInIde',
+        params: {
+          projectId: PROJECT.id,
+          reason: 'debugging',
+          sourceScreen: 'SCR-02',
+          itemRef: { entity: 'Rule', id: FAILING_RULE.id },
+          file: FAILED_CASE.file,
+          line: FAILED_CASE.line,
+        },
+      },
+    ]);
+    await expect(link).toBeFocused();
   });
 
   test('키보드만으로: Enter로 링크 → Tab으로 사유 이동 → Enter로 "정보 부족"', async ({ page }) => {

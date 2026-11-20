@@ -93,7 +93,11 @@ export const Modal = ({
       data-testid={`${testId}-backdrop`}
       onMouseDown={(event) => {
         // 모달 안에서 눌러 바깥에서 뗀 경우는 닫지 않는다 (누른 곳 기준)
-        if (event.target === event.currentTarget) onClose();
+        if (event.target !== event.currentTarget) return;
+        // 누른 곳으로 초점을 옮기는 브라우저 기본 동작을 막는다. 막지 않으면 닫힐 때 여는 요소로 돌려 놓은 초점을
+        // 그 기본 동작이 body로 다시 옮긴다(닫기 처리 → 기본 동작 순서). 닫지 않는 경우(부르는 동안)도 초점은 모달에 남는다
+        event.preventDefault();
+        onClose();
       }}
     >
       <div

@@ -91,6 +91,40 @@ export const textClipping = (pane: Locator, testIds: readonly string[]): Promise
   }, testIds);
 
 /**
+ * 버튼 묶음 한 줄 검사 (#191): `testIds` 요소(한 묶음의 버튼들)가 모두 있고 같은 줄에 놓였는지 본다.
+ * 같은 줄 = 경계 상자의 위쪽 좌표가 같고(0.5px 안) 왼쪽에서 오른쪽으로 받은 순서대로 놓인다.
+ * `textClipping`은 요소마다 따로 보므로 묶음이 두 줄로 쌓여도 통과한다. 비어 있으면 통과.
+ */
+export const sameRow = (pane: Locator, testIds: readonly string[]): Promise<string[]> =>
+  pane.evaluate((el, ids) => {
+    const problems: string[] = [];
+    const boxes: { id: string; box: DOMRect }[] = [];
+    for (const id of ids) {
+      const target = el.querySelector<HTMLElement>(`[data-testid="${id}"]`);
+      if (target === null) {
+        problems.push(`${id}: 없음`);
+        continue;
+      }
+      boxes.push({ id, box: target.getBoundingClientRect() });
+    }
+    const first = boxes[0];
+    if (first === undefined) return problems;
+    for (let i = 1; i < boxes.length; i += 1) {
+      const prev = boxes[i - 1];
+      const cur = boxes[i];
+      if (prev === undefined || cur === undefined) continue;
+      if (Math.abs(cur.box.top - first.box.top) > 0.5) {
+        problems.push(
+          `${cur.id}: 다른 줄 (위 ${Math.round(cur.box.top)} · ${first.id} 위 ${Math.round(first.box.top)})`,
+        );
+      } else if (cur.box.left < prev.box.right - 0.5) {
+        problems.push(`${cur.id}: ${prev.id}보다 왼쪽 또는 겹침`);
+      }
+    }
+    return problems;
+  }, testIds);
+
+/**
  * 좁은 창 검사 폭 (#179): 채팅이 고정 360px로 남는 가장 좁은 창(1100px)부터 기본 창(1280px)까지
  * (PR #177 검토의 임시 확인 폭 1120 · 1150px 포함)와, 채팅이 44px 띠로 접히는 창(1024px). 높이는 800px.
  */

@@ -195,6 +195,8 @@ test.describe('모달 열기 · 닫기', () => {
     await expect(dialog(page)).toBeVisible();
     await page.getByTestId('settings-modal-backdrop').click({ position: { x: 10, y: 10 } });
     await expect(dialog(page)).toHaveCount(0);
+    // 바깥 클릭으로 닫아도 Esc · ×처럼 초점이 톱니로 돌아간다
+    await expect(gear(page)).toBeFocused();
   });
 
   test('열려 있는 동안 Tab · Shift+Tab 초점이 모달 안에서만 돈다', async ({ page }) => {
