@@ -84,7 +84,8 @@ export const EditCard = ({
   const errors = editErrors(kind, values, payload);
   const valid = Object.keys(errors).length === 0;
   const confirm = (): void => {
-    if (busy || !valid) return;
+    // 버리기 확인 줄이 떠 있는 동안은 [수정 후 승인]이 없다: 입력 칸의 ⌘↵도 처리하지 않는다 (#173, ADR-095)
+    if (busy || !valid || confirmingDiscard) return;
     onConfirm(values);
   };
   const requestCancel = (): void => {

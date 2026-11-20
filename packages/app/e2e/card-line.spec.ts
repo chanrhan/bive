@@ -433,3 +433,104 @@ test.describe('스크롤바가 있는 좁은 목록: ID는 말줄임되지 않�
     await shot(page, '카드-1100-기본');
   });
 });
+
+/** 창 최소 폭 근처(채팅이 44px 띠로 접힘, ADR-093)와 좁은 목록 폭 */
+const TRAILING_WIDTHS = [820, 830, ...NARROW_WIDTHS] as const;
+
+/**
+ * 2줄째 끝 칸(시각, 안 읽음 점이 있으면 시각 + 점)이 다음 줄로 넘어가는 때 (#173, ADR-090): 앞 칸들 뒤에 남는 폭이 그 칸의
+ * 최소 폭보다 작을 때만이다. 최소 폭은 시각만 있으면 시각 최소 3em, 점이 있으면 3em + 간격 8px + 점 폭이다.
+ * 남는 폭 = 줄 폭 - 마지막 앞 칸이 있는 줄의 앞 칸들 폭(보조 문구는 줄바꿈 판단 때의 최소 폭 3em) - 칸 사이 간격.
+ * 남는 폭이 최소 폭에 0.5px 안으로 붙은 경우는 판단하지 않는다(소수 폭 반올림).
+ */
+const trailingWrapProblems = (pane: Locator): Promise<string[]> =>
+  pane.evaluate(
+    (el, { gap }) => {
+      const problems: string[] = [];
+      const middle = (cell: HTMLElement): number => {
+        const box = cell.getBoundingClientRect();
+        return box.top + box.height / 2;
+      };
+      el.querySelectorAll<HTMLElement>('[data-testid="card-line-2"]').forEach((line) => {
+        const name = line.closest('[data-testid="card"]')?.getAttribute('data-id') ?? '';
+        const time = line.querySelector<HTMLElement>('.card-time');
+        if (time === null) return;
+        const dot = line.querySelector<HTMLElement>('[data-testid="card-unread"]');
+        const head = [
+          ...line.querySelectorAll<HTMLElement>(
+            '.card-id, .card-note, [data-testid="card-exception"]',
+          ),
+        ];
+        const last = head.at(-1);
+        if (last === undefined) return;
+        const em = Number.parseFloat(getComputedStyle(time).fontSize);
+        const row = head.filter((cell) => Math.abs(middle(cell) - middle(last)) <= 1);
+        const used =
+          row.reduce(
+            (sum, cell) =>
+              sum + (cell.matches('.card-note') ? 3 * em : cell.getBoundingClientRect().width),
+            0,
+          ) +
+          gap * (row.length - 1);
+        const lineWidth = line.getBoundingClientRect().width;
+        const available = lineWidth - used - gap;
+        const need = 3 * em + (dot === null ? 0 : gap + dot.getBoundingClientRect().width);
+        const sameRow = Math.abs(middle(time) - middle(last)) <= 1;
+        const label = dot === null ? '시각' : '시각 + 안 읽음 점';
+        if (!sameRow && available >= need + 0.5) {
+          problems.push(
+            `${name}: ${label}이 남는 폭 ${available.toFixed(2)}px ≥ 최소 ${need}px인데 다음 줄`,
+          );
+        }
+        if (sameRow && available < need - 0.5) {
+          problems.push(
+            `${name}: ${label}이 남는 폭 ${available.toFixed(2)}px < 최소 ${need}px인데 같은 줄`,
+          );
+        }
+      });
+      return problems;
+    },
+    { gap: GAP },
+  );
+
+/** 시각은 있고 안 읽음 점은 없는 카드 수 */
+const timeOnlyCards = (pane: Locator): Promise<number> =>
+  pane.evaluate(
+    (el) =>
+      [...el.querySelectorAll('[data-testid="card-line-2"]')].filter(
+        (line) =>
+          line.querySelector('.card-time') !== null &&
+          line.querySelector('[data-testid="card-unread"]') === null,
+      ).length,
+  );
+
+/** 스크롤바를 숨긴다(Playwright 기본 `--hide-scrollbars`와 같이 폭을 차지하지 않음). 이 파일은 그 인자를 빼고 돈다 */
+const hideScrollbars = async (page: Page): Promise<void> => {
+  await page.addStyleTag({ content: '* { scrollbar-width: none !important; }' });
+};
+
+test.describe('2줄째 끝 칸은 남는 폭이 최소 폭보다 작을 때만 다음 줄로 (#173, ADR-090)', () => {
+  for (const scrollbar of ['보임', '숨김'] as const) {
+    for (const width of TRAILING_WIDTHS) {
+      for (const [screen, open] of TIMED_SCREENS) {
+        test(`스크롤바 ${scrollbar} · ${width}px 창 ${screen}: 시각만 있는 카드 · 시각과 안 읽음 점이 있는 카드`, async ({
+          page,
+        }) => {
+          await page.setViewportSize({ width, height: 800 });
+          const pane = await open(page);
+          if (scrollbar === '숨김') await hideScrollbars(page);
+          const bar = await page
+            .getByTestId('list-items')
+            .evaluate((items: HTMLElement) => items.offsetWidth - items.clientWidth);
+          if (scrollbar === '보임') await expectScrollbar(page);
+          else expect(bar, '스크롤바 폭').toBe(0);
+          // 시각만 있는 카드를 실제로 본다 (요구사항 카드 전부, 승인 대기는 읽은 제안)
+          expect(await timeOnlyCards(pane)).toBeGreaterThan(0);
+          expect(await trailingWrapProblems(pane)).toEqual([]);
+          expect(await narrowLineProblems(pane)).toEqual([]);
+          expect(await listPaneOverflow(pane)).toEqual([]);
+        });
+      }
+    }
+  }
+});

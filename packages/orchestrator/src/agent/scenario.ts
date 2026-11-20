@@ -84,7 +84,13 @@ const SessionSchema = z.strictObject({
    * 이 세션을 쓸 조건: 세션 `vars`(예: `ruleId`)의 값이 모두 같을 때만 고른다. 한 시나리오가 규칙이 다른 실행
    * 여러 개를 차례로 재생할 때 쓴다(예: `multi-rule`). 순번은 조건에 맞는 세션 안에서 센다. 없으면 늘 고를 수 있다
    */
-  when: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string()).optional(),
+  when: z
+    .record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string())
+    // 빈 조건은 "늘 고름"과 같아 `when`이 없는 세션과 구별되지 않는다. 뜻이 모호하므로 형식 오류로 막는다 (#173)
+    .refine((when) => Object.keys(when).length > 0, {
+      message: 'when에는 조건이 하나 이상 있어야 함',
+    })
+    .optional(),
   /**
    * init 보고에 고정 도구 서버(`bive`) 뒤로 더 붙일 MCP 서버 이름. 계정 · 프로젝트 MCP 설정이 섞인 세션을 재현해
    * 세션 가드(NFR-02)를 시험할 때만 쓴다 (ADR-077)
