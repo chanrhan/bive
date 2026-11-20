@@ -6,7 +6,7 @@
 //   대조는 하지 않는다: 기준 브랜치가 다른 규칙의 테스트를 더했을 수 있다). 판정 직전 · 판정 뒤 규범 저장소를 대조한다
 // - 관리자에 검사 제한 시간(`checkTimeoutMs` = 설치 + 판정 제한 + 여유)과 엔진의 중단 신호를 넘긴다(ADR-065: 관리자 기본값 없음).
 //   검사 함수는 관리자의 검사 신호로 설치 · 판정 프로세스를 멈춘다
-// - 병합 성공 → `passed`(`run.mergeCommit`), 실패 → `failed`(사유는 ADR-058 값 그대로), 브랜치 · 워크트리는 엔진이 보존
+// - 병합 성공 → `passed`(`run.mergeCommit`, 종료 조건 결과에 병합 순서 값 `mergeOrder`, ADR-094), 실패 → `failed`(사유는 ADR-058 값 그대로), 브랜치 · 워크트리는 엔진이 보존
 // - 재개(ADR-066 한계): 병합 단계 도중 비정상 종료로 기준 브랜치가 이미 갱신된 뒤 다시 병합하면 `no_changes`가 된다.
 //   직전 병합 시도가 재기동 중단(`interrupted`)일 때만, 기준 브랜치에 이 실행의 BIVE 병합 커밋(트레일러 `Bive-Run` ·
 //   `Bive-Project`, 둘째 부모 = 검사한 커밋)이 있고 그 트리가 첫 부모와 검사한 커밋의 병합 결과(`git merge-tree`)와 같으면
@@ -119,6 +119,29 @@ export const verifyRecordedMergeTree = async (
   return expectedTree === actual
     ? { ok: true }
     : { ok: false, reason: 'tree_mismatch', expectedTree, actualTree: actual };
+};
+
+/**
+ * 병합 커밋의 병합 순서 값: 그 커밋까지의 첫 부모 커밋 수(`git rev-list --count --first-parent`). 같은 기준 브랜치에
+ * 병합이 쌓일 때마다 커지므로 판정 기준(가장 나중에 병합된 실행)의 순서에 쓴다(ADR-094, `verification/summary.ts`).
+ * 기준 브랜치를 갱신한 뒤에 읽는다. 읽기에 실패하면 `null`이고 병합 결과는 바뀌지 않는다(조회는 시각으로 대신한다).
+ */
+export const mergeOrderOf = async (
+  git: GitRunner,
+  repoPath: string,
+  mergeCommit: string,
+): Promise<number | null> => {
+  try {
+    const result = await git(['rev-list', '--count', '--first-parent', mergeCommit, '--'], {
+      cwd: repoPath,
+      okCodes: [0, 128],
+    });
+    if (result.code !== 0) return null;
+    const count = Number(result.stdout.trim());
+    return Number.isSafeInteger(count) && count > 0 ? count : null;
+  } catch {
+    return null;
+  }
 };
 
 /** 이 병합 단계의 앞 시도가 재기동 중단으로 끝났는지 (재개 뒤의 새 시도). */
@@ -272,10 +295,12 @@ export const createMergeExecutor =
       });
     }
     if (result.status === 'merged') {
+      const mergeOrder = await mergeOrderOf(git, context.git.repoPath, result.mergeCommit);
       return {
         status: 'passed',
         exitDetail: {
           mergeCommit: result.mergeCommit,
+          mergeOrder,
           previousBaseCommit: result.previousBaseCommit,
           headCommit: result.headCommit,
           rechecked: result.rechecked,
@@ -294,9 +319,10 @@ export const createMergeExecutor =
       } else {
         const tree = await verifyRecordedMergeTree(git, context.git.repoPath, recorded, headCommit);
         if (tree.ok) {
+          const mergeOrder = await mergeOrderOf(git, context.git.repoPath, recorded.hash);
           return {
             status: 'passed',
-            exitDetail: { mergeCommit: recorded.hash, headCommit, recovered: true },
+            exitDetail: { mergeCommit: recorded.hash, mergeOrder, headCommit, recovered: true },
             run: { mergeCommit: recorded.hash },
           };
         }

@@ -48,6 +48,9 @@ const setup = (options: Omit<PipelineSetupOptions, 'temps' | 'engines'> = {}): P
 const mainTip = (h: PipelineHarness): string => userGit(h.repo, 'rev-parse', 'refs/heads/main');
 const parentsOf = (h: PipelineHarness, commit: string): string[] =>
   userGit(h.repo, 'rev-list', '--parents', '-n', '1', commit).split(' ').slice(1);
+/** 그 커밋까지의 첫 부모 커밋 수 (병합 순서 값과 같은 계산, 시험 쪽은 사용자 git). */
+const firstParentCount = (h: PipelineHarness, commit: string): number =>
+  Number(userGit(h.repo, 'rev-list', '--count', '--first-parent', commit));
 const mergeCount = (h: PipelineHarness): number =>
   Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'refs/heads/main'));
 
@@ -105,6 +108,9 @@ describe('판정 통과 → merge → main에 merge commit (수용 기준 4, RUN
       'BIVE <bive@bive.invalid>',
     );
     expect(exitOf(done, 'merge')).toMatchObject({ mergeCommit: merge, rechecked: false });
+    // 병합 순서 값: 기준 브랜치에서 그 병합 커밋까지의 첫 부모 커밋 수 (ADR-094)
+    expect(exitOf(done, 'merge').mergeOrder).toBe(firstParentCount(h, merge));
+    expect(firstParentCount(h, merge)).toBe(firstParentCount(h, base) + 1);
     // 판정 재검사는 없었다 (구현 · 검사 판정만)
     expect(h.judgeCalls.map((c) => c.kind)).toEqual(['red_check', 'implementation', 'check']);
     // ADR-065: 관리자 기본 제한 없음 → 실행기가 설치 + 판정 제한 + 여유를 넘긴다
@@ -243,6 +249,15 @@ describe('병합 단계 중단 뒤 재개 (코멘트 기준, ADR-066 한계)', (
     });
     const merged = mainTip(h);
     expect(merged).not.toBe(base);
+    // A가 중단된 동안 기준 브랜치에 다른 병합이 더 쌓인다 (실행 B의 병합을 흉내 내는 실제 git 병합 커밋)
+    userGit(h.repo, 'checkout', '-q', '-b', 'other-work', base);
+    fs.writeFileSync(path.join(h.repo, 'OTHER.md'), '다른 작업\n');
+    userGit(h.repo, 'add', 'OTHER.md');
+    userGit(h.repo, 'commit', '-q', '-m', '다른 작업');
+    userGit(h.repo, 'checkout', '-q', 'main');
+    userGit(h.repo, 'merge', '-q', '--no-ff', '-m', '다른 실행의 병합', 'other-work');
+    const later = mainTip(h);
+    expect(parentsOf(h, later)[0]).toBe(merged);
 
     // 재기동: running → interrupted, 재개(사람) → 병합 단계 새 시도
     const engine = h.newEngine();
@@ -254,12 +269,15 @@ describe('병합 단계 중단 뒤 재개 (코멘트 기준, ADR-066 한계)', (
     expect(attempts(done, 'merge')).toEqual(['merge#1:failed', 'merge#2:passed']);
     expect(exitOf(done, 'merge', 2)).toEqual({
       mergeCommit: merged,
+      mergeOrder: firstParentCount(h, merged),
       headCommit: done.run.headCommit,
       recovered: true,
     });
-    // 병합 커밋은 하나뿐이다
-    expect(mainTip(h)).toBe(merged);
-    expect(mergeCount(h)).toBe(1);
+    // 재개 복구로 찾은 병합 커밋의 순서 값은 실제 병합 순서다: 나중에 쌓인 병합보다 작다 (통과 기록 시각은 더 늦어도)
+    expect(firstParentCount(h, merged)).toBeLessThan(firstParentCount(h, later));
+    // 이 실행의 병합 커밋은 하나뿐이고, 기준 브랜치 끝은 나중에 쌓인 병합이다
+    expect(mainTip(h)).toBe(later);
+    expect(mergeCount(h)).toBe(2);
   }, 60_000);
 
   it('이 실행의 BIVE 병합 커밋이 아니면(사람이 직접 병합) no_changes로 failed', async () => {
