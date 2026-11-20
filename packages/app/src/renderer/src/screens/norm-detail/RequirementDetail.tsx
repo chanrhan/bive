@@ -199,7 +199,7 @@ export const RequirementDetail = ({
                 }}
               />
               <div className="requirement-editor-bar">
-                <span className="requirement-editor-hint">
+                <span className="requirement-editor-hint" data-testid="requirement-editor-hint">
                   {isMac() ? '⌘↵ 저장 · Esc 취소' : 'Ctrl+Enter 저장 · Esc 취소'}
                 </span>
                 <span className="requirement-editor-buttons">
