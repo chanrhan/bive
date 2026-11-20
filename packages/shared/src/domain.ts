@@ -852,7 +852,8 @@ export const ToolCall = z.strictObject({
   seq: NonNegativeInt,
   at: Timestamp,
   role: AgentRole,
-  name: NonEmptyString,
+  /** 에이전트가 부른 이름 그대로. 빈 문자열도 받는다(실행기가 `unknown_tool`로 거부한 호출도 기록, ADR-094) */
+  name: z.string(),
   argsSummary: z.string(),
   status: ToolCallStatus,
   reason: NonEmptyString.nullable(),
@@ -969,3 +970,11 @@ export const CodeOpenRecord = z.strictObject({
   line: CodeLine,
 });
 export type CodeOpenRecord = z.infer<typeof CodeOpenRecord>;
+
+/**
+ * 저장된 열람 기록을 읽을 때의 형식 (ADR-094: 쓰기는 엄격하게, 읽기는 느슨하게). 경로(`file`)의 세부 규칙
+ * ({@link isProjectRelativePath}, 나중에 조여질 수 있다: PR #184가 `%` · 양방향 제어 문자를 더함)은 다시 적용하지 않고
+ * 빈 값이 아닌 문자열인지만 본다. 나머지 칸은 {@link CodeOpenRecord}와 같다(타입 · 열거형 · DB CHECK와 같은 모양).
+ */
+export const StoredCodeOpenRecord = CodeOpenRecord.extend({ file: z.string().min(1) });
+export type StoredCodeOpenRecord = z.infer<typeof StoredCodeOpenRecord>;

@@ -3,10 +3,20 @@
 // - 조회는 최신부터(시각 → ID 내림차순) 건수 제한까지 (`listLatest`)
 // - 집계는 전체 기록의 사유별 건수 (`countByReason`, M2-02 · ADR-088). SQL에서 세므로 조회 건수 제한과 무관하다
 // - 누가 기록할 수 있는지(사람만)는 호출한 쪽(오케스트레이터)이 정한다. 여기서는 형식만 검증한다
-import { CodeOpenReason, type CodeOpenReasonCount, CodeOpenRecord } from '@bive/shared';
+// - 쓰기는 엄격하게(`CodeOpenRecord`), 읽기는 느슨하게(`StoredCodeOpenRecord`, ADR-094): 쓰기 규칙이 조여지기 전에 저장된
+//   행(PR #184 전의 `%`가 든 경로 등)도 읽어서 돌려준다. 타입 · 열거형이 깨진 행(DB CHECK가 막지만 그래도 들어온 경우)은
+//   그 행만 건너뛰고 경고 한 줄(같은 프로젝트 · 같은 건수면 프로세스당 한 번)을 남긴다. 나머지는 그대로 돌려준다
+import {
+  CodeOpenReason,
+  type CodeOpenReasonCount,
+  CodeOpenRecord,
+  StoredCodeOpenRecord,
+  type Ulid,
+} from '@bive/shared';
 
 import { withTransaction, type SqliteDatabase } from '../database.js';
 import { ConflictError, isUniqueViolation } from '../errors.js';
+import { warnOnce } from '../read-warnings.js';
 
 const ENTITY = '코드 열람 기록';
 
@@ -34,8 +44,9 @@ const toRow = (record: CodeOpenRecord): CodeOpenRow => ({
   line: record.line,
 });
 
-const toRecord = (row: CodeOpenRow): CodeOpenRecord =>
-  CodeOpenRecord.parse({
+/** 저장된 행을 읽기 형식으로. 타입 · 열거형이 깨진 행이면 `null`. */
+const toRecord = (row: CodeOpenRow): StoredCodeOpenRecord | null => {
+  const parsed = StoredCodeOpenRecord.safeParse({
     id: row.id,
     at: row.at,
     reason: row.reason,
@@ -44,16 +55,20 @@ const toRecord = (row: CodeOpenRow): CodeOpenRecord =>
     file: row.file,
     line: row.line,
   });
+  return parsed.success ? parsed.data : null;
+};
 
 export class CodeOpenRepository {
   readonly #db: SqliteDatabase;
+  readonly #projectId: Ulid;
   readonly #insert;
   readonly #exists;
   readonly #latest;
   readonly #countByReason;
 
-  constructor(db: SqliteDatabase) {
+  constructor(db: SqliteDatabase, projectId: Ulid) {
     this.#db = db;
+    this.#projectId = projectId;
     this.#insert = db.prepare<[CodeOpenRow]>(
       `INSERT INTO code_open_records (${COLUMNS}) VALUES (@id, @at, @reason, @source_screen,
        @item_entity, @item_id, @file, @line)`,
@@ -93,20 +108,43 @@ export class CodeOpenRepository {
     });
   }
 
-  /** 최신부터 `limit`건 (시각이 같으면 ID가 큰 것 먼저). `limit`은 1 이상으로 맞춘다. */
-  listLatest(limit: number): CodeOpenRecord[] {
-    return this.#latest.all(Math.max(1, Math.trunc(limit))).map(toRecord);
+  /**
+   * 최신부터 `limit`건 (시각이 같으면 ID가 큰 것 먼저). `limit`은 1 이상으로 맞춘다. 읽기 형식(ADR-094)으로 읽으며,
+   * 그 형식에도 맞지 않는 행은 건너뛰고(건수 제한 안의 행만 센다) 경고를 남긴다.
+   */
+  listLatest(limit: number): StoredCodeOpenRecord[] {
+    const records: StoredCodeOpenRecord[] = [];
+    let skipped = 0;
+    for (const row of this.#latest.all(Math.max(1, Math.trunc(limit)))) {
+      const record = toRecord(row);
+      if (record === null) skipped += 1;
+      else records.push(record);
+    }
+    if (skipped > 0) this.#warnSkipped('list', skipped);
+    return records;
   }
 
   /**
    * 전체 기록의 사유별 건수. 사유 3종을 고정 순서(`CodeOpenReason` 순서)로 모두 돌려준다(기록이 없는 사유는 0).
-   * @throws {ZodError} 저장된 사유가 열거형 밖일 때 (DB CHECK가 막으므로 생기지 않는다)
+   * 저장된 사유가 열거형 밖인 행(DB CHECK가 막으므로 보통 생기지 않는다)은 세지 않고 경고를 남긴다 (ADR-094).
    */
   countByReason(): CodeOpenReasonCount[] {
     const counts = new Map<CodeOpenReason, number>();
+    let skipped = 0;
     for (const row of this.#countByReason.all()) {
-      counts.set(CodeOpenReason.parse(row.reason), row.count);
+      const reason = CodeOpenReason.safeParse(row.reason);
+      if (reason.success) counts.set(reason.data, row.count);
+      else skipped += row.count;
     }
+    if (skipped > 0) this.#warnSkipped('summary', skipped);
     return CodeOpenReason.options.map((reason) => ({ reason, count: counts.get(reason) ?? 0 }));
+  }
+
+  #warnSkipped(what: 'list' | 'summary', count: number): void {
+    warnOnce(
+      `code_open_records.${what}:${this.#projectId}`,
+      String(count),
+      `코드 열람 기록 ${String(count)}건이 저장 형식에 맞지 않아 ${what === 'list' ? '조회' : '집계'}에서 건너뜀 (프로젝트 ${this.#projectId})`,
+    );
   }
 }

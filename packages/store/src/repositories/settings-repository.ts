@@ -14,6 +14,7 @@ import {
 } from '@bive/shared';
 
 import { withTransaction, type SqliteDatabase } from '../database.js';
+import { warnOnce } from '../read-warnings.js';
 
 /** 설정 변경의 주체와 시각. `updatedBy` · `updatedAt`이 된다. */
 export interface SettingsChange {
@@ -85,13 +86,16 @@ export class SettingsRepository {
   /**
    * 저장된 IDE 선택. 없으면 미설정. 스키마를 어기면(허용 목록이 좁아져 예전에 받던 틀 · 직접 고친 DB) 미설정으로
    * 강등하고 로그 한 줄을 남긴다. 다른 설정은 그대로 읽히고 화면에서 다시 고를 수 있다 (ADR-087). 여는 쪽(main)은
-   * 읽은 값을 다시 검증한다.
+   * 읽은 값을 다시 검증한다. 로그는 같은 프로젝트 · 같은 저장 값이면 프로세스당 한 번(값이 바뀌면 다시 한 번)이고,
+   * 저장된 값은 싣지 않는다(프로젝트 ID와 고정 문장만, ADR-094).
    */
   #readIde(value: unknown): IdeSetting | null {
     if (value === undefined || value === null) return null;
     const checked = IdeSetting.safeParse(value);
     if (checked.success) return checked.data;
-    console.warn(
+    warnOnce(
+      `settings.ide:${this.#projectId}`,
+      JSON.stringify(value),
       `설정의 IDE 선택이 허용 범위가 아니라 미설정으로 읽음 (프로젝트 ${this.#projectId})`,
     );
     return null;

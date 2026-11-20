@@ -11,6 +11,8 @@ import { METHODS, type NotificationName } from '@bive/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
+import { createGitRunner } from '../src/git/git-exec.js';
+import { findRecordedMerge, verifyRecordedMergeTree } from '../src/steps/merge.js';
 import { type NotificationSink, RunEventPublisher } from '../src/events/run-events.js';
 import { createRunHandlers } from '../src/ipc/run-handlers.js';
 import { createVerificationHandlers } from '../src/ipc/verification-handlers.js';
@@ -182,6 +184,87 @@ describe('병합 커밋이 만들어진 뒤 화면 갱신 단계가 실패하면
     expect(mergeCount(h)).toBe(0);
     expect((await runGet(h)).run).toMatchObject({ status: 'failed', mergeCommit: null });
     expect((await summaryOf(h)).basis).toBeNull();
+  }, 60_000);
+});
+
+describe('병합 단계 자신의 완료 저장 실패 (M2-11 #190 ⓐ 재현, ADR-094: 방침만, 복구는 별도 이슈)', () => {
+  it('현재 동작: 기준 브랜치에는 이 실행의 BIVE 병합 커밋이 있지만 실행은 병합 커밋 기록 없이 failed(step_error)로 남고 재개할 수 없다. 복구 근거(트레일러 · 둘째 부모 · 트리 대조)는 그 커밋을 이 실행 것으로만 찾는다', async () => {
+    // 제품 병합 실행기가 병합한 뒤, 완료 저장(completeStep: 단계 완료 + run.mergeCommit 한 트랜잭션)만 예외가 나게
+    // JSON으로 저장할 수 없는 값을 종료 조건 결과에 붙인다 (그 저장에서만 실패하는 저장 대역)
+    const h = setup({
+      executors: (defaults) => ({
+        ...defaults,
+        merge: async (context) => {
+          const outcome = await defaults.merge(context);
+          return outcome.status === 'passed'
+            ? { ...outcome, exitDetail: { ...(outcome.exitDetail as object), n: 1n } }
+            : outcome;
+        },
+      }),
+    });
+    const base = mainTip(h);
+    const done = await runToEnd(h);
+
+    // 기준 브랜치에는 병합 커밋이 있다
+    const tip = mainTip(h);
+    expect(tip).not.toBe(base);
+    expect(mergeCount(h)).toBe(1);
+    expect(userGit(h.repo, 'log', '-1', '--format=%B', tip)).toContain('Bive-Run: EXE-001');
+    // 실행에는 기록되지 않았고 failed다 (runEnding의 조건 mergeCommit에 걸리지 않음)
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'step_error',
+      currentStep: 'merge',
+      mergeCommit: null,
+    });
+    expect(attempts(done, 'merge', 'screen_update')).toEqual([
+      'merge#1:failed',
+      'screen_update#1:pending',
+    ]);
+    // 종료 상태라 재개(interrupted만, ADR-011)에도, 판정 기준(병합 커밋이 기록된 실행만)에도 닿지 않는다
+    const resumed = await h.engine.resume(h.project.id, h.runId, { kind: 'human' }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(resumed).toMatchObject({ code: -32009 });
+    expect((await summaryOf(h)).basis).toBeNull();
+
+    // 방침의 복구 근거: findRecordedMerge(트레일러 Bive-Run · Bive-Project + 둘째 부모 = 검사한 커밋)와
+    // verifyRecordedMergeTree(트리 = 첫 부모와 검사한 커밋의 병합 결과)가 그 커밋을 이 실행의 병합으로 찾는다
+    const git = createGitRunner();
+    const headCommit = String(done.run.headCommit);
+    const ref = {
+      git: {
+        projectId: h.project.id,
+        runDisplayId: done.run.displayId,
+        repoPath: h.repo,
+        baseBranch: done.run.baseBranch,
+        branch: String(done.run.branch),
+        worktreePath: String(done.run.worktreePath),
+        baseCommit: String(done.run.baseCommit),
+      },
+      run: done.run,
+      project: h.project,
+    };
+    const recorded = await findRecordedMerge(git, ref, headCommit);
+    expect(recorded).toEqual({ hash: tip, firstParent: base });
+    expect(await verifyRecordedMergeTree(git, h.repo, recorded!, headCommit)).toEqual({ ok: true });
+    // 다른 실행 · 다른 프로젝트 · 다른 검사 커밋으로는 찾지 않는다
+    expect(
+      await findRecordedMerge(
+        git,
+        { ...ref, run: { ...done.run, displayId: 'EXE-002' } },
+        headCommit,
+      ),
+    ).toBeNull();
+    expect(
+      await findRecordedMerge(
+        git,
+        { ...ref, project: { ...h.project, id: '01JE0000000000000000000099' } },
+        headCommit,
+      ),
+    ).toBeNull();
+    expect(await findRecordedMerge(git, ref, base)).toBeNull();
   }, 60_000);
 });
 

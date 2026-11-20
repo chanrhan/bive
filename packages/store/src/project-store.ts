@@ -64,7 +64,7 @@ export class ProjectStore {
     this.sessions = new SessionRepository(db);
     this.runs = new RunRepository(db, projectId, this.sequences, this.sessions);
     this.judgments = new JudgmentRepository(db);
-    this.codeOpens = new CodeOpenRepository(db);
+    this.codeOpens = new CodeOpenRepository(db, projectId);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

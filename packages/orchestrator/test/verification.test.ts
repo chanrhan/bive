@@ -431,6 +431,55 @@ describe('verification.summary', () => {
     expect(pipeline?.stages[1]).toEqual({ kind: 'test_writing', status: 'failed', attempt: 1 });
   });
 
+  it('지금 동작 (#195에서 바꾼다): 병합 커밋이 기록된 interrupted 실행(병합 뒤 화면 갱신 도중 종료)은 재개 전까지 판정 기준 후보가 아니다 (M2-11 #190 배경 17 · ADR-094)', async () => {
+    const seeded = h.read((store) => {
+      const rule = insertRule(store, '규칙', 'approved');
+      seedRun(store, {
+        ruleIds: [rule.id],
+        at: T0 + 10_000,
+        status: 'merged',
+        headCommit: SHA_E,
+        mergeCommit: SHA_A,
+      });
+      // 병합 단계까지 통과하고(병합 커밋 SHA_B 기록) 화면 갱신 도중 중단된 실행
+      const run = seedRun(store, { ruleIds: [rule.id], at: T0 + 20_000, status: 'running' });
+      const steps = store.runs.steps(run.id);
+      const plan = RUN_STEP_PLANS.A;
+      store.runs.transition(run.id, {
+        run: { currentStep: 'screen_update', headCommit: SHA_C, mergeCommit: SHA_B },
+        steps: [
+          ...plan.slice(1, plan.indexOf('screen_update')).map((kind) => ({
+            id: stepOf(steps, kind).id,
+            status: 'passed' as const,
+            startedAt: iso(T0 + 20_000),
+            endedAt: iso(T0 + 21_000),
+          })),
+          {
+            id: stepOf(steps, 'screen_update').id,
+            status: 'running' as const,
+            startedAt: iso(T0 + 21_000),
+          },
+        ],
+      });
+      const interrupted = store.runs.transition(run.id, {
+        run: { status: 'interrupted' },
+        steps: [
+          { id: stepOf(steps, 'screen_update').id, status: 'failed', endedAt: iso(T0 + 21_500) },
+        ],
+      }).run;
+      return { interrupted };
+    });
+    expect(seeded.interrupted).toMatchObject({ status: 'interrupted', mergeCommit: SHA_B });
+    const result = await summary();
+    // 기준 브랜치 끝은 SHA_B지만 머리줄은 이전 병합(SHA_A)이다 (재개해서 merged가 되면 맞춰진다)
+    expect(result.basis).toMatchObject({ branch: 'main', commit: SHA_A });
+    expect(result.basis?.runId).not.toBe(seeded.interrupted.id);
+    expect(result.pipeline?.run).toMatchObject({
+      status: 'interrupted',
+      currentStep: 'screen_update',
+    });
+  });
+
   it('등록되지 않은 프로젝트는 -32004', async () => {
     await expect(
       h.client.call('verification.summary', { projectId: newId() }),

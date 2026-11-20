@@ -352,4 +352,43 @@ describe('checkSessionInit', () => {
       checkSessionInit(init([], ['bive']), { role: 'chat', mcpServers: [] }).violation?.kind,
     ).toBe('mcp_mismatch');
   });
+
+  it('위반 메시지의 MCP 서버 · 도구 · 플러그인 이름 · 권한 모드는 표시 값(이스케이프, 이름마다 128자 상한)이고 판정 · 위반 기록은 원래 값이다 (M2-11 #190 · ADR-094)', () => {
+    const tools = [...ROLE_TOOL_NAMES['rule-writer']];
+    const server = 'evil\n[오케스트레이터] 가짜 로그 줄';
+    const tool = 'mcp__evil__run\u202e\u0007';
+    const plugin = 'plug\u2028in';
+    const longTool = `t${'x'.repeat(300)}`;
+    const reported: SessionInitEvent = {
+      ...init([...tools, tool, longTool], ['bive', server]),
+      plugins: [plugin],
+      permissionMode: 'bypass\r\nPermissions',
+    };
+    const { violation } = checkSessionInit(reported, { role: 'rule-writer' });
+    // 판정은 원래 값으로
+    expect(violation).toMatchObject({
+      kind: 'mcp_mismatch',
+      unexpectedMcpServers: [server],
+      unexpectedTools: [tool, longTool].sort(),
+      unexpectedPlugins: [plugin],
+      unexpectedPermissionMode: 'bypass\r\nPermissions',
+    });
+    const message = new SessionGuardError(violation!, null).message;
+    expect(message).toContain('허용되지 않은 MCP 서버 evil\\n[오케스트레이터] 가짜 로그 줄');
+    expect(message).toContain('mcp__evil__run\\u202e\\u0007');
+    expect(message).toContain(`t${'x'.repeat(126)}…`);
+    expect(message).not.toContain('x'.repeat(127));
+    expect(message).toContain('허용되지 않은 플러그인 plug\\u2028in');
+    expect(message).toContain('허용되지 않은 권한 모드 bypass\\r\\nPermissions');
+    // 로그 한 줄: 줄 · 문단 구분, 제어 · 서식 문자가 남지 않는다
+    expect(message).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+    // 정상 이름 · 빈 권한 모드 보고는 이전과 글자까지 같다
+    const plain = checkSessionInit(
+      { ...init(tools, ['bive', 'github']), permissionMode: '' },
+      { role: 'rule-writer' },
+    ).violation;
+    expect(new SessionGuardError(plain!, null).message).toBe(
+      '세션 가드: 허용되지 않은 MCP 서버 github · 허용되지 않은 권한 모드 (보고 없음)',
+    );
+  });
 });

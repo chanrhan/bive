@@ -1,9 +1,10 @@
 // 세션 가드 (NFR-02 · ADR-024 · ADR-052 · ADR-059). 세션 init의 도구 목록 · MCP 서버를 역할 허용 목록과 대조하고
 // 플러그인 · 권한 모드(보고하는 어댑터만)를 확인해, 다르면(계정 MCP · 내장 도구 · 빠진 도구 · 플러그인 · 다른 권한 모드)
 // 세션을 중단한다. 도구 목록 · MCP 수는 위반 여부와 상관없이 기록한다.
-import type { AgentRole, ToolManifestEntry } from '@bive/shared';
+import { type AgentRole, TOOL_CALL_NAME_DISPLAY_MAX, type ToolManifestEntry } from '@bive/shared';
 
 import type { SessionEvent, SessionInitEvent } from '../agent/adapter.js';
+import { displayText } from '../text-limit.js';
 import { BIVE_MCP_SERVER, roleToolNames } from './definitions.js';
 
 /** SDK가 MCP 도구에 붙이는 이름 접두 (`mcp__<서버>__<도구>`). BIVE 서버 도구만 접두를 떼고 비교한다. */
@@ -123,26 +124,37 @@ export const checkSessionInit = (
   };
 };
 
+/** 위반 메시지에 넣는 이름 하나의 표시 값 (이름마다 도구 이름 상한, ADR-089 · ADR-094). */
+const shownName = (name: string): string => displayText(name, TOOL_CALL_NAME_DISPLAY_MAX).text;
+const shownNames = (names: readonly string[]): string => names.map(shownName).join(', ');
+
+/**
+ * 위반 메시지 (세션 종료 사유 문장 · 규칙 작성 세션 종료 로그 · 엔진의 단계 실패 기록에 들어간다). MCP 서버 · 도구 ·
+ * 플러그인 이름과 권한 모드는 SDK 초기 보고 · 환경 설정에서 온 문자열이라 줄바꿈 등으로 로그 줄을 꾸밀 수 있으므로
+ * 표시 값(이스케이프 · 이름마다 상한)으로 적는다. 위반 판정은 원래 값({@link SessionGuardViolation})으로 이미 끝났다.
+ */
 export const describeViolation = (violation: SessionGuardViolation): string => {
   if (violation.kind === 'init_missing') return '세션 가드: init 메시지 없이 세션이 시작됨';
   const parts: string[] = [];
   if (violation.unexpectedMcpServers.length > 0) {
-    parts.push(`허용되지 않은 MCP 서버 ${violation.unexpectedMcpServers.join(', ')}`);
+    parts.push(`허용되지 않은 MCP 서버 ${shownNames(violation.unexpectedMcpServers)}`);
   }
   if (violation.missingMcpServers.length > 0) {
-    parts.push(`빠진 MCP 서버 ${violation.missingMcpServers.join(', ')}`);
+    parts.push(`빠진 MCP 서버 ${shownNames(violation.missingMcpServers)}`);
   }
   if (violation.unexpectedTools.length > 0) {
-    parts.push(`허용되지 않은 도구 ${violation.unexpectedTools.join(', ')}`);
+    parts.push(`허용되지 않은 도구 ${shownNames(violation.unexpectedTools)}`);
   }
   if (violation.missingTools.length > 0) {
-    parts.push(`빠진 도구 ${violation.missingTools.join(', ')}`);
+    parts.push(`빠진 도구 ${shownNames(violation.missingTools)}`);
   }
   if (violation.unexpectedPlugins.length > 0) {
-    parts.push(`허용되지 않은 플러그인 ${violation.unexpectedPlugins.join(', ')}`);
+    parts.push(`허용되지 않은 플러그인 ${shownNames(violation.unexpectedPlugins)}`);
   }
   if (violation.unexpectedPermissionMode !== null) {
-    parts.push(`허용되지 않은 권한 모드 ${violation.unexpectedPermissionMode || '(보고 없음)'}`);
+    parts.push(
+      `허용되지 않은 권한 모드 ${violation.unexpectedPermissionMode === '' ? '(보고 없음)' : shownName(violation.unexpectedPermissionMode)}`,
+    );
   }
   if (parts.length === 0) parts.push('도구 또는 MCP 서버 중복 보고');
   return `세션 가드: ${parts.join(' · ')}`;

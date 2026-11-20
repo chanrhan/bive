@@ -693,6 +693,44 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
       expect(JSON.stringify(result)).not.toContain('SECRET');
     });
 
+    it('빈 도구 이름("")의 거부 기록이 사실 그대로 저장되고 조회에서 빈 문자열 그대로 나온다 (NFR-02, M2-11 #190 · ADR-094)', async () => {
+      const { sessionIds, created } = await runWithSessions(1);
+      const [sessionId] = sessionIds as [string];
+      h.read((store) =>
+        store.sessions.appendToolCall({
+          id: newId(),
+          runId: created.run.id,
+          sessionId,
+          at: iso(T0),
+          role: 'implementer',
+          name: '',
+          argsSummary: '{"path":"src/a.ts"}',
+          status: 'denied',
+          reason: 'unknown_tool',
+          durationMs: 0,
+        }),
+      );
+      expect(h.read((store) => store.sessions.toolCallsBySession(sessionId))).toEqual([
+        expect.objectContaining({ name: '', status: 'denied', reason: 'unknown_tool' }),
+      ]);
+      const result = await h.client.call('toolCall.list', {
+        projectId: h.project.id,
+        runId: 'EXE-001',
+      });
+      expect(result.calls).toEqual([
+        expect.objectContaining({
+          sessionId,
+          seq: 0,
+          name: '',
+          nameTruncated: false,
+          status: 'denied',
+          reason: 'unknown_tool',
+          path: null,
+          pathTruncated: false,
+        }),
+      ]);
+    });
+
     describe('경로 · 도구 이름의 길이 상한과 제어 문자 이스케이프 (M2-06, ADR-089)', () => {
       const PATH_MAX = TOOL_CALL_PATH_DISPLAY_MAX;
       const NAME_MAX = TOOL_CALL_NAME_DISPLAY_MAX;
