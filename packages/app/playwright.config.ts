@@ -1,6 +1,7 @@
 // 화면 e2e (`pnpm e2e`, architecture.md 8장): renderer를 Vite 개발 서버로 띄워 브라우저 모드로 연다.
 // 브라우저: PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH가 있으면 그 실행 파일, 없으면 Playwright 기본 번들.
-// 이 VM은 기본 번들이 없어 /opt/pw-browsers/chromium-1194/chrome-linux/chrome을 지정한다 (ADR-028, ADR-043).
+// 이 VM은 기본 번들이 없어 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=$(ls -d /opt/pw-browsers/chromium-*/chrome-linux*/chrome)로
+// 지정한다. 버전 폴더 이름은 컨테이너마다 달라 찾아서 준다 (CLAUDE.md 5장, ADR-028, ADR-043).
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 

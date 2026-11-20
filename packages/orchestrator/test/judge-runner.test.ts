@@ -38,6 +38,7 @@ import {
   overrideTargetNames,
   parseStrictYaml,
   pinnedPnpmConfigArgs,
+  PROJECT_PNPM_CONFIG_ALLOWLIST,
   resolveJudgeStoreDir,
   shimTargets,
 } from '../src/judge/checkout.js';
@@ -476,21 +477,38 @@ describe('훅', () => {
   });
 
   it('중단 신호를 받으면 띄운 프로세스 · 임시 DB를 정리하고 runner_error(판정 중단)', async () => {
-    // 빌드 캐시를 지워 빌드 도중에 중단되게 한다 (느린 환경에서는 앞 단계에서 중단될 수 있다)
+    // 빌드 캐시를 지운 뒤 `next build`가 빌드 폴더(.next)를 만드는 순간 중단한다. 시각(예: 2초 뒤)으로 중단하면 부하에 따라
+    // 수집 · generate · migrate 어느 단계에 걸릴지 달라져 시험이 흔들렸다(#173). 중단을 빌드 단계에 묶어 단계까지 단언한다
     rmSync(path.join(fixtureDir, '.next'), { recursive: true, force: true });
     const dbDirsBefore = tempDbDirs();
-    const result = await runner.run({
-      projectId,
-      runId,
-      worktreeDir: fixtureDir,
-      profile: 'next-prisma-sqlite',
-      timeoutMs: JUDGE_TIMEOUT_MS,
-      signal: AbortSignal.timeout(2_000),
-    });
+    const controller = new AbortController();
+    const watch = setInterval(() => {
+      if (existsSync(path.join(fixtureDir, '.next'))) controller.abort();
+    }, 10);
+    let result: JudgeRunResult;
+    try {
+      result = await runner.run({
+        projectId,
+        runId,
+        worktreeDir: fixtureDir,
+        profile: 'next-prisma-sqlite',
+        timeoutMs: JUDGE_TIMEOUT_MS,
+        signal: controller.signal,
+      });
+    } finally {
+      clearInterval(watch);
+    }
+    expect(controller.signal.aborted).toBe(true);
     expect(result.status).toBe('runner_error');
-    expect(result.message).toMatch(/^판정 중단 \((collect|migrate|build|start|vitest) 단계\)$/);
+    expect(result.message).toBe('판정 중단 (build 단계)');
+    // 빌드 전 단계(수집 · generate · migrate)는 끝까지 돌았고, 기동 · vitest에는 닿지 않았다
+    expect(Object.keys(result.timings)).toEqual(
+      expect.arrayContaining(['collect', 'generate', 'migrate']),
+    );
+    expect(result.timings).not.toHaveProperty('start');
+    expect(result.timings).not.toHaveProperty('vitest');
     await expectNoLeftovers(result, dbDirsBefore);
-  }, 30_000);
+  }, 60_000);
 
   it(
     '스냅숏을 새로 쓰지 않는다: 없는 스냅숏 단언은 실패하고 판정 환경에 파일을 만들지 않는다 (#29 재현)',
@@ -2525,5 +2543,52 @@ describe('판정 입력 지문 (검토 1회차)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('판정 설치 로그를 끄는 프로젝트 설정 (#162 검토 2회차 후속, #173)', () => {
+  // `loglevel=silent`이면 pnpm이 명령줄 `--reporter`보다 먼저 리포터를 꺼 설치 로그가 0바이트가 된다(ADR-069 #162 절).
+  // 그래서 허용 목록에 없어야 하고, 어느 설정 출처 · 표기로 써도 설치 전에 거부된다. 설치는 하지 않는다(설정 판정 함수만)
+  const LOG_KEY = /^(log-?level|reporter|silent)$/iu;
+
+  const check = (files: Record<string, string>): void => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bive-pnpmlog-'));
+    try {
+      if (!('package.json' in files)) {
+        writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'app' }));
+      }
+      for (const [rel, body] of Object.entries(files)) writeFileSync(path.join(dir, rel), body);
+      assertProjectPnpmConfig(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('허용 목록(.npmrc · pnpm-workspace.yaml · package.json pnpm)에 로그 수준 · 리포터 키가 없다', () => {
+    for (const [source, keys] of Object.entries(PROJECT_PNPM_CONFIG_ALLOWLIST)) {
+      expect(
+        keys.filter((key) => LOG_KEY.test(key)),
+        source,
+      ).toEqual([]);
+    }
+  });
+
+  it.each([
+    ['.npmrc', ' loglevel = silent\n', /\.npmrc의 loglevel/u],
+    ['.npmrc', 'loglevel=error\n', /\.npmrc의 loglevel/u],
+    ['.npmrc', 'loglevel[]=silent\n', /\.npmrc의 loglevel/u],
+    ['.npmrc', '"loglevel"=silent\n', /\.npmrc의 "loglevel"/u],
+    ['.npmrc', 'LOGLEVEL=silent\n', /\.npmrc의 LOGLEVEL/u],
+    ['.npmrc', 'reporter=silent\n', /\.npmrc의 reporter/u],
+    ['.npmrc', 'silent=true\n', /\.npmrc의 silent/u],
+    ['pnpm-workspace.yaml', 'packages: []\nlogLevel: silent\n', /pnpm-workspace\.yaml의 logLevel/u],
+    ['pnpm-workspace.yaml', 'packages: []\nreporter: silent\n', /pnpm-workspace\.yaml의 reporter/u],
+    [
+      'package.json',
+      JSON.stringify({ name: 'app', pnpm: { loglevel: 'silent' } }),
+      /package\.json의 pnpm\.loglevel|package\.json.*loglevel/u,
+    ],
+  ])('%s %j는 설치 전에 거부한다', (file, body, message) => {
+    expect(() => check({ [file]: body })).toThrow(message);
   });
 });

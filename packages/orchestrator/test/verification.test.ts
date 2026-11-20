@@ -762,3 +762,38 @@ describe('순수 함수', () => {
     });
   });
 });
+
+describe('판정 시각이 같은 판정의 동률 (ADR-072 "판정 시각 → ID", #173)', () => {
+  it('기준 커밋의 같은 규칙 판정이 시각까지 같으면 ID가 뒤인 판정이 최신이다 (저장 순서와 무관)', async () => {
+    const seeded = h.read((store) => {
+      const forward = insertRule(store, '저장 순서 = ID 순서', 'approved');
+      const backward = insertRule(store, '저장 순서 ≠ ID 순서', 'approved');
+      const run = seedRun(store, {
+        ruleIds: [forward.id, backward.id],
+        at: T0 + 10_000,
+        status: 'merged',
+        headCommit: SHA_C,
+        mergeCommit: SHA_A,
+      });
+      const at = T0 + 11_000;
+      // ID는 만든 순서대로 커진다: 앞 = 먼저 만든 판정, 뒤 = 나중에 만든 판정
+      const forwardEarlier = judgment(forward, 'fail', judgedIn(store, run), at, SHA_C);
+      const forwardLater = judgment(forward, 'pass', judgedIn(store, run), at, SHA_C);
+      const backwardEarlier = judgment(backward, 'fail', judgedIn(store, run), at, SHA_C);
+      const backwardLater = judgment(backward, 'pass', judgedIn(store, run), at, SHA_C);
+      expect(forwardEarlier.id < forwardLater.id).toBe(true);
+      expect(backwardEarlier.id < backwardLater.id).toBe(true);
+      // forward는 ID 순서대로, backward는 거꾸로 저장한다
+      store.judgments.record([forwardEarlier, forwardLater, backwardLater, backwardEarlier]);
+      return { forward, backward, forwardLater, backwardLater };
+    });
+    const result = await summary();
+    expect(result.basis?.commit).toBe(SHA_A);
+    const latestOf = (rule: Rule) =>
+      result.rules.find((row) => row.rule.id === rule.id)?.judgment.latest;
+    expect(latestOf(seeded.forward)?.id).toBe(seeded.forwardLater.id);
+    expect(latestOf(seeded.backward)?.id).toBe(seeded.backwardLater.id);
+    // 두 규칙 모두 뒤 ID의 통과 판정이므로 준수 2 / 2
+    expect(result.compliance).toEqual({ passed: 2, judgeable: 2 });
+  });
+});

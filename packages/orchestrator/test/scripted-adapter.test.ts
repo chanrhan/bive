@@ -263,6 +263,7 @@ describe('시나리오 파일 스키마', () => {
     ['결과 없음', withSession((s) => delete s.result)],
     ['when 값이 문자열이 아님', withSession((s) => (s.when = { ruleId: 1 }))],
     ['when 이름이 자리표시자 이름 형식이 아님', withSession((s) => (s.when = { 'rule-id': 'x' }))],
+    ['when이 빈 객체 (#173)', withSession((s) => (s.when = {}))],
   ])('%s → ScenarioError', (_label, text) => {
     expect(() => parseScenario(text, 'sample')).toThrow(ScenarioError);
   });
@@ -641,5 +642,82 @@ describe('ScriptedAdapter pause 대기 (pause-implement)', () => {
     const events = await pending;
     expect(events.map((e) => e.type)).toEqual(['init', 'turn_start', 'message', 'result']);
     expect(resultOf(events).total_cost_usd).toBeNull();
+  });
+});
+
+describe('when 조건의 세션 고르기 (ADR-092 보강, #173)', () => {
+  /** 결과의 턴 수(`num_turns`)로 어느 세션인지 가린다. 비용은 모름(null)이라 모델별 비용이 없다 */
+  const session = (mark: number, when?: Record<string, string>) => ({
+    ...(when === undefined ? {} : { when }),
+    turns: [{ message: `세션 ${String(mark)}` }],
+    result: { subtype: 'success', total_cost_usd: null, num_turns: mark, modelUsage: {} },
+  });
+  const adapterWith = (sessions: ReturnType<typeof session>[]): ScriptedAdapter =>
+    new ScriptedAdapter({
+      scenario: parseScenario(
+        JSON.stringify({
+          name: 'when-order',
+          description: '조건 순번',
+          roles: { implementer: { sessions } },
+        }),
+      ),
+      biveHome: '/unused',
+      pollIntervalMs: 10,
+    });
+  const markOf = async (
+    adapter: ScriptedAdapter,
+    overrides: Partial<SessionSpec>,
+  ): Promise<number | null> =>
+    resultOf(await collect(adapter.startSession(spec({ role: 'implementer', ...overrides }))))
+      .num_turns;
+
+  // 규칙 R1 · R2의 세션이 섞여 있다: R1 = 1 · 3, R2 = 2 · 4 · 5
+  const MIXED = [
+    session(1, { ruleId: 'R1' }),
+    session(2, { ruleId: 'R2' }),
+    session(3, { ruleId: 'R1' }),
+    session(4, { ruleId: 'R2' }),
+    session(5, { ruleId: 'R2' }),
+  ];
+
+  it('when이 같은 세션이 여러 개면 순번 0 · 1 · 2가 그 후보 안에서 차례로 넘어가고, 다 쓰면 마지막 후보를 반복한다', async () => {
+    const adapter = adapterWith(MIXED);
+    const byIndex = async (ruleId: string, indexes: number[]): Promise<(number | null)[]> => {
+      const out: (number | null)[] = [];
+      for (const roleSessionIndex of indexes) {
+        out.push(await markOf(adapter, { runId: 'r1', vars: { ruleId }, roleSessionIndex }));
+      }
+      return out;
+    };
+    expect(await byIndex('R2', [0, 1, 2, 3])).toEqual([2, 4, 5, 5]);
+    expect(await byIndex('R1', [0, 1, 2])).toEqual([1, 3, 3]);
+  });
+
+  it('순번을 주지 않으면 실행마다 연 횟수로 세고, 그 순번도 후보 안에서 넘어간다', async () => {
+    const adapter = adapterWith(MIXED);
+    const opened: (number | null)[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      opened.push(await markOf(adapter, { runId: 'r1', vars: { ruleId: 'R2' } }));
+    }
+    expect(opened).toEqual([2, 4, 5]);
+    // 다른 실행은 처음부터
+    expect(await markOf(adapter, { runId: 'r2', vars: { ruleId: 'R1' } })).toBe(1);
+  });
+
+  it('비교는 세션 vars의 자기 속성만 본다: 상속받은 속성은 조건에 맞지 않는다', async () => {
+    const adapter = adapterWith([session(1, { ruleId: 'R1' }), session(9)]);
+    const inherited = Object.create({ ruleId: 'R1' }) as Record<string, string>;
+    expect(inherited.ruleId).toBe('R1');
+    // 조건 없는 세션(9)만 후보다
+    expect(await markOf(adapter, { runId: 'r1', vars: inherited, roleSessionIndex: 0 })).toBe(9);
+    // 자기 속성이면 맞는다
+    expect(
+      await markOf(adapter, { runId: 'r1', vars: { ruleId: 'R1' }, roleSessionIndex: 0 }),
+    ).toBe(1);
+    // 후보가 없으면 ScenarioError
+    const onlyWhen = adapterWith([session(1, { ruleId: 'R1' })]);
+    await expect(
+      collect(onlyWhen.startSession(spec({ role: 'implementer', runId: 'r1', vars: inherited }))),
+    ).rejects.toThrow(/조건에 맞는 세션 없음/);
   });
 });

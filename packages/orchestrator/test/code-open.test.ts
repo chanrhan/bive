@@ -12,6 +12,7 @@ import {
   createUlidGenerator,
   ErrorCode,
 } from '@bive/shared';
+import { registerProject } from '@bive/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PipeServer } from '../src/ipc/server.js';
@@ -176,7 +177,7 @@ describe('파일 경로 · 줄 · 화면 · 사유 검증: 프로젝트 루트 �
     ['줄바꿈', { file: 'src/a\n.ts' }],
     ['DEL', { file: 'src/a\u007f.ts' }],
     ['C1 제어 문자', { file: 'src/a\u0085.ts' }],
-    ['양방향 제어 문자', { file: 'src/a\u202ests.ts' }],
+    ['양방향 제어 문자', { file: 'src/a\u202Ests.ts' }],
     ['퍼센트(중첩 디코딩에서 상위 폴더)', { file: 'bive-acceptance/%2e%2e/%2e%2e/etc/passwd' }],
     ['빈 경로', { file: '' }],
     ['너무 긴 경로', { file: `${'a/'.repeat(600)}b.ts` }],
@@ -382,5 +383,50 @@ describe('쓰기 규칙이 조여지기 전에 저장된 기록 (M2-11 #190 수�
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('두 프로젝트: 코드 열람 기록 · 집계는 프로젝트마다 따로다 (#173)', () => {
+  it('두 번째 프로젝트에 기록을 남겨도 첫 프로젝트의 codeOpen.summary · codeOpen.list가 바뀌지 않고, 두 번째 프로젝트는 자기 기록만 본다', async () => {
+    const first = h.project.id;
+    await h.client.call('codeOpen.record', debugging());
+    const summaryBefore = await h.client.call('codeOpen.summary', { projectId: first });
+    const listBefore = await h.client.call('codeOpen.list', { projectId: first });
+    expect(summaryBefore.total).toBe(1);
+    expect(listBefore.records).toHaveLength(1);
+
+    // 같은 BIVE_HOME에 두 번째 프로젝트를 등록하고 사유가 다른 기록 3건을 남긴다
+    const second = registerProject(
+      {
+        id: createUlidGenerator()(),
+        name: '두 번째 앱',
+        rootPath: '/work/second-app',
+        baseBranch: 'main',
+        createdAt: iso(T0),
+      },
+      { home: h.biveHome },
+    );
+    const recorded = [];
+    for (const reason of ['debugging', 'screen_error', 'info_lacking'] as const) {
+      h.clock.now += 1_000;
+      const { record } = await h.client.call('codeOpen.record', {
+        ...debugging(),
+        projectId: second.id,
+        reason,
+      });
+      recorded.push(record);
+    }
+
+    // 첫 프로젝트: 집계 · 목록이 그대로다 (모든 프로젝트를 합산하면 total 4 · 기록 4건이 된다)
+    expect(await h.client.call('codeOpen.summary', { projectId: first })).toEqual(summaryBefore);
+    expect(await h.client.call('codeOpen.list', { projectId: first })).toEqual(listBefore);
+    // 두 번째 프로젝트: 자기 기록 3건만, 최신부터
+    const secondSummary = await h.client.call('codeOpen.summary', { projectId: second.id });
+    expect(secondSummary.total).toBe(3);
+    expect(secondSummary.reasons.find((r) => r.reason === 'debugging')?.count).toBe(1);
+    expect(await h.client.call('codeOpen.list', { projectId: second.id })).toEqual({
+      records: [...recorded].reverse(),
+      truncated: false,
+    });
   });
 });
