@@ -81,6 +81,11 @@ const TurnSchema = z.union([ToolTurnSchema, MessageTurnSchema, PauseTurnSchema])
 const SessionSchema = z.strictObject({
   description: z.string().optional(),
   /**
+   * 이 세션을 쓸 조건: 세션 `vars`(예: `ruleId`)의 값이 모두 같을 때만 고른다. 한 시나리오가 규칙이 다른 실행
+   * 여러 개를 차례로 재생할 때 쓴다(예: `multi-rule`). 순번은 조건에 맞는 세션 안에서 센다. 없으면 늘 고를 수 있다
+   */
+  when: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string()).optional(),
+  /**
    * init 보고에 고정 도구 서버(`bive`) 뒤로 더 붙일 MCP 서버 이름. 계정 · 프로젝트 MCP 설정이 섞인 세션을 재현해
    * 세션 가드(NFR-02)를 시험할 때만 쓴다 (ADR-077)
    */
@@ -90,7 +95,10 @@ const SessionSchema = z.strictObject({
 });
 
 const RoleScriptSchema = z.strictObject({
-  /** 같은 역할 세션이 열릴 때마다 순서대로 쓴다. 다 쓰면 마지막 세션을 반복한다 */
+  /**
+   * 같은 역할 세션이 열릴 때마다 순서대로 쓴다. 다 쓰면 마지막 세션을 반복한다. `when`이 있는 세션은 조건에 맞는
+   * 세션끼리만 순서를 센다
+   */
   sessions: z.array(SessionSchema).min(1),
 });
 

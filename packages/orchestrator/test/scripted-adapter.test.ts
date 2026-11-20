@@ -32,6 +32,8 @@ const REQUIRED_SCENARIOS = [
   'forbidden-write',
   'happy-path',
   'merge-conflict',
+  'multi-rule',
+  'multi-rule-regress',
   'pause-implement',
 ];
 
@@ -156,6 +158,41 @@ describe('시나리오 파일 스키마', () => {
     }
   });
 
+  it('multi-rule · multi-rule-regress는 실행 안 세션을 규칙마다 when.ruleId로 고르고, 회귀 변형은 RULE-002 구현만 다르다 (ADR-092)', () => {
+    const writeOf = (session: { turns: unknown[] } | undefined): string => {
+      const write = session?.turns.find(
+        (turn) =>
+          typeof turn === 'object' && turn !== null && 'tool' in turn && turn.tool === 'write_file',
+      ) as { args: Record<string, unknown> } | undefined;
+      return String(write?.args.content);
+    };
+    const normal = loadScenario('multi-rule');
+    const regress = loadScenario('multi-rule-regress');
+    for (const scenario of [normal, regress]) {
+      for (const role of ['test-writer', 'implementer'] as const) {
+        expect(scenario.roles[role]?.sessions.map((s) => s.when)).toEqual([
+          { ruleId: 'RULE-001' },
+          { ruleId: 'RULE-002' },
+        ]);
+      }
+      expect(scenario.roles['rule-writer']?.sessions[0]?.when).toBeUndefined();
+    }
+    // 두 시나리오는 RULE-002 구현 세션만 다르다
+    expect(normal.roles['rule-writer']).toEqual(regress.roles['rule-writer']);
+    expect(normal.roles['test-writer']).toEqual(regress.roles['test-writer']);
+    expect(normal.roles.implementer?.sessions[0]).toEqual(regress.roles.implementer?.sessions[0]);
+    // 정상: 두 번째 구현이 첫 규칙의 time을 지우지 않고 version을 더한다. 회귀: time을 지운다
+    const first = writeOf(normal.roles.implementer?.sessions[0]);
+    expect(first).toContain('time: new Date().toISOString()');
+    expect(first).not.toContain('version');
+    const second = writeOf(normal.roles.implementer?.sessions[1]);
+    expect(second).toContain('time: new Date().toISOString()');
+    expect(second).toContain("version: '0.1.0'");
+    const broken = writeOf(regress.roles.implementer?.sessions[1]);
+    expect(broken).not.toContain('time');
+    expect(broken).toContain("version: '0.1.0'");
+  });
+
   const valid = {
     name: 'sample',
     description: '예시',
@@ -224,6 +261,8 @@ describe('시나리오 파일 스키마', () => {
       withSession((s) => (s.turns = [{ pause: { file: 'p', until: 'x' } }])),
     ],
     ['결과 없음', withSession((s) => delete s.result)],
+    ['when 값이 문자열이 아님', withSession((s) => (s.when = { ruleId: 1 }))],
+    ['when 이름이 자리표시자 이름 형식이 아님', withSession((s) => (s.when = { 'rule-id': 'x' }))],
   ])('%s → ScenarioError', (_label, text) => {
     expect(() => parseScenario(text, 'sample')).toThrow(ScenarioError);
   });
@@ -377,6 +416,63 @@ describe('ScriptedAdapter 재생', () => {
       adapter.startSession(spec({ role: 'implementer', runId: 'r1', roleSessionIndex: 1 })),
     );
     expect(resultOf(events).total_cost_usd).toBe(0.0571);
+  });
+
+  it('when이 있으면 세션 vars가 맞는 세션 안에서 순번을 세고, 실행마다 규칙에 맞는 세션을 쓴다 (ADR-092)', async () => {
+    const adapter = adapterFor('multi-rule');
+    const written = async (
+      role: 'test-writer' | 'implementer',
+      runId: string,
+      ruleId: string,
+      roleSessionIndex?: number,
+    ): Promise<unknown[]> => {
+      const tools = fakeExecutor();
+      await collect(
+        adapter.startSession(
+          spec({
+            role,
+            tools,
+            runId,
+            vars: { ruleId },
+            ...(roleSessionIndex === undefined ? {} : { roleSessionIndex }),
+          }),
+        ),
+      );
+      return tools.calls.filter((c) => c.name === 'write_file').map((c) => c.args.path);
+    };
+    expect(await written('test-writer', 'r1', 'RULE-001')).toEqual([
+      'bive-acceptance/RULE-001/health-time.acc.ts',
+    ]);
+    expect(await written('test-writer', 'r2', 'RULE-002')).toEqual([
+      'bive-acceptance/RULE-002/health-version.acc.ts',
+    ]);
+    // 실행 2의 첫 구현 세션(순번 0)은 RULE-002 세션이다. 회귀 순번(1 · 2)은 조건에 맞는 마지막 세션을 반복한다
+    for (const index of [0, 1, 2]) {
+      const tools = fakeExecutor();
+      await collect(
+        adapter.startSession(
+          spec({
+            role: 'implementer',
+            tools,
+            runId: 'r2',
+            vars: { ruleId: 'RULE-002' },
+            roleSessionIndex: index,
+          }),
+        ),
+      );
+      expect(String(tools.calls[1]?.args.content)).toContain("version: '0.1.0'");
+    }
+    // 조건에 맞는 세션이 없으면 순회에서 ScenarioError
+    await expect(
+      collect(
+        adapter.startSession(
+          spec({ role: 'implementer', runId: 'r3', vars: { ruleId: 'RULE-003' } }),
+        ),
+      ),
+    ).rejects.toThrow(/조건에 맞는 세션 없음/);
+    await expect(
+      collect(adapter.startSession(spec({ role: 'implementer', runId: 'r4' }))),
+    ).rejects.toThrow(ScenarioError);
   });
 
   it('extraMcpServers가 있으면 init의 MCP 서버 목록이 bive 뒤에 그 이름을 더한다', async () => {

@@ -166,9 +166,18 @@ export class ScriptedAdapter implements AgentAdapter {
     if (!Number.isInteger(index) || index < 0) {
       throw new ScenarioError(`세션 순번 오류: ${index}`);
     }
+    // `when` 조건이 세션 vars와 맞는 세션만 후보로 둔다 (조건 없는 세션은 늘 후보)
+    const vars = spec.vars ?? {};
+    const candidates = script.sessions.filter((session) =>
+      Object.entries(session.when ?? {}).every(([name, value]) => vars[name] === value),
+    );
     // 다 쓰면 마지막 세션을 반복한다
-    const session = script.sessions[Math.min(index, script.sessions.length - 1)];
-    if (session === undefined) throw new ScenarioError(`역할 ${spec.role}의 세션 없음`);
+    const session = candidates[Math.min(index, candidates.length - 1)];
+    if (session === undefined) {
+      throw new ScenarioError(
+        `시나리오 ${this.scenario.name}에 역할 ${spec.role}의 조건에 맞는 세션 없음 (vars ${JSON.stringify(vars)})`,
+      );
+    }
     return session;
   }
 
