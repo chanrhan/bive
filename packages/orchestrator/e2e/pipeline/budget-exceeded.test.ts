@@ -2,6 +2,7 @@
 // 테스트 작성 · Red 확인(실제 판정 러너)은 정상으로 끝나고, 구현 세션이 결과 subtype error_max_budget_usd로 끝난다.
 // 실행은 budget_exceeded, 브랜치 · 워크트리 보존(구현 세션이 고치던 미커밋 변경 포함), 구현 판정 · 병합 없음이어야 한다.
 // 구현 세션은 다시 열리지 않는다.
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -76,7 +77,15 @@ describe('budget-exceeded: budget_exceeded, 브랜치 보존, 병합 없음', ()
     expect(git(worktree, 'rev-parse', 'HEAD')).toBe(done.run.headCommit);
     // 미커밋 작업 보존: 구현 세션이 한도에 닿기 전에 고친 라우트가 커밋되지 않은 변경으로 워크트리에 남는다
     expect(git(worktree, 'status', '--porcelain')).not.toBe('');
-    expect(git(worktree, 'status', '--porcelain', '--', ROUTE)).toBe(`M ${ROUTE}`);
+    // 스테이지되지 않은 변경이다: 색인(index)은 테스트 작성 커밋 그대로이고 작업 트리만 다르다 (#173).
+    // `git()`은 출력 앞뒤 공백을 자르므로 상태 칸(" M" = 작업 트리만, "M " = 스테이지됨)을 자르지 않고 읽는다
+    const porcelain = execFileSync('git', ['status', '--porcelain', '--', ROUTE], {
+      cwd: worktree,
+      encoding: 'utf8',
+    });
+    expect(porcelain).toBe(` M ${ROUTE}\n`);
+    expect(git(worktree, 'diff', '--cached', '--name-only')).toBe('');
+    expect(git(worktree, 'diff', '--name-only')).toBe(ROUTE);
     expect(fs.readFileSync(path.join(worktree, ROUTE), 'utf8')).toContain("const db = 'ok';");
     // 병합 없음: main 그대로, merge commit 0개, 인수 테스트도 main에 없다
     expect(mainTip(e)).toBe(base);

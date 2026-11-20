@@ -121,6 +121,27 @@ const FIXED_TOOLS: readonly string[] = [
   'propose_rule',
 ];
 
+/**
+ * 고정 도구마다 그 도구 스키마에 맞는 인자 (다른 역할의 실행기에 넣어 이름만으로 거부되는지 본다). 인자 검사에서
+ * 걸려 거부되는 것이 아님을 보이려고 올바른 인자를 쓴다. 빠진 도구는 인자 없음(`{}`)이 올바른 인자다
+ */
+const OTHER_ROLE_TOOL_ARGS: Readonly<Record<string, Record<string, unknown>>> = {
+  read_file: { path: 'package.json' },
+  write_file: { path: 'planted.txt', content: '다른 역할의 쓰기' },
+  list_files: { path: '.' },
+  search_files: { query: 'x' },
+  run_tests: {},
+  install_package: { name: 'is-number' },
+  propose_rule: {
+    parentRequirementId: 'REQ-001',
+    title: '다른 역할의 제안',
+    statement: 'WHEN 요청이 오면 THE SYSTEM SHALL 응답한다',
+    kind: 'business',
+    checkKinds: ['test'],
+    rationale: '무결성 시험',
+  },
+};
+
 /** 규범 엔터티 낱말 (순서와 상관없이 쓰기 동사와 함께 나오면 규범 쓰기) */
 const NORM_ENTITY =
   '(rule|requirement|contract|norm|block|adr|approval|proposal|judg|verdict|baseline)';
@@ -257,6 +278,11 @@ describe('모든 역할 세션의 도구 목록에 승인 · 잠정 승인 · �
       expect(options.strictMcpConfig).toBe(true);
       expect(options.permissionMode).toBe(REQUIRED_PERMISSION_MODE);
       expect(options).not.toHaveProperty('agents');
+      // 파일 설정(사용자 · 프로젝트 · 로컬 settings, CLAUDE.md, 훅)을 읽지 않고, 세션을 남기지 않으며, 프롬프트의 `@경로` ·
+      // `/명령`을 펼치지 않는다: 고정 도구 · 경로 가드를 거치지 않는 설정 · 파일 읽기 경로가 없다 (ADR-059, #173)
+      expect(options.settingSources).toEqual([]);
+      expect(options.persistSession).toBe(false);
+      expect(options.verbatimPrompts).toBe(true);
       const allowed = options.allowedTools ?? [];
       expect(allowed.map(normalizeToolName)).toEqual(listed);
       expect(allowed.every((name) => name.startsWith(`mcp__${BIVE_MCP_SERVER}__`))).toBe(true);
@@ -285,6 +311,18 @@ describe('모든 역할 세션의 도구 목록에 승인 · 잠정 승인 · �
           reason: 'unknown_tool',
         });
       }
+
+      // 다른 역할의 고정 도구도 이름만 보고 거부한다: 인자가 그 도구의 스키마에 맞아도 실행하지 않는다 (#173)
+      const others = FIXED_TOOLS.filter((name) => !(listed as readonly string[]).includes(name));
+      if (role !== 'implementer') expect(others, role).not.toEqual([]);
+      for (const name of others) {
+        await expect(
+          executor.execute(name, OTHER_ROLE_TOOL_ARGS[name] ?? {}),
+          name,
+        ).resolves.toMatchObject({ status: 'denied', reason: 'unknown_tool' });
+      }
+      // 거부된 호출은 세션 루트에 아무것도 남기지 않았다
+      expect(fs.readdirSync(root)).toEqual([]);
     },
   );
 });

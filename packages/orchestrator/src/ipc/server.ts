@@ -362,6 +362,11 @@ export class PipeServer {
   #nextId = 1;
 
   constructor(options: PipeServerOptions) {
+    // 잘못된 상한을 생성 시점에 거른다: 0 · 음수 · 소수 · NaN이면 역압이 꺼지거나 읽기가 바로 멈춘다 (#173)
+    const max = options.maxPendingFrames;
+    if (max !== undefined && (!Number.isInteger(max) || max <= 0)) {
+      throw new RangeError(`처리 대기 프레임 수 상한은 양의 정수여야 함: ${max}`);
+    }
     this.#options = options;
   }
 

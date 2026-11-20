@@ -1217,3 +1217,130 @@ test.describe('필터 · 처리 기록 (수용 기준 4)', () => {
     await expect(page.getByTestId('record-chain-broken')).toHaveText('승인 기록 검증 실패');
   });
 });
+
+test.describe('수정 입력 보호: 다른 제안 승인 · 버리기 확인 중 단축키 (#173, ADR-082)', () => {
+  const EDITED_TITLE = `${String(P1_PAYLOAD.title)}됨`;
+
+  /** PRP-001(A)에서 [수정]을 열고 제목 끝에 "됨"을 붙인다. */
+  const editA = async (page: Page): Promise<Locator> => {
+    await card(page, 'PRP-001').click();
+    await action(page, 'edit').click();
+    const title = page.getByTestId('edit-title');
+    await expect(title).toBeFocused();
+    await title.fill(EDITED_TITLE);
+    return title;
+  };
+
+  test('A를 수정 중일 때 B를 승인하면 승인 요청은 B의 ID로만 가고, A로 돌아오면 수정 초안이 그대로 남아 있다', async ({
+    page,
+  }) => {
+    const bive = await setup(page);
+    await editA(page);
+
+    // B(PRP-003)를 고른다: B에는 수정 입력이 없으므로 [승인]이 열려 있다
+    await card(page, 'PRP-003').click();
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-003');
+    await expect(page.getByTestId('edit-card')).toHaveCount(0);
+    await expect(action(page, 'approve')).toBeEnabled();
+    const approvedB: Proposal = {
+      ...P3,
+      state: 'approved',
+      decision: {
+        at: '2026-10-16T05:00:00.000Z',
+        by: HUMAN,
+        appliedRef: { entity: 'Requirement', id: ID.req },
+      },
+    };
+    await bive.setResponse('proposal.approve', {
+      result: {
+        proposal: approvedB,
+        applied: { entity: 'Requirement', requirement: REQUIREMENT },
+        approvalLog: { ...LOG_APPROVE, targetRef: { entity: 'Proposal', id: ID.p3 } },
+      },
+    });
+    await bive.setResponse('proposal.list', { result: { proposals: [P1, approvedB, P4, P5] } });
+    await bive.setResponse('proposal.count', { result: countOf([P1, approvedB, P4, P5]) });
+    await action(page, 'approve').click();
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
+    await expect(page.getByTestId('card-id')).toHaveText(['PRP-001']);
+
+    // 승인 요청은 B 하나뿐, A에 대한 처리 요청은 없다
+    expect(await callsOf(bive, 'proposal.approve')).toEqual([
+      { projectId: PROJECT_ID, id: ID.p3, author: HUMAN },
+    ]);
+    expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
+    expect(await callsOf(bive, 'proposal.reject')).toEqual([]);
+
+    // A로 돌아오면 수정 입력이 고친 제목으로 열려 있고 [승인] · [거절]은 계속 막혀 있다
+    await card(page, 'PRP-001').click();
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-001');
+    await expect(page.getByTestId('edit-card')).toBeVisible();
+    await expect(page.getByTestId('edit-title')).toHaveValue(EDITED_TITLE);
+    await expect(action(page, 'approve')).toBeDisabled();
+    await expect(action(page, 'reject')).toBeDisabled();
+  });
+
+  test('버리기 확인 줄이 떠 있는 동안 Ctrl+Enter는 수정 후 승인으로 처리되지 않는다 (확인 줄의 버튼 · 입력 칸 어디서 눌러도)', async ({
+    page,
+  }) => {
+    const bive = await setup(page);
+    const title = await editA(page);
+    const prompt = page.getByTestId('edit-discard');
+
+    // Esc → 확인 줄, 초점은 [계속 수정]
+    await title.press('Escape');
+    await expect(prompt).toBeVisible();
+    await expect(page.getByTestId('edit-keep')).toBeFocused();
+    await page.getByTestId('edit-keep').press('Control+Enter');
+    await expect(page.getByTestId('edit-card')).toBeVisible();
+    await expect(title).toHaveValue(EDITED_TITLE);
+
+    // 확인 줄을 그대로 둔 채 입력 칸을 눌러 초점을 옮기고 Ctrl+Enter
+    if ((await prompt.count()) === 0) await title.press('Escape');
+    await expect(prompt).toBeVisible();
+    await title.click();
+    await expect(title).toBeFocused();
+    await expect(prompt).toBeVisible();
+    await title.press('Control+Enter');
+    // 처리 요청이 나가지 않고, 확인 줄 · 수정 입력 · 고친 내용이 그대로다
+    await expect(prompt).toBeVisible();
+    await expect(page.getByTestId('edit-card')).toBeVisible();
+    await expect(title).toHaveValue(EDITED_TITLE);
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-001');
+    expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
+    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
+
+    // [계속 수정]으로 확인 줄을 닫으면 단축키가 다시 수정 후 승인이다 (막힌 것은 확인 줄이 떠 있는 동안뿐)
+    await page.getByTestId('edit-keep').click();
+    await expect(prompt).toHaveCount(0);
+    await expect(title).toBeFocused();
+    const approved: Proposal = {
+      ...P1,
+      state: 'approved',
+      decision: {
+        at: '2026-10-16T05:00:00.000Z',
+        by: HUMAN,
+        appliedRef: { entity: 'Rule', id: ID.rule },
+        editedPayload: { ...P1_PAYLOAD, title: EDITED_TITLE },
+      },
+    };
+    await bive.setResponse('proposal.amend', {
+      result: {
+        proposal: approved,
+        applied: { entity: 'Rule', rule: { ...RULE, title: EDITED_TITLE } },
+        approvalLog: { ...LOG_APPROVE, action: 'approve_edited' },
+      },
+    });
+    await bive.setResponse('proposal.list', { result: { proposals: [approved, P3, P4, P5] } });
+    await title.press('Control+Enter');
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
+    expect(await callsOf(bive, 'proposal.amend')).toEqual([
+      {
+        projectId: PROJECT_ID,
+        id: ID.p1,
+        author: HUMAN,
+        edited: { ...P1_PAYLOAD, title: EDITED_TITLE },
+      },
+    ]);
+  });
+});
