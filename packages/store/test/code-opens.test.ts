@@ -4,7 +4,7 @@
 // - 조회는 최신부터 건수 제한까지
 // - 집계(`countByReason`)는 전체 기록의 사유별 건수, 고정 순서 · 0건 포함 (M2-02, ADR-088)
 import type { CodeOpenRecord } from '@bive/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ConflictError } from '../src/errors.js';
 import { openProjectStore, type ProjectStore } from '../src/project-store.js';
@@ -159,5 +159,88 @@ describe('CodeOpenRepository.countByReason (M2-02, ADR-088)', () => {
   it('다른 프로젝트 저장소의 기록은 세지 않는다', () => {
     withStore((store) => store.codeOpens.record(record()));
     withStore((store) => expect(store.codeOpens.countByReason()).toEqual(ZERO));
+  });
+});
+
+describe('쓰기 규칙이 조여지기 전에 저장된 행 읽기 (M2-11 #190, ADR-094: 읽기는 느슨하게)', () => {
+  // PR #184 전의 쓰기 규칙은 `%`와 양방향 제어 문자를 받았다(DB CHECK는 지금도 받는다)
+  const LEGACY_FILES = ['src/a%20b.ts', 'src/a\u202eb.ts'];
+  const insertRow = (store: ProjectStore, reason: string, file: string, at: string): string => {
+    const id = newId();
+    store.db.prepare(INSERT).run(id, at, reason, 'SCR-03', 'Rule', RULE_ID, file, 7);
+    return id;
+  };
+
+  it('지금 쓰기 규칙에 맞지 않는 경로(%, 양방향 제어 문자)의 행도 listLatest · countByReason이 실패하지 않고 글자 그대로 읽으며 경고는 없다', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      withStore((store) => {
+        const saved = store.codeOpens.record(record({ at: '2026-11-14T08:00:00.000Z' }));
+        const ids = LEGACY_FILES.map((file, i) =>
+          insertRow(store, 'screen_error', file, `2026-11-14T09:0${String(i)}:00.000Z`),
+        );
+        // 같은 값은 지금 쓰기에서는 거부된다 (쓰기는 엄격하게)
+        for (const file of LEGACY_FILES) {
+          expect(() => store.codeOpens.record(record({ file }))).toThrow();
+        }
+        const listed = store.codeOpens.listLatest(10);
+        expect(listed.map((r) => r.id)).toEqual([ids[1], ids[0], saved.id]);
+        expect(listed.map((r) => r.file)).toEqual(['src/a\u202eb.ts', 'src/a%20b.ts', saved.file]);
+        expect(listed[0]).toMatchObject({
+          reason: 'screen_error',
+          sourceScreen: 'SCR-03',
+          line: 7,
+        });
+        expect(store.codeOpens.countByReason()).toEqual([
+          { reason: 'screen_error', count: 2 },
+          { reason: 'info_lacking', count: 0 },
+          { reason: 'debugging', count: 1 },
+        ]);
+      });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('타입 · 열거형이 깨진 행(DB CHECK를 우회해 들어온 모르는 사유)은 그 행만 건너뛰고 나머지를 돌려주며, 경고 한 줄은 같은 건수면 프로세스당 한 번', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      withStore((store) => {
+        const saved = store.codeOpens.record(record());
+        store.db.pragma('ignore_check_constraints = ON');
+        insertRow(store, 'curiosity', 'src/a.ts', '2026-11-14T10:00:00.000Z');
+        store.db.pragma('ignore_check_constraints = OFF');
+
+        expect(store.codeOpens.listLatest(10)).toEqual([saved]);
+        expect(store.codeOpens.listLatest(10)).toEqual([saved]);
+        expect(store.codeOpens.countByReason()).toEqual([
+          { reason: 'screen_error', count: 0 },
+          { reason: 'info_lacking', count: 0 },
+          { reason: 'debugging', count: 1 },
+        ]);
+        expect(store.codeOpens.countByReason()).toHaveLength(3);
+        // 조회 · 집계가 각각 한 줄, 두 번째 호출은 찍지 않는다
+        expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+          expect.stringMatching(
+            /^코드 열람 기록 1건이 저장 형식에 맞지 않아 조회에서 건너뜀 \(프로젝트 [0-9A-Z]{26}\)$/,
+          ),
+          expect.stringMatching(
+            /^코드 열람 기록 1건이 저장 형식에 맞지 않아 집계에서 건너뜀 \(프로젝트 [0-9A-Z]{26}\)$/,
+          ),
+        ]);
+
+        // 깨진 행이 늘면(건수가 바뀌면) 다시 한 번
+        store.db.pragma('ignore_check_constraints = ON');
+        insertRow(store, '', 'src/b.ts', '2026-11-14T11:00:00.000Z');
+        store.db.pragma('ignore_check_constraints = OFF');
+        expect(store.codeOpens.listLatest(10)).toEqual([saved]);
+        expect(store.codeOpens.listLatest(10)).toEqual([saved]);
+        expect(warn).toHaveBeenCalledTimes(3);
+        expect(String(warn.mock.calls[2]?.[0])).toContain('2건이');
+      });
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

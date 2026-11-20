@@ -219,6 +219,73 @@ describe('마이그레이션 러너 규칙', () => {
   });
 });
 
+describe('0010 tool_call_empty_name: 빈 도구 이름 기록 (M2-11 #190, ADR-094)', () => {
+  const SESSION = newId();
+  const CALL = newId();
+  const insertSession = (db: SqliteDatabase) =>
+    db
+      .prepare(
+        `INSERT INTO sessions (id, role, model, work_dir, model_usage, tools, mcp_servers, started_at)
+         VALUES (?, 'implementer', 'm', '/w', '{}', '[]', '[]', '2026-11-14T00:00:00.000Z')`,
+      )
+      .run(SESSION);
+  const insertCall = (db: SqliteDatabase, id: string, seq: number, name: string) =>
+    db
+      .prepare(
+        `INSERT INTO tool_calls (id, run_id, session_id, seq, at, role, name, args_summary, status, reason, duration_ms)
+         VALUES (?, NULL, ?, ?, '2026-11-14T00:00:01.000Z', 'implementer', ?, '{}', 'denied', 'unknown_tool', 3)`,
+      )
+      .run(id, SESSION, seq, name);
+
+  it('0009까지의 DB에 있던 기록은 값 · 순서 그대로 옮기고, 빈 이름을 받게 되며, 덮어쓰기 · 수정 · 삭제 금지 트리거와 색인은 그대로다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 9), { now: fixedNow });
+      insertSession(db);
+      insertCall(db, CALL, 0, 'proposal.approve');
+      // 0009까지는 빈 이름을 DB CHECK가 막는다 (기록이 사라지던 원인)
+      expect(() => insertCall(db, newId(), 1, '')).toThrow(/CHECK/);
+      const before = db.prepare('SELECT * FROM tool_calls').all();
+
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([10]);
+      expect(db.prepare('SELECT * FROM tool_calls').all()).toEqual(before);
+      insertCall(db, newId(), 1, '');
+      expect(db.prepare('SELECT seq, name FROM tool_calls ORDER BY seq').all()).toEqual([
+        { seq: 0, name: 'proposal.approve' },
+        { seq: 1, name: '' },
+      ]);
+      expect(() => insertCall(db, newId(), 1, 'x')).toThrow(/덮어쓰기 금지/);
+      expect(() => db.prepare("UPDATE tool_calls SET name = 'y'").run()).toThrow(/바꿀 수 없/);
+      expect(() => db.prepare('DELETE FROM tool_calls').run()).toThrow(/지울 수 없/);
+      // 다른 칸의 CHECK는 그대로다
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO tool_calls (id, run_id, session_id, seq, at, role, name, args_summary, status, reason, duration_ms)
+             VALUES (?, NULL, ?, 5, '2026-11-14T00:00:01.000Z', 'implementer', 'a', '{}', 'maybe', NULL, 0)`,
+          )
+          .run(newId(), SESSION),
+      ).toThrow(/CHECK/);
+      const objects = db
+        .prepare("SELECT type, name FROM sqlite_master WHERE tbl_name = 'tool_calls' ORDER BY name")
+        .all();
+      expect(objects).toEqual(
+        expect.arrayContaining([
+          { type: 'table', name: 'tool_calls' },
+          { type: 'index', name: 'tool_calls_run' },
+          { type: 'index', name: 'tool_calls_session' },
+          { type: 'trigger', name: 'tool_calls_no_delete' },
+          { type: 'trigger', name: 'tool_calls_no_replace' },
+          { type: 'trigger', name: 'tool_calls_no_update' },
+        ]),
+      );
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'tool_calls_v10%'").all(),
+      ).toEqual([]);
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+    });
+  });
+});
+
 describe('마이그레이션 파일 규칙', () => {
   const dirOf = (set: string) =>
     fileURLToPath(new URL(`../src/migrations/${set}/`, import.meta.url));

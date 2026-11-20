@@ -26,6 +26,7 @@ import {
   ScreenId,
   Settings,
   Step,
+  StoredCodeOpenRecord,
   Timestamp,
   ToolCallStatus,
   UsdOrNull,
@@ -610,8 +611,11 @@ export const ToolCallEntry = z.strictObject({
   at: Timestamp,
   role: AgentRole,
   step: z.strictObject({ kind: StepKind, attempt: z.int().positive() }).nullable(),
-  /** 도구 이름(모르는 도구면 에이전트가 부른 그대로). 표시용 표기 · 상한은 {@link TOOL_CALL_NAME_DISPLAY_MAX} */
-  name: z.string().min(1).max(TOOL_CALL_NAME_DISPLAY_MAX),
+  /**
+   * 도구 이름(모르는 도구면 에이전트가 부른 그대로, 빈 문자열이면 빈 문자열 그대로, ADR-094). 표시용 표기 · 상한은
+   * {@link TOOL_CALL_NAME_DISPLAY_MAX}
+   */
+  name: z.string().max(TOOL_CALL_NAME_DISPLAY_MAX),
   /** `name`이 상한 때문에 잘렸는지 (목록 상한의 `truncated`와 다르다) */
   nameTruncated: z.boolean(),
   status: ToolCallStatus,
@@ -740,11 +744,14 @@ export type CodeOpenRecordParams = z.infer<typeof CodeOpenRecordParams>;
 export const CodeOpenRecordResult = z.strictObject({ record: CodeOpenRecord });
 export type CodeOpenRecordResult = z.infer<typeof CodeOpenRecordResult>;
 
-/** `codeOpen.list`: 열람 기록을 최신부터(시각 → ID 내림차순) 상한까지. */
+/**
+ * `codeOpen.list`: 열람 기록을 최신부터(시각 → ID 내림차순) 상한까지. 저장된 기록은 읽기 형식(`StoredCodeOpenRecord`)으로
+ * 읽고, `file`은 표시용 표기(제어 · 서식 문자 이스케이프, ADR-089 · ADR-094)다. 정상 경로는 글자 그대로다.
+ */
 export const CodeOpenListParams = z.strictObject({ projectId: Ulid });
 export type CodeOpenListParams = z.infer<typeof CodeOpenListParams>;
 export const CodeOpenListResult = z.strictObject({
-  records: z.array(CodeOpenRecord).max(CODE_OPEN_LIST_LIMIT),
+  records: z.array(StoredCodeOpenRecord).max(CODE_OPEN_LIST_LIMIT),
   truncated: z.boolean(),
 });
 export type CodeOpenListResult = z.infer<typeof CodeOpenListResult>;

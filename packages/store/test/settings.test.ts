@@ -1,6 +1,6 @@
 // 프로젝트 설정 테이블 · 리포지토리 (M1-05, COST-01 · NFR-07, ADR-057).
 import { defaultSettings } from '@bive/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { openProjectStore, type ProjectStore } from '../src/project-store.js';
 import { newId, useTempHome } from './support/temp-home.js';
@@ -157,6 +157,39 @@ describe('settings 테이블 · 리포지토리', () => {
       });
     },
   );
+
+  it('잘못 저장된 IDE 선택의 경고는 같은 프로젝트 · 같은 값이면 조회가 몇 번이든 한 번이고, 값이 바뀌면 다시 한 번이며, 저장된 값을 싣지 않은 한 줄이다 (M2-11 #190 · ADR-094)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const projectId = newId();
+      const setIde = (store: ProjectStore, ide: unknown): void => {
+        const row = store.db.prepare('SELECT body FROM settings').get() as { body: string };
+        const body = JSON.parse(row.body) as Record<string, unknown>;
+        body.ide = ide;
+        store.db.prepare('UPDATE settings SET body = ?').run(JSON.stringify(body));
+      };
+      withStore(projectId, (store) => {
+        store.settings.update({ ide: { kind: 'vscode' } }, { by: human, at: T0 });
+        setIde(store, { kind: 'custom', template: 'file:///{path}\n가짜 로그 줄\u202e{line}' });
+        for (let i = 0; i < 3; i += 1) expect(store.settings.get().ide).toBeNull();
+        expect(warn.mock.calls).toEqual([
+          [`설정의 IDE 선택이 허용 범위가 아니라 미설정으로 읽음 (프로젝트 ${projectId})`],
+        ]);
+        setIde(store, { kind: 'idea' });
+        for (let i = 0; i < 3; i += 1) expect(store.settings.get().ide).toBeNull();
+        expect(warn).toHaveBeenCalledTimes(2);
+      });
+      // 다시 열어도(같은 프로세스) 같은 값이면 찍지 않는다
+      withStore(projectId, (store) => expect(store.settings.get().ide).toBeNull());
+      expect(warn).toHaveBeenCalledTimes(2);
+      for (const [line] of warn.mock.calls) {
+        expect(String(line)).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+        expect(String(line)).not.toContain('file:');
+      }
+    } finally {
+      warn.mockRestore();
+    }
+  });
 
   it('행은 1개만 둘 수 있다 (singleton = 1)', () => {
     withStore(newId(), (store) => {

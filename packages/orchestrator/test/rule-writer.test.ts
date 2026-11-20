@@ -623,6 +623,30 @@ describe('도구 목록 · 모델 · 한도 (ADR-024)', () => {
     expect(record.toolCalls).toEqual([]);
     expect(h.read((store) => store.proposals.list())).toEqual([]);
   });
+
+  it('가드 위반의 MCP 서버 이름에 줄바꿈 · 양방향 제어 문자가 있어도 세션 종료 로그는 한 줄이고 이름은 표시 값이다 (M2-11 #190 · ADR-094)', async () => {
+    const evil = 'evil\n규칙 작성 세션 종료 (REQ-001, success, 제안 9건)\u202e';
+    const h = await startHarness({
+      transform: (event) =>
+        event.type === 'init' ? { ...event, mcpServers: [...event.mcpServers, evil] } : event,
+    });
+    await saveSettings(h);
+
+    const requirement = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
+    await h.service.whenSettled(h.project.id, requirement.id);
+
+    const record = onlyRecord(h, requirement.id);
+    expect(record).toMatchObject({
+      endReason: 'guard_violation',
+      manifest: { role: 'rule-writer', mcpServerCount: 2 },
+    });
+    const ended = h.logs.filter((line) => line.startsWith('규칙 작성 세션 종료'));
+    expect(ended).toHaveLength(1);
+    expect(ended[0]).toContain(
+      '세션 가드: 허용되지 않은 MCP 서버 evil\\n규칙 작성 세션 종료 (REQ-001, success, 제안 9건)\\u202e',
+    );
+    for (const line of h.logs) expect(line).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+  });
 });
 
 describe('설정 미비 · 중복 · 종료', () => {

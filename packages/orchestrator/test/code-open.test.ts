@@ -12,7 +12,7 @@ import {
   createUlidGenerator,
   ErrorCode,
 } from '@bive/shared';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PipeServer } from '../src/ipc/server.js';
 import { RpcCallError, type TestClient } from './helpers/client.js';
@@ -176,7 +176,7 @@ describe('파일 경로 · 줄 · 화면 · 사유 검증: 프로젝트 루트 �
     ['줄바꿈', { file: 'src/a\n.ts' }],
     ['DEL', { file: 'src/a\u007f.ts' }],
     ['C1 제어 문자', { file: 'src/a\u0085.ts' }],
-    ['양방향 제어 문자', { file: 'src/a‮sts.ts' }],
+    ['양방향 제어 문자', { file: 'src/a\u202ests.ts' }],
     ['퍼센트(중첩 디코딩에서 상위 폴더)', { file: 'bive-acceptance/%2e%2e/%2e%2e/etc/passwd' }],
     ['빈 경로', { file: '' }],
     ['너무 긴 경로', { file: `${'a/'.repeat(600)}b.ts` }],
@@ -308,6 +308,79 @@ describe('codeOpen.summary: 사유별 건수 (M2-02 수용 기준 3, ADR-088)', 
         params,
       });
       expect(response).toMatchObject({ id: 'sum', error: { code: ErrorCode.InvalidParams } });
+    }
+  });
+});
+
+describe('쓰기 규칙이 조여지기 전에 저장된 기록 (M2-11 #190 수용 기준 1, ADR-094 · ADR-089)', () => {
+  const INSERT =
+    'INSERT INTO code_open_records (id, at, reason, source_screen, item_entity, item_id, file, line) VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
+  const newId = createUlidGenerator();
+  /** 저장소에 직접 쓴 행 (DB CHECK는 지나지만 지금 쓰기 규칙에는 맞지 않을 수 있다). `unchecked`면 CHECK도 끈다. */
+  const insertRow = (reason: string, file: string, at: string, unchecked = false): string => {
+    const id = newId();
+    h.read((store) => {
+      if (unchecked) store.db.pragma('ignore_check_constraints = ON');
+      try {
+        store.db.prepare(INSERT).run(id, at, reason, 'SCR-03', 'Rule', RULE_ID, file, 5);
+      } finally {
+        if (unchecked) store.db.pragma('ignore_check_constraints = OFF');
+      }
+    });
+    return id;
+  };
+  const summary = () => h.client.call('codeOpen.summary', { projectId: h.project.id });
+
+  it('PR #184 전 규칙으로 저장된 경로(% · 양방향 제어 문자)가 있어도 list · summary가 실패하지 않고, list의 file은 표시 값(정상 경로 · %는 글자 그대로)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      h.clock.now = T0;
+      const { record } = await h.client.call('codeOpen.record', debugging());
+      const percent = insertRow('screen_error', 'src/a%20b.ts', iso(T0 + 1_000));
+      const bidi = insertRow('info_lacking', 'src/a\u202eb.ts', iso(T0 + 2_000));
+
+      const listed = await h.client.call('codeOpen.list', { projectId: h.project.id });
+      expect(listed.truncated).toBe(false);
+      expect(listed.records.map((r) => [r.id, r.file])).toEqual([
+        [bidi, 'src/a\\u202eb.ts'],
+        [percent, 'src/a%20b.ts'],
+        [record.id, 'bive-acceptance/RULE-001/health-time.acc.ts'],
+      ]);
+      // 저장된 값은 바꾸지 않는다 (표시만 이스케이프)
+      expect(h.read((store) => store.codeOpens.listLatest(10)[0]?.file)).toBe('src/a\u202eb.ts');
+      await expect(summary()).resolves.toEqual({
+        reasons: [
+          { reason: 'screen_error', count: 1 },
+          { reason: 'info_lacking', count: 1 },
+          { reason: 'debugging', count: 1 },
+        ],
+        total: 3,
+      });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('사유가 열거형 밖인 행(DB CHECK 우회)은 list · summary에서 그 행만 빠지고, 경고는 프로젝트 ID와 건수만 담은 한 줄이 프로세스당 한 번', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      h.clock.now = T0;
+      const { record } = await h.client.call('codeOpen.record', debugging());
+      insertRow('curiosity\n가짜 로그 줄', 'src/a.ts', iso(T0 + 1_000), true);
+      for (let i = 0; i < 2; i += 1) {
+        await expect(h.client.call('codeOpen.list', { projectId: h.project.id })).resolves.toEqual({
+          records: [record],
+          truncated: false,
+        });
+        expect((await summary()).total).toBe(1);
+      }
+      expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+        `코드 열람 기록 1건이 저장 형식에 맞지 않아 조회에서 건너뜀 (프로젝트 ${h.project.id})`,
+        `코드 열람 기록 1건이 저장 형식에 맞지 않아 집계에서 건너뜀 (프로젝트 ${h.project.id})`,
+      ]);
+    } finally {
+      warn.mockRestore();
     }
   });
 });

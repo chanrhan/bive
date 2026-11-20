@@ -216,6 +216,26 @@ const gitRefOf = (project: Project, run: Run): RunGitRef | null =>
         baseCommit: run.baseCommit,
       };
 
+/**
+ * 실행을 끝낼 때의 종료 상태 (ADR-091 · ADR-094). 엔진이 실행을 실패 쪽으로 끝내는 모든 경로(`#halt`, `#drive`의
+ * `state_inconsistent`, `#failAfterError`에서 시도가 이미 끝난 경우)가 이 함수 하나로 정한다.
+ * - 병합 커밋이 기록된 실행(`run.mergeCommit !== null`)은 기준 브랜치에 병합 커밋이 있으므로 `merged`(실패 사유 없음,
+ *   `currentStep = null`)로 끝내고 브랜치 · 워크트리를 보존하지 않는다(`merged: true`). 실패는 그 단계 시도에만 남는다
+ * - 그 밖에는 `runStatus` + 사유(`failureReason`)이고 보존한다(`merged: false`, RUN-08)
+ * 조건은 저장된 `mergeCommit`뿐이다. 그 값은 병합 실행기가 기준 브랜치를 git으로 확인한 `passed`일 때만 채워지므로
+ * (ADR-069 · ADR-091), 병합되지 않은 실행이 이 함수로 `merged`가 되는 일은 없다.
+ */
+export const runEnding = (
+  run: Pick<Run, 'mergeCommit'>,
+  runStatus: HaltStatus,
+  reason: string,
+):
+  | { merged: true; run: { status: 'merged'; currentStep: null } }
+  | { merged: false; run: { status: HaltStatus; failureReason: string } } =>
+  run.mergeCommit !== null
+    ? { merged: true, run: { status: 'merged', currentStep: null } }
+    : { merged: false, run: { status: runStatus, failureReason: reason } };
+
 interface ActiveRun {
   readonly controller: AbortController;
   readonly done: Promise<void>;
@@ -541,16 +561,15 @@ export class PipelineEngine {
             ? undefined
             : steps.filter((s) => s.kind === run.currentStep && s.status === 'running').at(-1);
         if (step === undefined || step.kind === 'approval') {
+          // 열린 시도가 없다: 실행만 끝낸다 (병합 커밋이 기록된 실행이면 merged, runEnding)
+          const ending = runEnding(run, 'failed', 'state_inconsistent');
           this.#save(projectId, (store) =>
             store.runs.transition(runId, {
               expectedStatus: 'running',
-              run: {
-                status: 'failed',
-                failureReason: 'state_inconsistent',
-                endedAt: this.#timestamp(),
-              },
+              run: { ...ending.run, endedAt: this.#timestamp() },
             }),
           );
+          this.#logEnding(run, ending.merged, 'failed', 'state_inconsistent');
           return;
         }
         current = { run, step, git: null };
@@ -585,8 +604,8 @@ export class PipelineEngine {
 
   /**
    * 구동 중 예외 뒤: 실행이 아직 `running`이면 `failed`(`step_error`)로 끝낸다. 지금 시도가 아직 열려 있으면 그
-   * 시도를 실패로(병합 커밋이 기록된 뒤면 실행은 `merged`, `#halt` · ADR-091), 아니면 실행만 바꾼다. 그것도 실패하면
-   * 로그만 남긴다(다음 기동 때 `interrupted`).
+   * 시도를 실패로(`#halt`), 아니면 실행만 바꾼다. 어느 쪽이든 병합 커밋이 기록된 뒤면 실행은 `merged`다(`runEnding`,
+   * ADR-091 · ADR-094). 그것도 실패하면 로그만 남긴다(다음 기동 때 `interrupted`).
    */
   async #failAfterError(projectId: string, current: DriveState, error: unknown): Promise<void> {
     const exitDetail = { message: errorMessage(error) };
@@ -607,14 +626,17 @@ export class PipelineEngine {
         );
         return;
       }
+      // 시도가 이미 끝났다: 실행만 끝낸다 (병합 커밋이 기록된 실행이면 merged · 보존 없음, runEnding)
+      const ending = runEnding(latest.run, 'failed', 'step_error');
       const at = this.#timestamp();
       this.#save(projectId, (store) =>
         store.runs.transition(current.run.id, {
           expectedStatus: 'running',
-          run: { status: 'failed', failureReason: 'step_error', endedAt: at },
+          run: { ...ending.run, endedAt: at },
         }),
       );
-      if (current.git !== null) await this.#worktrees.preserve(current.git);
+      this.#logEnding(latest.run, ending.merged, 'failed', 'step_error');
+      if (!ending.merged && current.git !== null) await this.#worktrees.preserve(current.git);
     } catch (failure) {
       this.#log(`실행을 실패로 끝내지 못함 (${current.run.displayId}): ${errorMessage(failure)}`);
     }
@@ -916,7 +938,7 @@ export class PipelineEngine {
     git: RunGitRef | null,
   ): Promise<void> {
     const at = this.#timestamp();
-    const merged = run.mergeCommit !== null;
+    const ending = runEnding(run, runStatus, reason);
     this.#save(projectId, (store) =>
       store.runs.transition(run.id, {
         expectedStatus: 'running',
@@ -930,25 +952,36 @@ export class PipelineEngine {
           },
         ],
         run: {
-          ...(merged
-            ? { status: 'merged', currentStep: null }
-            : { status: runStatus, failureReason: reason }),
+          ...ending.run,
           endedAt: at,
           toolManifest: store.sessions.manifest(run.id),
         },
       }),
     );
-    if (merged) {
-      this.#log(`실행 병합 완료 (${run.displayId}, ${step.kind} 단계 실패: ${reason})`);
-      return;
-    }
-    this.#log(`실행 종료 (${run.displayId}, ${runStatus}: ${reason})`);
-    if (git === null) return;
+    this.#logEnding(run, ending.merged, runStatus, reason, step.kind);
+    // 병합된 실행은 보존(워크트리 잠금)하지 않는다 (ADR-091)
+    if (ending.merged || git === null) return;
     try {
       await this.#worktrees.preserve(git);
     } catch (error) {
       this.#log(`실행 브랜치 보존 실패 (${run.displayId}): ${errorMessage(error)}`);
     }
+  }
+
+  /** 실행 종료 진행 기록 한 줄 (`runEnding`의 결과대로). */
+  #logEnding(
+    run: Run,
+    merged: boolean,
+    runStatus: HaltStatus,
+    reason: string,
+    stepKind?: StepKind,
+  ): void {
+    if (merged) {
+      const what = stepKind === undefined ? reason : `${stepKind} 단계 실패: ${reason}`;
+      this.#log(`실행 병합 완료 (${run.displayId}, ${what})`);
+      return;
+    }
+    this.#log(`실행 종료 (${run.displayId}, ${runStatus}: ${reason})`);
   }
 
   // ── 세션 ──────────────────────────────────────────────

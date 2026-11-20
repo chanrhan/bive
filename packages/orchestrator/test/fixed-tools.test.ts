@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import os from 'node:os';
 import path from 'node:path';
 
-import { AgentRole } from '@bive/shared';
+import { AgentRole, createUlidGenerator } from '@bive/shared';
+import { openProjectStore } from '@bive/store';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { SessionEvent, SessionSpec } from '../src/agent/adapter.js';
@@ -24,6 +25,8 @@ import {
   type ToolCallRecord,
 } from '../src/tools/executor.js';
 import type { ProposeRuleInput } from '../src/tools/definitions.js';
+
+const newUlid = createUlidGenerator();
 
 let home: string;
 let worktree: string;
@@ -112,6 +115,55 @@ describe('목록 밖 이름 거부', () => {
         argsSummary: '{"proposalId":"PRP-002"}',
       }),
     ]);
+  });
+
+  it('빈 이름("")의 호출도 denied(unknown_tool)로 거부하고, 이름을 지어내지 않고 빈 문자열 그대로 기록하며 저장소가 그 기록을 받는다 (NFR-02, M2-11 #190 · ADR-094)', async () => {
+    const tools = createRoleTools({ role: 'implementer', sessionRoot: worktree, biveHome: home });
+    expect(await tools.execute('', { path: 'src/a.ts' })).toMatchObject({
+      status: 'denied',
+      reason: 'unknown_tool',
+    });
+    expect(tools.records).toEqual([
+      expect.objectContaining({
+        name: '',
+        status: 'denied',
+        reason: 'unknown_tool',
+        argsSummary: '{"path":"src/a.ts"}',
+      }),
+    ]);
+    // 엔진 · 규칙 작성 서비스가 쓰는 저장 창구(appendToolCall)가 그 기록을 그대로 남긴다
+    const [record] = tools.records;
+    if (record === undefined) throw new Error('기록 없음');
+    const projectId = newUlid();
+    const sessionId = newUlid();
+    const store = openProjectStore(projectId, { home });
+    try {
+      store.sessions.start({
+        id: sessionId,
+        runId: null,
+        stepId: null,
+        role: 'implementer',
+        model: 'model-a',
+        workDir: worktree,
+        startedAt: record.at,
+      });
+      const saved = store.sessions.appendToolCall({
+        id: newUlid(),
+        runId: null,
+        sessionId,
+        at: record.at,
+        role: record.role,
+        name: record.name,
+        argsSummary: record.argsSummary,
+        status: record.status,
+        reason: record.reason ?? null,
+        durationMs: Math.round(record.durationMs),
+      });
+      expect(store.sessions.toolCallsBySession(sessionId)).toEqual([saved]);
+      expect(saved).toMatchObject({ name: '', status: 'denied', reason: 'unknown_tool', seq: 0 });
+    } finally {
+      store.close();
+    }
   });
 
   it('Object 원형 이름(constructor 등)도 도구로 보지 않는다', async () => {

@@ -431,6 +431,85 @@ describe('verification.summary', () => {
     expect(pipeline?.stages[1]).toEqual({ kind: 'test_writing', status: 'failed', attempt: 1 });
   });
 
+  it('병합 뒤 화면 갱신 도중 중단된 실행(interrupted · 병합 커밋 기록)도 판정 기준이 되고, 순서는 병합 단계가 끝난 시각이다 (M2-11 #190 · ADR-094)', async () => {
+    /** 병합 단계까지 통과(병합 단계 끝 = `mergedAt`)하고 화면 갱신 도중 중단된 실행. `mergeCommit`이 없으면 병합 전 중단. */
+    const interruptedAfter = (
+      store: ProjectStore,
+      ruleIds: Ulid[],
+      at: number,
+      mergeCommit: string | null,
+    ): Run => {
+      const run = seedRun(store, { ruleIds, at, status: 'running' });
+      const steps = store.runs.steps(run.id);
+      const until = mergeCommit === null ? 'check' : 'merge';
+      const plan = RUN_STEP_PLANS.A;
+      const done = plan.slice(1, plan.indexOf(until) + 1);
+      const next = plan[plan.indexOf(until) + 1] as StepKind;
+      store.runs.transition(run.id, {
+        run: { currentStep: next, headCommit: SHA_C, mergeCommit },
+        steps: [
+          ...done.map((kind) => ({
+            id: stepOf(steps, kind).id,
+            status: 'passed' as const,
+            startedAt: iso(at),
+            endedAt: iso(at + 1_000),
+          })),
+          { id: stepOf(steps, next).id, status: 'running' as const, startedAt: iso(at + 1_000) },
+        ],
+      });
+      return store.runs.transition(run.id, {
+        run: { status: 'interrupted' },
+        steps: [{ id: stepOf(steps, next).id, status: 'failed', endedAt: iso(at + 1_500) }],
+      }).run;
+    };
+    const seeded = h.read((store) => {
+      const rule = insertRule(store, '규칙', 'approved');
+      // EXE-001: 앞서 병합 완료 (종료 T0 + 12초)
+      seedRun(store, {
+        ruleIds: [rule.id],
+        at: T0 + 10_000,
+        status: 'merged',
+        headCommit: SHA_E,
+        mergeCommit: SHA_A,
+      });
+      // EXE-002: 병합(T0 + 21초) 뒤 화면 갱신 도중 중단 → 기준 브랜치 끝은 SHA_B
+      const run2 = interruptedAfter(store, [rule.id], T0 + 20_000, SHA_B);
+      store.judgments.record([judgment(rule, 'pass', judgedIn(store, run2), T0 + 20_500, SHA_C)]);
+      return { rule, run2 };
+    });
+    let result = await summary();
+    expect(result.basis).toEqual({ branch: 'main', commit: SHA_B, runId: seeded.run2.id });
+    expect(result.compliance).toEqual({ passed: 1, judgeable: 1 });
+    expect(result.rules[0]).toMatchObject({
+      judgment: { status: 'pass', latest: { runId: seeded.run2.id, commit: SHA_C } },
+      run: { displayId: 'EXE-002' },
+    });
+    // 파이프라인은 그 실행의 중단 상태 그대로 (재개 버튼 근거)
+    expect(result.pipeline?.run).toMatchObject({
+      displayId: 'EXE-002',
+      status: 'interrupted',
+      currentStep: 'screen_update',
+    });
+
+    // 대조: 병합 전에 중단된 실행(병합 커밋 없음)은 기준이 아니다
+    h.read((store) => interruptedAfter(store, [seeded.rule.id], T0 + 30_000, null));
+    result = await summary();
+    expect(result.basis).toEqual({ branch: 'main', commit: SHA_B, runId: seeded.run2.id });
+
+    // 그 뒤에 병합된 실행이 있으면 그것이 기준이다
+    const run4 = h.read((store) =>
+      seedRun(store, {
+        ruleIds: [seeded.rule.id],
+        at: T0 + 40_000,
+        status: 'merged',
+        headCommit: SHA_E,
+        mergeCommit: SHA_D,
+      }),
+    );
+    result = await summary();
+    expect(result.basis).toEqual({ branch: 'main', commit: SHA_D, runId: run4.id });
+  });
+
   it('등록되지 않은 프로젝트는 -32004', async () => {
     await expect(
       h.client.call('verification.summary', { projectId: newId() }),

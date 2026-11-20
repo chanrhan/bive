@@ -1091,6 +1091,8 @@ describe('화면 갱신 단계 (M1-19 수용 기준 4, RUN-02 8단계, ADR-076)'
       mergeCommit: mainTip(h),
     });
     expect(done.run.lastCompletedStep).toBe('merge');
+    // 병합된 실행은 실패 종료의 보존(워크트리 잠금)을 하지 않는다 (ADR-091, M2-11 #190 PR #188 검토)
+    expect(isLocked(h, String(done.run.worktreePath))).toBe(false);
   }, 60_000);
 
   it('송신을 기다리는 중 엔진을 멈추면 바로 끝나고(저장 없음), 재기동 뒤 재개하면 병합을 다시 하지 않고 화면 갱신만 다시 해 merged (검토 1회차)', async () => {
@@ -1142,5 +1144,136 @@ describe('화면 갱신 단계 (M1-19 수용 기준 4, RUN-02 8단계, ADR-076)'
     ]);
     expect(mainTip(h)).toBe(mergeCommit);
     expect(notified).toEqual(['screen_update']);
+  }, 60_000);
+});
+
+describe('실행의 종료 상태는 한 곳(runEnding)에서 정한다: #halt를 거치지 않는 두 경로 (M2-11 #190, ADR-091 · ADR-094)', () => {
+  /** 자기 단계 시도를 저장소에서 먼저 끝낸 뒤 예외: 엔진의 #halt 저장이 끝난 시도에 걸려 #failAfterError의 "시도가 이미 끝남" 경로로 간다. */
+  const closeAttemptThenThrow: StepExecutor = (context) => {
+    const at = new Date().toISOString();
+    context.read((store) =>
+      store.runs.transition(context.run.id, {
+        expectedStatus: 'running',
+        steps: [
+          {
+            id: context.step.id,
+            status: 'failed',
+            exitDetail: { reason: 'closed_elsewhere' },
+            startedAt: context.step.startedAt ?? at,
+            endedAt: at,
+          },
+        ],
+      }),
+    );
+    return Promise.reject(new Error('시도를 닫은 뒤 예외'));
+  };
+
+  /** 종료 신호가 올 때까지 끝나지 않는 단계 (엔진을 멈춰 그 단계 시도가 running인 채로 남긴다). */
+  const untilStopped: StepExecutor = (context) =>
+    new Promise((_resolve, reject) => {
+      context.signal.addEventListener('abort', () => reject(context.signal.reason as Error), {
+        once: true,
+      });
+    });
+
+  /**
+   * `kind` 단계가 도는 중에 엔진을 멈추고, 그 시도를 저장소에서 끝낸 뒤(열린 시도 없음) 재기동 · 재개한다:
+   * 재개는 대기 시도가 없어 실행만 running으로 바꾸고 #drive가 `state_inconsistent` 경로로 간다.
+   */
+  const resumeWithoutOpenAttempt = async (h: Harness, kind: StepKind): Promise<RunDetail> => {
+    expect(h.engine.evaluateApproval(h.project.id, h.runId)).toBe(true);
+    await waitFor(
+      () => detailOf(h).steps.some((s) => s.kind === kind && s.status === 'running'),
+      30_000,
+      `${kind} 단계 시작`,
+    );
+    await h.engine.stop();
+    const open = detailOf(h).steps.find((s) => s.kind === kind && s.status === 'running');
+    if (open === undefined) throw new Error('열린 시도 없음');
+    const at = new Date().toISOString();
+    withProject(h.biveHome, h.project.id, (store) =>
+      store.runs.transition(h.runId, {
+        expectedStatus: 'running',
+        steps: [
+          {
+            id: open.id,
+            status: 'failed',
+            exitDetail: { reason: 'closed_elsewhere' },
+            endedAt: at,
+          },
+        ],
+      }),
+    );
+    const second = h.newEngine();
+    expect(second.recoverInterruptedRuns()).toHaveLength(1);
+    const interrupted = detailOf(h);
+    expect(interrupted.run.status).toBe('interrupted');
+    expect(interrupted.steps.filter((s) => s.kind === kind).map((s) => s.status)).toEqual([
+      'failed',
+    ]);
+    await second.resume(h.project.id, h.runId, human);
+    await second.settled();
+    return detailOf(h);
+  };
+
+  it('#failAfterError(시도가 이미 끝남): 병합 커밋이 기록된 실행은 merged(실패 사유 없음), 보존하지 않음', async () => {
+    const h = setup({ executors: { screen_update: closeAttemptThenThrow } });
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'merged',
+      failureReason: null,
+      currentStep: null,
+      lastCompletedStep: 'merge',
+      mergeCommit: mainTip(h),
+    });
+    expect(done.run.endedAt).not.toBeNull();
+    expect(attempts(done, 'screen_update')).toEqual(['screen_update#1:failed']);
+    expect(stepOf(done, 'screen_update').exitDetail).toEqual({ reason: 'closed_elsewhere' });
+    expect(isLocked(h, String(done.run.worktreePath))).toBe(false);
+    expect(h.engine.activeRunIds).toEqual([]);
+  }, 60_000);
+
+  it('#failAfterError(시도가 이미 끝남) 대조: 병합 커밋이 없는 실행은 이전처럼 failed(step_error) · 보존, 기준 브랜치 그대로', async () => {
+    const h = setup({ executors: { check: closeAttemptThenThrow } });
+    const base = mainTip(h);
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'step_error',
+      currentStep: 'check',
+      mergeCommit: null,
+    });
+    expect(attempts(done, 'check')).toEqual(['check#1:failed']);
+    expect(mainTip(h)).toBe(base);
+    expect(isLocked(h, String(done.run.worktreePath))).toBe(true);
+  }, 60_000);
+
+  it('#drive의 state_inconsistent(열린 시도 없음): 병합 커밋이 기록된 실행은 merged(실패 사유 없음), 보존하지 않음', async () => {
+    const h = setup({ executors: { screen_update: untilStopped } });
+    const done = await resumeWithoutOpenAttempt(h, 'screen_update');
+    const merge = String(done.run.mergeCommit);
+    expect(merge).toMatch(/^[0-9a-f]{40}$/);
+    expect(mainTip(h)).toBe(merge);
+    expect(done.run).toMatchObject({
+      status: 'merged',
+      failureReason: null,
+      currentStep: null,
+      lastCompletedStep: 'merge',
+    });
+    expect(done.run.endedAt).not.toBeNull();
+    expect(isLocked(h, String(done.run.worktreePath))).toBe(false);
+  }, 60_000);
+
+  it('#drive의 state_inconsistent 대조: 병합 커밋이 없는 실행은 이전처럼 failed(state_inconsistent), 병합 없음', async () => {
+    const h = setup({ executors: { check: untilStopped } });
+    const base = mainTip(h);
+    const done = await resumeWithoutOpenAttempt(h, 'check');
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'state_inconsistent',
+      currentStep: 'check',
+      mergeCommit: null,
+    });
+    expect(mainTip(h)).toBe(base);
   }, 60_000);
 });
