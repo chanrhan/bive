@@ -101,6 +101,21 @@ button.card:hover {
   background: var(--color-accent);
 }
 
-.card-time + .card-unread {
+/* 시각 + 안 읽음 점 (승인 대기 카드): 한 덩어리로 다음 줄로 넘어가고 줄 오른쪽 끝에 붙는다 (#191, ADR-090).
+   덩어리는 시각 칸과 같이 남는 폭만 차지하고(기준 0 · 늘어남 · 최대 자기 글자 폭), 최소 폭은 시각 최소 3em + 간격 + 점이다.
+   남는 폭이 넉넉하면 시각 · 점의 위치가 덩어리 없이 이어 놓을 때와 같다. */
+.card-end {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: calc(3em + var(--space-2) + 8px);
+  max-width: max-content;
+  margin-left: auto;
+  overflow: hidden;
+}
+
+.card-end > .card-time {
+  flex: 0 1 auto;
   margin-left: 0;
 }

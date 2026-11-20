@@ -2,6 +2,7 @@
 // 빌드된 앱을 임시 BIVE_HOME으로 띄워 다음을 확인하고, 하나라도 어긋나면 종료 코드 1.
 //   창 제목 "BIVE" · window.bive 키가 invoke · on 두 개뿐 · 렌더러에 require 없음 ·
 //   레이아웃(사이드바 · 중앙 영역 · 채팅) · 사이드바 하단 "연결됨"(system.status, ADR-045) ·
+//   창 최소 크기(줄여도 안쪽 820 × 600 이상, 본문 가로 스크롤 없음, ADR-093) ·
 //   기동 인자 `--open <dir>`로 연 프로젝트(.bive.json 두 키 · 사이드바 프로젝트명 · 요구사항 화면, M1-01) ·
 //   Electron 사용자 데이터가 $BIVE_HOME/app-data에 생김(ADR-055) ·
 //   app.pid 기록 · 앱 종료 코드 0 · 앱 종료 뒤 app.pid 삭제 ·
@@ -19,6 +20,7 @@ import { _electron, type ElectronApplication } from 'playwright-core';
 import { electronArgs } from '../src/launch-flags.js';
 import { isProcessAlive, readPidFile } from '../src/main/orchestrator-launch.js';
 import { appRunPaths } from '../src/main/run-paths.js';
+import { MIN_CONTENT_SIZE } from '../src/main/window-size.js';
 
 const APP_DIR = fileURLToPath(new URL('..', import.meta.url));
 const electronPath = createRequire(import.meta.url)('electron') as string;
@@ -142,6 +144,31 @@ const main = async (): Promise<void> => {
 
     await mkdir(SCREENSHOT_DIR, { recursive: true });
     await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'electron-layout.png') });
+
+    // 창 최소 크기 (ADR-093): 최소보다 작게 줄여도 안쪽 크기가 820 × 600 아래로 내려가지 않고, 본문에 가로 스크롤이 없다
+    const shrunk = await app.evaluate(async ({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      if (window === undefined) return null;
+      window.setSize(600, 400);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return { content: window.getContentSize(), minimum: window.getMinimumSize() };
+    });
+    check(
+      shrunk !== null &&
+        (shrunk.content[0] ?? 0) >= MIN_CONTENT_SIZE.width &&
+        (shrunk.content[1] ?? 0) >= MIN_CONTENT_SIZE.height,
+      `창을 600 × 400으로 줄여도 안쪽 크기 ${MIN_CONTENT_SIZE.width} × ${MIN_CONTENT_SIZE.height} 이상`,
+      shrunk,
+    );
+    const mainScroll = await page.evaluate<{ scroll: number; client: number; inner: number }>(
+      '(() => { const m = document.querySelector(\'[data-testid="main-area"]\'); return { scroll: m.scrollWidth, client: m.clientWidth, inner: window.innerWidth }; })()',
+    );
+    check(
+      mainScroll.inner >= MIN_CONTENT_SIZE.width && mainScroll.scroll <= mainScroll.client,
+      `최소 창의 본문 가로 스크롤 없음 (창 안쪽 폭 ${mainScroll.inner}px)`,
+      mainScroll,
+    );
+    await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'electron-min-window.png') });
 
     const appPid = child.pid;
     check(

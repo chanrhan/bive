@@ -36,6 +36,7 @@ import {
   listPaneOverflow,
   NARROW_WIDTHS,
   paneWidths,
+  sameRow,
   textClipping,
   WIDE_WIDTH,
 } from './support/overflow.js';
@@ -422,6 +423,13 @@ test.describe('1280×800 창의 버튼 문구 (#175)', () => {
     await page.getByTestId('requirement-edit').click();
     await page.getByTestId('requirement-edit-input').fill(EDITED_TEXT);
     await expectOneLine(page, ['requirement-cancel', 'requirement-save']);
+    // 편집 줄의 [취소] · [저장]은 한 묶음으로 같은 줄 (#191)
+    expect(
+      await sameRow(page.getByTestId('requirement-detail'), [
+        'requirement-cancel',
+        'requirement-save',
+      ]),
+    ).toEqual([]);
     await page.screenshot({
       path: `${SCREENSHOT_DIR}SCR-06/요구사항-1280-편집.png`,
       fullPage: true,

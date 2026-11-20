@@ -323,6 +323,26 @@ test.describe('코드 열람 영역 (#44 수용 기준 1 · 2, MET-01 · ADR-088
     await expect(page.getByTestId('verification-basis')).toHaveText('판정 기준 main@a1f26b1');
   });
 
+  test('한계 문구 "링크 경유 열기 시도 수 · 링크 밖 열람 미집계"는 제목의 툴팁이고 키보드 초점으로 닿는다 (#191)', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    const heading = area(page).getByRole('heading', { name: '코드 열람' });
+    await expect(heading).toBeVisible();
+    const hint = heading.getByTestId('code-open-hint');
+    // 준수 카드와 같은 방식: 초점을 받는 버튼, 이름은 제목 글자, 한계 문구는 툴팁 · 접근 가능한 설명
+    await expect(hint).toHaveRole('button');
+    await expect(hint).toHaveAccessibleName('코드 열람');
+    await expect(hint).toHaveAttribute('title', '링크 경유 열기 시도 수 · 링크 밖 열람 미집계');
+    await expect(hint).toHaveAccessibleDescription('링크 경유 열기 시도 수 · 링크 밖 열람 미집계');
+    // 준수 카드 다음 Tab 한 번으로 닿는다 (실행당 비용 카드는 초점을 받지 않는다)
+    await page.getByTestId('metric-compliance').focus();
+    await page.keyboard.press('Tab');
+    await expect(hint).toBeFocused();
+    // 보이는 문구는 더하지 않는다 (ADR-088: 화면 정의서에 없는 문구)
+    await expect(area(page).getByText('링크 경유 열기 시도 수', { exact: false })).toHaveCount(0);
+  });
+
   test('영역 순서: 지표 카드 → 코드 열람 → 파이프라인 → 규칙별 최신 판정', async ({ page }) => {
     await openScreen(page);
     await expect(area(page)).toBeVisible();
