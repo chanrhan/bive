@@ -12,6 +12,9 @@ export const RUN_EVENT_NAMES = ['event.run.updated', 'event.step.updated'] as co
 /** 할 일 배지 · 할 일 목록이 다시 조회하는 제안 알림 이름 (shared `PROPOSAL_EVENT_NAMES`와 같음, 시험이 대조한다). */
 export const PROPOSAL_EVENT_NAMES = ['event.proposal.changed'] as const;
 
+/** 요구사항 상세의 규칙 작성 상태가 다시 조회하는 알림 이름 (shared `RULE_WRITER_EVENT_NAMES`와 같음, 시험이 대조한다). */
+export const RULE_WRITER_EVENT_NAMES = ['event.ruleWriter.changed'] as const;
+
 /** 알림 값이 이 프로젝트의 것인지 (`projectId`). 다른 프로젝트 실행의 알림으로는 조회하지 않는다. */
 export const isProjectEvent = (params: unknown, projectId: string): boolean =>
   typeof params === 'object' &&
