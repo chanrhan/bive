@@ -1,8 +1,11 @@
 // 실행 생성 · 승인 단계 판정 · 단계 종료 저장 (RUN-01, RUN-02, NFR-07, NFR-01, ADR-027 · ADR-057 · ADR-061).
 // - 생성(`createRun`)은 실행 시작 확인이다. 사람만 하고(-32020), 설정 검사(-32010)를 통과해야 하며,
 //   실행 저장과 승인 기록 `run_start` 추가를 트랜잭션 1개로 한다. 하나라도 실패하면 아무것도 남지 않는다
-// - 승인 단계(`evaluateApprovalStep`)는 대상 규칙이 전부 승인(`normState = approved`, 삭제 안 됨)일 때만 끝난다.
-//   아니면 아무것도 저장하지 않고 `waiting_approval`에 머문다 (RUN-02: 실행 시작 확인과 별개)
+// - 승인 단계(`evaluateApprovalStep`)는 대상 규칙이 전부 효력 상태(`normState = approved`, 삭제 안 됨)인지만 본다
+//   (ADR-100 A3: 승인 단계 자리 = 효력 확인). 아니면 이 함수는 아무것도 저장하지 않고 `approved = false`를 돌려주며,
+//   엔진이 그 자리에서 실행을 끝낸다(`runEnding`, 사람을 기다리지 않는다, ADR-107)
+// - 실행 저장 모양(`saveNewRun`)은 사람의 [실행](`createRun`, 승인 기록 `run_start`)과 자동 시작(`runs/auto-start.ts`,
+//   규범 변경 기록 `auto_start`)이 같다
 // - 프로젝트당 동시 실행 1개 (ADR-100 B⑥ · A13, ADR-105): 승인 단계를 통과할 때 프로젝트에 자리가 없으면(진행 중 · 중단된
 //   실행이나 실행 대기가 있음) `running` 대신 `queued`(실행 대기)로 저장한다. 자리가 나면 `startNextQueuedRun`이 실행
 //   대기 중 가장 먼저 만든 것(표시 ID 순)을 시작한다. 판단과 저장은 같은 트랜잭션이라 두 요청이 겹쳐도 `running`은 1개다
@@ -21,6 +24,7 @@ import {
   RUN_STEP_PLANS,
   type Run,
   type RunCreateResult,
+  type RunStarter,
   type RunStatus,
   type Settings,
   type Step,
@@ -141,8 +145,53 @@ const snapshotSettings = (
 };
 
 /**
- * 실행을 만든다(실행 시작 확인): 유형 A · `waiting_approval` · 현재 단계 승인(진행 중) · 나머지 단계 대기.
- * 실행 저장과 승인 기록 `run_start`(대상 규칙 포함)를 한 트랜잭션으로.
+ * 열린 저장소의 트랜잭션 안에서 실행 1개를 저장한다: 유형 A · `waiting_approval` · 현재 단계 승인(진행 중) · 나머지 단계 대기.
+ * 예산 · 모델 스냅샷은 검사를 통과한 `settings`에서 복사한다. 사람의 [실행](`createRun`)과 자동 시작(`runs/auto-start.ts`)이
+ * 같은 모양으로 저장하려고 함께 쓴다. 시작 근거 기록(승인 기록 `run_start` · 규범 변경 기록 `auto_start`)은 부른 쪽이 같은
+ * 트랜잭션에 남긴다.
+ * @throws {NotFoundError} 프로젝트 · 대상 규칙이 없음
+ * @throws {ConflictError} 대상 규칙이 삭제됨
+ */
+export const saveNewRun = (
+  store: ProjectStore,
+  settings: Settings,
+  input: {
+    readonly runId: Ulid;
+    readonly ruleIds: readonly Ulid[];
+    readonly startedBy: RunStarter;
+  },
+  at: string,
+  newId: () => Ulid,
+): RunDetail => {
+  const project = store.getProject();
+  if (project === null) throw new NotFoundError('프로젝트', store.projectId);
+  const type = M1_RUN_TYPE;
+  const plan: readonly StepKind[] = RUN_STEP_PLANS[type];
+  const { budgetSnapshot, modelSnapshot } = snapshotSettings(settings, stepRoles(plan));
+  return store.runs.create({
+    id: input.runId,
+    type,
+    targetRuleIds: [...input.ruleIds],
+    currentStep: plan[0] ?? null,
+    baseBranch: project.baseBranch,
+    budgetSnapshot,
+    modelSnapshot,
+    startedBy: input.startedBy,
+    createdAt: at,
+    // 승인 단계는 생성과 함께 시작한다(승인 단계 진행 중). 나머지는 대기
+    steps: plan.map((kind, index) => ({
+      id: newId(),
+      kind,
+      attempt: 1,
+      status: index === 0 ? 'running' : 'pending',
+      role: STEP_ROLES[kind],
+      startedAt: index === 0 ? at : null,
+    })),
+  });
+};
+
+/**
+ * 실행을 만든다(실행 시작 확인): `saveNewRun`과 승인 기록 `run_start`(대상 규칙 포함)를 한 트랜잭션으로.
  * 판단 순서: 주체(-32020) → 설정(-32010) → 대상 규칙(없음 -32004 · 삭제됨 -32009).
  * @throws {RpcError} -32020 에이전트 주체 · -32010 설정 미비
  * @throws {NotFoundError} 대상 규칙이 없음
@@ -158,33 +207,15 @@ export const createRun = (
   return store.transaction(() => {
     // 설정 검사(M1 필수 역할, ADR-057)와 스냅샷을 같은 트랜잭션에서 읽는다
     const settings = requireRunnableSettings(store);
-    const project = store.getProject();
-    if (project === null) throw new NotFoundError('프로젝트', store.projectId);
-    const type = M1_RUN_TYPE;
-    const plan: readonly StepKind[] = RUN_STEP_PLANS[type];
     const at = timestamp(clock);
     const runId = clock.newId();
-    const { budgetSnapshot, modelSnapshot } = snapshotSettings(settings, stepRoles(plan));
-    const detail = store.runs.create({
-      id: runId,
-      type,
-      targetRuleIds: [...input.ruleIds],
-      currentStep: plan[0] ?? null,
-      baseBranch: project.baseBranch,
-      budgetSnapshot,
-      modelSnapshot,
-      startedBy: { kind: 'human' },
-      createdAt: at,
-      // 승인 단계는 생성과 함께 시작한다(승인 대기 = 승인 단계 진행 중). 나머지는 대기
-      steps: plan.map((kind, index) => ({
-        id: clock.newId(),
-        kind,
-        attempt: 1,
-        status: index === 0 ? 'running' : 'pending',
-        role: STEP_ROLES[kind],
-        startedAt: index === 0 ? at : null,
-      })),
-    });
+    const detail = saveNewRun(
+      store,
+      settings,
+      { runId, ruleIds: input.ruleIds, startedBy: { kind: 'human' } },
+      at,
+      clock.newId,
+    );
     const approvalLog: ApprovalLogEntry = store.approvalLog.append({
       at,
       action: 'run_start',

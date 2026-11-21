@@ -3,8 +3,11 @@
 // ADR-061 · ADR-066).
 // - 상태 저장은 단계 종료마다 `ProjectStore.runs`의 트랜잭션 1회다(`completeStep` · `regress` · `transition`).
 //   단계 중간에는 실행 상태를 저장하지 않는다(세션 · 도구 호출 기록은 별도 기록, 워크트리 생성 정보는 ADR-061)
-// - 승인 단계는 엔진이 판정한다(`evaluateApprovalStep`): 실행 생성 직후 · 규칙 승인 뒤. 대상 규칙이 전부 승인
-//   상태가 아니면 아무것도 저장하지 않고 머문다. 그 밖 단계는 주입받은 단계 실행기(`StepExecutors`)가 결과를 낸다
+// - 승인 단계는 엔진이 판정한다(`evaluateApprovalStep`): 실행 생성 직후 · 옛 제안 승인 뒤 · 기동 때. 승인 단계 자리는
+//   효력 확인이다(ADR-100 A3): 대상 규칙이 전부 효력 상태면 통과, 아니면 그 자리에서 실행을 끝낸다(`runEnding`). 사람을
+//   기다리며 머물지 않는다 (ADR-107). 그 밖 단계는 주입받은 단계 실행기(`StepExecutors`)가 결과를 낸다
+// - 구동마다 시작 근거를 대조한다(`checkRunStartBasis`): 사람의 승인 기록 `run_start` 1건 또는 규범 변경 기록의 자동 시작
+//   항목 1건. 아니면 `run_without_log` (NFR-01, ADR-107)
 // - 종료 조건 미충족은 다음 단계로 가지 않는다: 테스트 작성 · Red 확인은 테스트 작성부터 다시(상한 2회),
 //   구현 · 검사는 구현부터 다시(`regressionCount`, 상한 2회). 상한을 넘으면 실행 `failed`, 브랜치 · 워크트리 보존
 // - 재기동(`recoverInterruptedRuns`)은 `running` 실행을 `interrupted`로 바꾸고 자동으로 이어가지 않는다(PRD 5.1)
@@ -53,7 +56,13 @@ import { resetRunWorktree } from '../git/worktree-reset.js';
 import { toRpcError, withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import type { RunTracker } from '../lifecycle.js';
-import { completeStep, evaluateApprovalStep, startNextQueuedRun } from '../runs/run-service.js';
+import {
+  type ApprovalStepResult,
+  completeStep,
+  evaluateApprovalStep,
+  QUEUED_TARGET_UNAVAILABLE,
+  startNextQueuedRun,
+} from '../runs/run-service.js';
 import { createCheckExecutor } from '../steps/check.js';
 import { createImplementationExecutor } from '../steps/implementation.js';
 import { createMergeExecutor } from '../steps/merge.js';
@@ -62,6 +71,7 @@ import { createTestWritingExecutor } from '../steps/test-writing.js';
 import { dailyBudgetReached, projectDailyBudget } from '../settings/project-budget.js';
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
 import { budgetOverrun, sessionLimits } from './session-budget.js';
+import { checkRunStartBasis } from './start-basis.js';
 import {
   COMMIT_STEP_KINDS,
   type EngineEvent,
@@ -188,9 +198,6 @@ const isInterruptedAttempt = (step: Step): boolean =>
   typeof step.exitDetail === 'object' &&
   step.exitDetail !== null &&
   (step.exitDetail as { interrupted?: unknown }).interrupted === true;
-
-const sameIds = (a: readonly string[] | undefined, b: readonly string[]): boolean =>
-  a !== undefined && a.length === b.length && a.every((id, index) => id === b[index]);
 
 /** 구동 중인 실행 · 단계 시도 · git 참조. */
 interface DriveState {
@@ -332,12 +339,25 @@ export class PipelineEngine {
   }
 
   /**
-   * 기동 뒤 (연결을 받기 시작한 다음 한 번): 등록된 프로젝트마다 실행 대기를 저장된 상태에서 이어간다(`#advanceQueue`).
+   * 기동 뒤 (연결을 받기 시작한 다음 한 번): 등록된 프로젝트마다 승인 대기로 남은 실행의 승인 단계를 판정하고(생성 순),
+   * 실행 대기를 저장된 상태에서 이어간다(`#advanceQueue`).
    * 자리를 차지한 실행(진행 중 · 중단)이 없는 프로젝트에서만 가장 먼저 만든 실행 대기가 시작된다. 재기동으로 중단된 실행이
    * 있는 프로젝트는 사람이 재개하거나 그 실행이 끝날 때까지 그대로다 (ADR-105).
    */
   startQueuedRuns(): void {
     for (const projectId of this.#registeredProjectIds()) {
+      // 생성 뒤 승인 단계 판정 전에 앞 프로세스가 끝난 실행(사람의 [실행] · 자동 시작)은 승인 대기로 남아 있다. 승인 단계는
+      // 사람을 기다리지 않으므로 여기서 판정한다 (ADR-107: 승인 대기에 머무는 경로를 두지 않는다)
+      this.#quietly(`승인 단계 판정 (프로젝트 ${projectId})`, () => {
+        const waiting = this.#store(projectId, (store) =>
+          store.runs.list({ status: 'waiting_approval' }).map((run) => run.id),
+        );
+        for (const runId of waiting) {
+          this.#quietly(`승인 단계 판정 (${runId})`, () => {
+            this.evaluateApproval(projectId, runId);
+          });
+        }
+      });
       this.#quietly(`실행 대기 시작 (프로젝트 ${projectId})`, () => {
         this.#advanceQueue(projectId);
       });
@@ -442,24 +462,74 @@ export class PipelineEngine {
   }
 
   /**
-   * 승인 단계를 판정한다 (RUN-02). 대상 규칙이 전부 승인 상태면 `running`으로 저장하고 구동을 시작한다. 프로젝트에 자리가
-   * 없으면 `queued`(실행 대기)로 저장하고 대기열을 한 번 살핀다(자리가 나 있으면 생성 순으로 시작, ADR-105).
-   * @returns 승인 단계가 끝났는지
+   * 승인 단계를 판정한다 (RUN-02, ADR-100 A3: 승인 단계 자리 = 효력 확인). 사람을 기다리지 않는다:
+   * - 대상 규칙이 전부 효력 상태면 `running`으로 저장하고 구동을 시작한다. 프로젝트에 자리가 없으면 `queued`(실행 대기)로
+   *   저장하고 대기열을 한 번 살핀다(자리가 나 있으면 생성 순으로 시작, ADR-105)
+   * - 효력이 없는 규칙(없음 · 삭제됨 · 효력 아님)이 하나라도 있으면 그 자리에서 실행을 끝낸다: 승인 단계 시도 `failed`
+   *   (`exitDetail.unavailableRuleIds`), 실행의 종료 상태는 `runEnding`이 정한다(병합 커밋이 없으므로 `failed`,
+   *   `target_rule_unavailable`). 워크트리 · 브랜치를 만들기 전이라 보존할 것이 없다 (ADR-107)
+   * 종료 중이면 아무것도 하지 않는다(승인 대기는 다음 기동의 `startQueuedRuns`가 판정한다).
+   * @returns 승인 단계를 통과했는지
    */
   evaluateApproval(projectId: string, runId: string): boolean {
     if (this.#closed) return false;
-    const result = this.#store(projectId, (store) =>
-      evaluateApprovalStep(store, runId, { now: this.#now }),
+    const { judged, ended } = this.#store(projectId, (store) =>
+      store.transaction(() => {
+        const approval = evaluateApprovalStep(store, runId, { now: this.#now });
+        return {
+          judged: approval,
+          ended: approval.approved ? null : this.#endWithoutEffect(store, approval),
+        };
+      }),
     );
-    if (!result.approved) return false;
-    this.#emit({ type: 'run.saved', projectId, detail: { run: result.run, steps: result.steps } });
-    if (result.run.status === 'queued') {
-      this.#log(`실행 대기 (${result.run.displayId})`);
+    if (ended !== null) {
+      this.#emit({ type: 'run.saved', projectId, detail: ended });
+      this.#logEnding(
+        ended.run,
+        ended.run.status === 'merged',
+        'failed',
+        QUEUED_TARGET_UNAVAILABLE,
+      );
+      return false;
+    }
+    this.#emit({ type: 'run.saved', projectId, detail: { run: judged.run, steps: judged.steps } });
+    if (judged.run.status === 'queued') {
+      this.#log(`실행 대기 (${judged.run.displayId})`);
       this.#advanceQueue(projectId);
       return true;
     }
     this.#launch(projectId, runId);
     return true;
+  }
+
+  /**
+   * 승인 단계에서 대상 규칙의 효력이 없을 때 실행을 끝낸다 (열린 저장소, 부른 쪽 트랜잭션 안). 승인 단계 시도를 실패로 닫고
+   * 실행의 종료 상태는 `runEnding` 한 곳에서 정한다(ADR-091 · ADR-094 · ADR-107).
+   */
+  #endWithoutEffect(store: ProjectStore, judged: ApprovalStepResult): RunDetail {
+    const at = this.#timestamp();
+    const approval = judged.steps.find(
+      (step) => step.kind === 'approval' && !isFinalStepStatus(step.status),
+    );
+    const ending = runEnding(judged.run, 'failed', QUEUED_TARGET_UNAVAILABLE);
+    return store.runs.transition(judged.run.id, {
+      expectedStatus: 'waiting_approval',
+      run: { ...ending.run, endedAt: at },
+      steps:
+        approval === undefined
+          ? []
+          : [
+              {
+                id: approval.id,
+                status: 'failed',
+                exitDetail: {
+                  reason: QUEUED_TARGET_UNAVAILABLE,
+                  unavailableRuleIds: judged.unapprovedRuleIds,
+                },
+                endedAt: at,
+              },
+            ],
+    });
   }
 
   /**
@@ -828,19 +898,20 @@ export class PipelineEngine {
     project: Project,
     run: Run,
   ): Promise<{ git: RunGitRef } | { halt: StepOutcome }> {
-    // 실행마다 사람의 실행 시작 확인(승인 기록 run_start, 같은 대상 규칙)이 있어야 한다 (NFR-01)
-    const logged = this.#store(projectId, (store) =>
-      store.approvalLog
-        .list({ entity: 'Run', id: run.id })
-        .filter((entry) => entry.action === 'run_start'),
-    );
-    if (logged.length !== 1 || !sameIds(logged[0]?.detail.ruleIds, run.targetRuleIds)) {
+    // 실행마다 시작 근거가 정확히 1건이어야 한다: 사람의 실행 시작 확인(승인 기록 run_start) 또는 실행 자동 시작(규범 변경
+    // 기록 auto_start, 원인 = 대상 규칙의 신규 기록). 같은 대상 규칙이어야 한다 (NFR-01, ADR-107)
+    const basis = this.#store(projectId, (store) => checkRunStartBasis(store, run));
+    if (basis.mismatch !== null) {
       return {
         halt: {
           status: 'halt',
           runStatus: 'failed',
           reason: 'run_without_log',
-          exitDetail: { runStartEntries: logged.length },
+          exitDetail: {
+            runStartEntries: basis.runStartEntries,
+            autoStartEntries: basis.autoStartEntries,
+            mismatch: basis.mismatch,
+          },
         },
       };
     }

@@ -20,6 +20,7 @@ import { acquirePidLock } from './lock.js';
 import { assertSocketPathLength } from './pipe-path.js';
 import { RuleWriterService } from './rule-writer/rule-writer-service.js';
 import { type RunPaths, runPaths } from './run-paths.js';
+import { AutoStarter } from './runs/auto-start.js';
 import { writeTokenFile } from './token.js';
 import { ORCHESTRATOR_VERSION } from './version.js';
 
@@ -191,14 +192,6 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
     // 제안 처리 저장 뒤 → event.proposal.changed (M1-36, ADR-076). 기다리지 않는다. 새 제안은 생기지 않는다(M7-02):
     // 규칙 작성 결과는 제안 없이 바로 반영되고, 이 변경 전부터 대기 중이던 제안만 처리된다
     const proposalEvents = new ProposalEventPublisher({ sink: () => server, log });
-    const ruleWriter = new RuleWriterService({
-      biveHome: options.biveHome,
-      adapter: agent.adapter,
-      tasks: lifecycle,
-      log,
-      // 시도 기록 저장 뒤 → event.ruleWriter.changed (M3-26, ADR-099). 기다리지 않는다
-      onChanged: ruleWriterChangedNotifier({ sink: () => server, log }),
-    });
     // 실행 저장 · 화면 갱신 단계 → event.step.updated · event.run.updated (ADR-076). 서버를 만들기 전(기동 중
     // 중단 표시)에는 받을 연결이 없으므로 보내지 않는다
     const runEvents = new RunEventPublisher({ biveHome: options.biveHome, sink: () => server });
@@ -209,6 +202,19 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       log,
       onEvent: (event) => runEvents.publish(event),
       ...(options.executors === undefined ? {} : { executors: options.executors }),
+    });
+    // 규칙 작성 세션이 규칙을 만들고 정상 종료하면 세션 밖에서 실행을 자동 시작한다 (M7-05 #217, ADR-100 D1 · B⑤ · C2, ADR-107)
+    const autoStarter = new AutoStarter({ biveHome: options.biveHome, engine, log });
+    const ruleWriter = new RuleWriterService({
+      biveHome: options.biveHome,
+      adapter: agent.adapter,
+      tasks: lifecycle,
+      log,
+      // 시도 기록 저장 뒤 → event.ruleWriter.changed (M3-26, ADR-099). 기다리지 않는다
+      onChanged: ruleWriterChangedNotifier({ sink: () => server, log }),
+      onSessionEnded: (projectId, sessionId, endReason) => {
+        autoStarter.afterRuleWriterSession(projectId, sessionId, endReason);
+      },
     });
     // 잠금을 잡은 뒤 · 연결을 받기 전: 비정상 종료로 남은 running 실행은 interrupted (PRD 5.1, 자동 재개 없음)
     const interruptedRuns = engine.recoverInterruptedRuns();

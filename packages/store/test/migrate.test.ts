@@ -915,7 +915,298 @@ describe('0015 run_queue: 실행 대기 상태 · 프로젝트당 진행 중 1�
   it('0014까지의 빈 DB에도 적용되고, 다시 실행해도 스키마가 같다', () => {
     withDb((db) => {
       migrate(db, PROJECT_MIGRATIONS.slice(0, 14), { now: fixedNow });
-      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([15]);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 15), { now: fixedNow }).applied).toEqual([15]);
+      const schema = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 15), { now: fixedNow }).applied).toEqual([]);
+      expect(schemaOf(db)).toEqual(schema);
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+    });
+  });
+});
+
+describe('0016 run_auto_start: 실행 시작 주체에 오케스트레이터(원인 기록 순번) · 자동 시작 생략 기록 (M7-05 #217, ADR-100 A2 · C2, ADR-107)', () => {
+  const T = (minute: number) => `2026-11-21T01:${String(minute).padStart(2, '0')}:00.000Z`;
+  const human = '{"kind":"human"}';
+  const SHA = 'd'.repeat(40);
+  const BUDGET = '{"run":{"maxBudgetUsd":5,"maxTurns":100},"roles":{}}';
+
+  const seedRule = (db: SqliteDatabase): string => {
+    const req = newId();
+    const rule = newId();
+    db.prepare(
+      `INSERT INTO requirements (id, display_id, text, author, norm_state, unrulable_reason, created_at,
+       updated_at, updated_by, deleted_at) VALUES (?, 'REQ-001', '본문', ?, 'approved', NULL, ?, ?, ?, NULL)`,
+    ).run(req, human, T(0), T(0), human);
+    db.prepare(
+      `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
+       parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
+       updated_at, deleted_at) VALUES (?, 'RULE-001', '제목', '진술', 'business', '["test"]', ?, NULL, 0, '[]',
+       NULL, NULL, '{"kind":"agent","role":"rule-writer"}', 'approved', ?, ?, NULL)`,
+    ).run(rule, req, T(0), T(0));
+    return rule;
+  };
+  const insertRun = (
+    db: SqliteDatabase,
+    rule: string,
+    row: {
+      id: string;
+      seq: number;
+      status: string;
+      startedBy?: string;
+      mergeCommit?: string | null;
+    },
+  ) => {
+    const display = `EXE-${String(row.seq).padStart(3, '0')}`;
+    db.prepare(
+      `INSERT INTO runs (id, display_id, type, status, current_step, last_completed_step, regression_count,
+       failure_reason, branch, worktree_path, base_branch, base_commit, head_commit, merge_commit, budget_snapshot,
+       model_snapshot, cost_usd, turns, tool_manifest, started_by, created_at, started_at, ended_at)
+       VALUES (?, ?, 'A', ?, 'implementation', 'red_check', 1, NULL, ?, ?, 'main', ?, ?, ?, ?, '{"implementer":"m"}',
+       0.5, 7, '[]', ?, ?, ?, NULL)`,
+    ).run(
+      row.id,
+      display,
+      row.status,
+      `bive/run-${display}`,
+      `/w/${display}`,
+      SHA,
+      SHA,
+      row.mergeCommit ?? null,
+      BUDGET,
+      row.startedBy ?? human,
+      T(row.seq),
+      T(row.seq + 1),
+    );
+    db.prepare('INSERT INTO run_target_rules (run_id, rule_id, position) VALUES (?, ?, 0)').run(
+      row.id,
+      rule,
+    );
+  };
+  const objectSql = (db: SqliteDatabase) =>
+    db
+      .prepare(
+        "SELECT type, name, sql FROM sqlite_master WHERE tbl_name IN ('runs', 'steps') AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY name",
+      )
+      .all() as { type: string; name: string; sql: string }[];
+  const tableSql = (db: SqliteDatabase, name: string): string =>
+    (
+      db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as {
+        sql: string;
+      }
+    ).sql;
+  const setStatus = (db: SqliteDatabase, id: string, status: string) =>
+    db.prepare('UPDATE runs SET status = ? WHERE id = ?').run(status, id);
+  const OLD_STARTED_BY_CHECK =
+    "json_valid(started_by) AND json_extract(started_by, '$.kind') = 'human'";
+  /** 표 정의에서 시작 주체 칸의 정의를 자리표시자로 바꾼다 (나머지가 같은지 비교용). */
+  const withoutStartedBy = (sql: string) =>
+    sql.replace(
+      /started_by TEXT NOT NULL CHECK \([\s\S]*?\n {2}\),\n {2}created_at/,
+      'STARTED_BY,\n  created_at',
+    );
+
+  it('0015까지의 DB(사람이 시작한 실행 · 실행 대기 · 중단 · 단계 · 세션 · 도구 호출 · 판정): 행 · 자식 표 · 색인 · 트리거는 그대로이고 시작 주체 CHECK만 넓어진다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 15), { now: fixedNow });
+      const rule = seedRule(db);
+      const merged = newId();
+      const interrupted = newId();
+      const waiting = newId();
+      const queued = newId();
+      insertRun(db, rule, { id: merged, seq: 1, status: 'merged', mergeCommit: SHA });
+      insertRun(db, rule, { id: interrupted, seq: 2, status: 'interrupted' });
+      insertRun(db, rule, { id: waiting, seq: 3, status: 'waiting_approval' });
+      insertRun(db, rule, { id: queued, seq: 4, status: 'queued' });
+      const step = newId();
+      db.prepare(
+        `INSERT INTO steps (id, run_id, kind, attempt, status, role, exit_detail, commit_sha, cost_usd, turns,
+         started_at, ended_at) VALUES (?, ?, 'implementation', 1, 'pending', NULL, '{}', NULL, NULL, NULL, ?, NULL)`,
+      ).run(step, interrupted, T(5));
+      const session = newId();
+      db.prepare(
+        `INSERT INTO sessions (id, run_id, step_id, role, model, work_dir, model_usage, tools, mcp_servers, started_at)
+         VALUES (?, ?, ?, 'implementer', 'm', '/w', '{}', '[]', '[]', ?)`,
+      ).run(session, interrupted, step, T(6));
+      db.prepare(
+        `INSERT INTO tool_calls (id, run_id, session_id, seq, at, role, name, args_summary, status, reason, duration_ms)
+         VALUES (?, ?, ?, 0, ?, 'implementer', 'read_file', '{}', 'ok', NULL, 3)`,
+      ).run(newId(), interrupted, session, T(7));
+      db.prepare(
+        `INSERT INTO judgments (id, rule_id, run_id, step_id, commit_sha, judged_at, status, runner, exit_code,
+         reporter_path, cases, quarantine_reason) VALUES (?, ?, ?, ?, ?, ?, 'pass', 'vitest', 0, NULL, '[]', NULL)`,
+      ).run(newId(), rule, interrupted, step, SHA, T(8));
+      // 0015까지는 오케스트레이터 주체를 DB CHECK가 막는다
+      expect(() =>
+        insertRun(db, rule, {
+          id: newId(),
+          seq: 9,
+          status: 'waiting_approval',
+          startedBy: '{"kind":"orchestrator","causeSeqs":[1]}',
+        }),
+      ).toThrow(/CHECK/);
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE name = 'auto_start_skips'").all(),
+      ).toEqual([]);
+
+      const rows = (table: string) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
+      const childTables = ['run_target_rules', 'steps', 'sessions', 'tool_calls', 'judgments'];
+      const runsBefore = rows('runs');
+      const childrenBefore = childTables.map(rows);
+      const childSqlBefore = childTables.map((name) => tableSql(db, name));
+      const sqlBefore = objectSql(db);
+      const runsTableBefore = tableSql(db, 'runs');
+      expect(runsTableBefore).toContain(OLD_STARTED_BY_CHECK);
+
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 16), { now: fixedNow }).applied).toEqual([16]);
+
+      // 사람이 시작한 실행 · 실행 대기 · 중단 · 승인 대기 행은 값 · 순서 그대로, 자식 표의 행 · 정의 그대로, 위반 없음
+      expect(rows('runs')).toEqual(runsBefore);
+      expect(
+        db.prepare('SELECT display_id, status, started_by FROM runs ORDER BY rowid').all(),
+      ).toEqual([
+        { display_id: 'EXE-001', status: 'merged', started_by: human },
+        { display_id: 'EXE-002', status: 'interrupted', started_by: human },
+        { display_id: 'EXE-003', status: 'waiting_approval', started_by: human },
+        { display_id: 'EXE-004', status: 'queued', started_by: human },
+      ]);
+      expect(childTables.map(rows)).toEqual(childrenBefore);
+      expect(childTables.map((name) => tableSql(db, name))).toEqual(childSqlBefore);
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+      expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'runs_v16%'").all(),
+      ).toEqual([]);
+      // 표 정의는 시작 주체 CHECK만 바뀌었다
+      const after = tableSql(db, 'runs').replace(/^CREATE TABLE "runs"/, 'CREATE TABLE runs');
+      expect(after).not.toContain(OLD_STARTED_BY_CHECK);
+      expect(withoutStartedBy(after)).toContain('STARTED_BY,');
+      expect(withoutStartedBy(after)).toBe(
+        withoutStartedBy(runsTableBefore.replace(/^CREATE TABLE "runs"/, 'CREATE TABLE runs')),
+      );
+      // 색인 · 트리거(0005의 것, 다시 만든 steps 트리거 2개, 0015의 진행 중 1개 방어 2개, 손대지 않은 steps의 것)는
+      // 글자까지 같다
+      expect(objectSql(db)).toEqual(sqlBefore);
+      expect(objectSql(db).map((o) => o.name)).toEqual([
+        'runs_identity_immutable',
+        'runs_no_delete',
+        'runs_no_replace',
+        'runs_one_running_insert',
+        'runs_one_running_update',
+        'runs_status',
+        'runs_terminal_final',
+        'steps_final',
+        'steps_identity_immutable',
+        'steps_no_delete',
+        'steps_no_replace',
+        'steps_run',
+        'steps_run_terminal_insert',
+      ]);
+
+      // 옮긴 트리거가 그대로 동작한다
+      expect(() => setStatus(db, merged, 'failed')).toThrow(/종료된 실행/);
+      expect(() =>
+        db
+          .prepare(
+            `UPDATE runs SET started_by = '{"kind":"orchestrator","causeSeqs":[1]}' WHERE id = ?`,
+          )
+          .run(waiting),
+      ).toThrow(/생성 정보/);
+      expect(() => db.prepare('DELETE FROM runs WHERE id = ?').run(waiting)).toThrow(/지울 수 없/);
+      expect(() =>
+        insertRun(db, rule, { id: waiting, seq: 3, status: 'waiting_approval' }),
+      ).toThrow(/덮어쓰기 금지/);
+      expect(() => setStatus(db, queued, 'running')).toThrow(/진행 중 · 중단된 실행/);
+
+      // 시작 주체: 사람, 또는 원인 기록 순번(정수 1개 이상)이 있는 오케스트레이터만
+      let seq = 10;
+      const tryStarter = (startedBy: string) => {
+        seq += 1;
+        insertRun(db, rule, { id: newId(), seq, status: 'waiting_approval', startedBy });
+      };
+      tryStarter(human);
+      tryStarter('{"kind":"orchestrator","causeSeqs":[1]}');
+      tryStarter('{"kind":"orchestrator","causeSeqs":[3,4]}');
+      for (const rejected of [
+        '{"kind":"orchestrator"}',
+        '{"kind":"orchestrator","causeSeqs":null}',
+        '{"kind":"orchestrator","causeSeqs":[]}',
+        '{"kind":"orchestrator","causeSeqs":[0]}',
+        '{"kind":"orchestrator","causeSeqs":[-1]}',
+        '{"kind":"orchestrator","causeSeqs":[1.5]}',
+        '{"kind":"orchestrator","causeSeqs":["1"]}',
+        '{"kind":"orchestrator","causeSeqs":[null]}',
+        '{"kind":"orchestrator","causeSeqs":1}',
+        '{"kind":"orchestrator","causeSeqs":{"0":1}}',
+        '{"kind":"agent","role":"implementer"}',
+        '{"kind":null}',
+        '{}',
+        '"human"',
+        '["human"]',
+        'null',
+        '1',
+      ]) {
+        expect(() => tryStarter(rejected), rejected).toThrow(/CHECK/);
+      }
+      expect(db.prepare('SELECT count(*) AS n FROM runs').get()).toEqual({ n: 7 });
+    });
+  });
+
+  it('0015의 시작 주체 CHECK는 객체가 아닌 JSON을 통과시켰다(NULL 구멍): 그런 행이 있으면 0016은 전부 되돌리고 그 DB를 열지 않는다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 15), { now: fixedNow });
+      const rule = seedRule(db);
+      // 0015에서는 json_extract('"human"', '$.kind')가 NULL이라 CHECK가 통과했다
+      insertRun(db, rule, {
+        id: newId(),
+        seq: 1,
+        status: 'waiting_approval',
+        startedBy: '"human"',
+      });
+      const before = db.prepare('SELECT * FROM runs').all();
+      expect(() => migrate(db, PROJECT_MIGRATIONS.slice(0, 16), { now: fixedNow })).toThrow();
+      expect(listAppliedMigrations(db).map((m) => m.version)).toEqual(
+        PROJECT_MIGRATIONS.slice(0, 15).map((m) => m.version),
+      );
+      expect(db.prepare('SELECT * FROM runs').all()).toEqual(before);
+      expect(tableSql(db, 'runs')).toContain(OLD_STARTED_BY_CHECK);
+      expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+    });
+  });
+
+  it('auto_start_skips: 세션 1개에 1행, 사유 3종 · 설정 항목 배열만, 덮어쓰기 · 수정 · 삭제는 DB가 거부한다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 16), { now: fixedNow });
+      const insert = (sessionId: string, reason: string, missing = '[]') =>
+        db
+          .prepare(
+            'INSERT INTO auto_start_skips (session_id, reason, missing, skipped_at) VALUES (?, ?, ?, ?)',
+          )
+          .run(sessionId, reason, missing, T(1));
+      const session = newId();
+      insert(session, 'project_daily_budget_unset');
+      insert(newId(), 'project_daily_budget_exceeded');
+      insert(newId(), 'settings_incomplete', '["roles.implementer.model"]');
+      expect(() => insert(session, 'settings_incomplete')).toThrow(/덮어쓰기 금지/);
+      expect(() =>
+        db
+          .prepare('INSERT OR REPLACE INTO auto_start_skips VALUES (?, ?, ?, ?)')
+          .run(session, 'settings_incomplete', '[]', T(2)),
+      ).toThrow(/덮어쓰기 금지/);
+      expect(() =>
+        db.prepare("UPDATE auto_start_skips SET reason = 'settings_incomplete'").run(),
+      ).toThrow(/바꿀 수 없/);
+      expect(() => db.prepare('DELETE FROM auto_start_skips').run()).toThrow(/지울 수 없/);
+      expect(() => insert(newId(), 'closed')).toThrow(/CHECK/);
+      expect(() => insert(newId(), 'settings_incomplete', '{}')).toThrow(/CHECK/);
+      expect(() => insert('short', 'settings_incomplete')).toThrow(/CHECK/);
+      expect(db.prepare('SELECT count(*) AS n FROM auto_start_skips').get()).toEqual({ n: 3 });
+    });
+  });
+
+  it('0015까지의 빈 DB에도 적용되고, 다시 실행해도 스키마가 같다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 15), { now: fixedNow });
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([16]);
       const schema = schemaOf(db);
       expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
       expect(schemaOf(db)).toEqual(schema);

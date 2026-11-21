@@ -750,13 +750,26 @@ export const NormChangeBreakReason = z.enum([
 ]);
 export type NormChangeBreakReason = z.infer<typeof NormChangeBreakReason>;
 
+/** 규범 변경 기록 순번 목록 (원인 기록 ID, 1개 이상 · 중복 없음). 기록 ID는 정수 순번이다(ADR-103). */
+const NormChangeSeqList = z
+  .array(z.int().positive())
+  .min(1)
+  .refine((seqs) => new Set(seqs).size === seqs.length, '순번이 중복됐습니다');
+
 /**
- * 종류별 상세. 신규는 `after`(만든 규범의 내용)만, 그 밖의 종류가 쓰는 칸은 그 이슈가 더한다.
+ * 종류별 상세. 신규는 `after`(만든 규범의 내용)만, 자동 시작은 `causeSeqs`(원인 = 대상 규칙의 신규 기록 순번, 대상 규칙
+ * 순서)와 `ruleIds`(대상 규칙, 같은 순서)다(M7-05 #217, ADR-107). 그 밖의 종류가 쓰는 칸은 그 이슈가 더한다(넓히기만 한다).
  * 값은 에이전트가 쓴 글을 담을 수 있어 화면 · 응답에는 표시 값으로만 내보낸다(ADR-089).
  */
 export const NormChangeDetail = z.strictObject({
   before: z.unknown().optional(),
   after: z.unknown().optional(),
+  causeSeqs: NormChangeSeqList.optional(),
+  ruleIds: z
+    .array(Ulid)
+    .min(1)
+    .refine((ids) => new Set(ids).size === ids.length, '대상 규칙이 중복됐습니다')
+    .optional(),
 });
 export type NormChangeDetail = z.infer<typeof NormChangeDetail>;
 
@@ -811,6 +824,31 @@ export const NormChangeEntry = z
           code: 'custom',
           message: '신규에는 이전 내용(before)이 없습니다',
           path: ['detail', 'before'],
+        });
+      }
+    }
+    if (entry.kind === 'auto_start') {
+      // 실행 자동 시작 (M7-05, ADR-107): 주체는 오케스트레이터, 대상은 그 실행, 원인 기록과 대상 규칙이 한 쌍씩 있다
+      if (entry.actor.kind !== 'orchestrator') {
+        ctx.addIssue({
+          code: 'custom',
+          message: '자동 시작의 주체는 오케스트레이터입니다',
+          path: ['actor'],
+        });
+      }
+      if (entry.targetRef.entity !== 'Run' || entry.runId !== entry.targetRef.id) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '자동 시작의 대상은 그 실행이고 연결 실행과 같아야 합니다',
+          path: ['targetRef'],
+        });
+      }
+      const { causeSeqs, ruleIds } = entry.detail;
+      if (causeSeqs === undefined || ruleIds === undefined || causeSeqs.length !== ruleIds.length) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '자동 시작에는 원인 기록 순번과 대상 규칙이 같은 수만큼 필요합니다',
+          path: ['detail', 'causeSeqs'],
         });
       }
     }
@@ -901,6 +939,20 @@ export const ToolManifestEntry = z.strictObject({
 export type ToolManifestEntry = z.infer<typeof ToolManifestEntry>;
 
 /**
+ * 실행 자동 시작의 시작 주체 (M7-05 #217, ADR-100 A2 · C2, ADR-107): 오케스트레이터. 원인 규범 변경 기록(대상 규칙을 만든
+ * 신규 기록)의 순번이 1개 이상 있어야 한다. 엔진은 시작마다 이 순번이 규범 변경 기록의 자동 시작 항목 1건과 같은지 본다.
+ */
+export const AutoStartRunStarter = z.strictObject({
+  kind: z.literal('orchestrator'),
+  causeSeqs: NormChangeSeqList,
+});
+export type AutoStartRunStarter = z.infer<typeof AutoStartRunStarter>;
+
+/** 실행의 시작 주체: 사람(실행 시작 확인, 승인 기록 `run_start`) 또는 오케스트레이터(자동 시작, 규범 변경 기록 `auto_start`). */
+export const RunStarter = z.discriminatedUnion('kind', [HumanAuthor, AutoStartRunStarter]);
+export type RunStarter = z.infer<typeof RunStarter>;
+
+/**
  * 실행 (RUN-01, RUN-02, RUN-07, RUN-08, COST-01, NFR-07, ADR-061).
  * - `targetRuleIds`: 요청 순서 그대로, 중복 없음
  * - `currentStep`: 진행 중(또는 승인 대기 중)인 단계. 모든 단계가 끝나면 `null`
@@ -932,7 +984,7 @@ export const Run = z.strictObject({
   costUsd: UsdOrNull,
   turns: NonNegativeInt.nullable(),
   toolManifest: z.array(ToolManifestEntry),
-  startedBy: HumanAuthor,
+  startedBy: RunStarter,
   createdAt: Timestamp,
   startedAt: Timestamp.nullable(),
   endedAt: Timestamp.nullable(),

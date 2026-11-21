@@ -1205,6 +1205,7 @@ describe('규칙 작성 시도 기록 · 조회 · 다시 시도 (M3-26 #206, NR
         errorTruncated: true,
         requestedAt: iso(T0),
         endedAt: iso(T0),
+        autoStart: null,
       },
     ]);
     const shown = entries[0]?.error ?? '';
@@ -1249,6 +1250,7 @@ describe('규칙 작성 시도 기록 · 조회 · 다시 시도 (M3-26 #206, NR
           errorTruncated: false,
           requestedAt: iso(T0),
           endedAt: iso(T0),
+          autoStart: null,
         },
       ],
     });
