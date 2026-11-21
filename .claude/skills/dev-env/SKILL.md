@@ -23,7 +23,7 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 
 ## 명령
 
-2026-11-14 `main`(`2074c67`)에서 아래 표의 명령을 모두 실행해 기대 결과를 확인했다(`--open`은 README 6장 "M1 완료 기준 흐름 준비" 블록으로 띄워 원격 디버깅 포트로 요구사항 화면을 확인, 파이프라인 e2e 한 파일은 `forbidden-write.test.ts`). 같은 날 새 컨테이너의 `main`(`6626b6b`)에서 앱 기동 · 오케스트레이터 단독 기동 · CLI 핑 · 픽스처 설치 · GitHub REST를 다시 실행해 같은 결과를 확인했고, `--open`은 로드맵 2.1 준비 블록을 그대로 실행해 `app.pid` · `.bive.json`이 생기는 데까지 확인했다.
+2026-11-14 `main`(`2074c67`)에서 아래 표의 명령을 모두 실행해 기대 결과를 확인했다(`--open`은 README 6장 "M1 완료 기준 흐름 준비" 블록으로 띄워 원격 디버깅 포트로 요구사항 화면을 확인, 파이프라인 e2e 한 파일은 `forbidden-write.test.ts`). 같은 날 새 컨테이너의 `main`(`6626b6b`)에서 앱 기동 · 오케스트레이터 단독 기동 · CLI 핑 · 픽스처 설치 · GitHub REST를 다시 실행해 같은 결과를 확인했고, `--open`은 로드맵 2.1 준비 블록을 그대로 실행해 `app.pid` · `.bive.json`이 생기는 데까지 확인했다. 2026-11-21 `main`(`e95c318`)에서 CLAUDE.md 5장의 완료 조건 명령 9개를 다시 실행해 같은 결과를 확인했다.
 
 | 작업 | 명령 | 기대 결과 |
 |---|---|---|
@@ -35,7 +35,7 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 | 픽스처 테스트 | `pnpm -C fixtures/sample-next-app test` | 임시 SQLite 마이그레이션 → `next build` → `next start` → HTTP 확인 |
 | 픽스처 초기화 | `scripts/reset-fixture.sh $(mktemp -d)/fx --verify` | 복사 → 설치 → git 커밋 → 테스트 통과 |
 | 초기화 스크립트 검사 | `scripts/test-reset-fixture.sh` | 지우면 안 되는 경로를 거부하는지 검사 |
-| 파이프라인 e2e 한 파일 | `packages/orchestrator`에서 `pnpm exec vitest run --config vitest.pipeline.config.ts e2e/pipeline/<파일>` | 그 시험 하나만 통과. 픽스처 설치가 먼저 필요하다. 파일마다 실제 설치 · `next build`를 해서 오래 걸린다(2026-11-14 새 컨테이너에서 전체 `pnpm e2e:pipeline` 11개 파일이 약 19분, 한 파일 평균 2분 가까이. 2026-11-15 `multi-rule.test.ts`가 더해져 12개 파일이 되었고 CI에서 약 20분 30초, 실행을 두 번 하는 그 파일 하나가 약 7분으로 가장 느리다) |
+| 파이프라인 e2e 한 파일 | `packages/orchestrator`에서 `pnpm exec vitest run --config vitest.pipeline.config.ts e2e/pipeline/<파일>` | 그 시험 하나만 통과. 픽스처 설치가 먼저 필요하다. 파일마다 실제 설치 · `next build`를 해서 오래 걸린다(2026-11-14 새 컨테이너에서 전체 `pnpm e2e:pipeline` 11개 파일이 약 19분, 한 파일 평균 2분 가까이. 2026-11-15 `multi-rule.test.ts`가 더해져 12개 파일이 되었고 CI에서 약 20분 30초, 실행을 두 번 하는 그 파일 하나가 약 7분으로 가장 느리다. 2026-11-21 이 VM에서 12개 파일 약 23분) |
 | GitHub REST | `scripts/gh-rest.sh GET repos/chanrhan/bive/milestones` | 마일스톤 목록 JSON |
 
 코드 열기(IDE URL)는 화면 없는 VM에서 열 곳이 없으므로 앱을 `BIVE_OPEN_URL_LOG=$BIVE_HOME/open-url.log`(절대 경로, 빈 값은 미설정과 같음)를 더해 띄우면 URL을 열지 않고 그 파일에 한 줄씩 적는다(로드맵 2.2 흐름, ADR-087). IDE 설정은 프로젝트별이라 새 프로젝트의 첫 열기는 IDE 선택 단계가 먼저 나온다.
@@ -56,3 +56,6 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 - **PR을 만들었는데 CI 검사가 생기지 않는다**: PR의 `mergeable_state`가 `dirty`(main과 충돌)면 CI가 아예 생기지 않는다. PR을 만든 직후 `scripts/gh-rest.sh GET repos/chanrhan/bive/pulls/<번호>`로 확인하고, `dirty`면 `git fetch origin main && git merge origin/main`으로 충돌을 풀고 다시 푸시한다.
 - **변조 재현 때 다른 작업 공간까지 바뀐다**: `node_modules`의 파일은 전역 pnpm 저장소에서 하드 링크된 것이라 고치면 저장소 원본과 다른 작업 공간이 함께 바뀐다. 의존성 파일을 고쳐 재현할 때는 별도 `--store-dir`이나 복사 설치(`--package-import-method=copy`)에서 한다. `pnpm store status`가 `esbuild`를 수정됨으로 보고하는 것은 esbuild 설치 스크립트가 자기 파일을 바꾸는 알려진 동작이라 변조가 아니다.
 - **병렬 worktree의 테스트가 서로 간섭한다**: 테스트는 `TMPDIR=$(mktemp -d /tmp/t<이슈>.XXXX) pnpm test`처럼 임시 폴더를 따로 준다. 로그 · PR 본문 같은 임시 파일을 공용 scratchpad에 둘 때는 이슈 번호를 파일 이름에 넣는다. 부하가 높아 프로세스 기동 시험이 시간 초과되면 그 파일만 단독으로 다시 실행해 판단한다 (ADR-064).
+- **CDP로 앱 창 크기를 바꿀 수 없다** (M2 검수 2026-11-21 확인): Electron의 원격 디버깅(`--remote-debugging-port`)에는 CDP `Browser` 도메인이 없어 `Browser.setWindowBounds`가 실패한다. 페이지에서 `window.resizeTo(w, h)`를 부르면 바뀌고, 앱의 최소 크기(창 안쪽 820 × 600, ADR-093)도 그대로 지켜진다.
+- **`xvfb-run -a`의 창이 1280px보다 넓어지지 않는다**: 기본 가상 화면 폭이 1280이다. 더 넓은 창을 볼 때는 `xvfb-run -a -s "-screen 0 1920x1080x24" <명령>`으로 화면 크기를 준다.
+- **로드맵 준비 블록의 `app`이 다음 명령에서 사라진다**: `app` · `quit` · `cli`는 셸 함수이고 `app`은 앱을 그 셸의 백그라운드 작업으로 띄우므로 같은 셸에서만 쓸 수 있다. 도구 호출마다 셸이 끝나는 에이전트는 앱을 `setsid nohup <app의 명령> > <로그> 2>&1 &`로 셸에서 떼어 띄우고, 다음 호출에서 같은 `BIVE_HOME` · `FX`를 다시 export한다.
