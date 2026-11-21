@@ -37,7 +37,10 @@ import {
   JudgmentStatus,
   ProposalKind,
   ProposalState,
+  RuleWriterSkipReason,
+  RuleWriterState,
   RunStatus,
+  SessionEndReason,
   StepKind,
   StepStatus,
 } from './enums.js';
@@ -639,6 +642,50 @@ export const ToolCallListResult = z.strictObject({
 });
 export type ToolCallListResult = z.infer<typeof ToolCallListResult>;
 
+// ── 규칙 작성 세션 기록 (NRM-02, NFR-03, SCR-02, M3-26, ADR-062 · ADR-099) ──
+// - 요구사항별로 가장 최근 규칙 작성 시도 하나의 상태를 읽는 조회 전용 RPC. 값은 저장된 시도 기록
+//   (`rule_writer_requests`)과 세션 기록(`sessions`)에서만 만든다(NFR-03). 오케스트레이터 메모리는 읽지 않는다
+// - 오류 문장은 어댑터 · 외부에서 온 문자열일 수 있어 표시용 표기(제어 · 서식 문자 이스케이프, ADR-089)와 길이 상한을 거친다
+
+/** 오류 문장 표시 상한 (UTF-16 코드 단위). 넘으면 앞을 남기고 끝에 `…`, `errorTruncated`가 `true`. */
+export const RULE_WRITER_ERROR_DISPLAY_MAX = 500;
+
+/** `ruleWriter.status`: 프로젝트(또는 요구사항 하나)의 요구사항별 최근 규칙 작성 시도. */
+export const RuleWriterStatusParams = z.strictObject({
+  projectId: Ulid,
+  requirementId: Ulid.optional(),
+});
+export type RuleWriterStatusParams = z.infer<typeof RuleWriterStatusParams>;
+
+/** 요구사항 하나의 가장 최근 규칙 작성 시도. */
+export const RuleWriterStatusEntry = z.strictObject({
+  requirementId: Ulid,
+  /** 시도 ID (세션을 열었으면 세션 ID와 같다) */
+  attemptId: Ulid,
+  state: RuleWriterState,
+  /** `skipped`일 때만 */
+  skipReason: RuleWriterSkipReason.nullable(),
+  /** `settings_incomplete`일 때 비어 있던 설정 항목 */
+  missing: z.array(MissingSettingPath),
+  /** `ended`일 때만 */
+  endReason: SessionEndReason.nullable(),
+  /** 생략 · 실패 설명의 표시용 표기 (상한 {@link RULE_WRITER_ERROR_DISPLAY_MAX}). 없으면 `null` */
+  error: z.string().min(1).max(RULE_WRITER_ERROR_DISPLAY_MAX).nullable(),
+  /** `error`가 상한 때문에 잘렸는지. `error`가 `null`이면 `false` */
+  errorTruncated: z.boolean(),
+  /** 시도를 받은 시각 */
+  requestedAt: Timestamp,
+  /** 끝난(생략된) 시각. 대기 · 진행 중이면 `null` */
+  endedAt: Timestamp.nullable(),
+});
+export type RuleWriterStatusEntry = z.infer<typeof RuleWriterStatusEntry>;
+
+/** 시도 기록이 있는 요구사항만, 요구사항 ID 순. */
+export const RuleWriterStatusResult = z.strictObject({
+  entries: z.array(RuleWriterStatusEntry),
+});
+export type RuleWriterStatusResult = z.infer<typeof RuleWriterStatusResult>;
+
 // ── 검증 (JDG-03, COST-02, SCR-05, M1-18, ADR-072) ───────────
 // - 화면 하나(검증)가 한 번에 읽는 값을 저장소 한 번 열기로 모은다. 값은 규칙 · 판정 기록 · 실행 · 세션 기록에서만 만든다(NFR-03)
 // - 판정 기준 = 가장 최근에 병합된 실행의 기준 브랜치 · 병합 커밋. 병합된 실행이 없으면 `null`
@@ -820,6 +867,7 @@ export const METHODS = {
   'run.list': { params: RunListParams, result: RunListResult },
   'run.resume': { params: RunResumeParams, result: RunDetailResult },
   'toolCall.list': { params: ToolCallListParams, result: ToolCallListResult },
+  'ruleWriter.status': { params: RuleWriterStatusParams, result: RuleWriterStatusResult },
   'verification.summary': {
     params: VerificationSummaryParams,
     result: VerificationSummaryResult,
@@ -891,11 +939,26 @@ export type ProposalChangedEvent = z.infer<typeof ProposalChangedEvent>;
 /** 제안 알림 이름. 렌더러는 받으면 할 일 배지 · 할 일 목록을 다시 조회한다. */
 export const PROPOSAL_EVENT_NAMES = ['event.proposal.changed'] as const;
 
+// ── 규칙 작성 알림 (NRM-02, SCR-02, M3-26, ADR-099) ──────────
+// - 규칙 작성 시도의 기록이 바뀔 때(대기 · 시작 · 끝 · 생략 저장 뒤) 1개. 제안 알림과 같이 기다리지 않는다
+// - 식별자만 싣는다. 받는 쪽은 `ruleWriter.status`를 다시 조회한다
+
+/** `event.ruleWriter.changed`: 요구사항 하나의 규칙 작성 시도 기록이 바뀜. */
+export const RuleWriterChangedEvent = z.strictObject({
+  projectId: Ulid,
+  requirementId: Ulid,
+});
+export type RuleWriterChangedEvent = z.infer<typeof RuleWriterChangedEvent>;
+
+/** 규칙 작성 알림 이름. 렌더러는 받으면 요구사항 상세의 규칙 작성 상태를 다시 조회한다. */
+export const RULE_WRITER_EVENT_NAMES = ['event.ruleWriter.changed'] as const;
+
 /** 알림 이름 → 파라미터 스키마. `event.*` 알림은 해당 이슈에서 추가한다. */
 export const NOTIFICATIONS = {
   'event.run.updated': { params: RunUpdatedEvent },
   'event.step.updated': { params: StepUpdatedEvent },
   'event.proposal.changed': { params: ProposalChangedEvent },
+  'event.ruleWriter.changed': { params: RuleWriterChangedEvent },
 } as const satisfies Record<string, NotificationSpec>;
 
 export type NotificationParams<N extends NotificationName> = z.infer<

@@ -17,6 +17,7 @@ import {
   parseNotification,
   type Proposal,
   type ProposalChangedEvent,
+  type RuleWriterChangedEvent,
   RUN_STEP_PLANS,
   type RunUpdatedEvent,
   type StepUpdatedEvent,
@@ -56,7 +57,8 @@ afterEach(async () => {
 type Received =
   | { method: 'event.run.updated'; params: RunUpdatedEvent }
   | { method: 'event.step.updated'; params: StepUpdatedEvent }
-  | { method: 'event.proposal.changed'; params: ProposalChangedEvent };
+  | { method: 'event.proposal.changed'; params: ProposalChangedEvent }
+  | { method: 'event.ruleWriter.changed'; params: RuleWriterChangedEvent };
 
 /** 받은 알림을 차례대로 모은다. 알림을 받을 때마다 `onNotice`를 부른다(받은 순간의 재조회). */
 const collect = (
@@ -157,6 +159,8 @@ const runState = (notice: Received): string => {
       return `step ${notice.params.kind}#${String(notice.params.attempt)}:${notice.params.status}`;
     case 'event.proposal.changed':
       return `proposal ${notice.params.displayId}:${notice.params.state}`;
+    case 'event.ruleWriter.changed':
+      return `ruleWriter ${notice.params.requirementId}`;
   }
 };
 
@@ -580,6 +584,68 @@ describe('제안 생성 · 처리마다 event.proposal.changed (M1-36, TODO-01 �
     ).rejects.toMatchObject({ code: -32009 });
     await caller.call('ping');
     expect(received).toHaveLength(before);
+  }, 60_000);
+});
+
+describe('규칙 작성 시도 기록이 바뀔 때마다 event.ruleWriter.changed (M3-26, NRM-02 · SCR-02 · ADR-099)', () => {
+  it('설정 미비 생략 · 다시 시도의 대기 · 시작 · 끝마다 알림이 가고, 받은 순간 ruleWriter.status가 그 기록이다', async () => {
+    const s = await start();
+    const watcher = await client(s);
+    const caller = await client(s);
+    // 알림을 받은 순간 화면이 다시 조회하는 값 (렌더러의 ruleWriter.status 재조회와 같다)
+    const seen: Promise<string>[] = [];
+    const received = collect(watcher, (notice) => {
+      if (notice.method !== 'event.ruleWriter.changed') return;
+      seen.push(
+        caller
+          .call('ruleWriter.status', {
+            projectId: notice.params.projectId,
+            requirementId: notice.params.requirementId,
+          })
+          .then(({ entries }) =>
+            entries.map((e) => `${e.state}:${e.skipReason ?? e.endReason ?? '-'}`).join(','),
+          ),
+      );
+    });
+
+    // 설정이 없으면 생략 기록 1개 → 알림 1개
+    await caller.call('settings.update', {
+      projectId: s.project.id,
+      patch: { roles: { 'rule-writer': { model: null } } },
+      author: human,
+    });
+    const { requirement } = await caller.call('requirement.create', {
+      projectId: s.project.id,
+      text: '헬스 체크 응답에 서버 시각 포함',
+      author: human,
+    });
+    await waitFor(() => seen.length === 1, 10_000, '생략 알림');
+    expect(await seen[0]).toBe('skipped:settings_incomplete');
+
+    // 설정 뒤 직접 편집 저장 → 다시 시도: 대기 → 진행 중 → 끝(성공)
+    await caller.call('settings.update', {
+      projectId: s.project.id,
+      patch: {
+        run: { maxBudgetUsd: 5, maxTurns: 200 },
+        roles: { 'rule-writer': { model: 'test-model', maxBudgetUsd: 1, maxTurns: 20 } },
+      },
+      author: human,
+    });
+    await caller.call('requirement.update', {
+      projectId: s.project.id,
+      id: requirement.id,
+      text: '헬스 체크 응답에 서버 시각을 포함',
+      author: human,
+    });
+    await waitFor(() => seen.length === 4, 30_000, '다시 시도 알림 3건');
+    const states = await Promise.all(seen);
+    // 대기 · 시작 알림의 재조회는 이미 다음 상태일 수 있다(세션이 빨리 끝남). 마지막은 끝난 상태다
+    expect(states[3]).toBe('ended:success');
+    expect(
+      received.filter((n) => n.method === 'event.ruleWriter.changed').map((n) => n.params),
+    ).toEqual(
+      Array.from({ length: 4 }, () => ({ projectId: s.project.id, requirementId: requirement.id })),
+    );
   }, 60_000);
 });
 

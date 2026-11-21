@@ -12,6 +12,7 @@ import { migration as m0007 } from './0007_session_budget.js';
 import { migration as m0008 } from './0008_judgments.js';
 import { migration as m0009 } from './0009_code_open_records.js';
 import { migration as m0010 } from './0010_tool_call_empty_name.js';
+import { migration as m0011 } from './0011_rule_writer_requests.js';
 
 export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0001,
@@ -24,4 +25,5 @@ export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0008,
   m0009,
   m0010,
+  m0011,
 ];

@@ -755,6 +755,32 @@ describe('재개 · 재기동의 예외 경로 (리뷰 반영)', () => {
     const closed = withProject(h.biveHome, h.project.id, (store) => store.sessions.get(sessionId));
     expect(closed).toMatchObject({ endReason: 'aborted', error: '오케스트레이터가 비정상 종료됨' });
   });
+
+  it('재기동 복구는 세션을 열기 전 대기열에 남은 규칙 작성 시도를 생략(closed)으로 끝내고 다시 띄우지 않는다 (M3-26, ADR-099)', () => {
+    const h = setup();
+    const requirementId = h.rule.parentRequirementId ?? '';
+    const pending = newId();
+    withProject(h.biveHome, h.project.id, (store) => {
+      store.ruleWriterRequests.create({
+        id: pending,
+        requirementId,
+        requestedAt: new Date().toISOString(),
+      });
+    });
+    expect(h.engine.recoverInterruptedRuns()).toEqual([]);
+    const attempt = withProject(h.biveHome, h.project.id, (store) =>
+      store.ruleWriterRequests.latest(requirementId),
+    );
+    expect(attempt).toMatchObject({
+      id: pending,
+      state: 'skipped',
+      skipReason: 'closed',
+      error: '오케스트레이터가 비정상 종료됨',
+    });
+    expect(
+      withProject(h.biveHome, h.project.id, (store) => store.sessions.get(pending)),
+    ).toBeNull();
+  });
 });
 
 describe('비정상 종료(SIGKILL) 뒤 재기동 · run.resume (수용 기준 3 · 4, 실제 프로세스)', () => {

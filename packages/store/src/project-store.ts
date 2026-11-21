@@ -15,6 +15,7 @@ import { ProjectRepository } from './repositories/project-repository.js';
 import { ProposalRepository } from './repositories/proposal-repository.js';
 import { RequirementRepository } from './repositories/requirement-repository.js';
 import { RuleRepository } from './repositories/rule-repository.js';
+import { RuleWriterRequestRepository } from './repositories/rule-writer-request-repository.js';
 import { RunRepository } from './repositories/run-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
 import { SettingsRepository } from './repositories/settings-repository.js';
@@ -47,6 +48,8 @@ export class ProjectStore {
   readonly judgments: JudgmentRepository;
   /** 코드 열람 기록 (MET-01, ADR-084). 추가만 하고 사람이 사유를 골라 연 때마다 1건이다. */
   readonly codeOpens: CodeOpenRepository;
+  /** 규칙 작성 시도 기록 (NRM-02, ADR-099). 세션을 연 시도의 결과는 `sessions`에 있다. */
+  readonly ruleWriterRequests: RuleWriterRequestRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -65,6 +68,7 @@ export class ProjectStore {
     this.runs = new RunRepository(db, projectId, this.sequences, this.sessions);
     this.judgments = new JudgmentRepository(db);
     this.codeOpens = new CodeOpenRepository(db, projectId);
+    this.ruleWriterRequests = new RuleWriterRequestRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */
