@@ -59,6 +59,7 @@ import { createImplementationExecutor } from '../steps/implementation.js';
 import { createMergeExecutor } from '../steps/merge.js';
 import { createRedCheckExecutor } from '../steps/red-check.js';
 import { createTestWritingExecutor } from '../steps/test-writing.js';
+import { dailyBudgetReached, projectDailyBudget } from '../settings/project-budget.js';
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
 import { budgetOverrun, sessionLimits } from './session-budget.js';
 import {
@@ -1168,15 +1169,26 @@ export class PipelineEngine {
     const role = STEP_ROLES[step.kind];
     if (role === null) throw new Error(`에이전트 역할이 없는 단계입니다: ${step.kind}`);
     const model = run.modelSnapshot[role];
-    const { limits, index } = this.#store(projectId, (store) => {
+    // 프로젝트 하루 한도(ADR-104)는 실행 스냅샷이 아니라 지금 설정과 저장된 오늘의 세션 기록에서 읽는다
+    const { limits, index, daily } = this.#store(projectId, (store) => {
       const sessions = store.sessions.listByRun(run.id);
+      const daily = projectDailyBudget(store, store.settings.get(), this.#now());
       return {
-        limits: sessionLimits(run.budgetSnapshot, role, sessions),
+        limits: sessionLimits(run.budgetSnapshot, role, sessions, daily?.remaining),
         index: sessions.filter((session) => session.role === role).length,
+        daily,
       };
     });
     if (model === undefined || limits === undefined) {
       throw new StepHaltError('failed', 'settings_missing', { role });
+    }
+    if (daily !== null && dailyBudgetReached(daily)) {
+      throw new StepHaltError('budget_exceeded', 'project_daily_budget_exceeded', {
+        role,
+        day: daily.day,
+        limit: daily.limit,
+        ...daily.spend,
+      });
     }
     if (limits === null) throw new StepHaltError('budget_exceeded', 'budget_exhausted', { role });
     signal.throwIfAborted();

@@ -222,6 +222,7 @@ const settings = {
     implementer: emptyRole,
     chat: emptyRole,
   },
+  dailyBudgetUsd: null,
   approvalQueueLimit: 40,
   provisionalPolicy: 'off',
   autoMode: false,
@@ -308,6 +309,17 @@ describe('프로젝트 · 설정', () => {
     expect(role({ ...emptyRole, model: '  ' })).toBe(false);
     expect(role({ ...emptyRole, model: 'm'.repeat(201) })).toBe(false);
     expect(role({ ...emptyRole, model: 'model-a' })).toBe(true);
+    // 프로젝트 하루 한도(ADR-104): 비움(null) · 0 이상 수, 음수 · 무한대 · 키 없음은 거부
+    const daily = (value: unknown) =>
+      Settings.safeParse({ ...settings, dailyBudgetUsd: value }).success;
+    expect(daily(null)).toBe(true);
+    expect(daily(0)).toBe(true);
+    expect(daily(2.5)).toBe(true);
+    expect(daily(-0.01)).toBe(false);
+    expect(daily(Infinity)).toBe(false);
+    const withoutDaily: Record<string, unknown> = { ...settings };
+    delete withoutDaily.dailyBudgetUsd;
+    expect(Settings.safeParse(withoutDaily).success).toBe(false);
     expect(
       Settings.safeParse({ ...settings, roles: { ...settings.roles, reviewer: emptyRole } })
         .success,

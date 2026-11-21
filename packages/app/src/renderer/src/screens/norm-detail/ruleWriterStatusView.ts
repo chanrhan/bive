@@ -23,6 +23,7 @@ export const SKIP_REASON_LABELS = {
   closed: '오케스트레이터 종료',
   start_failed: '시작 실패',
   requirement_unavailable: '요구사항 없음',
+  project_daily_budget_exceeded: '프로젝트 하루 예산 초과',
 } as const satisfies Record<RuleWriterSkipReason, string>;
 
 export const RULE_WRITER_TEXT = {

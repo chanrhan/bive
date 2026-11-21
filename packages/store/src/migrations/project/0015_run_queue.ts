@@ -1,7 +1,7 @@
 import type { Migration } from '../../migrate.js';
 
 /**
- * 실행 대기 (RUN-01 · RUN-08, ADR-100 B⑥ · A13, M7-06 #218, ADR-105).
+ * 실행 대기 (RUN-01 · RUN-08, ADR-100 B⑥ · A13, M7-06 #218, ADR-105). 0014는 #237(규칙 작성 하루 예산 건너뜀)의 것이다.
  * 1. `runs.status` CHECK에 `queued`(실행 대기: 프로젝트에 진행 중 · 중단된 실행이 있어 시작을 기다림)를 더한다. SQLite는
  *    CHECK를 바꾸는 ALTER가 없어 표를 다시 만든다(0010 · 0012와 같은 순서): 새 표 → 행 복사(rowid 순, 값 그대로) → 옛
  *    트리거 · 표 삭제 → 이름 바꾸기 → 색인 · 트리거 다시 만들기. 나머지 칸 · 색인 · 트리거는 0005와 글자까지 같다.
@@ -22,11 +22,11 @@ import type { Migration } from '../../migrate.js';
  * 머지된 0005는 고치지 않는다.
  */
 export const migration: Migration = {
-  version: 14,
+  version: 15,
   name: 'run_queue',
   disableForeignKeys: true,
   up: `
-CREATE TABLE runs_v14 (
+CREATE TABLE runs_v15 (
   id TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 26),
   display_id TEXT NOT NULL UNIQUE CHECK (display_id GLOB 'EXE-[0-9][0-9][0-9]*'),
   type TEXT NOT NULL CHECK (type IN ('A', 'B', 'C', 'D')),
@@ -68,7 +68,7 @@ CREATE TABLE runs_v14 (
   ended_at TEXT CHECK (ended_at IS NULL OR length(ended_at) > 0)
 ) STRICT;
 
-INSERT INTO runs_v14 (
+INSERT INTO runs_v15 (
   id, display_id, type, status, current_step, last_completed_step, regression_count, failure_reason,
   branch, worktree_path, base_branch, base_commit, head_commit, merge_commit, budget_snapshot,
   model_snapshot, cost_usd, turns, tool_manifest, started_by, created_at, started_at, ended_at
@@ -86,7 +86,7 @@ DROP TRIGGER runs_no_delete;
 DROP TRIGGER steps_run_terminal_insert;
 DROP TRIGGER steps_final;
 DROP TABLE runs;
-ALTER TABLE runs_v14 RENAME TO runs;
+ALTER TABLE runs_v15 RENAME TO runs;
 
 CREATE INDEX runs_status ON runs (status);
 

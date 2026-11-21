@@ -1,5 +1,5 @@
 // 단계 세션의 한도 · 집계 초과 판정 (COST-01, NFR-07, ADR-024 · ADR-061 · ADR-066 · ADR-067).
-// 세션 한도 = min(역할 잔여, 실행 잔여). 기준은 실행 시작 때 복사한 예산 스냅샷이고, 사용량은 저장된 세션 결과의
+// 세션 한도 = min(역할 잔여, 실행 잔여, 프로젝트 하루 잔여(USD만, M7-04 · ADR-104)). 기준은 실행 시작 때 복사한 예산 스냅샷이고, 사용량은 저장된 세션 결과의
 // 합(나노 달러 정수 합산)이다. 표시 · 기록용 합계(`sumSessionUsage`)는 값 없음을 `null`로 두지만(COST-02), 한도
 // 계산에서는 값을 모르는 세션을 0으로 세지 않는다(NFR-07, 중단 · 재개를 되풀이해도 쓴 돈이 예산에서 빠지지 않게):
 // - init 보고 없이 끝난 세션: 모델 호출 전에 끝났으므로 0 (SDK는 첫 모델 요청 전에 init을 낸다)
@@ -107,11 +107,14 @@ const chargedUsage = (
 
 /**
  * 다음 세션의 한도. 역할 스냅샷이 없으면 `undefined`(설정 미비), 남은 USD · 턴 중 하나라도 0 이하면 `null`(예산 소진).
+ * `dailyRemainingUsd`는 프로젝트 하루 한도의 남은 USD(`projectDailyBudget`의 `remaining`, 하루 한도가 비어 있으면
+ * 생략 = 무한)다. 세션 USD 한도 = min(역할 잔여, 실행 잔여, 프로젝트 하루 잔여) (COST-01, ADR-104).
  */
 export const sessionLimits = (
   snapshot: BudgetSnapshot,
   role: AgentRole,
   sessions: readonly Session[],
+  dailyRemainingUsd: number = Infinity,
 ): SessionBudget | null | undefined => {
   const roleLimits = snapshot.roles[role];
   if (roleLimits === undefined) return undefined;
@@ -119,6 +122,7 @@ export const sessionLimits = (
   const maxBudgetUsd = Math.min(
     remainingUsd(roleLimits.maxBudgetUsd, own.usd.value),
     remainingUsd(snapshot.run.maxBudgetUsd, all.usd.value),
+    dailyRemainingUsd,
   );
   const maxTurns = Math.min(
     roleLimits.maxTurns - own.turns.value,

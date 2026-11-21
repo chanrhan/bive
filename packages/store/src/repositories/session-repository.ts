@@ -159,6 +159,7 @@ export class SessionRepository {
   readonly #select;
   readonly #selectByRun;
   readonly #selectByRequirement;
+  readonly #selectStartedAround;
   readonly #selectUnended;
   readonly #selectCallsBySession;
   readonly #countByRunRole;
@@ -194,6 +195,12 @@ export class SessionRepository {
     );
     this.#selectByRequirement = db.prepare<[string], SessionRow>(
       `SELECT ${SESSION_COLUMNS} FROM sessions WHERE requirement_id = ? ORDER BY started_at, id`,
+    );
+    // 시각 문자열은 소수 초 자릿수가 다를 수 있어 문자열 비교로 경계를 정확히 가르지 못한다: 날짜 접두로 넉넉히 고르고
+    // 정확한 구간은 `listStartedBetween`이 시각 값으로 거른다
+    this.#selectStartedAround = db.prepare<[string, string], SessionRow>(
+      `SELECT ${SESSION_COLUMNS} FROM sessions WHERE started_at >= ? AND started_at < ?
+       ORDER BY started_at, id`,
     );
     this.#selectCallsBySession = db.prepare<[string], ToolCallRow>(
       `SELECT ${TOOL_CALL_COLUMNS} FROM tool_calls WHERE session_id = ? ORDER BY seq`,
@@ -298,6 +305,25 @@ export class SessionRepository {
   /** 실행 밖 세션 포함, 요구사항을 대상으로 한 세션 (시작 순). */
   listByRequirement(requirementId: string): Session[] {
     return this.#selectByRequirement.all(requirementId).map(toSession);
+  }
+
+  /**
+   * 시작 시각이 `[from, to)`(밀리초 시각) 안인 세션 전부 (실행 세션 · 실행 밖 세션, 시작 순). 프로젝트 하루 지출 합산의
+   * 원천이다 (COST-01, ADR-100 B⑤ · A12, ADR-104).
+   */
+  listStartedBetween(from: number, to: number): Session[] {
+    if (!(from < to)) return [];
+    const day = 24 * 60 * 60 * 1000;
+    // UTC 날짜 접두('YYYY-MM-DD')는 그날의 모든 시각 문자열보다 작거나 같다. 앞뒤로 하루씩 넓혀 고른다
+    const lower = new Date(from - day).toISOString().slice(0, 10);
+    const upper = new Date(to + day).toISOString().slice(0, 10);
+    return this.#selectStartedAround
+      .all(lower, upper)
+      .map(toSession)
+      .filter((session) => {
+        const at = Date.parse(session.startedAt);
+        return at >= from && at < to;
+      });
   }
 
   /** 세션의 도구 호출 기록 (순번 순). */

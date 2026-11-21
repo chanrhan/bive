@@ -190,6 +190,46 @@ describe('sessions', () => {
     });
   });
 
+  it('시작 시각 구간 [from, to)의 세션을 실행 · 실행 밖 구분 없이 시작 순으로 돌려준다 (소수 초 자릿수가 달라도 시각 값으로 비교, M7-04)', () => {
+    withStore((store) => {
+      const requirementId = store.requirements.create({
+        id: newId(),
+        text: '구간 시험',
+        author: human,
+        normState: 'approved',
+        createdAt: T0,
+      }).id;
+      const start = (startedAt: string): string => {
+        const id = newId();
+        store.sessions.start({
+          id,
+          runId: null,
+          stepId: null,
+          requirementId,
+          role: 'rule-writer',
+          model: 'm',
+          workDir: '/w',
+          startedAt,
+        });
+        return id;
+      };
+      const before = start('2026-11-20T23:59:59.999Z');
+      const atFrom = start('2026-11-21T00:00:00Z');
+      const inside = start('2026-11-21T12:00:00.5Z');
+      const last = start('2026-11-21T23:59:59.999Z');
+      start('2026-11-22T00:00:00.000Z');
+      const from = Date.parse('2026-11-21T00:00:00.000Z');
+      const to = Date.parse('2026-11-22T00:00:00.000Z');
+      expect(store.sessions.listStartedBetween(from, to).map((s) => s.id)).toEqual([
+        atFrom,
+        inside,
+        last,
+      ]);
+      expect(store.sessions.listStartedBetween(from - 1, from).map((s) => s.id)).toEqual([before]);
+      expect(store.sessions.listStartedBetween(to, from)).toEqual([]);
+    });
+  });
+
   it('도구 호출은 세션 안 순번을 붙여 추가만 한다', () => {
     withStore((store) => {
       const { run, steps } = seedRun(store);

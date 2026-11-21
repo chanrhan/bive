@@ -657,13 +657,79 @@ describe('0012 confirmations: 확인 상태 · 승인 기록 행동 넓히기 ·
   });
 });
 
-describe('0014 run_queue: 실행 대기 상태 · 프로젝트당 진행 중 1개 (M7-06 #218, ADR-100 B⑥, ADR-105)', () => {
+describe('0014 rule_writer_daily_budget_skip: 생략 사유 프로젝트 하루 예산 초과 (M7-04 #216, ADR-104)', () => {
+  const insertRequirement = (db: SqliteDatabase, id: string) =>
+    db
+      .prepare(
+        `INSERT INTO requirements (id, display_id, text, author, norm_state, created_at, updated_at, updated_by)
+         VALUES (?, 'REQ-001', '요구사항', '{"kind":"human"}', 'approved', '2026-11-21T00:00:00.000Z',
+         '2026-11-21T00:00:00.000Z', '{"kind":"human"}')`,
+      )
+      .run(id);
+  const insertAttempt = (db: SqliteDatabase, id: string, requirementId: string, reason: string) =>
+    db
+      .prepare(
+        `INSERT INTO rule_writer_requests (id, requirement_id, requested_at, skip_reason, skip_detail, missing, skipped_at)
+         VALUES (?, ?, '2026-11-21T00:00:01.000Z', ?, '설명', '[]', '2026-11-21T00:00:01.000Z')`,
+      )
+      .run(id, requirementId, reason);
+  const objectSql = (db: SqliteDatabase) =>
+    db
+      .prepare(
+        "SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'rule_writer_requests' AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY name",
+      )
+      .all();
+
+  it('0013까지의 시도 기록은 값 그대로 옮기고, 새 생략 사유를 받게 되며, 트리거 · 색인 · 다른 CHECK는 그대로다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 13), { now: fixedNow });
+      const requirementId = newId();
+      insertRequirement(db, requirementId);
+      insertAttempt(db, newId(), requirementId, 'settings_incomplete');
+      // 0013까지는 새 사유를 DB CHECK가 막는다
+      expect(() =>
+        insertAttempt(db, newId(), requirementId, 'project_daily_budget_exceeded'),
+      ).toThrow(/CHECK/);
+      const before = db.prepare('SELECT * FROM rule_writer_requests').all();
+      const sqlBefore = objectSql(db);
+      expect(sqlBefore).toHaveLength(5);
+
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 14), { now: fixedNow }).applied).toEqual([14]);
+      expect(db.prepare('SELECT * FROM rule_writer_requests').all()).toEqual(before);
+      insertAttempt(db, newId(), requirementId, 'project_daily_budget_exceeded');
+      expect(
+        db.prepare('SELECT skip_reason FROM rule_writer_requests ORDER BY rowid').all(),
+      ).toEqual([
+        { skip_reason: 'settings_incomplete' },
+        { skip_reason: 'project_daily_budget_exceeded' },
+      ]);
+      // 모르는 사유 · 덮어쓰기 · 생략된 시도 수정 · 삭제는 그대로 거부한다
+      expect(() => insertAttempt(db, newId(), requirementId, 'budget')).toThrow(/CHECK/);
+      const [first] = before as { id: string }[];
+      expect(() => insertAttempt(db, first?.id ?? '', requirementId, 'closed')).toThrow(
+        /덮어쓰기 금지/,
+      );
+      expect(() => db.prepare("UPDATE rule_writer_requests SET skip_detail = 'x'").run()).toThrow(
+        /바꿀 수 없/,
+      );
+      expect(() => db.prepare('DELETE FROM rule_writer_requests').run()).toThrow(/지울 수 없/);
+      // 트리거 4개 · 색인 1개의 SQL 본문은 0011과 글자까지 같다
+      expect(objectSql(db)).toEqual(sqlBefore);
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%_v14%'").all()).toEqual(
+        [],
+      );
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+    });
+  });
+});
+
+describe('0015 run_queue: 실행 대기 상태 · 프로젝트당 진행 중 1개 (M7-06 #218, ADR-100 B⑥, ADR-105)', () => {
   const T = (minute: number) => `2026-11-21T00:${String(minute).padStart(2, '0')}:00.000Z`;
   const human = '{"kind":"human"}';
   const SHA = 'c'.repeat(40);
   const BUDGET = '{"run":{"maxBudgetUsd":5,"maxTurns":100},"roles":{}}';
 
-  /** 0013까지 적용한 DB에 그때의 스키마 그대로 요구사항 · 규칙을 넣는다. 규칙 ID를 돌려준다. */
+  /** 0014까지 적용한 DB에 그때의 스키마 그대로 요구사항 · 규칙을 넣는다. 규칙 ID를 돌려준다. */
   const seedNorms = (db: SqliteDatabase): string => {
     const req = newId();
     const rule = newId();
@@ -734,9 +800,9 @@ describe('0014 run_queue: 실행 대기 상태 · 프로젝트당 진행 중 1�
   const setStatus = (db: SqliteDatabase, id: string, status: string) =>
     db.prepare('UPDATE runs SET status = ? WHERE id = ?').run(status, id);
 
-  it('0013까지의 DB(실행 · 단계 · 세션 · 도구 호출 · 판정 있음): 실행 행은 값 · 순서 그대로, 자식 표의 행 · 외래 키 · 트리거 · 색인은 그대로이고 실행 대기를 받는다', () => {
+  it('0014까지의 DB(실행 · 단계 · 세션 · 도구 호출 · 판정 있음): 실행 행은 값 · 순서 그대로, 자식 표의 행 · 외래 키 · 트리거 · 색인은 그대로이고 실행 대기를 받는다', () => {
     withDb((db) => {
-      migrate(db, PROJECT_MIGRATIONS.slice(0, 13), { now: fixedNow });
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 14), { now: fixedNow });
       const rule = seedNorms(db);
       const merged = newId();
       const interrupted = newId();
@@ -758,7 +824,7 @@ describe('0014 run_queue: 실행 대기 상태 · 프로젝트당 진행 중 1�
         `INSERT INTO judgments (id, rule_id, run_id, step_id, commit_sha, judged_at, status, runner, exit_code,
          reporter_path, cases, quarantine_reason) VALUES (?, ?, ?, ?, ?, ?, 'pass', 'vitest', 0, NULL, '[]', NULL)`,
       ).run(newId(), rule, interrupted, step, SHA, T(8));
-      // 0013까지는 실행 대기를 DB CHECK가 막는다
+      // 0014까지는 실행 대기를 DB CHECK가 막는다
       expect(() => insertRun(db, rule, { id: newId(), seq: 9, status: 'queued' })).toThrow(/CHECK/);
 
       const rows = (table: string) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
@@ -769,7 +835,7 @@ describe('0014 run_queue: 실행 대기 상태 · 프로젝트당 진행 중 1�
       const sqlBefore = objectSql(db);
       const runsTableBefore = tableSql(db, 'runs');
 
-      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 14), { now: fixedNow }).applied).toEqual([14]);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 15), { now: fixedNow }).applied).toEqual([15]);
 
       // 행 · 순서 · 값 그대로, 자식 표의 행 · 정의(외래 키 `REFERENCES runs`) 그대로, 위반 없음, 외래 키 검사는 켜진 채
       expect(rows('runs')).toEqual(runsBefore);
@@ -778,7 +844,7 @@ describe('0014 run_queue: 실행 대기 상태 · 프로젝트당 진행 중 1�
       expect(db.pragma('foreign_key_check')).toEqual([]);
       expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
       expect(
-        db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'runs_v14%'").all(),
+        db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'runs_v15%'").all(),
       ).toEqual([]);
       // 표 정의는 상태 CHECK에 실행 대기가 더해진 것뿐이다 (시작 주체의 사람 CHECK도 그대로, ADR-105)
       expect(tableSql(db, 'runs').replace(/^CREATE TABLE "runs"/, 'CREATE TABLE runs')).toBe(
@@ -846,10 +912,10 @@ describe('0014 run_queue: 실행 대기 상태 · 프로젝트당 진행 중 1�
     });
   });
 
-  it('0013까지의 빈 DB에도 적용되고, 다시 실행해도 스키마가 같다', () => {
+  it('0014까지의 빈 DB에도 적용되고, 다시 실행해도 스키마가 같다', () => {
     withDb((db) => {
-      migrate(db, PROJECT_MIGRATIONS.slice(0, 13), { now: fixedNow });
-      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([14]);
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 14), { now: fixedNow });
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([15]);
       const schema = schemaOf(db);
       expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
       expect(schemaOf(db)).toEqual(schema);

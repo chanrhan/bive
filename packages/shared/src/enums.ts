@@ -272,6 +272,8 @@ export const RuleWriterSkipReason = z.enum([
   'start_failed',
   /** 대기하는 사이 요구사항이 삭제됐거나 읽을 수 없게 됨 */
   'requirement_unavailable',
+  /** 프로젝트의 오늘(기기의 로컬 날짜) 지출이 하루 예산 한도에 이름 (COST-01, ADR-100 B⑤ · A12, ADR-104) */
+  'project_daily_budget_exceeded',
 ]);
 export type RuleWriterSkipReason = z.infer<typeof RuleWriterSkipReason>;
 export const RULE_WRITER_SKIP_REASON_LABELS = {
@@ -279,6 +281,7 @@ export const RULE_WRITER_SKIP_REASON_LABELS = {
   closed: '오케스트레이터 종료',
   start_failed: '시작 실패',
   requirement_unavailable: '요구사항 없음',
+  project_daily_budget_exceeded: '프로젝트 하루 예산 초과',
 } as const satisfies Record<RuleWriterSkipReason, string>;
 
 /** 규칙 작성 시도 하나의 상태: 대기 · 진행 중 · 끝남(종료 사유는 세션 기록) · 생략. */

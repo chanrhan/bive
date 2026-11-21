@@ -759,10 +759,12 @@ describe('재개 · 재기동의 예외 경로 (리뷰 반영)', () => {
     return { h, engine };
   };
 
-  it('워크트리를 되돌리지 못하면 -32009, 실행은 interrupted 그대로, 예약은 풀린다', async () => {
+  it('워크트리를 되돌리지 못하면(일시적일 수 있는 명령 실패) -32009, 실행은 interrupted 그대로, 예약은 풀린다', async () => {
     const { h, engine } = await interruptedHarness();
     const before = detailOf(h);
-    fs.rmSync(String(before.run.worktreePath), { recursive: true, force: true });
+    // 명령 실패(워크트리의 .git 연결이 깨짐). 워크트리가 아예 없는 것 같은 복구 불가 사유는 그 재개 안에서 실행을
+    // 실패로 끝낸다 (ADR-105, run-queue.test.ts)
+    fs.writeFileSync(path.join(String(before.run.worktreePath), '.git'), 'gitdir: /nonexistent\n');
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const error: unknown = await engine

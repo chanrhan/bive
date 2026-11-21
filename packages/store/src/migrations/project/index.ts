@@ -15,7 +15,8 @@ import { migration as m0010 } from './0010_tool_call_empty_name.js';
 import { migration as m0011 } from './0011_rule_writer_requests.js';
 import { migration as m0012 } from './0012_confirmations.js';
 import { migration as m0013 } from './0013_norm_changes.js';
-import { migration as m0014 } from './0014_run_queue.js';
+import { migration as m0014 } from './0014_rule_writer_daily_budget_skip.js';
+import { migration as m0015 } from './0015_run_queue.js';
 
 export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0001,
@@ -32,4 +33,5 @@ export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0012,
   m0013,
   m0014,
+  m0015,
 ];

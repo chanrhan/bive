@@ -1,5 +1,6 @@
 // SCR-21 설정 (screens.md 7장 X-02, ADR-010 · ADR-035 · ADR-057): 사이드바 하단 톱니 → 모달(820 × 600).
-// 예산 · 모델 섹션: 실행 전체 한도(USD · 턴) + 역할별(rule-writer · test-writer · implementer) 모델 · 한도.
+// 예산 · 모델 섹션: 실행 전체 한도(USD · 턴) + 프로젝트 하루 한도(USD, 비움 허용, M7-04 · ADR-104)
+// + 역할별(rule-writer · test-writer · implementer) 모델 · 한도.
 // 섹션 목록에는 IDE(코드 열기, ADR-018 · ADR-087)가 하나 더 있다. 기본 상태는 예산 · 모델이 골라져 있다.
 // 나머지 섹션(잠정 승인 · 자동 모드 · 대기열 · 작성 규칙)과 planner · 채팅 역할 행은 DOM에 없다.
 // 상태: 기본 = 모달 열림 · 저장된 설정(검증 통과), 빈 = 미설정(한 번도 저장하지 않음, 화면 정의서에 정의 없음 · ADR-029).
@@ -9,6 +10,8 @@ export const SETTINGS_TEXT = {
   title: '설정',
   section: '예산 · 모델',
   run: '실행 전체',
+  daily: '프로젝트 하루',
+  dailyNote: '비움: 한도 없음 · 자동 시작 없음',
   roles: '역할별',
   save: '저장',
   close: '닫기',
@@ -35,6 +38,9 @@ export const FIELD_NAMES = [
   ...ROLE_ROWS.flatMap((role) => [`${role} 모델`, `${role} 한도 USD`, `${role} 턴`]),
 ] as const;
 
+/** 프로젝트 하루 한도 입력 칸의 접근 가능한 이름 (필수 칸이 아니라 `FIELD_NAMES`와 따로 둔다, ADR-104). */
+export const DAILY_FIELD_NAME = '프로젝트 하루 한도 USD';
+
 /** 미노출 섹션 (ADR-035). 기능을 여는 이슈가 이 목록에서 빼고 체크리스트를 고친다. */
 export const HIDDEN_SECTIONS = ['잠정 승인', '자동 모드', '대기열', '작성 규칙'] as const;
 
@@ -57,6 +63,9 @@ const modal = (validation: string): StateChecklist => {
     },
     { label: '섹션 제목', role: 'heading', name: SETTINGS_TEXT.section },
     { label: '실행 전체 묶음', role: 'group', name: SETTINGS_TEXT.run },
+    { label: '프로젝트 하루 묶음', role: 'group', name: SETTINGS_TEXT.daily },
+    { label: '입력 칸 프로젝트 하루 한도', role: 'textbox', name: DAILY_FIELD_NAME },
+    { label: '하루 한도 안내', testId: 'settings-daily-note', text: SETTINGS_TEXT.dailyNote },
     { label: '역할별 묶음', role: 'group', name: SETTINGS_TEXT.roles },
     ...ROLE_ROWS.map((role): ElementCheck => ({
       label: `역할 행 ${role}`,
