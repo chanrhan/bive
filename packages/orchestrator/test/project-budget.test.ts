@@ -15,7 +15,7 @@ import {
   type SettingsPatch,
 } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { AgentAdapter, SessionSpec } from '../src/agent/adapter.js';
 import { loadScenario } from '../src/agent/scenario.js';
@@ -89,13 +89,54 @@ const session = (totalCostUsd: number | null, extra: Partial<Session> = {}): Ses
   ...extra,
 });
 
-describe('하루의 경계: 기기의 로컬 날짜 (ADR-100 A12)', () => {
-  it('하루는 로컬 자정부터 다음 로컬 자정 직전까지다', () => {
-    const day = localDayOf(local(2026, 11, 21, 15, 30));
-    expect(day).toEqual({ start: local(2026, 11, 21), end: local(2026, 11, 22) });
+/**
+ * 시험 동안 기기 시간대를 바꾼다(UTC가 아닌 곳에서 로컬 날짜 경계를 단언해, 경계를 UTC 날짜로 바꾸면 빨강이 되게).
+ * vitest 워커에서 `process.env.TZ`를 바꾸면 `Date`의 로컬 계산에 바로 반영된다(아래 `offsetAtEpoch`로 확인).
+ */
+const useTimeZone = (zone: string): void => {
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env.TZ;
+    process.env.TZ = zone;
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.TZ;
+    else process.env.TZ = saved;
+  });
+};
+
+/** 시간대별: 1970-01-01의 UTC와의 차(분, `getTimezoneOffset`) · 그 시간대의 하루 경계 사례(UTC 시각). */
+const ZONES = [
+  {
+    zone: 'Asia/Seoul',
+    offsetAtEpoch: -540,
+    // 2026-11-22 00:30 KST = 2026-11-21T15:30Z → 그날은 2026-11-21T15:00Z ~ 2026-11-22T15:00Z
+    probe: '2026-11-21T15:30:00.000Z',
+    day: { start: '2026-11-21T15:00:00.000Z', end: '2026-11-22T15:00:00.000Z' },
+  },
+  {
+    zone: 'America/Los_Angeles',
+    offsetAtEpoch: 480,
+    // 일광 절약 시간이 끝나는 날(2026-11-01, 25시간): 01:30 PST 두 번째 = 09:30Z
+    probe: '2026-11-01T09:30:00.000Z',
+    day: { start: '2026-11-01T07:00:00.000Z', end: '2026-11-02T08:00:00.000Z' },
+  },
+] as const;
+
+describe.each(ZONES)('하루의 경계: 기기의 로컬 날짜 (ADR-100 A12, 시간대 $zone)', (zone) => {
+  useTimeZone(zone.zone);
+
+  it('하루는 로컬 자정부터 다음 로컬 자정 직전까지다 (UTC 날짜가 아니다)', () => {
+    expect(new Date(0).getTimezoneOffset()).toBe(zone.offsetAtEpoch);
+    const day = localDayOf(Date.parse(zone.probe));
+    expect({ start: iso(day.start), end: iso(day.end) }).toEqual(zone.day);
     // 자정 직전 · 자정은 서로 다른 날
-    expect(localDayOf(local(2026, 11, 21, 23, 59, 59, 999))).toEqual(day);
-    expect(localDayOf(local(2026, 11, 22)).start).toBe(day.end);
+    expect(localDayOf(day.end - 1)).toEqual(day);
+    expect(localDayOf(day.end).start).toBe(day.end);
+    expect(localDayOf(local(2026, 11, 21, 15, 30))).toEqual({
+      start: local(2026, 11, 21),
+      end: local(2026, 11, 22),
+    });
   });
 });
 
@@ -116,13 +157,22 @@ describe('하루 합산: 값을 모르는 세션은 ADR-067 규칙', () => {
       estimated: 0,
       unknownSessions: 1,
     });
-    // init 뒤 결과 없음 · 진행 중 = 그날 아는 최댓값 (그 세션 한도로 자름)
+    // 진행 중 = 그 세션에 넘긴 한도 전부 (예약, 그날 아는 값과 무관), init 전이어도 같다
     const running = session(null, { endReason: null, endedAt: null });
     expect(dailySpend([session(0.04), session(0.1), running], 1)).toMatchObject({
-      spent: 0.24,
+      spent: 0.64,
       known: 0.14,
-      estimated: 0.1,
+      estimated: 0.5,
       unknownSessions: 1,
+    });
+    const startingRun = session(null, { sdkSessionId: null, endReason: null, endedAt: null });
+    expect(dailySpend([session(0.001), startingRun], 1).estimated).toBe(0.5);
+    // 진행 중인데 한도 기록이 없으면(이 변경 전 세션) 하루 한도 전부
+    expect(dailySpend([session(0.001), { ...running, budget: null }], 0.3).estimated).toBe(0.3);
+    // init 뒤 결과 없이 끝남 = 그날 아는 최댓값 (그 세션 한도로 자름)
+    expect(dailySpend([session(0.04), session(0.1), session(null)], 1)).toMatchObject({
+      spent: 0.24,
+      estimated: 0.1,
     });
     const capped = session(null, { budget: { maxBudgetUsd: 0.07, maxTurns: 5 } });
     expect(dailySpend([session(0.1), capped], 1).estimated).toBe(0.07);
@@ -173,46 +223,52 @@ const seedSession = (
   });
 };
 
-describe('저장된 세션 기록에서 합산 · 날짜가 바뀌면 새로 시작', () => {
-  it('오늘 시작한 세션만 더하고, 자정이 지나면 합계가 0부터 다시 시작하며 다시 읽어도 같다', async () => {
-    const h = await startProjectHarness({ servers, clients });
-    const today = local(2026, 11, 21, 12);
-    h.read((store) => {
-      const requirementId = seedRequirement(store, local(2026, 11, 20, 8));
-      seedSession(store, requirementId, local(2026, 11, 20, 23, 59, 59, 999), 0.3); // 어제
-      seedSession(store, requirementId, local(2026, 11, 21, 0, 0, 0, 0), 0.1); // 오늘 자정
-      seedSession(store, requirementId, local(2026, 11, 21, 23, 59, 59, 999), 0.05); // 오늘 끝
-      seedSession(store, requirementId, local(2026, 11, 22, 0, 0, 0, 0), 0.2); // 내일
+describe.each(ZONES)(
+  '저장된 세션 기록에서 합산 · 날짜가 바뀌면 새로 시작 (시간대 $zone)',
+  (zone) => {
+    useTimeZone(zone.zone);
+
+    it('오늘 시작한 세션만 더하고, 자정이 지나면 합계가 0부터 다시 시작하며 다시 읽어도 같다', async () => {
+      expect(new Date(0).getTimezoneOffset()).toBe(zone.offsetAtEpoch);
+      const h = await startProjectHarness({ servers, clients });
+      const today = local(2026, 11, 21, 12);
+      h.read((store) => {
+        const requirementId = seedRequirement(store, local(2026, 11, 20, 8));
+        seedSession(store, requirementId, local(2026, 11, 20, 23, 59, 59, 999), 0.3); // 어제
+        seedSession(store, requirementId, local(2026, 11, 21, 0, 0, 0, 0), 0.1); // 오늘 자정
+        seedSession(store, requirementId, local(2026, 11, 21, 23, 59, 59, 999), 0.05); // 오늘 끝
+        seedSession(store, requirementId, local(2026, 11, 22, 0, 0, 0, 0), 0.2); // 내일
+      });
+      const at = (now: number) =>
+        h.read((store) => projectDailyBudget(store, { dailyBudgetUsd: 1 }, now));
+      expect(at(today)).toMatchObject({
+        day: { start: iso(local(2026, 11, 21)), end: iso(local(2026, 11, 22)) },
+        limit: 1,
+        remaining: 0.85,
+        spend: { spent: 0.15, sessionCount: 2 },
+      });
+      // 날짜가 바뀌면 합계가 새로 시작한다 (어제 · 오늘 세션은 빠진다)
+      expect(at(local(2026, 11, 22, 0, 0, 0, 0))).toMatchObject({
+        remaining: 0.8,
+        spend: { spent: 0.2, sessionCount: 1 },
+      });
+      expect(at(local(2026, 11, 23, 9))).toMatchObject({
+        remaining: 1,
+        spend: { spent: 0, sessionCount: 0 },
+      });
+      // 같은 저장소를 다시 열어 읽어도 같은 합계 (메모리 카운터가 아니다)
+      expect(at(today)?.spend.spent).toBe(0.15);
+      // 비움은 한도 없음
+      expect(
+        h.read((store) => projectDailyBudget(store, { dailyBudgetUsd: null }, today)),
+      ).toBeNull();
+      // 0은 지출이 0이어도 이미 한도에 이른 것
+      expect(
+        h.read((store) => projectDailyBudget(store, { dailyBudgetUsd: 0 }, local(2026, 11, 23))),
+      ).toMatchObject({ remaining: 0, spend: { spent: 0 } });
     });
-    const at = (now: number) =>
-      h.read((store) => projectDailyBudget(store, { dailyBudgetUsd: 1 }, now));
-    expect(at(today)).toMatchObject({
-      day: { start: iso(local(2026, 11, 21)), end: iso(local(2026, 11, 22)) },
-      limit: 1,
-      remaining: 0.85,
-      spend: { spent: 0.15, sessionCount: 2 },
-    });
-    // 날짜가 바뀌면 합계가 새로 시작한다 (어제 · 오늘 세션은 빠진다)
-    expect(at(local(2026, 11, 22, 0, 0, 0, 0))).toMatchObject({
-      remaining: 0.8,
-      spend: { spent: 0.2, sessionCount: 1 },
-    });
-    expect(at(local(2026, 11, 23, 9))).toMatchObject({
-      remaining: 1,
-      spend: { spent: 0, sessionCount: 0 },
-    });
-    // 같은 저장소를 다시 열어 읽어도 같은 합계 (메모리 카운터가 아니다)
-    expect(at(today)?.spend.spent).toBe(0.15);
-    // 비움은 한도 없음
-    expect(
-      h.read((store) => projectDailyBudget(store, { dailyBudgetUsd: null }, today)),
-    ).toBeNull();
-    // 0은 지출이 0이어도 이미 한도에 이른 것
-    expect(
-      h.read((store) => projectDailyBudget(store, { dailyBudgetUsd: 0 }, local(2026, 11, 23))),
-    ).toMatchObject({ remaining: 0, spend: { spent: 0 } });
-  });
-});
+  },
+);
 
 // ── 규칙 작성 세션 ─────────────────────────────────────────
 
@@ -484,4 +540,223 @@ describe('실행 세션 (수용 기준 1)', () => {
       withProject(biveHome, seeded.project.id, (store) => store.sessions.listByRun(secondId)),
     ).toEqual([]);
   }, 120_000);
+});
+
+// ── 겹쳐 도는 세션 (검토 1회차 B1) ───────────────────────────
+
+/** 시작한 세션을 `release` 전까지 붙잡는 어댑터 (붙잡을 역할만). 받은 한도를 역할과 함께 남긴다. */
+const holdingAdapter = (biveHome: string, holdRoles: readonly string[]) => {
+  let release = (): void => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const budgets: { role: string; maxBudgetUsd: number }[] = [];
+  const scripted = new ScriptedAdapter({
+    scenario: loadScenario('happy-path'),
+    biveHome,
+    pollIntervalMs: 20,
+  });
+  const adapter: AgentAdapter = {
+    kind: scripted.kind,
+    startSession: (spec) => {
+      budgets.push({ role: spec.role, maxBudgetUsd: spec.budget.maxBudgetUsd });
+      if (!holdRoles.includes(spec.role)) return scripted.startSession(spec);
+      return (async function* () {
+        await gate;
+        yield* scripted.startSession(spec);
+      })();
+    },
+  };
+  return { adapter, budgets, release: () => release() };
+};
+
+/** 오늘 진행 중 세션들에 넘긴 한도의 합 + 끝난 세션의 지출 (값을 아는 것만). */
+const committedToday = (store: ProjectStore): number => {
+  const day = localDayOf(Date.now());
+  const nano = store.sessions
+    .listStartedBetween(day.start, day.end)
+    .reduce(
+      (sum, s) =>
+        sum +
+        Math.round(
+          (s.endReason === null ? (s.budget?.maxBudgetUsd ?? Infinity) : (s.totalCostUsd ?? 0)) *
+            1e9,
+        ),
+      0,
+    );
+  return nano / 1e9;
+};
+
+const waitFor = async (check: () => boolean, what: string): Promise<void> => {
+  const deadline = Date.now() + 30_000;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`기다리는 조건이 채워지지 않음: ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+};
+
+describe('겹쳐 도는 세션: 진행 중 세션은 넘긴 한도 전부로 센다 (검토 1회차 B1, ADR-104)', () => {
+  const seedEnded = (biveHome: string, projectId: string, cost: number): void => {
+    withProject(biveHome, projectId, (store) => {
+      const requirementId = seedRequirement(store, Date.now() - 2000);
+      seedSession(store, requirementId, Date.now() - 1000, cost);
+    });
+  };
+
+  it('그날 끝난 세션이 있어도, 실행 세션이 도는 동안 차례로 시작한 다른 실행들의 한도 합 + 끝난 지출이 하루 한도를 넘지 않고 잔여 0이면 막힌다 (실행 + 실행)', async () => {
+    const biveHome = makeBiveHome();
+    const repo = copyFixture(temps);
+    const seeded = seedProject(biveHome, repo, {
+      ...COMPLETE_SETTINGS,
+      roles: {
+        ...COMPLETE_SETTINGS.roles,
+        'test-writer': { model: 'test-model', maxBudgetUsd: 0.05, maxTurns: 100 },
+      },
+      dailyBudgetUsd: 0.1,
+    });
+    seedEnded(biveHome, seeded.project.id, 0.001);
+    const held = holdingAdapter(biveHome, ['test-writer']);
+    const engine = new PipelineEngine({
+      biveHome,
+      agent: held.adapter,
+      executors: testExecutors(),
+    });
+    engines.push(engine);
+    const start = (): string => {
+      const runId = withProject(biveHome, seeded.project.id, (store) =>
+        createRun(
+          store,
+          { ruleIds: [seeded.rule.id], author: human },
+          { clientId: null },
+          { now: Date.now, newId: engineId },
+        ),
+      ).run.id;
+      expect(engine.evaluateApproval(seeded.project.id, runId)).toBe(true);
+      return runId;
+    };
+    const detail = (runId: string) =>
+      withProject(biveHome, seeded.project.id, (store) => store.runs.getDetail(runId));
+
+    // 첫 실행의 test-writer: min(0.05, 0.1 - 0.001) = 0.05, 붙잡힌 채 진행 중
+    start();
+    await waitFor(() => held.budgets.length === 1, '첫 세션');
+    // 둘째 실행: 진행 중 세션을 0.05로 세어 min(0.05, 0.1 - 0.001 - 0.05) = 0.049
+    start();
+    await waitFor(() => held.budgets.length === 2, '둘째 세션');
+    expect(held.budgets).toEqual([
+      { role: 'test-writer', maxBudgetUsd: 0.05 },
+      { role: 'test-writer', maxBudgetUsd: 0.049 },
+    ]);
+    expect(withProject(biveHome, seeded.project.id, committedToday)).toBe(0.1);
+    // 셋째 실행: 잔여 0 → 세션 없이 budget_exceeded(project_daily_budget_exceeded)
+    const third = start();
+    await waitFor(() => detail(third)?.run.status === 'budget_exceeded', '셋째 실행 종료');
+    expect(detail(third)?.run.failureReason).toBe('project_daily_budget_exceeded');
+    expect(held.budgets).toHaveLength(2);
+    held.release();
+    await engine.settled();
+  }, 120_000);
+
+  it('규칙 작성 세션이 도는 동안 시작한 실행 세션은 그 세션의 한도만큼 덜 받는다 (실행 + 규칙 작성)', async () => {
+    const biveHome = makeBiveHome();
+    const repo = copyFixture(temps);
+    const seeded = seedProject(biveHome, repo, {
+      ...COMPLETE_SETTINGS,
+      roles: {
+        ...COMPLETE_SETTINGS.roles,
+        'rule-writer': { model: 'test-model', maxBudgetUsd: 0.04, maxTurns: 20 },
+      },
+      dailyBudgetUsd: 0.1,
+    });
+    seedEnded(biveHome, seeded.project.id, 0.001);
+    const held = holdingAdapter(biveHome, ['rule-writer']);
+    const service = new RuleWriterService({ biveHome, adapter: held.adapter, now: Date.now });
+    services.push(service);
+    const engine = new PipelineEngine({
+      biveHome,
+      agent: held.adapter,
+      executors: testExecutors(),
+    });
+    engines.push(engine);
+
+    withProject(biveHome, seeded.project.id, (store) => {
+      const requirement = store.requirements.create({
+        id: engineId(),
+        text: '겹침 시험 요구사항',
+        author: human,
+        normState: 'approved',
+        createdAt: new Date().toISOString(),
+      });
+      return service.start(store, { projectId: seeded.project.id, requirement });
+    });
+    await waitFor(() => held.budgets.length === 1, '규칙 작성 세션');
+    const runId = withProject(biveHome, seeded.project.id, (store) =>
+      createRun(
+        store,
+        { ruleIds: [seeded.rule.id], author: human },
+        { clientId: null },
+        { now: Date.now, newId: engineId },
+      ),
+    ).run.id;
+    expect(engine.evaluateApproval(seeded.project.id, runId)).toBe(true);
+    await engine.settled();
+    // 규칙 작성 0.04(진행 중), test-writer min(2, 5, 0.1 - 0.001 - 0.04) = 0.059 → 0.0421,
+    // implementer 0.1 - 0.001 - 0.04 - 0.0421 = 0.0169
+    expect(held.budgets).toEqual([
+      { role: 'rule-writer', maxBudgetUsd: 0.04 },
+      { role: 'test-writer', maxBudgetUsd: 0.059 },
+      { role: 'implementer', maxBudgetUsd: 0.0169 },
+    ]);
+    held.release();
+    await service.idle();
+  }, 120_000);
+
+  it('진행 중 세션이 끝나 실제 값이 확정되면 덜 쓴 만큼이 다시 잔여가 된다', async () => {
+    const h = await startProjectHarness({ servers, clients });
+    const now = local(2026, 11, 21, 12);
+    const id = ulid();
+    const remaining = () =>
+      h.read((store) => projectDailyBudget(store, { dailyBudgetUsd: 0.1 }, now)?.remaining);
+    h.read((store) => {
+      const requirementId = seedRequirement(store, now - 2000);
+      seedSession(store, requirementId, now - 1000, 0.001);
+      store.sessions.start({
+        id,
+        runId: null,
+        stepId: null,
+        requirementId,
+        role: 'rule-writer',
+        model: 'test-model',
+        workDir: '/work/session',
+        budget: { maxBudgetUsd: 0.05, maxTurns: 20 },
+        startedAt: iso(now - 500),
+      });
+    });
+    expect(remaining()).toBe(0.049);
+    h.read((store) => {
+      store.sessions.recordInit(id, { sdkSessionId: 'sdk', tools: [], mcpServers: [] });
+      store.sessions.end(id, {
+        endReason: 'success',
+        totalCostUsd: 0.02,
+        numTurns: 2,
+        endedAt: iso(now),
+      });
+    });
+    expect(remaining()).toBe(0.079);
+  });
+
+  it('규칙 작성 세션의 행을 저장하지 못하면 세션을 열지 않고 시작 실패로 남긴다 (하루 합산의 원천이 없으므로)', async () => {
+    const h = await startRuleWriter();
+    await saveSettings(h, RULE_WRITER_PATCH(1));
+    h.read((store) =>
+      store.db.exec(`CREATE TRIGGER test_block_sessions BEFORE INSERT ON sessions
+        BEGIN SELECT RAISE(ABORT, '시험: 세션 행 저장 거부'); END;`),
+    );
+    expect(await writeRequirement(h, '행 저장 실패 요구사항')).toMatchObject({
+      state: 'skipped',
+      skipReason: 'start_failed',
+      error: '세션 기록 저장 실패로 세션을 열지 않음',
+    });
+    expect(h.specs).toHaveLength(0);
+  });
 });

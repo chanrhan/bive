@@ -2,10 +2,13 @@
 // - 합산 단위: 프로젝트(저장소 하나)의 세션 전부(실행 세션 + 실행 밖 규칙 작성 세션). 원천은 저장된 세션 기록(비용 ·
 //   시작 시각)뿐이고 메모리 카운터를 쓰지 않는다(오케스트레이터를 다시 띄워도 같은 합계)
 // - 하루의 경계: 기기의 로컬 날짜(A12). 세션은 시작 시각이 속한 날의 지출이다. 날짜가 바뀌면 합계가 0부터 다시 시작한다
-// - 값을 모르는 세션(ADR-067과 같은 규칙, 묶음 단위만 실행 대신 그날의 프로젝트): ① init 보고 없이 끝난 세션은 0
-//   ② 그 밖(init 뒤 결과 없음 · 비정상 종료 · 아직 끝나지 않음)은 그날 값을 아는 세션 중 가장 큰 USD(그 세션에 넘긴 한도를
-//   넘지 않게 자름) ③ 그날 아는 세션이 없으면 그 세션에 넘긴 한도 전부. 한도 기록이 없는 세션(이 변경 전의 규칙 작성 세션)은
-//   넘긴 한도를 모르므로 ③에서 하루 한도 전부를 쓴 것으로 본다(적게 세지 않는 쪽)
+// - 진행 중 세션(종료 사유 없음)은 그 세션에 넘긴 한도 전부로 센다(한도 기록이 없으면 하루 한도 전부). 잔여 읽기와 세션 행
+//   만들기 사이에 기다림이 없으므로 이것이 사실상 예약이 되어, 겹쳐 도는 세션들의 한도 합 + 끝난 세션의 지출이 하루 한도를
+//   넘지 않는다. 세션이 끝나 실제 값이 확정되면 덜 쓴 만큼이 다시 잔여가 된다
+// - 값을 모르는 끝난 세션(ADR-067과 같은 규칙, 묶음 단위만 실행 대신 그날의 프로젝트): ① init 보고 없이 끝난 세션은 0
+//   ② 그 밖(init 뒤 결과 없음 · 비정상 종료)은 그날 값을 아는 세션 중 가장 큰 USD(그 세션에 넘긴 한도를 넘지 않게 자름)
+//   ③ 그날 아는 세션이 없으면 그 세션에 넘긴 한도 전부. 한도 기록이 없는 세션(이 변경 전의 규칙 작성 세션)은 넘긴 한도를
+//   모르므로 ③에서 하루 한도 전부를 쓴 것으로 본다(적게 세지 않는 쪽). ②는 상한이 아니다(ADR-067과 같은 성질)
 // - 하루 한도 `null`(비움)은 한도 없음이다: 새 세션을 막지 않고 자동 시작(M7-05)만 하지 않는다. `0`은 모든 새 세션을 막는다
 // 하루 한도는 USD만이다(턴 한도 없음).
 import { remainingUsd, type Session, type Settings, sumUsd } from '@bive/shared';
@@ -48,12 +51,17 @@ export const dailySpend = (sessions: readonly Session[], limit: number): DailySp
   const estimates: number[] = [];
   for (const session of sessions) {
     if (session.totalCostUsd !== null) continue;
-    const beforeModel = session.sdkSessionId === null && session.endReason !== null;
-    if (beforeModel) {
+    const allotment = session.budget?.maxBudgetUsd ?? limit;
+    // 진행 중: 넘긴 한도 전부 (예약)
+    if (session.endReason === null) {
+      estimates.push(allotment);
+      continue;
+    }
+    // 끝났는데 init 보고가 없음: 모델 호출 전 (0)
+    if (session.sdkSessionId === null) {
       estimates.push(0);
       continue;
     }
-    const allotment = session.budget?.maxBudgetUsd ?? limit;
     estimates.push(Math.min(maxKnown ?? allotment, allotment));
   }
   const known = sumUsd(knownUsd) ?? 0;

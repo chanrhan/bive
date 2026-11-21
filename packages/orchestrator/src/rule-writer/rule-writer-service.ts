@@ -576,7 +576,12 @@ export class RuleWriterService implements RuleWriterLauncher {
           startedAt: record.startedAt ?? this.#timestamp(),
         }),
       );
-      if (this.#persisted.has(record.id)) this.#notify(record);
+      // 세션 행은 프로젝트 하루 예산 합산의 원천이다: 행을 남기지 못하면 그 지출이 하루 한도에 잡히지 않으므로 세션을 열지 않는다
+      // (시도 기록에 시작 실패로 남는다, ADR-104)
+      if (!this.#persisted.has(record.id)) {
+        throw new Error('세션 기록 저장 실패로 세션을 열지 않음');
+      }
+      this.#notify(record);
       const outcome = await runGuardedSession({
         adapter: this.#adapter,
         controller,
