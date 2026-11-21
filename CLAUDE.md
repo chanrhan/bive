@@ -49,7 +49,7 @@ pnpm 워크스페이스 · TypeScript strict · ESM. 패키지 5개(`packages/sh
 | Electron 스모크 | `xvfb-run -a pnpm smoke` |
 | 파이프라인 e2e | `pnpm e2e:pipeline` (오케스트레이터의 엔진 · 판정 · IPC를 고쳤을 때. 픽스처 설치 `pnpm -C fixtures/sample-next-app install --frozen-lockfile`가 먼저 필요) |
 
-- CI는 세 검사다: `checks`(린트 · 타입 · 단위 · 빌드 · 형식 · 픽스처 · 화면 e2e) · `pipeline-e2e`(파이프라인 e2e, 모든 PR에서 늘 돈다) · 둘을 모으는 `ci`. 완료 판단은 `ci` 성공이다 (ADR-077).
+- CI는 세 검사다: `checks`(린트 · 타입 · 단위 · 빌드 · 형식 · 픽스처 · 화면 e2e) · `pipeline-e2e`(파이프라인 e2e, 모든 PR에서 늘 돈다. 두 묶음 잡 `pipeline-e2e-group (1)` · `(2)`가 병렬로 돌고 `pipeline-e2e`가 둘의 성공과 파일 대조를 모은다) · 둘을 모으는 `ci`. 완료 판단은 `ci` 성공이다 (ADR-077).
 - GitHub 호출은 `scripts/gh-rest.sh <METHOD> <경로>`(= `gh api`)로 한다. `git push`는 그대로 동작한다.
 - 이 VM에는 `ANTHROPIC_API_KEY`가 없어 실제 에이전트 SDK를 부를 수 없다. 테스트는 가짜 에이전트 어댑터로 한다 (ADR-016).
 - 앱 · 오케스트레이터 기동, 픽스처, 환경 변수, VM 제약, 자주 겪는 오류(브라우저 경로 · Electron 샌드박스 · 소켓 경로 길이 · 포트 충돌 · 커밋 서명)는 `dev-env` 스킬에 있다.
