@@ -3,12 +3,25 @@
 // [저장] → settings.update(사람 주체) → 검증 상태 다시 읽기.
 // IDE 섹션: VS Code(vscode://file/{path}:{line}) · Cursor(cursor://file/{path}:{line}) · 사용자 지정 URL 틀, 기본값 VS Code.
 // 열린 프로젝트는 가짜 `project.current` 응답으로 준다(현재 프로젝트 계약은 M1-01 `ProjectContext`).
-import type { Project, Settings, SettingsValidateResult } from '@bive/shared';
+import type {
+  Project,
+  Requirement,
+  RuleWriterStatusEntry,
+  Settings,
+  SettingsValidateResult,
+} from '@bive/shared';
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
-import { FIELD_NAMES, HIDDEN_SECTIONS, IDE_TEXT, SETTINGS_TEXT } from './checklists/scr-21.js';
+import { PROJECT as REQUIREMENT_PROJECT, REQUIREMENTS } from './checklists/scr-02.js';
+import {
+  DAILY_FIELD_NAME,
+  FIELD_NAMES,
+  HIDDEN_SECTIONS,
+  IDE_TEXT,
+  SETTINGS_TEXT,
+} from './checklists/scr-21.js';
 import { type BiveMock, mockBive, type MockResponses } from './support/bive-mock.js';
-import { expectScreen, findForbiddenText } from './support/expectScreen.js';
+import { collectVisibleText, expectScreen, findForbiddenText } from './support/expectScreen.js';
 import { horizontalOverflow, textClipping } from './support/overflow.js';
 
 const PROJECT_ID = '01JA00000000000000000000P1';
@@ -33,6 +46,7 @@ const settingsWith = (overrides: Partial<Settings> = {}): Settings => ({
     implementer: EMPTY_ROLE,
     chat: EMPTY_ROLE,
   },
+  dailyBudgetUsd: null,
   approvalQueueLimit: 40,
   provisionalPolicy: 'off',
   autoMode: false,
@@ -53,6 +67,7 @@ const FILLED = settingsWith({
     'test-writer': FULL_ROLE,
     implementer: FULL_ROLE,
   },
+  dailyBudgetUsd: 10,
   updatedAt: '2026-10-16T09:00:00.000Z',
   updatedBy: { kind: 'human' },
 });
@@ -119,7 +134,8 @@ test.describe('체크리스트', () => {
     await expect(field(page, 'rule-writer 한도 USD')).toHaveValue('1');
     await expect(field(page, 'rule-writer 턴')).toHaveValue('20');
     await expect(field(page, 'implementer 턴')).toHaveValue('100');
-    for (const name of FIELD_NAMES) {
+    await expect(field(page, DAILY_FIELD_NAME)).toHaveValue('10');
+    for (const name of [...FIELD_NAMES, DAILY_FIELD_NAME]) {
       await expect(field(page, name)).toHaveAttribute('aria-invalid', 'false');
     }
   });
@@ -133,6 +149,9 @@ test.describe('체크리스트', () => {
       // 자리 표시 글자 없이 레이블만
       await expect(field(page, name)).not.toHaveAttribute('placeholder', /.+/);
     }
+    // 하루 한도는 비움이 허용되므로(한도 없음) 빈 칸이어도 필수 표시가 없다 (ADR-104)
+    await expect(field(page, DAILY_FIELD_NAME)).toHaveValue('');
+    await expect(field(page, DAILY_FIELD_NAME)).toHaveAttribute('aria-invalid', 'false');
   });
 
   test('나머지 섹션(잠정 승인 · 자동 모드 · 대기열 · 작성 규칙)은 DOM에 없다 (ADR-035)', async ({
@@ -206,12 +225,12 @@ test.describe('모달 열기 · 닫기', () => {
         const modal = document.querySelector('[data-testid="settings-modal"]');
         return modal !== null && modal.contains(document.activeElement);
       });
-    // 섹션 목록 2개 + 입력 11칸 + 저장 + 닫기 = 15개보다 많이 눌러 한 바퀴 이상 돈다
-    for (let i = 0; i < 16; i += 1) {
+    // 섹션 목록 2개 + 입력 12칸 + 저장 + 닫기 = 16개보다 많이 눌러 한 바퀴 이상 돈다
+    for (let i = 0; i < 17; i += 1) {
       await page.keyboard.press('Tab');
       expect(await inside()).toBe(true);
     }
-    for (let i = 0; i < 16; i += 1) {
+    for (let i = 0; i < 17; i += 1) {
       await page.keyboard.press('Shift+Tab');
       expect(await inside()).toBe(true);
     }
@@ -288,6 +307,7 @@ test.describe('저장', () => {
         params: {
           projectId: PROJECT_ID,
           patch: {
+            dailyBudgetUsd: null,
             run: { maxBudgetUsd: 5, maxTurns: 200 },
             roles: {
               'rule-writer': { model: 'test-model', maxBudgetUsd: 1, maxTurns: 20 },
@@ -543,5 +563,159 @@ test.describe('IDE (코드 열기, #45 수용 기준 1)', () => {
     await expect(radio(page, 'Cursor')).toBeChecked();
     // 섹션을 오가는 것만으로는 저장하지 않는다
     expect(await updates(bive)).toEqual([]);
+  });
+});
+
+test.describe('프로젝트 하루 한도 (M7-04 #216 수용 기준 4, ADR-100 B⑤, ADR-104)', () => {
+  const save = (page: Page): Locator =>
+    page.getByRole('button', { name: SETTINGS_TEXT.save, exact: true });
+  const updateCalls = async (bive: BiveMock) =>
+    (await settingsCalls(bive)).filter((call) => call.method === 'settings.update');
+  const lastPatch = async (bive: BiveMock) =>
+    ((await updateCalls(bive)).at(-1)?.params as { patch: Record<string, unknown> } | undefined)
+      ?.patch;
+
+  test('예산 · 모델 섹션의 프로젝트 하루 묶음: 비움 · 0 · 소수를 저장하고, 음수 · 글자는 "입력 오류"이며 저장을 부르지 않는다', async ({
+    page,
+  }) => {
+    const bive = await openModal(page);
+    await expect(dialog(page).getByRole('group', { name: SETTINGS_TEXT.daily })).toBeVisible();
+    await expect(page.getByTestId('settings-daily-note')).toHaveText(SETTINGS_TEXT.dailyNote);
+    const daily = field(page, DAILY_FIELD_NAME);
+    await expect(daily).toHaveValue('10');
+
+    // 비움 = null (한도 없음)
+    await bive.setResponse('settings.update', {
+      result: { settings: { ...FILLED, dailyBudgetUsd: null } },
+    });
+    await daily.fill('');
+    await save(page).click();
+    await expect(page.getByTestId('settings-save-status')).toHaveText(SETTINGS_TEXT.saved);
+    expect(await lastPatch(bive)).toMatchObject({ dailyBudgetUsd: null });
+    await expect(daily).toHaveValue('');
+    // 검증 상태는 하루 한도를 보지 않는다 (비워도 "설정 완료")
+    await expect(page.getByTestId('settings-validation')).toHaveText(SETTINGS_TEXT.complete);
+
+    // 0 = 0 (모든 새 세션을 막음, 비움과 다르다)
+    await bive.setResponse('settings.update', {
+      result: { settings: { ...FILLED, dailyBudgetUsd: 0 } },
+    });
+    await daily.fill('0');
+    await save(page).click();
+    await expect(daily).toHaveValue('0');
+    expect(await lastPatch(bive)).toMatchObject({ dailyBudgetUsd: 0 });
+
+    // 소수 (앞뒤 공백은 뗀다)
+    await bive.setResponse('settings.update', {
+      result: { settings: { ...FILLED, dailyBudgetUsd: 2.5 } },
+    });
+    await daily.fill(' 2.5 ');
+    await save(page).click();
+    await expect(daily).toHaveValue('2.5');
+    expect(await lastPatch(bive)).toMatchObject({ dailyBudgetUsd: 2.5 });
+
+    // 음수 · 글자 · 지수 표기는 입력 오류, 저장 요청 없음
+    const count = (await updateCalls(bive)).length;
+    for (const raw of ['-1', 'abc', '1e2']) {
+      await daily.fill(raw);
+      await save(page).click();
+      await expect(page.getByTestId('settings-save-status')).toHaveText('입력 오류');
+      await expect(daily).toHaveAttribute('data-state', 'invalid');
+    }
+    expect(await updateCalls(bive)).toHaveLength(count);
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
+  });
+
+  for (const viewport of [
+    { width: 1100, height: 800 },
+    { width: 820, height: 600 },
+  ]) {
+    test(`${String(viewport.width)} × ${String(viewport.height)} 창에서 하루 한도 입력 · 안내가 잘리거나 넘치지 않는다`, async ({
+      page,
+    }) => {
+      await page.setViewportSize(viewport);
+      await openModal(page, EMPTY, INCOMPLETE(ALL_MISSING));
+      await field(page, DAILY_FIELD_NAME).fill('-1');
+      await save(page).click();
+      await expect(page.getByTestId('settings-save-status')).toHaveText('입력 오류');
+      expect(
+        await textClipping(dialog(page), [
+          'settings-daily-note',
+          'settings-validation',
+          'settings-save-status',
+          'settings-save',
+        ]),
+      ).toEqual([]);
+      // 하루 한도 칸 · 안내 · 저장 버튼이 섹션 안에 있다
+      const area = await page.getByTestId('settings-budget-model').boundingBox();
+      if (area === null) throw new Error('섹션 없음');
+      for (const target of [
+        field(page, DAILY_FIELD_NAME),
+        page.getByTestId('settings-daily-note'),
+        page.getByTestId('settings-save'),
+      ]) {
+        const box = await target.boundingBox();
+        if (box === null) throw new Error('요소 없음');
+        expect(box.x + box.width).toBeLessThanOrEqual(area.x + area.width + 0.5);
+        expect(box.y + box.height).toBeLessThanOrEqual(area.y + area.height + 0.5);
+      }
+      // 모달 안에 가로 · 세로 스크롤이 생기지 않는다
+      const scrolls = await dialog(page).evaluate((el) =>
+        [el, ...el.querySelectorAll<HTMLElement>('*')]
+          .filter(
+            (child) =>
+              child.scrollWidth > child.clientWidth + 0.5 ||
+              child.scrollHeight > child.clientHeight + 0.5,
+          )
+          .filter((child) => {
+            const style = getComputedStyle(child);
+            return style.overflowX !== 'visible' || style.overflowY !== 'visible';
+          })
+          .map((child) => child.getAttribute('data-testid') ?? child.className),
+      );
+      expect(scrolls).toEqual([]);
+    });
+  }
+
+  test('생략 사유 "프로젝트 하루 예산 초과"가 요구사항 상세의 규칙 작성 상태 줄에 보인다', async ({
+    page,
+  }) => {
+    const target = REQUIREMENTS[0] as Requirement;
+    const skipped: RuleWriterStatusEntry = {
+      requirementId: target.id,
+      attemptId: '01JD0000000000000000000001',
+      state: 'skipped',
+      skipReason: 'project_daily_budget_exceeded',
+      missing: [],
+      endReason: null,
+      error: '프로젝트 하루 예산 초과',
+      errorTruncated: false,
+      requestedAt: '2026-11-21T00:00:00.000Z',
+      endedAt: '2026-11-21T00:00:00.000Z',
+    };
+    await mockBive(page, {
+      responses: {
+        'system.status': { result: STATUS },
+        'project.current': { result: { project: REQUIREMENT_PROJECT } },
+        'requirement.list': { result: { requirements: REQUIREMENTS } },
+        'rule.list': { result: { rules: [] } },
+        'ruleWriter.status': { result: { entries: [skipped] } },
+      },
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: '요구사항', exact: true }).click();
+    await page.getByTestId('card').filter({ hasText: target.displayId }).click();
+    const line = page.getByTestId('requirement-rule-writer');
+    await expect(line).toHaveAttribute('data-state', 'skipped');
+    await expect(line).toHaveAttribute('data-tone', 'warning');
+    await expect(line.getByTestId('requirement-rule-writer-label')).toHaveText(
+      '규칙 작성 생략 · 프로젝트 하루 예산 초과',
+    );
+    // 설명이 사유와 같으면 한 번만, 자식 규칙 영역 안
+    await expect(line.getByTestId('requirement-rule-writer-detail')).toHaveCount(0);
+    await expect(
+      page.getByTestId('requirement-rules').getByTestId('requirement-rule-writer'),
+    ).toHaveCount(1);
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
   });
 });

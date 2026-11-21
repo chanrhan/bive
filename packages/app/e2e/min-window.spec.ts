@@ -33,6 +33,7 @@ const SETTINGS: Settings = {
     implementer: EMPTY_ROLE,
     chat: EMPTY_ROLE,
   },
+  dailyBudgetUsd: null,
   approvalQueueLimit: 40,
   provisionalPolicy: 'off',
   autoMode: false,

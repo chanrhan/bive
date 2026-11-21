@@ -13,6 +13,7 @@ import {
   CommitSha,
   Confirmation,
   ConfirmationTarget,
+  DailyBudgetUsd,
   EntityRef,
   IdeSetting,
   JudgmentResult,
@@ -545,11 +546,13 @@ export type RoleSettingsPatch = z.infer<typeof RoleSettingsPatch>;
 /**
  * `settings.update`의 `patch`: 예산 · 모델 (M1, ADR-010 · ADR-035)과 코드 열기 IDE (M2-03, ADR-087). 없는 키는 그대로 둔다.
  * IDE는 고를 수만 있고 미설정(`null`)으로 되돌리지 않는다. 사용자 지정 틀은 저장할 때 허용 범위를 검사한다(`IdeUrlTemplate`).
+ * 프로젝트 하루 예산 한도(M7-04, ADR-104)는 `null`이면 비움(한도 없음)으로 되돌린다.
  * 승인 대기 상한 · 잠정 승인 · 자동 모드 · 설치 허용 목록은 그 화면을 여는 이슈가 키를 더한다.
  */
 export const SettingsPatch = z.strictObject({
   run: RunLimits.partial().optional(),
   roles: z.partialRecord(AgentRole, RoleSettingsPatch).optional(),
+  dailyBudgetUsd: DailyBudgetUsd.optional(),
   ide: IdeSetting.optional(),
 });
 export type SettingsPatch = z.infer<typeof SettingsPatch>;

@@ -45,6 +45,12 @@ import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import type { TaskTracker } from '../lifecycle.js';
 import { createAgentRule } from '../norms/agent-rule.js';
+import {
+  dailyBudgetReached,
+  type DailyBudgetState,
+  PROJECT_DAILY_BUDGET_EXCEEDED_TEXT,
+  projectDailyBudget,
+} from '../settings/project-budget.js';
 import { roleSessionSettings } from '../settings/settings-service.js';
 import { displayText } from '../text-limit.js';
 import type { ProposeRuleInput } from '../tools/definitions.js';
@@ -266,8 +272,16 @@ export class RuleWriterService implements RuleWriterLauncher {
       }
       let session;
       try {
-        // 실행 전체 한도까지 검사하고(ADR-057) rule-writer 모델 · 한도를 그대로 쓴다 (실행 밖 세션이라 cap 없음)
-        session = roleSessionSettings(store.settings.get(), RULE_WRITER_ROLE);
+        // 실행 전체 한도까지 검사하고(ADR-057) rule-writer 모델 · 한도를 쓴다. 실행 밖 세션이라 실행 잔여는 없고,
+        // USD 한도는 프로젝트 하루 잔여로 묶는다(ADR-104). 하루 한도에 이르렀으면 세션을 띄우지 않는다
+        const settings = store.settings.get();
+        const daily = projectDailyBudget(store, settings, this.#now());
+        session = roleSessionSettings(
+          settings,
+          RULE_WRITER_ROLE,
+          daily === null ? {} : { maxBudgetUsd: daily.remaining },
+        );
+        if (dailyBudgetReached(daily)) return this.#skipDaily(store, input, daily);
       } catch (error) {
         if (error instanceof RpcError && error.code === ErrorCode.SettingsIncomplete) {
           const data = SettingsIncompleteData.safeParse(error.data);
@@ -387,6 +401,29 @@ export class RuleWriterService implements RuleWriterLauncher {
     return { status: 'skipped', reason, record: structuredClone(record) };
   }
 
+  /** 하루 한도에 이르러 세션을 띄우지 않는다 (생략 사유 `project_daily_budget_exceeded`, ADR-104). */
+  #skipDaily(
+    store: ProjectStore,
+    input: RuleWriterStartInput,
+    daily: DailyBudgetState | null,
+  ): RuleWriterStartResult {
+    if (daily !== null) this.#logDaily(input.requirement.displayId, daily);
+    return this.#skip(
+      store,
+      input,
+      'project_daily_budget_exceeded',
+      PROJECT_DAILY_BUDGET_EXCEEDED_TEXT,
+      [],
+    );
+  }
+
+  #logDaily(displayId: string, daily: DailyBudgetState): void {
+    this.#log(
+      `프로젝트 하루 예산 초과 (${displayId}, ${daily.day.start} 부터, 한도 USD ${String(daily.limit)}, ` +
+        `지출 USD ${String(daily.spend.spent)}, 추정 세션 ${String(daily.spend.unknownSessions)}개)`,
+    );
+  }
+
   /**
    * 시도 기록을 쓰고(실패는 로그만) 바뀌었음을 알린다. 알림은 지금 저장소 열림 구간이 끝난 뒤 보낸다(ADR-069:
    * 열림 구간 안에서 보내지 않는다).
@@ -484,11 +521,15 @@ export class RuleWriterService implements RuleWriterLauncher {
     // 대기하는 사이 바뀌었을 수 있으므로 시작 직전에 다시 읽는다: 삭제됐으면 생략, 수정됐으면 최신 본문
     const requirement = this.#reloadRequirement(record, queued);
     if (requirement === null) return;
-    const { model, budget } = record;
-    if (model === null || budget === null) {
+    const { model } = record;
+    if (model === null || record.budget === null) {
       this.#end(record, 'error_during_execution', '세션 설정 없음');
       return;
     }
+    // 대기하는 사이 다른 세션이 하루 지출을 늘렸을 수 있으므로 시작 직전에 하루 잔여를 다시 읽는다 (ADR-104)
+    const budget = this.#dailyCappedBudget(record, record.budget);
+    if (budget === null) return;
+    record.budget = budget;
     const controller = new AbortController();
     this.#controllers.add(controller);
     const workDir = path.join(this.#biveHome, 'work', record.projectId, 'sessions', record.id);
@@ -531,6 +572,7 @@ export class RuleWriterService implements RuleWriterLauncher {
           role: RULE_WRITER_ROLE,
           model,
           workDir,
+          budget,
           startedAt: record.startedAt ?? this.#timestamp(),
         }),
       );
@@ -576,6 +618,38 @@ export class RuleWriterService implements RuleWriterLauncher {
       rmSync(workDir, { recursive: true, force: true });
     }
     this.#end(record, endReason, detail);
+  }
+
+  /**
+   * 시작 직전의 하루 잔여로 묶은 세션 한도. 하루 한도에 이르렀으면 생략(`project_daily_budget_exceeded`) 기록을 남기고
+   * `null`. 하루 지출을 읽지 못하면 시작 실패로 생략한다(한도를 모르고 세션을 열지 않는다).
+   */
+  #dailyCappedBudget(record: RuleWriterSessionRecord, budget: SessionBudget): SessionBudget | null {
+    let reason: StoredSkipReason;
+    let detail: string;
+    try {
+      const daily = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+        projectDailyBudget(store, store.settings.get(), this.#now()),
+      );
+      if (!dailyBudgetReached(daily)) {
+        return daily === null
+          ? budget
+          : { ...budget, maxBudgetUsd: Math.min(budget.maxBudgetUsd, daily.remaining) };
+      }
+      if (daily !== null) this.#logDaily(record.requirementDisplayId, daily);
+      reason = 'project_daily_budget_exceeded';
+      detail = PROJECT_DAILY_BUDGET_EXCEEDED_TEXT;
+    } catch (error) {
+      reason = 'start_failed';
+      detail = errorMessage(error);
+    }
+    record.status = 'skipped';
+    record.skipReason = reason;
+    record.error = detail;
+    record.endedAt = this.#timestamp();
+    this.#log(`규칙 작성 생략 (${record.requirementDisplayId}, ${detail})`);
+    this.#saveSkip(record, reason, detail);
+    return null;
   }
 
   /** 시작 직전의 요구사항. 삭제 · 없음 · 읽기 실패면 생략 기록을 남기고 `null`. */

@@ -203,6 +203,25 @@ describe('세션 한도 · 집계 초과 판정 (수용 기준 3)', () => {
     expect(sessionLimits(SNAPSHOT, 'planner', [])).toBeUndefined();
   });
 
+  it('세션 USD 한도는 min(역할 잔여, 실행 잔여, 프로젝트 하루 잔여)이다 (M7-04 수용 기준 2, ADR-104)', () => {
+    const sessions = [session('test-writer', 0.04, 3), session('implementer', 0.17, 9)];
+    // 하루 잔여를 주지 않으면(하루 한도 비움) 역할 · 실행 잔여만: test-writer 0.06 (역할)
+    expect(sessionLimits(SNAPSHOT, 'test-writer', sessions)?.maxBudgetUsd).toBe(0.06);
+    // 하루 잔여가 가장 작으면 그 값
+    expect(sessionLimits(SNAPSHOT, 'test-writer', sessions, 0.05)).toEqual({
+      maxBudgetUsd: 0.05,
+      maxTurns: 7,
+    });
+    // 역할 잔여가 가장 작으면 그 값 (하루 잔여가 더 커도)
+    expect(sessionLimits(SNAPSHOT, 'test-writer', sessions, 0.5)?.maxBudgetUsd).toBe(0.06);
+    // 실행 잔여가 가장 작으면 그 값: implementer 역할 0.08, 실행 0.3 - 0.26 = 0.04, 하루 0.07
+    const more = [...sessions, session('test-writer', 0.05, 1)];
+    expect(sessionLimits(SNAPSHOT, 'implementer', more, 0.07)?.maxBudgetUsd).toBe(0.04);
+    // 하루 잔여가 0 이하면 세션을 열지 않는다 (턴은 하루 한도가 없다)
+    expect(sessionLimits(SNAPSHOT, 'test-writer', sessions, 0)).toBeNull();
+    expect(sessionLimits(SNAPSHOT, 'test-writer', sessions, -0.01)).toBeNull();
+  });
+
   it('값을 모르는 세션은 한도 계산에서 0이 아니다: 아는 세션의 최댓값(세션 한도로 자름), 없으면 세션 한도 전부', () => {
     const budget = { maxBudgetUsd: 0.05, maxTurns: 6 };
     const aborted = (role: AgentRole, extra: Partial<Session> = {}): Session =>
@@ -862,6 +881,20 @@ describe('세션 한도 · 예산 초과 (수용 기준 3 · 4)', () => {
       ['error_max_budget_usd', 0.0587],
     ]);
     expect([done.run.costUsd, stepOf(done, 'implementation').costUsd]).toEqual([0.1008, 0.0587]);
+  }, 90_000);
+
+  it('프로젝트 하루 잔여가 가장 작으면 그 값이 세션 USD 한도다 (M7-04 수용 기준 2, ADR-104)', async () => {
+    // 역할 2 · 실행 5 · 하루 0.07: test-writer min(2, 5, 0.07) = 0.07, implementer min(2, 5 - 0.0421, 0.07 - 0.0421)
+    const h = setup({ settings: { ...COMPLETE_SETTINGS, dailyBudgetUsd: 0.07 } });
+    const done = await runToEnd(h);
+    expect(h.budgets).toEqual([
+      { role: 'test-writer', maxBudgetUsd: 0.07, maxTurns: 100 },
+      { role: 'implementer', maxBudgetUsd: 0.0279, maxTurns: 100 },
+    ]);
+    expect(done.run).toMatchObject({
+      status: 'budget_exceeded',
+      failureReason: 'error_max_budget_usd',
+    });
   }, 90_000);
 
   it('역할 잔여가 작으면 그 값이 USD 한도이고, 턴은 실행 잔여가 작으면 그 값이다 (error_max_turns → budget_exceeded)', async () => {

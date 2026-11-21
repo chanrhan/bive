@@ -1,5 +1,6 @@
 // 설정 예산 · 모델 섹션의 입력 값 ↔ 설정 변환 (SCR-21, COST-01 · NFR-07, ADR-057).
 // 입력 칸은 문자열을 들고 있고, 저장할 때 `settings.update` 패치로 바꾼다. 빈 칸은 미설정(`null`)이다.
+// 프로젝트 하루 한도(M7-04, ADR-104)의 빈 칸은 비움(한도 없음 · 자동 시작 없음)이고 0 이상 수를 받는다(0 = 새 세션 모두 막음).
 // renderer는 shared를 타입으로만 가져온다 (architecture.md 2장).
 import type { AgentRole, MissingSetting, Settings, SettingsPatch } from '@bive/shared';
 
@@ -21,15 +22,20 @@ export const ROLE_ROW_LABELS = {
   implementer: 'implementer',
 } as const satisfies Record<SettingsRoleRow, string>;
 
-/** 입력 칸 하나의 키: `run.<필드>` 또는 `roles.<역할>.<필드>` (`MissingSetting`과 같은 경로). */
-export type FieldKey =
+/**
+ * 입력 칸 하나의 키: `run.<필드>` 또는 `roles.<역할>.<필드>` (`MissingSetting`과 같은 경로)와 프로젝트 하루 한도
+ * `dailyBudgetUsd`(필수 항목이 아니라 `MissingSetting`에 없다).
+ */
+export type RequiredFieldKey =
   | 'run.maxBudgetUsd'
   | 'run.maxTurns'
   | `roles.${SettingsRoleRow}.${'model' | 'maxBudgetUsd' | 'maxTurns'}`;
+export type FieldKey = RequiredFieldKey | 'dailyBudgetUsd';
 
 export type FormValues = Record<FieldKey, string>;
 
-export const FIELD_KEYS: readonly FieldKey[] = [
+/** 실행에 필수인 칸 (실행 전 검사의 빈 항목 경로와 같은 순서). 하루 한도는 필수가 아니라 빠진다. */
+export const FIELD_KEYS: readonly RequiredFieldKey[] = [
   'run.maxBudgetUsd',
   'run.maxTurns',
   ...SETTINGS_ROLE_ROWS.flatMap((role) => [
@@ -42,8 +48,11 @@ export const FIELD_KEYS: readonly FieldKey[] = [
 const text = (value: number | string | null): string => (value === null ? '' : String(value));
 
 /** 저장된 설정 → 입력 값. 미설정은 빈 칸. */
-export const toFormValues = (settings: Pick<Settings, 'run' | 'roles'>): FormValues => {
+export const toFormValues = (
+  settings: Pick<Settings, 'run' | 'roles' | 'dailyBudgetUsd'>,
+): FormValues => {
   const values: Partial<FormValues> = {
+    dailyBudgetUsd: text(settings.dailyBudgetUsd),
     'run.maxBudgetUsd': text(settings.run.maxBudgetUsd),
     'run.maxTurns': text(settings.run.maxTurns),
   };
@@ -64,6 +73,15 @@ const parseUsd = (raw: string): number | null | undefined => {
   if (!/^\d+(\.\d+)?$/.test(trimmed)) return undefined;
   const value = Number(trimmed);
   return Number.isFinite(value) && value > 0 ? value : undefined;
+};
+
+/** 하루 한도: 빈 칸 = 비움(`null`), 0 이상 수(소수 표기만). 맞지 않으면 `undefined`(입력 오류). */
+const parseDailyUsd = (raw: string): number | null | undefined => {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return undefined;
+  const value = Number(trimmed);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
 };
 
 const parseTurns = (raw: string): number | null | undefined => {
@@ -95,6 +113,7 @@ export const toPatch = (values: FormValues): ParseResult => {
     return parsed;
   };
   const patch = {
+    dailyBudgetUsd: read('dailyBudgetUsd', parseDailyUsd),
     run: {
       maxBudgetUsd: read('run.maxBudgetUsd', parseUsd),
       maxTurns: read('run.maxTurns', parseTurns),
@@ -116,5 +135,5 @@ export const toPatch = (values: FormValues): ParseResult => {
 /** 검사 결과의 빈 항목 중 이 화면에 보이는 칸만 고른다. */
 export const visibleMissing = (missing: readonly MissingSetting[]): Set<FieldKey> => {
   const keys = new Set<string>(FIELD_KEYS);
-  return new Set(missing.filter((path): path is FieldKey => keys.has(path)));
+  return new Set(missing.filter((path): path is RequiredFieldKey => keys.has(path)));
 };

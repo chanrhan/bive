@@ -83,6 +83,8 @@ export const ENGINE_FAILURE_REASONS = [
   'state_inconsistent',
   /** 세션을 열기 전 남은 예산이 0 이하 (COST-01, `budget_exceeded`) */
   'budget_exhausted',
+  /** 세션을 열기 전 프로젝트의 오늘(기기의 로컬 날짜) 지출이 하루 한도에 이름 (COST-01, `budget_exceeded`, ADR-104) */
+  'project_daily_budget_exceeded',
   /** 세션 결과 subtype (`budget_exceeded`) */
   'error_max_budget_usd',
   'error_max_turns',

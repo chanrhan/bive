@@ -1,5 +1,6 @@
 // 설정 예산 · 모델 섹션 (SCR-21, COST-01 · NFR-07 · ADR-024 · ADR-057).
-// 실행 전체 한도(USD · 턴) + 역할별 모델 · 한도(USD · 턴). 모델 ID는 사용자가 자유 입력한다(목록 없음).
+// 실행 전체 한도(USD · 턴) + 프로젝트 하루 한도(USD, 비움 허용, M7-04 · ADR-104) + 역할별 모델 · 한도(USD · 턴).
+// 모델 ID는 사용자가 자유 입력한다(목록 없음).
 // [저장] → `settings.update`(사람 주체) → `settings.validateForRun`으로 검증 상태를 다시 읽는다.
 // 값은 오케스트레이터 응답에서만 만든다 (NFR-03).
 import type { JsonRpcErrorObject, SettingsValidateResult } from '@bive/shared';
@@ -19,6 +20,8 @@ import {
 export const SECTION_TEXT = {
   title: '예산 · 모델',
   run: '실행 전체',
+  daily: '프로젝트 하루',
+  dailyNote: '비움: 한도 없음 · 자동 시작 없음',
   roles: '역할별',
   role: '역할',
   model: '모델',
@@ -194,19 +197,40 @@ export const BudgetModelSection = ({ projectId }: { projectId: string }): React.
         void submit();
       }}
     >
-      <fieldset className="settings-group" data-testid="settings-run" disabled={save === 'saving'}>
-        <legend className="settings-group-title">{SECTION_TEXT.run}</legend>
-        <div className="settings-run-fields">
-          <label className="settings-run-field">
+      <div className="settings-limits">
+        <fieldset
+          className="settings-group"
+          data-testid="settings-run"
+          disabled={save === 'saving'}
+        >
+          <legend className="settings-group-title">{SECTION_TEXT.run}</legend>
+          <div className="settings-run-fields">
+            <label className="settings-run-field">
+              <span className="settings-label">{SECTION_TEXT.usd}</span>
+              {field('run.maxBudgetUsd', `${SECTION_TEXT.run} ${SECTION_TEXT.usd}`, 'decimal')}
+            </label>
+            <label className="settings-run-field">
+              <span className="settings-label">{SECTION_TEXT.turns}</span>
+              {field('run.maxTurns', `${SECTION_TEXT.run} ${SECTION_TEXT.turns}`, 'numeric')}
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset
+          className="settings-group"
+          data-testid="settings-daily"
+          disabled={save === 'saving'}
+        >
+          <legend className="settings-group-title">{SECTION_TEXT.daily}</legend>
+          <label className="settings-run-field settings-daily-field">
             <span className="settings-label">{SECTION_TEXT.usd}</span>
-            {field('run.maxBudgetUsd', `${SECTION_TEXT.run} ${SECTION_TEXT.usd}`, 'decimal')}
+            {field('dailyBudgetUsd', `${SECTION_TEXT.daily} ${SECTION_TEXT.usd}`, 'decimal')}
+            <span className="settings-note" data-testid="settings-daily-note">
+              {SECTION_TEXT.dailyNote}
+            </span>
           </label>
-          <label className="settings-run-field">
-            <span className="settings-label">{SECTION_TEXT.turns}</span>
-            {field('run.maxTurns', `${SECTION_TEXT.run} ${SECTION_TEXT.turns}`, 'numeric')}
-          </label>
-        </div>
-      </fieldset>
+        </fieldset>
+      </div>
 
       <fieldset
         className="settings-group"

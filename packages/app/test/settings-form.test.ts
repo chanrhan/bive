@@ -39,6 +39,7 @@ describe('변환', () => {
     expect(Object.values(values).every((value) => value === '')).toBe(true);
     const filled = toFormValues({
       run: { maxBudgetUsd: 0.5, maxTurns: 200 },
+      dailyBudgetUsd: 0,
       roles: {
         ...defaultSettings(PROJECT).roles,
         implementer: { model: 'model-a', maxBudgetUsd: 2, maxTurns: 30 },
@@ -48,6 +49,8 @@ describe('변환', () => {
     expect(filled['roles.implementer.model']).toBe('model-a');
     expect(filled['roles.implementer.maxTurns']).toBe('30');
     expect(filled['roles.test-writer.model']).toBe('');
+    // 하루 한도 0은 빈 칸이 아니라 '0' (0과 비움은 뜻이 다르다, ADR-104)
+    expect(filled.dailyBudgetUsd).toBe('0');
   });
 
   it('빈 칸은 null, 모델은 앞뒤 공백 제거, 패치는 shared 스키마를 통과한다', () => {
@@ -63,6 +66,7 @@ describe('변환', () => {
     expect(result).toEqual({
       ok: true,
       patch: {
+        dailyBudgetUsd: null,
         run: { maxBudgetUsd: 5, maxTurns: 200 },
         roles: {
           'rule-writer': { model: 'test-model', maxBudgetUsd: 0.01, maxTurns: 20 },
@@ -85,8 +89,31 @@ describe('변환', () => {
     ['0 턴', 'roles.test-writer.maxTurns', '0'],
     ['지수 표기 턴', 'roles.test-writer.maxTurns', '1e3'],
     ['너무 긴 모델', 'roles.rule-writer.model', 'm'.repeat(201)],
+    ['음수 하루 한도', 'dailyBudgetUsd', '-1'],
+    ['글자 하루 한도', 'dailyBudgetUsd', 'abc'],
+    ['지수 표기 하루 한도', 'dailyBudgetUsd', '1e2'],
   ] as const)('%s는 입력 오류', (_, key, raw) => {
     const values = { ...toFormValues(defaultSettings(PROJECT)), [key]: raw };
     expect(toPatch(values)).toEqual({ ok: false, invalid: [key] });
+  });
+});
+
+describe('프로젝트 하루 한도 (M7-04, ADR-104)', () => {
+  it.each([
+    ['빈 칸은 비움(null)', '', null],
+    ['공백만 있어도 비움', '  ', null],
+    ['0은 0 (새 세션 모두 막음)', '0', 0],
+    ['소수', ' 3.5 ', 3.5],
+  ] as const)('%s', (_, raw, expected) => {
+    const result = toPatch({ ...toFormValues(defaultSettings(PROJECT)), dailyBudgetUsd: raw });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.patch.dailyBudgetUsd).toBe(expected);
+    expect(SettingsPatch.safeParse(result.patch).success).toBe(true);
+  });
+
+  it('하루 한도는 필수 칸이 아니다: 실행 전 검사의 빈 항목에 없고 필수 표시 대상도 아니다', () => {
+    expect(FIELD_KEYS).not.toContain('dailyBudgetUsd');
+    expect(findMissingSettings(defaultSettings(PROJECT))).not.toContain('dailyBudgetUsd');
   });
 });
