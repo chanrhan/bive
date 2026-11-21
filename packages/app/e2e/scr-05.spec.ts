@@ -541,6 +541,27 @@ test.describe('이동 · 재개 (수용 기준 4)', () => {
     expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
   });
 
+  test('이미 병합된 중단 실행을 재개할 수 없어 병합 완료로 끝났다는 거부면 "<표시 ID> 재개 불가 · 병합 완료"(실패라고 하지 않음) (ADR-105)', async ({
+    page,
+  }) => {
+    await openScreen(page, {
+      'verification.summary': { result: interrupted },
+      'run.resume': {
+        error: {
+          code: -32009,
+          message:
+            '재개할 수 없어 남은 단계를 끝내지 못했습니다. 실행은 이미 병합돼 병합 완료로 끝냈습니다',
+          data: { reason: 'resume_unrecoverable', code: 'worktree_missing', runStatus: 'merged' },
+        },
+      },
+    });
+    await page.getByRole('button', { name: '재개', exact: true }).click();
+    await expect(page.getByTestId('pipeline-resume-error')).toHaveText(
+      `${interrupted.pipeline.run.displayId} 재개 불가 · 병합 완료`,
+    );
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
+  });
+
   test('최근 실행이 중단이면 [재개]가 run.resume(사람 주체)을 부르고 요약을 다시 읽는다', async ({
     page,
   }) => {

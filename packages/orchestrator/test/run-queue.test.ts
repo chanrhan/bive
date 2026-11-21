@@ -13,7 +13,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentAdapter } from '../src/agent/adapter.js';
 import { loadScenario } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
-import { PipelineEngine, RESUME_UNRECOVERABLE } from '../src/engine/pipeline-engine.js';
+import {
+  PipelineEngine,
+  RESUME_UNRECOVERABLE,
+  screenUpdateStep,
+} from '../src/engine/pipeline-engine.js';
 import type { StepExecutor, StepExecutors, StepOutcome } from '../src/engine/types.js';
 import { RpcError } from '../src/ipc/server.js';
 import { selectAgent } from '../src/agent/select.js';
@@ -80,6 +84,7 @@ class Gates {
 const gatedExecutors = (
   gates: Gates,
   halts: Map<string, Extract<StepOutcome, { status: 'halt' }>> = new Map(),
+  screenHolds: ReadonlySet<string> = new Set(),
 ): StepExecutors => {
   const testWriting: StepExecutor = async (context) => {
     await gates.wait(context.run.displayId, context.signal);
@@ -98,6 +103,15 @@ const gatedExecutors = (
     implementation: pass,
     check: pass,
     merge: mergeStep,
+    // 화면 갱신: `screenHolds`의 실행은 병합 뒤 종료 신호가 올 때까지 멈춘다(병합 커밋이 기록된 채 중단시키려고)
+    screen_update: (context) =>
+      screenHolds.has(context.run.displayId)
+        ? new Promise((_resolve, reject) => {
+            context.signal.addEventListener('abort', () => reject(context.signal.reason as Error), {
+              once: true,
+            });
+          })
+        : screenUpdateStep(context),
   };
 };
 
@@ -106,6 +120,8 @@ interface QueueHarness extends SeededProject {
   repo: string;
   gates: Gates;
   halts: Map<string, Extract<StepOutcome, { status: 'halt' }>>;
+  /** 병합 뒤 화면 갱신에서 멈출 실행 */
+  screenHolds: Set<string>;
   adapter: AgentAdapter;
   /** 저장마다 (표시 ID, 상태) */
   saves: string[];
@@ -127,12 +143,14 @@ const setup = (biveHome = makeBiveHome()): QueueHarness => {
   });
   const gates = new Gates();
   const halts = new Map<string, Extract<StepOutcome, { status: 'halt' }>>();
+  const screenHolds = new Set<string>();
   const h = {
     ...seeded,
     biveHome,
     repo,
     gates,
     halts,
+    screenHolds,
     adapter,
     saves: [] as string[],
     maxRunning: 0,
@@ -141,7 +159,7 @@ const setup = (biveHome = makeBiveHome()): QueueHarness => {
     const engine = new PipelineEngine({
       biveHome,
       agent: adapter,
-      executors: gatedExecutors(gates, halts),
+      executors: gatedExecutors(gates, halts, screenHolds),
       onEvent: (event) => {
         if (event.type !== 'run.saved' || event.projectId !== seeded.project.id) return;
         h.saves.push(`${event.detail.run.displayId}:${event.detail.run.status}`);
@@ -668,6 +686,77 @@ describe('재기동 · 중단 · 재개 (수용 기준 2, ADR-105)', () => {
     },
     60_000,
   );
+
+  it('병합 커밋이 기록된 중단 실행(병합 뒤 화면 갱신 도중 중단)을 재개할 수 없으면 실패가 아니라 병합 완료로 끝나고(runEnding), 실패는 그 단계 시도에만, 판정 기준은 그 병합 그대로, 다음 대기가 시작한다 (ADR-091 · ADR-105)', async () => {
+    const h = setup();
+    const base = userGit(h.repo, 'rev-parse', 'refs/heads/main');
+    h.screenHolds.add('EXE-001');
+    const first = startRun(h);
+    await waitGate(h, first);
+    h.gates.open(first);
+    await waitFor(
+      () => detailOf(h, first).run.currentStep === 'screen_update',
+      20_000,
+      '병합 뒤 화면 갱신',
+    );
+    const mergeCommit = detailOf(h, first).run.mergeCommit;
+    expect(mergeCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(mergeCommit).not.toBe(base);
+    await h.engine.stop();
+    const engine = h.newEngine();
+    expect(engine.recoverInterruptedRuns().map((run) => run.displayId)).toEqual([first]);
+    const second = startRun(h, engine);
+    await waitFor(() => statusOf(h, second) === 'queued', 10_000, '실행 대기');
+    const interrupted = detailOf(h, first);
+    expect(interrupted.run).toMatchObject({ status: 'interrupted', mergeCommit });
+    const basisBefore = withProject(h.biveHome, h.project.id, (store) =>
+      verificationSummary(store),
+    ).basis;
+    expect(basisBefore).toEqual({ branch: 'main', commit: mergeCommit, runId: interrupted.run.id });
+
+    fs.rmSync(String(interrupted.run.worktreePath), { recursive: true, force: true });
+    const refused = await engine.resume(h.project.id, first, human).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(RpcError);
+    expect((refused as RpcError).code).toBe(ErrorCode.StateConflict);
+    expect((refused as RpcError).message).toContain('실행은 이미 병합돼 병합 완료로 끝냈습니다');
+    expect((refused as RpcError).message).not.toContain('실패로 끝냈습니다');
+    expect((refused as RpcError).data).toMatchObject({
+      reason: RESUME_UNRECOVERABLE,
+      code: 'worktree_missing',
+      runStatus: 'merged',
+    });
+    const ended = detailOf(h, first);
+    expect(ended.run).toMatchObject({
+      status: 'merged',
+      failureReason: null,
+      currentStep: null,
+      lastCompletedStep: 'merge',
+      mergeCommit,
+    });
+    expect(ended.run.endedAt).not.toBeNull();
+    // 실패는 그 단계 시도에만 (중단된 화면 갱신 시도 · 재개 불가로 닫은 시도)
+    expect(attempts(ended).filter((a) => a.startsWith('screen_update'))).toEqual([
+      'screen_update#1:failed',
+      'screen_update#2:failed',
+    ]);
+    expect(
+      ended.steps.find((s) => s.kind === 'screen_update' && s.attempt === 2)?.exitDetail,
+    ).toMatchObject({ reason: 'worktree_error', detail: { code: 'worktree_missing' } });
+    // 판정 기준은 그 병합 그대로, 기준 브랜치도 그대로
+    const basisAfter = withProject(h.biveHome, h.project.id, (store) =>
+      verificationSummary(store),
+    ).basis;
+    expect(basisAfter).toEqual(basisBefore);
+    expect(userGit(h.repo, 'rev-parse', 'refs/heads/main')).toBe(mergeCommit);
+    // 자리가 났으므로 다음 실행 대기가 시작한다(그 병합 위에서)
+    await waitGate(h, second);
+    expect(statuses(h)).toEqual({ [first]: 'merged', [second]: 'running' });
+    expect(detailOf(h, second).run.baseCommit).toBe(mergeCommit);
+    h.gates.open(second);
+    await engine.settled();
+    expect(statusOf(h, second)).toBe('merged');
+    expect(h.maxRunning).toBe(1);
+  }, 60_000);
 
   it('일시적일 수 있는 재개 실패(git 명령 오류)는 상태를 바꾸지 않고, 고친 뒤 다시 재개하면 이어진다', async () => {
     const h = setup();

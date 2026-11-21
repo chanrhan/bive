@@ -589,8 +589,10 @@ export class PipelineEngine {
   }
 
   /**
-   * 재개할 수 없는 중단 실행을 끝낸다 (사람의 재개 행동의 결과, ADR-105): `interrupted → failed`(`worktree_error`), 지금
-   * 단계의 대기 시도도 실패(사유 · git 오류 코드 · 메시지)로 끝낸다. 워크트리가 없거나 어긋나 보존(잠금)은 하지 않는다(브랜치는
+   * 재개할 수 없는 중단 실행을 끝낸다 (사람의 재개 행동의 결과, ADR-105). 실행의 종료 상태는 다른 실패 쪽 종료와 같이
+   * `runEnding` 한 곳에서 정한다(ADR-091 · ADR-094): 병합 커밋이 기록된 실행은 `interrupted → merged`(실패 사유 없음,
+   * `currentStep = null`), 아니면 `interrupted → failed`(`worktree_error`). 어느 쪽이든 재개 불가라는 실패는 지금 단계의
+   * 대기 시도에 남긴다(사유 · git 오류 코드 · 메시지). 워크트리가 없거나 어긋나 보존(잠금)은 하지 않는다(브랜치는
    * 지우지 않으므로 남는다). 저장 뒤 돌려줄 RPC 오류(-32009, `data.reason = resume_unrecoverable`)를 만든다. 저장이 실패하면
    * (다른 쪽이 먼저 바꿈) 그 오류를 돌려준다.
    */
@@ -609,12 +611,13 @@ export class PipelineEngine {
       reason: 'worktree_error',
       detail: { code: error.code, message: error.message },
     };
+    const ending = runEnding(run, 'failed', 'worktree_error');
     let saved: RunDetail;
     try {
       saved = this.#rpcStore(projectId, (store) =>
         store.runs.transition(run.id, {
           expectedStatus: 'interrupted',
-          run: { status: 'failed', failureReason: 'worktree_error', endedAt: at },
+          run: { ...ending.run, endedAt: at },
           steps:
             pending === undefined
               ? []
@@ -635,11 +638,20 @@ export class PipelineEngine {
         : new RpcError(ErrorCode.StateConflict, errorMessage(failure));
     }
     this.#emit({ type: 'run.saved', projectId, detail: saved });
-    this.#log(`실행 종료 (${run.displayId}, failed: worktree_error, 재개 불가 ${error.code})`);
+    this.#logEnding(run, ending.merged, 'failed', `재개 불가 ${error.code}`);
+    const message = ending.merged
+      ? `재개할 수 없어 남은 단계를 끝내지 못했습니다. 실행은 이미 병합돼 병합 완료로 끝냈습니다`
+      : `재개할 수 없어 실행을 실패로 끝냈습니다`;
     return new RpcError(
       ErrorCode.StateConflict,
-      `재개할 수 없어 실행을 실패로 끝냈습니다 (${run.displayId}, ${error.code}): ${error.message}`,
-      { reason: RESUME_UNRECOVERABLE, runId: run.id, displayId: run.displayId, code: error.code },
+      `${message} (${run.displayId}, ${error.code}): ${error.message}`,
+      {
+        reason: RESUME_UNRECOVERABLE,
+        runId: run.id,
+        displayId: run.displayId,
+        code: error.code,
+        runStatus: saved.run.status,
+      },
     );
   }
 

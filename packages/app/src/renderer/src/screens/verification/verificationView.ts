@@ -32,6 +32,8 @@ export const TEXT = {
   resumeFailed: '재개 실패',
   /** 재개할 수 없어 실행이 실패로 끝남 (앞에 표시 ID, ADR-105) */
   resumeUnrecoverable: '재개 불가 · 실패 처리',
+  /** 재개할 수 없지만 이미 병합된 실행이라 병합 완료로 끝남 (앞에 표시 ID, ADR-105) */
+  resumeUnrecoverableMerged: '재개 불가 · 병합 완료',
   rules: '규칙별 최신 판정',
   noRules: '규칙 없음',
   turnsSuffix: '턴',
@@ -151,9 +153,21 @@ export const isResumeUnrecoverable = (error: unknown): boolean => {
   );
 };
 
-/** "EXE-001 재개 불가 · 실패 처리" */
-export const resumeUnrecoverableText = (displayId: string): string =>
-  `${displayId} ${TEXT.resumeUnrecoverable}`;
+/** 재개 불가 거부의 `data.runStatus` (끝난 상태). 없으면 `null`. */
+export const resumeEndedStatus = (error: unknown): string | null => {
+  if (typeof error !== 'object' || error === null) return null;
+  const data = (error as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return null;
+  const status = (data as { runStatus?: unknown }).runStatus;
+  return typeof status === 'string' ? status : null;
+};
+
+/** "EXE-001 재개 불가 · 실패 처리", 병합 완료로 끝났으면 "EXE-001 재개 불가 · 병합 완료". */
+export const resumeUnrecoverableText = (
+  displayId: string,
+  endedStatus: string | null = null,
+): string =>
+  `${displayId} ${endedStatus === 'merged' ? TEXT.resumeUnrecoverableMerged : TEXT.resumeUnrecoverable}`;
 
 /** [재개]를 보일지: 최근 실행이 중단(`interrupted`)일 때만 (ADR-011). */
 export const canResume = (status: RunStatus): boolean => status === 'interrupted';

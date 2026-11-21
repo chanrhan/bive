@@ -189,7 +189,8 @@ stateDiagram-v2
   running --> budget_exceeded: 실행 · 역할 예산 초과
   running --> interrupted: 비정상 종료 후 재기동
   interrupted --> running: run.resume (사람)
-  interrupted --> failed: run.resume (사람)이 복구 불가 사유로 실패
+  interrupted --> failed: run.resume (사람)이 복구 불가 사유로 실패 (병합 커밋 없음)
+  interrupted --> merged: run.resume (사람)이 복구 불가 사유로 실패 (병합 커밋 기록됨, runEnding)
   merged --> [*]
   failed --> [*]
   budget_exceeded --> [*]
@@ -198,7 +199,7 @@ stateDiagram-v2
 - 상태 저장 시점: 단계 종료마다 트랜잭션 1회 (RUN-01, `ProjectStore.runs.transition`, ADR-061). 단계 중간 진행은 이벤트 로그만
 - 생성 직후: `waiting_approval` · 현재 단계 승인(진행 중). 승인 단계는 대상 규칙이 전부 승인 상태(삭제 안 됨 · `normState = approved`)일 때만 끝나고, 아니면 아무것도 저장하지 않고 머문다 (ADR-061)
 - `failed` · `budget_exceeded`: 브랜치 · 워크트리 보존, 병합 없음 (RUN-08, COST-01)
-- 프로젝트당 동시 실행 1개 (ADR-100 B⑥, ADR-105): 자리를 차지하는 상태는 `running` · `interrupted`. 승인 단계 통과 때 자리가 없거나 실행 대기가 있으면 `queued`(실행 대기, 워크트리 · 기준 커밋 없음). 종료 상태(`merged` · `failed` · `budget_exceeded`)가 되면 엔진이 저장된 실행 대기 중 표시 ID가 가장 작은 것을 시작한다(기동 때도). `interrupted`가 있으면 사람이 재개해 끝날 때까지 시작하지 않고, 다른 실행이 `running`이면 `run.resume`은 -32009. 재개의 워크트리 되돌리기가 복구 불가 사유(`worktree_missing` · `worktree_branch_mismatch` · `invalid_input`)로 실패하면 그 재개 안에서 `interrupted → failed`(`worktree_error`)로 끝내 자리를 비운다. 검증 화면 파이프라인은 자리를 차지한 실행(진행 중, 없으면 가장 먼저 만든 중단)을 보이고 없으면 최근 실행, 그 밖 실행 대기 건수를 함께 싣는다. DB 트리거(`project/0015_run_queue`)도 `running` 2건 · 순서 어김을 막는다
+- 프로젝트당 동시 실행 1개 (ADR-100 B⑥, ADR-105): 자리를 차지하는 상태는 `running` · `interrupted`. 승인 단계 통과 때 자리가 없거나 실행 대기가 있으면 `queued`(실행 대기, 워크트리 · 기준 커밋 없음). 종료 상태(`merged` · `failed` · `budget_exceeded`)가 되면 엔진이 저장된 실행 대기 중 표시 ID가 가장 작은 것을 시작한다(기동 때도). `interrupted`가 있으면 사람이 재개해 끝날 때까지 시작하지 않고, 다른 실행이 `running`이면 `run.resume`은 -32009. 재개의 워크트리 되돌리기가 복구 불가 사유(`worktree_missing` · `worktree_branch_mismatch` · `invalid_input`)로 실패하면 그 재개 안에서 `runEnding`대로 `interrupted → failed`(`worktree_error`, 병합 커밋이 기록됐으면 `merged`)로 끝내 자리를 비운다. 검증 화면 파이프라인은 자리를 차지한 실행(진행 중, 없으면 가장 먼저 만든 중단)을 보이고 없으면 최근 실행, 그 밖 실행 대기 건수를 함께 싣는다. DB 트리거(`project/0015_run_queue`)도 `running` 2건 · 순서 어김을 막는다
 - 검토 대기열 등록은 P1부터 (COST-01, TODO-02)
 
 단계 · 종료 조건 (유형 A, M1)

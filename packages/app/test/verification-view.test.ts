@@ -20,6 +20,7 @@ import {
   currentStepOf,
   isResumeUnrecoverable,
   queuedText,
+  resumeEndedStatus,
   resumeUnrecoverableText,
   formatTurns,
   formatUsd,
@@ -113,6 +114,13 @@ describe('값 표시', () => {
     expect(isResumeUnrecoverable({ code: -32009, data: { reason: 'other' } })).toBe(false);
     expect(isResumeUnrecoverable(null)).toBe(false);
     expect(resumeUnrecoverableText('EXE-001')).toBe('EXE-001 재개 불가 · 실패 처리');
+    // 이미 병합된 실행이면 "실패 처리"라고 하지 않는다 (병합 완료로 끝남, ADR-105)
+    expect(resumeUnrecoverableText('EXE-001', 'failed')).toBe('EXE-001 재개 불가 · 실패 처리');
+    expect(resumeUnrecoverableText('EXE-001', 'merged')).toBe('EXE-001 재개 불가 · 병합 완료');
+    expect(
+      resumeEndedStatus({ data: { reason: 'resume_unrecoverable', runStatus: 'merged' } }),
+    ).toBe('merged');
+    expect(resumeEndedStatus({ data: { reason: 'resume_unrecoverable' } })).toBeNull();
   });
 
   it('준수 카드의 필터는 규칙 목록 준수 집계 기준의 "판정 가능" 값 하나만 고른다', () => {

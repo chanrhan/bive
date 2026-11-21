@@ -37,6 +37,7 @@ import {
   formatUsd,
   isResumeUnrecoverable,
   queuedText,
+  resumeEndedStatus,
   resumeUnrecoverableText,
   RUN_STATUS_TEXT,
   runLinkParts,
@@ -234,7 +235,9 @@ const Pipeline = ({
   const currentStep = currentStepOf(run);
   const queued = queuedText(pipeline.queued);
   // 'failed' = 재개 실패(실행은 중단 그대로), 'ended' = 재개할 수 없어 실행이 실패로 끝남(그 실행의 표시 ID, ADR-105)
-  const [resume, setResume] = useState<'idle' | 'pending' | 'failed' | { ended: string }>('idle');
+  const [resume, setResume] = useState<
+    'idle' | 'pending' | 'failed' | { ended: string; status: string | null }
+  >('idle');
 
   const onResume = useCallback(() => {
     setResume('pending');
@@ -246,7 +249,7 @@ const Pipeline = ({
       (error: unknown) => {
         if (isResumeUnrecoverable(error)) {
           // 실행이 끝나 자리가 났으므로 다시 읽는다(다음 실행 대기가 보인다)
-          setResume({ ended: run.displayId });
+          setResume({ ended: run.displayId, status: resumeEndedStatus(error) });
           onChanged();
           return;
         }
@@ -258,7 +261,7 @@ const Pipeline = ({
     resume === 'failed'
       ? TEXT.resumeFailed
       : typeof resume === 'object'
-        ? resumeUnrecoverableText(resume.ended)
+        ? resumeUnrecoverableText(resume.ended, resume.status)
         : null;
 
   return (
