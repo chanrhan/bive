@@ -14,6 +14,7 @@ import {
   CodeOpenRecordParams,
   CodeOpenSummaryResult,
   CommitSha,
+  Confirmation,
   compareSteps,
   defaultSettings,
   EntityName,
@@ -74,7 +75,12 @@ const requirement = {
   updatedAt: AT,
   updatedBy: human,
   deletedAt: null,
-  confirmation: { state: 'confirmed', at: AT, by: human, basis: { kind: 'requirement_record', at: AT } },
+  confirmation: {
+    state: 'confirmed',
+    at: AT,
+    by: human,
+    basis: { kind: 'requirement_record', at: AT },
+  },
 };
 
 const rule = {
@@ -481,6 +487,72 @@ describe('규범', () => {
     ).toBe(true);
     expect(ApprovalLogEntry.safeParse({ ...entry, actor: testWriter }).success).toBe(false);
     expect(ApprovalLogEntry.safeParse({ ...entry, prevHash: 'x' }).success).toBe(false);
+  });
+
+  it('확인 기록(confirm)은 요구사항 · 규칙 대상만, 반영 규범 · diff 없음. 직접 편집(rule_edit · contract_edit)은 diff 필수 (ADR-100 A2)', () => {
+    const confirm = {
+      seq: 1,
+      at: AT,
+      action: 'confirm',
+      actor: human,
+      targetRef: { entity: 'Rule', id: ID.rule },
+      clientId: 'pipe-1',
+      detail: {},
+      prevHash: APPROVAL_LOG_GENESIS_HASH,
+      hash: 'f'.repeat(64),
+    };
+    expect(ApprovalLogEntry.parse(confirm)).toEqual(confirm);
+    expect(
+      ApprovalLogEntry.safeParse({ ...confirm, targetRef: { entity: 'Requirement', id: ID.req } })
+        .success,
+    ).toBe(true);
+    for (const targetRef of [
+      { entity: 'Proposal', id: ID.proposal },
+      { entity: 'Contract', id: ID.rule },
+      { entity: 'Rule', id: 'RULE-001' },
+    ]) {
+      expect(ApprovalLogEntry.safeParse({ ...confirm, targetRef }).success).toBe(false);
+    }
+    expect(
+      ApprovalLogEntry.safeParse({
+        ...confirm,
+        detail: { appliedRef: { entity: 'Rule', id: ID.rule } },
+      }).success,
+    ).toBe(false);
+    expect(ApprovalLogEntry.safeParse({ ...confirm, actor: testWriter }).success).toBe(false);
+    const diff = { before: { title: 'a' }, after: { title: 'b' } };
+    expect(ApprovalLogEntry.safeParse({ ...confirm, detail: { diff } }).success).toBe(false);
+    for (const action of ['rule_edit', 'contract_edit']) {
+      expect(ApprovalLogEntry.safeParse({ ...confirm, action }).success).toBe(false);
+      expect(ApprovalLogEntry.safeParse({ ...confirm, action, detail: { diff } }).success).toBe(
+        true,
+      );
+    }
+  });
+
+  it('확인 상태: 두 값, 확인됨은 사람 · 시각 · 근거가 필수 (ADR-100 D2 · C1 · A1)', () => {
+    expect(Confirmation.parse({ state: 'unconfirmed' })).toEqual({ state: 'unconfirmed' });
+    const confirmed = {
+      state: 'confirmed',
+      at: AT,
+      by: human,
+      basis: { kind: 'approval_log', seq: 3 },
+    };
+    expect(Confirmation.parse(confirmed)).toEqual(confirmed);
+    expect(
+      Confirmation.safeParse({ ...confirmed, basis: { kind: 'requirement_record', at: AT } })
+        .success,
+    ).toBe(true);
+    expect(Confirmation.safeParse({ ...confirmed, by: testWriter }).success).toBe(false);
+    expect(Confirmation.safeParse({ state: 'confirmed', at: AT, by: human }).success).toBe(false);
+    expect(Confirmation.safeParse({ state: 'disputed' }).success).toBe(false);
+    expect(Confirmation.safeParse({ state: 'unconfirmed', at: AT }).success).toBe(false);
+    expect(
+      Confirmation.safeParse({ ...confirmed, basis: { kind: 'approval_log', seq: 0 } }).success,
+    ).toBe(false);
+    // 요구사항 · 규칙은 확인 상태를 가진다 (기본값 없음: 저장소가 항상 채운다)
+    expect(Rule.safeParse({ ...rule, confirmation: undefined }).success).toBe(false);
+    expect(Requirement.safeParse({ ...requirement, confirmation: undefined }).success).toBe(false);
   });
 
   it('실행 시작 기록은 대상 규칙(ruleIds)이 필수이고, 다른 행동에는 둘 수 없다 (ADR-061)', () => {

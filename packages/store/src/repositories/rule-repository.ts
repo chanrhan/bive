@@ -131,9 +131,7 @@ export class RuleRepository {
        @contract_id, @author, @norm_state, @created_at, @updated_at, @deleted_at)`,
     );
     this.#select = db.prepare<[string], RuleReadRow>(`${SELECT} WHERE r.id = ?`);
-    this.#selectLive = db.prepare<[], RuleReadRow>(
-      `${SELECT} WHERE r.deleted_at IS NULL ${ORDER}`,
-    );
+    this.#selectLive = db.prepare<[], RuleReadRow>(`${SELECT} WHERE r.deleted_at IS NULL ${ORDER}`);
     this.#selectByParent = db.prepare<[string], RuleReadRow>(
       `${SELECT} WHERE r.parent_requirement_id = ? AND r.deleted_at IS NULL ${ORDER}`,
     );

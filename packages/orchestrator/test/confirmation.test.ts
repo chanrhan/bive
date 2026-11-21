@@ -115,9 +115,9 @@ describe('사람의 저장 = 확인됨 (수용 기준 2, ADR-100 B① · A1, NRM
     await expect(
       h.client.call('requirement.get', { projectId: h.project.id, id: requirement.id }),
     ).resolves.toEqual({ requirement });
-    await expect(
-      h.client.call('requirement.list', { projectId: h.project.id }),
-    ).resolves.toEqual({ requirements: [requirement] });
+    await expect(h.client.call('requirement.list', { projectId: h.project.id })).resolves.toEqual({
+      requirements: [requirement],
+    });
     expect(logOf()).toEqual([]);
   });
 

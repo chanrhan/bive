@@ -104,7 +104,11 @@ export const confirmHumanRequirementWrite = (
   );
   const confirmation = store.confirmations.confirm(
     { entity: 'Requirement', id: requirement.id },
-    { by, at: requirement.updatedAt, basis: { kind: 'requirement_record', at: requirement.updatedAt } },
+    {
+      by,
+      at: requirement.updatedAt,
+      basis: { kind: 'requirement_record', at: requirement.updatedAt },
+    },
   );
   return { ...requirement, confirmation };
 };

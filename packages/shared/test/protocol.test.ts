@@ -311,7 +311,12 @@ describe('requirement.* (M1-02, ADR-047)', () => {
     updatedAt: AT,
     updatedBy: human,
     deletedAt: null,
-    confirmation: { state: 'confirmed', at: AT, by: human, basis: { kind: 'requirement_record', at: AT } },
+    confirmation: {
+      state: 'confirmed',
+      at: AT,
+      by: human,
+      basis: { kind: 'requirement_record', at: AT },
+    },
   } as const;
 
   const request = (method: string, params: unknown) =>

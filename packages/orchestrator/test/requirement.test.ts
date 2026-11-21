@@ -148,6 +148,13 @@ describe('requirement.create · get · list: 본문 · 생성 주체 · 생성 �
       updatedAt: iso(T0),
       updatedBy: human,
       deletedAt: null,
+      // 사람이 쓴 요구사항은 저장이 곧 확인됨 (ADR-100 B①, 근거 = 작성 기록, ADR-101)
+      confirmation: {
+        state: 'confirmed',
+        at: iso(T0),
+        by: human,
+        basis: { kind: 'requirement_record', at: iso(T0) },
+      },
     });
 
     await expect(
@@ -214,7 +221,15 @@ describe('requirement.update: 사람의 직접 편집은 제안 없이 바로 �
       text: '관리자는 사유를 남기고 회원을 정지할 수 있다',
       updatedAt: iso(T0 + 5 * 60_000),
       updatedBy: human,
+      // 사람이 고친 요구사항은 수정이 곧 확인됨 (ADR-100 B①, 근거 = 수정 기록, ADR-101)
+      confirmation: {
+        state: 'confirmed',
+        at: iso(T0 + 5 * 60_000),
+        by: human,
+        basis: { kind: 'requirement_record', at: iso(T0 + 5 * 60_000) },
+      },
     });
+    expect(seeded.confirmation).toEqual({ state: 'unconfirmed' });
     expect(updated.author).toEqual(ruleWriter);
     expect(updated.createdAt).toBe(seeded.createdAt);
     expect(updated.normState).toBe('approved');

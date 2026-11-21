@@ -290,6 +290,13 @@ describe('proposal.approve: 규범 반영 + 승인 기록 (행동 · 주체 · �
       createdAt: iso(T0 + 2_000),
       updatedAt: iso(T0 + 2_000),
       deletedAt: null,
+      // 사람이 고쳐 승인한 규칙은 확인됨 (근거 = 이 approve_edited 기록, ADR-100 A1 · ADR-101)
+      confirmation: {
+        state: 'confirmed',
+        at: iso(T0 + 2_000),
+        by: human,
+        basis: { kind: 'approval_log', seq: 2 },
+      },
     });
     expect(h.read((store) => store.rules.listByParent(req.id))).toEqual([rule]);
 

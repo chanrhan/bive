@@ -103,13 +103,16 @@ interface AgentAdapter {
 | | `writingRules` (P2), `updatedAt`, `updatedBy` | NRM-10 |
 | **Requirement** | `id`, `displayId`, `text`, `author`, `normState`, `createdAt`, `updatedAt`, `updatedBy` (마지막 수정 · 삭제 주체), `deletedAt` | NRM-01, ADR-047 |
 | | `unrulable: { reason } \| null` | NRM-08 |
+| | `confirmation` (확인 상태, 아래 Confirmation. 저장 칸이 아니라 `confirmations`에서 읽어 붙인다) | ADR-100 D2, ADR-101 |
 | | 파생: 상태 = 자식 판정 종합, 결함 = 자식 규칙 0개 ∧ `unrulable` 없음 | 기획서 3.1, NRM-06 |
 | **Rule** | `id`, `displayId`, `title`, `statement` (EARS), `kind` (`architecture` · `tech-constraint` · `business`) | NRM-02, 기획서 3.1 |
 | | `checkKinds[]` (1개 이상: `test` · `pbt` · `contract` · `static` · `structure`) | NRM-02, 기획서 4.2 |
 | | `parentRequirementId` (내장 구조 규칙만 `null`), `parentDetachedAt` (부모 요구사항 삭제로 부모가 해제된 시각, 그때 `parentRequirementId = null`), `builtin: boolean` | NRM-02, JDG-05, ADR-050 |
 | | `targetBlockIds[]` (1개 이상, P1), `risk` (`low` · `medium` · `high`, P1) | NRM-09 |
 | | `contractId?` (`contract` 검사), `author`, `normState`, 시각 | NRM-03, NFR-03 |
+| | `confirmation` (확인 상태, 아래 Confirmation) | ADR-100 D2, ADR-101 |
 | | 파생: `judgment` = 최신 JudgmentResult, `mutation` = 최신 변이 결과 (P1) | JDG-02, JDG-04 |
+| **Confirmation** | `{state: 'unconfirmed'}` (기본, 행 없음) 또는 `{state: 'confirmed', at, by (사람), basis}`. `basis` = `{kind: 'approval_log', seq}` (확인 · 제안 승인의 승인 기록) · `{kind: 'requirement_record', at}` (사람이 쓰거나 고친 요구사항의 작성 · 수정 기록). 대상 = 요구사항 · 규칙 (테이블 `confirmations`, 열쇠 (엔터티, 대상 ID), 확인 주체는 사람만 · 덮어쓰기 · 대상 변경 · 삭제 금지 DB 트리거). 실행 · 판정 · 병합의 조건이 아니다 | NFR-01, ADR-100 D2 · C1 · A1, ADR-101 |
 | **Contract** (P1) | `id`, `displayId`, `kind` (`openapi` · `db-schema` · `asyncapi` · `external-api` · `cache` · `json-schema`), `filePath` (등록 단위 = 파일), `contentHash` | NRM-03, SCR-04 |
 | | `parentRequirementId?` (0~1), `author`, `normState` | 기획서 3.1 |
 | **Block** (P1) | `id`, `name`, `kind` (`domain` · `shared`), `include[]`, `public[]`, `dependsOn[]`, `risk`, `author` | 기획서 3.3, ADR-005 |
@@ -138,7 +141,7 @@ interface AgentAdapter {
 | | `state` (`pending` · `approved` · `rejected` · `provisional`), `decision: { at, by (사람), editedPayload?, rejectReason?, appliedRef? }` (거절 사유 필수, 승인은 반영 규범 필수) | NRM-04, NRM-05, ADR-050 |
 | | 본문 스키마: `requirement_new` `{text}` · `rule_new` `{title, statement, kind, checkKinds, parentRequirementId}` (M1은 이 두 종류만 등록 · 승인) | ADR-050 |
 | | `adrId?`, `runId?` (승인 후 생성 실행) | DSN-07 |
-| **ApprovalLog** | `seq`, `at`, `action` (`approve` · `approve_edited` · `reject` · `run_start` · `provisional_grant`(M3-17, 주체 형태는 그때 결정)), `actor` (사람), `targetRef`, `clientId`, `detail` (`diff?` 수정 전후 · `reason?` 거절 사유 · `appliedRef?` 반영 규범 · `ruleIds?` 실행 시작의 대상 규칙, ADR-061), `prevHash`, `hash` (추가만, 수정 · 삭제 · `REPLACE` 덮어쓰기 없음 · DB 트리거로 차단) | NFR-01, PRD 5.1, ADR-050 |
+| **ApprovalLog** | `seq`, `at`, `action` (`approve` · `approve_edited` · `reject` · `run_start` · `provisional_grant`(M3-17, 주체 형태는 그때 결정) · `confirm` (사람의 확인, 대상 = 요구사항 · 규칙) · `rule_edit` · `contract_edit` (사람의 직접 편집, M7-03 · M3-10)), `actor` (사람), `targetRef`, `clientId`, `detail` (`diff?` 수정 전후(수정 후 승인 · 직접 편집에 필수) · `reason?` 거절 사유 · `appliedRef?` 반영 규범 · `ruleIds?` 실행 시작의 대상 규칙, ADR-061), `prevHash`, `hash` (추가만, 수정 · 삭제 · `REPLACE` 덮어쓰기 없음 · DB 트리거로 차단) | NFR-01, PRD 5.1, ADR-050, ADR-100 C2 · A2 |
 | **Adr** (P1) | `id`, `number`, `title`, `status` (`proposed` · `accepted`), `context`, `decision`, `consequences`, `author`, 연결 규범 · 실행 · 제안 | SCR-15, DSN-07 |
 | **NormChange** | `id`, `entityType`, `entityId`, `before`, `after`, `at`, `author`, `runId?`, `proposalId?` | NRM-07, NRM-04 |
 | **CodeChange** (P1) | `id`, `runId`, `commit`, `files[]`, `summary`, `reason` (author agent), `adrId?`, `flags` (명세 외 · 범위 밖 · Breaking · ADR 없음) | DSN-06, SCR-14, ADR-008 |
@@ -167,6 +170,7 @@ interface AgentAdapter {
 - 판정 기록 (M1-16, ADR-069): 마이그레이션 `project/0008_judgments`(`judgments`). 판정 러너가 `completed`로 끝난 판정(구현 · 검사 · 병합 재검사) 1회마다 다룬 규칙별 1건을 바로 남긴다(`ProjectStore.judgments.record`, 세션 기록처럼 실행 상태 저장과 별개). 상태는 규칙 케이스가 1개 이상이고 전부 통과면 `pass`, 아니면 `fail`. 수집 · 러너 오류는 기록하지 않는다. 수정 · 삭제 · 덮어쓰기는 트리거로 막는다. 규칙의 최신 판정 = 판정 시각이 가장 늦은 기록(같으면 ID가 큰 것): `latestByRule` · `latestForRules`, 이력 `listByRun` · `listByRule`, RPC 결합 `orchestrator/src/judgments/latest-judgment.ts`의 `storedLatestJudgments`(ADR-060)
 - 코드 열람 기록 (M2-01, ADR-084): 마이그레이션 `project/0009_code_open_records`(`code_open_records`). 사람이 `file:line` 링크에서 사유를 골라 연 1회마다 1건(`ProjectStore.codeOpens.record`), 수정 · 삭제 · 덮어쓰기는 트리거로 막는다. 조회는 최신부터 `listLatest`, 사유별 건수는 전체 기록을 SQL로 세는 `countByReason`(M2-02, ADR-088). 쓰기는 엄격하게(`CodeOpenRecord`), 읽기는 느슨하게(`StoredCodeOpenRecord`: 경로의 세부 규칙은 다시 적용하지 않음): 타입 · 열거형이 깨진 행만 건너뛰고 경고 한 줄(M2-11, ADR-094)
 - 규칙 작성 시도 기록 (M3-26, ADR-099): 마이그레이션 `project/0011_rule_writer_requests`(`rule_writer_requests`). 중복이 아닌 규칙 작성 시도 1개 = 행 1개(ID는 세션 ID와 같다). 세션을 열지 않으면 생략 사유 · 설명 · 비어 있던 설정 항목을 한 번 채우고, 식별 정보 · 생략된 행은 바뀌지 않으며 지우지 않는다(트리거). 상태는 이 행과 같은 ID의 `sessions` 행에서 만든다(`ProjectStore.ruleWriterRequests`, 0011 전의 규칙 작성 세션도 시도로 읽는다). 재기동 복구가 세션도 생략도 없는 행을 `closed`로 끝낸다
+- 확인 상태 (M7-01, ADR-101): 마이그레이션 `project/0012_confirmations`. `approval_log`를 다시 만들어 `action` CHECK에 `confirm` · `rule_edit` · `contract_edit`를 더하고(행 · 해시 체인 · 트리거 그대로, 0003은 그대로), `confirmations`를 만든 뒤 기존 데이터를 이행한다: 사람이 쓰거나 고친 요구사항(근거 = 작성 · 수정 기록)과 승인 기록 `approve` · `approve_edited`의 반영 규범(근거 = 그 순번)만 확인됨, 승인 기록 새 항목 없음. 확인됨을 쓰는 곳은 `ProjectStore.confirmations.confirm`(사람 주체 인자)이고 오케스트레이터에서는 `orchestrator/src/confirmations/confirmation-service.ts`만 부른다(사람의 확인 RPC · 요구사항 작성 · 편집 · 제안 승인)
 - 마이그레이션 (M0-04): `packages/store/src/migrations/<project|registry>/<NNNN>_<snake_name>.ts` (`export const migration`)를 다음 번호로 추가하고 같은 폴더 `index.ts` 배열 끝에 넣는다. 적용 기록 `schema_migrations`에 SQL 해시를 남기므로 머지된 파일은 고치지 않는다. 테이블은 `STRICT`, 연결은 WAL · `foreign_keys` ON · `synchronous` FULL · `recursive_triggers` ON(ADR-050)
 
 ## 4. 실행 파이프라인 상태 기계
@@ -247,22 +251,23 @@ stateDiagram-v2
 | `project.current` · `project.list` | — → `{project \| null}`(마지막으로 연 프로젝트) / `{projects}` | PRJ-01, ADR-054 | M1 |
 | `project.get` | `{projectId}` → 프로젝트 | PRJ-01 | 필요한 이슈에서 |
 | `project.sync` | `{projectId}` → 블록 선언 제안 | PRJ-02 | M2 |
-| `requirement.list` | `{projectId}` → `{requirements}` (삭제 제외, 표시 ID 순). 필터는 화면 이슈에서 | NRM-01, SCR-02, ADR-047 | M1 |
+| `requirement.list` | `{projectId}` → `{requirements}` (삭제 제외, 표시 ID 순). 필터는 화면 이슈에서. 요구사항마다 `confirmation`(확인 상태, ADR-101) | NRM-01, SCR-02, ADR-047 | M1 |
 | `requirement.get` | `{projectId, id}` → `{requirement}` (삭제된 것도). 자식 규칙 · 이력은 해당 이슈에서 | SCR-06, ADR-047 | M1 |
-| `requirement.create` | `{projectId, text, author}` → `{requirement}` (사람 작성만, 승인 불필요). 저장 뒤 rule-writer 세션을 비동기로 시작하고 응답은 기다리지 않는다. 설정 미비면 세션만 생략(기록 · 로그), 응답은 그대로 | NRM-01, NRM-02, ADR-047, ADR-062 | M1 |
-| `requirement.update` · `requirement.delete` | `{projectId, id, text, author}` / `{projectId, id, author}` → `{requirement}` (사람만, 삭제는 소프트). 수정 저장 뒤 가장 최근 규칙 작성 시도가 생략 · 실패(성공 아닌 종료)이고 규칙 자동 생성 제안이 없으면 다시 시도한다(비동기, 응답은 그대로, ADR-099) | NRM-01, NRM-02, ADR-047, ADR-099 | M1 · M3 |
+| `requirement.create` | `{projectId, text, author}` → `{requirement}` (사람 작성만, 승인 불필요. 저장과 같은 트랜잭션에서 확인됨, 근거 = 작성 기록 · 승인 기록 항목 없음, ADR-101). 저장 뒤 rule-writer 세션을 비동기로 시작하고 응답은 기다리지 않는다. 설정 미비면 세션만 생략(기록 · 로그), 응답은 그대로 | NRM-01, NRM-02, ADR-047, ADR-062 | M1 |
+| `requirement.update` · `requirement.delete` | `{projectId, id, text, author}` / `{projectId, id, author}` → `{requirement}` (사람만, 삭제는 소프트. 수정은 같은 트랜잭션에서 확인됨, 근거 = 수정 기록, 삭제는 확인 상태를 바꾸지 않음, ADR-101). 수정 저장 뒤 가장 최근 규칙 작성 시도가 생략 · 실패(성공 아닌 종료)이고 규칙 자동 생성 제안이 없으면 다시 시도한다(비동기, 응답은 그대로, ADR-099) | NRM-01, NRM-02, ADR-047, ADR-099 | M1 · M3 |
 | `ruleWriter.status` | `{projectId, requirementId?}` → `{entries: [{requirementId, attemptId, state, skipReason, missing, endReason, error, errorTruncated, requestedAt, endedAt}]}` (조회 전용. 시도 기록이 있는 요구사항마다 가장 최근 시도 하나, 요구사항 ID 순. `state` = `queued` · `running` · `ended` · `skipped`. 값은 `rule_writer_requests` · `sessions` 행에서만. `error`는 생략 설명 · 세션 오류의 표시 값(ADR-089 이스케이프, 500자 넘으면 끝을 `…`로 줄이고 `errorTruncated`). 없는 프로젝트 `-32004`) | NRM-02, NFR-03, SCR-02, ADR-099 | M3 |
 | `requirement.markUnrulable` | `{id, reason}` | NRM-08 | M2 |
-| `rule.list` | `{projectId}` → `{rules: [{rule, judgment}]}` (규칙 테이블의 규범만 · 제안 제외, 삭제 제외, 표시 ID 순). `judgment = {status, latest}`, 판정 기록이 없으면 `{status: 'unjudged', latest: null}`, 실행 링크는 `latest.runId`. 필터는 렌더러 목록 | NRM-02, JDG-02, SCR-03, ADR-060 | M1 |
+| `rule.list` | `{projectId}` → `{rules: [{rule, judgment}]}` (규칙 테이블의 규범만 · 제안 제외, 삭제 제외, 표시 ID 순. `rule.confirmation` = 확인 상태, ADR-101). `judgment = {status, latest}`, 판정 기록이 없으면 `{status: 'unjudged', latest: null}`, 실행 링크는 `latest.runId`. 필터는 렌더러 목록 | NRM-02, JDG-02, SCR-03, ADR-060 | M1 |
 | `rule.get` | `{projectId, id}` → `{rule, judgment}` (삭제된 것도, 제안 ID는 `-32004`). 최신 판정 결합 지점은 `orchestrator/src/judgments/latest-judgment.ts` | NRM-02, JDG-02, ADR-060 | M1 |
 | `judgment.list` | `{projectId, ruleId}` → `{judgments: [{judgment, runDisplayId}]}` (규칙 상세의 실행 이력: 판정 기록 최신부터 50건, 실행 안의 판정이면 `EXE-NNN`, 아니면 `null`. 삭제된 규칙도, 없는 규칙 · 제안 ID `-32004`) | JDG-02, SCR-03, SCR-06, ADR-073 | M1 |
 | `contract.list` · `contract.get` | 계약 | NRM-03 | M2 |
 | `proposal.list` · `proposal.get` | `{projectId, state?, kind?}` → `{proposals}` (표시 ID 순) / `{projectId, id}` → `{proposal}` | TODO-01, ADR-050 | M1 |
 | `proposal.count` | `{projectId}` → `{pending, pendingByKind}` (할 일 배지 · 툴팁, 모든 종류 키) | SCR-17, ADR-050 | M1 |
-| `proposal.approve` · `proposal.amend` | `{projectId, id, author, edited?}` (amend는 `edited` 필수) → `{proposal, applied, approvalLog}` (사람만, 수정 후 승인 포함) | NRM-04, ADR-050 | M1 |
+| `proposal.approve` · `proposal.amend` | `{projectId, id, author, edited?}` (amend는 `edited` 필수) → `{proposal, applied, approvalLog}` (사람만, 수정 후 승인 포함. 반영 규범은 같은 트랜잭션에서 확인됨, 근거 = 이 승인 기록, ADR-101) | NRM-04, ADR-050, ADR-101 | M1 |
 | `proposal.reject` | `{projectId, id, author, reason}` → `{proposal, approvalLog}` (빈 사유 `-32001` `REJECT_REASON_REQUIRED`) | NRM-04, ADR-050 | M1 |
 | `proposal.markRead` | `{projectId, id}` → `{proposal}` (처음 읽은 시각만) | SCR-17 | M1 |
 | `approvalLog.list` | `{projectId, targetRef?}` → `{entries, chain: {valid, brokenAtSeq}}` (체인 검증은 전체 기록 기준) | NFR-01, ADR-027, ADR-050 | M1 |
+| `confirmation.set` | `{projectId, target: {entity: Requirement \| Rule, id}, author}` → `{target, confirmation, approvalLog}` (사람만 -32020 · 없는 대상 -32004 · 삭제된 대상 · 이미 확인됨 -32009 · 다른 엔터티 -32602. 승인 기록 `confirm` 추가와 확인됨(근거 = 그 순번) 저장이 트랜잭션 1개. 확인을 푸는 RPC는 없음, 역할 세션 도구에도 없음) | NFR-01, ADR-100 D2 · I1 · C2, ADR-101 | M7 |
 | `verification.summary` | `{projectId}` → `{basis, compliance: {passed, judgeable}, denominator, costPerRunUsd, rules, pipeline}` (판정 기준 = 가장 나중에 병합된 실행(병합 커밋이 기록된 실행, 상태 무관 · 병합 단계 결과에 저장된 병합 커밋의 전체 조상 수 순, ADR-096)의 기준 브랜치 · 병합 커밋, 없으면 `null` · 준수(통과/판정 가능) · 분모 목록 · 실행당 비용(없으면 `null`) · 규칙별 판정(판정 기준 커밋에서 낸 판정만, 없으면 미판정)과 실행 링크(비용 합계 · 턴) · 최근 실행의 단계와 현재 단계) | JDG-03, COST-02, SCR-05, ADR-072, ADR-096 | M1 |
 | `run.create` | `{projectId, ruleIds, author}` → `{run, steps, approvalLog}` (실행 시작 확인, 사람만, 유형 A · `waiting_approval` · 승인 기록 `run_start`. 설정 미비 `-32010` · 없는 규칙 `-32004` · 삭제된 규칙 `-32009`이면 아무것도 만들지 않음) | RUN-01, RUN-02, NFR-07, ADR-061 | M1 |
 | `run.list` · `run.get` | `{projectId, status?}` → `{runs}` (표시 ID 순) / `{projectId, id}`(ULID 또는 `EXE-NNN`) → `{run, steps, usage}` (`usage` = 실행 · 역할 · 에이전트 단계 시도별 비용 · 턴 · 모델별 사용량, 값 없으면 `null`, ADR-067) | RUN-01, SCR-05, COST-02, ADR-061, ADR-067 | M1 |
@@ -372,6 +377,7 @@ stateDiagram-v2
 | 규칙 | 강제 위치 | 시험 |
 |---|---|---|
 | 에이전트는 승인 · 잠정 승인 불가 (NFR-01) | `orchestrator/src/tools/definitions.ts`(ADR-052): 승인 · 규범 쓰기 도구 없음. 제안 생성 도구만 (`proposal` 상태 `pending` 고정) | 승인 도구 부재 · 제안 상태 고정 단위 테스트, `integrity.test.ts`(모든 역할 도구 목록 · `agent-approve` 승인 호출 `unknown_tool` 거부 · 작업 디렉터리 격리, ADR-075) |
+| 에이전트는 확인 표시를 만들 수 없음 (NFR-01, ADR-100 I1) | `orchestrator/src/confirmations/confirmation-service.ts`만 `ProjectStore.confirmations.confirm`(사람 주체 인자, DB CHECK 사람만)을 부르고, 가져오는 곳은 `confirmation.set` · `requirement.*` 처리기와 제안 승인뿐(ADR-101). 역할 도구에 확인 도구 없음 | `integrity.test.ts`(모든 역할 도구 목록에 확인 도구 없음 · `agent-confirm`의 `confirmation.set` `unknown_tool` 거부 · 확인 경로의 가져오기 구조), `confirmation.test.ts`(에이전트 주체 -32020) |
 | 승인은 파이프 경로로만 (PRD 5.1) | `orchestrator/src/ipc/server.ts`: 인증 전 연결은 `system.hello` 외 전부 -32020. `orchestrator/src/ipc/proposal-handlers.ts`: `proposal.approve` · `amend` · `reject`(사람 주체만) · `run.create`, ApprovalLog 기록. 제안 등록 · 규칙 · 계약 쓰기 RPC 없음 | `proposal-guard.test.ts`: 토큰 없는 연결 거부, `rule.update` · `contract.update` -32601 |
 | 잠정 승인은 도구 정책만 (NRM-05) | `orchestrator/src/norms/provisional-policy.ts`, 기본 `off` (ADR-012) | 정책 off 시 provisional 미발생 |
 | 규범 저장소 직접 접근 불가 (NFR-01) | `orchestrator/src/tools/path-guard.ts`: 세션 루트 밖 · `BIVE_HOME/projects` · `BIVE_HOME/run` 거부, 심볼릭 링크 실경로 확인 | 금지 경로 시나리오 |
