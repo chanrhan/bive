@@ -9,6 +9,11 @@
 //   `rule_generation` 제안으로 가린다. 재기동 때 끊긴 세션을 다시 띄우지 않는다 (PRD 5.1 자동 재개 없음)
 // - 세션 기록(도구 호출 · 매니페스트 · 결과)은 메모리 · 로그와 함께 프로젝트 저장소(`sessions` · `tool_calls`,
 //   실행 밖 세션, ADR-066)에도 남긴다. 저장 실패는 로그만 남기고 세션을 막지 않는다
+// - 중복이 아닌 시도마다 시도 기록(`rule_writer_requests`, 세션 ID와 같은 ID)을 남기고, 세션을 열지 않으면 생략 사유를
+//   거기에 채운다. 화면 · `ruleWriter.status`는 이 기록과 세션 기록에서만 상태를 만든다 (M3-26, ADR-099)
+// - 시도 기록이 바뀌면(대기 · 시작 · 끝 · 생략) `onChanged`로 알린다 (`event.ruleWriter.changed`)
+// - 다시 시도(`retry`): 사람이 요구사항을 직접 편집해 저장했을 때, 가장 최근 시도가 생략 · 실패(`success` 아닌 종료)이고
+//   규칙 자동 생성 제안이 없으면 새 시도를 띄운다. 진행 중 · 대기 중이거나 성공한 요구사항은 띄우지 않는다 (ADR-099)
 import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -19,6 +24,7 @@ import {
   ErrorCode,
   type MissingSetting,
   type Requirement,
+  type RuleWriterSkipReason as StoredSkipReason,
   type SessionEndReason,
   SettingsIncompleteData,
   TOOL_CALL_NAME_DISPLAY_MAX,
@@ -47,18 +53,14 @@ import { RULE_WRITER_SYSTEM_PROMPT, ruleWriterTaskPrompt } from './prompts.js';
 /** 이 세션의 역할. 설정 검사도 이 역할만 본다 (ADR-057: 실행 전체 한도는 항상 함께 검사). */
 export const RULE_WRITER_ROLE = 'rule-writer' as const satisfies AgentRole;
 
-/** 세션을 띄우지 않은 이유. */
-export type RuleWriterSkipReason =
-  /** 설정의 rule-writer 모델 · 한도 또는 실행 전체 한도가 비어 있음 (NFR-07) */
-  | 'settings_incomplete'
-  /** 같은 요구사항에 이미 세션을 띄웠거나 규칙 자동 생성 제안이 있음 */
-  | 'duplicate'
-  /** 오케스트레이터가 종료 중 */
-  | 'closed'
-  /** 시작 준비 중 예상하지 못한 오류 */
-  | 'start_failed'
-  /** 대기하는 사이 요구사항이 삭제됐거나 읽을 수 없게 됨(프로젝트 등록 해제 등) */
-  | 'requirement_unavailable';
+/**
+ * 세션을 띄우지 않은 이유. 저장하는 사유(설정 미비 · 종료 중 · 시작 실패 · 요구사항 없음)는 shared `RuleWriterSkipReason`이고,
+ * 중복(같은 요구사항에 이미 세션을 띄웠거나 규칙 자동 생성 제안이 있음)은 저장하지 않는다.
+ */
+export type RuleWriterSkipReason = StoredSkipReason | 'duplicate';
+
+/** 요구사항 하나의 시도 기록이 저장된 뒤 부른다 (`event.ruleWriter.changed`). 던지지 않아야 한다. */
+export type RuleWriterChangeListener = (projectId: string, requirementId: string) => void;
 
 export type RuleWriterSessionStatus = 'skipped' | 'queued' | 'running' | 'ended';
 
@@ -112,9 +114,11 @@ export type RuleWriterStartResult =
       readonly record: RuleWriterSessionRecord | null;
     };
 
-/** `requirement.create` 처리기가 쓰는 창구. 던지지 않는다. */
+/** `requirement.create` · `requirement.update` 처리기가 쓰는 창구. 던지지 않는다. */
 export interface RuleWriterLauncher {
   start(store: ProjectStore, input: RuleWriterStartInput): RuleWriterStartResult;
+  /** 가장 최근 시도가 생략 · 실패일 때만 새 시도를 띄운다. 대상이 아니면 `null` */
+  retry(store: ProjectStore, input: RuleWriterStartInput): RuleWriterStartResult | null;
 }
 
 export interface RuleWriterServiceOptions {
@@ -132,6 +136,8 @@ export interface RuleWriterServiceOptions {
   readonly log?: (line: string) => void;
   /** `close`가 세션 정리를 기다리는 최대 시간 (기본 5000ms) */
   readonly closeTimeoutMs?: number;
+  /** 시도 기록이 저장된 뒤 (기본: 알리지 않음) */
+  readonly onChanged?: RuleWriterChangeListener;
 }
 
 const DEFAULT_CLOSE_TIMEOUT_MS = 5000;
@@ -158,6 +164,7 @@ export class RuleWriterService implements RuleWriterLauncher {
   /** 저장소에 세션 행을 만든 기록 ID */
   readonly #persisted = new Set<string>();
   readonly #closeTimeoutMs: number;
+  readonly #onChanged: RuleWriterChangeListener | undefined;
   /** 모든 기록 (생략 포함, 만든 순서) */
   readonly #records: RuleWriterSessionRecord[] = [];
   /** 세션을 띄운(대기열에 넣은) 요구사항 → 기록 */
@@ -187,6 +194,7 @@ export class RuleWriterService implements RuleWriterLauncher {
       }
     };
     this.#closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
+    this.#onChanged = options.onChanged;
   }
 
   /** 기록 사본 (만든 순서). */
@@ -206,12 +214,48 @@ export class RuleWriterService implements RuleWriterLauncher {
    * 던지지 않는다(요구사항 저장 응답을 바꾸지 않음).
    */
   start(store: ProjectStore, input: RuleWriterStartInput): RuleWriterStartResult {
+    return this.#begin(store, input, false);
+  }
+
+  /**
+   * 사람이 요구사항을 직접 편집해 저장한 뒤 부른다(같은 저장소 열림). 저장된 가장 최근 시도가 생략이거나 `success`가 아닌
+   * 종료일 때만 `start`와 같은 검사(종료 중 · 중복 · 제안 있음 · 설정)를 거쳐 새 시도를 띄운다. 시도 기록이 없거나
+   * 대기 · 진행 중 · 성공이면 `null`. 던지지 않는다.
+   */
+  retry(store: ProjectStore, input: RuleWriterStartInput): RuleWriterStartResult | null {
+    try {
+      const latest = store.ruleWriterRequests.latest(input.requirement.id);
+      const failed =
+        latest !== null &&
+        (latest.state === 'skipped' ||
+          (latest.state === 'ended' && latest.endReason !== 'success'));
+      if (!failed) return null;
+    } catch (error) {
+      this.#log(
+        `규칙 작성 다시 시도 확인 실패 (${input.requirement.displayId}): ${errorMessage(error)}`,
+      );
+      return null;
+    }
+    this.#log(`규칙 작성 다시 시도 (${input.requirement.displayId})`);
+    return this.#begin(store, input, true);
+  }
+
+  #begin(
+    store: ProjectStore,
+    input: RuleWriterStartInput,
+    relaunch: boolean,
+  ): RuleWriterStartResult {
     const { projectId, requirement } = input;
     try {
       if (this.#closed) {
-        return this.#skip(input, 'closed', '오케스트레이터 종료 중', []);
+        return this.#skip(store, input, 'closed', '오케스트레이터 종료 중', []);
       }
-      const existing = this.#launched.get(keyOf(projectId, requirement.id));
+      const launched = this.#launched.get(keyOf(projectId, requirement.id));
+      // 다시 시도는 이 프로세스에서 끝난(생략 포함) 세션을 막지 않는다. 대기 · 진행 중이면 중복이다
+      const existing =
+        relaunch && (launched?.status === 'ended' || launched?.status === 'skipped')
+          ? undefined
+          : launched;
       if (existing !== undefined || this.#hasGeneratedProposals(store, requirement.id)) {
         this.#log(`규칙 작성 생략 (${requirement.displayId}, 이미 세션을 띄웠거나 제안이 있음)`);
         return {
@@ -228,6 +272,7 @@ export class RuleWriterService implements RuleWriterLauncher {
         if (error instanceof RpcError && error.code === ErrorCode.SettingsIncomplete) {
           const data = SettingsIncompleteData.safeParse(error.data);
           return this.#skip(
+            store,
             input,
             'settings_incomplete',
             error.message,
@@ -240,10 +285,18 @@ export class RuleWriterService implements RuleWriterLauncher {
       record.model = session.model;
       record.budget = { ...session.budget };
       this.#launched.set(keyOf(projectId, requirement.id), record);
+      // 시도 기록 저장이 실패해도 세션은 띄운다(세션 행만으로도 시도로 읽힌다)
+      this.#saveAttempt(record, () =>
+        store.ruleWriterRequests.create({
+          id: record.id,
+          requirementId: record.requirementId,
+          requestedAt: record.createdAt,
+        }),
+      );
       this.#enqueue(record, requirement);
       return { status: 'queued', record: structuredClone(record) };
     } catch (error) {
-      return this.#skip(input, 'start_failed', errorMessage(error), []);
+      return this.#skip(store, input, 'start_failed', errorMessage(error), []);
     }
   }
 
@@ -311,8 +364,9 @@ export class RuleWriterService implements RuleWriterLauncher {
   }
 
   #skip(
+    store: ProjectStore,
     input: RuleWriterStartInput,
-    reason: RuleWriterSkipReason,
+    reason: StoredSkipReason,
     detail: string,
     missing: readonly MissingSetting[],
   ): RuleWriterStartResult {
@@ -322,7 +376,61 @@ export class RuleWriterService implements RuleWriterLauncher {
     record.error = detail;
     const suffix = missing.length > 0 ? `: ${missing.join(', ')}` : '';
     this.#log(`규칙 작성 생략 (${input.requirement.displayId}, ${detail}${suffix})`);
+    this.#saveAttempt(record, () =>
+      store.ruleWriterRequests.create({
+        id: record.id,
+        requirementId: record.requirementId,
+        requestedAt: record.createdAt,
+        skip: { reason, detail, missing, at: record.createdAt },
+      }),
+    );
     return { status: 'skipped', reason, record: structuredClone(record) };
+  }
+
+  /**
+   * 시도 기록을 쓰고(실패는 로그만) 바뀌었음을 알린다. 알림은 지금 저장소 열림 구간이 끝난 뒤 보낸다(ADR-069:
+   * 열림 구간 안에서 보내지 않는다).
+   */
+  #saveAttempt(record: RuleWriterSessionRecord, write: () => unknown): void {
+    try {
+      write();
+    } catch (error) {
+      this.#log(
+        `규칙 작성 시도 기록 저장 실패 (${record.requirementDisplayId}): ${errorMessage(error)}`,
+      );
+      return;
+    }
+    this.#notify(record);
+  }
+
+  #notify(record: RuleWriterSessionRecord): void {
+    const listener = this.#onChanged;
+    if (listener === undefined) return;
+    const { projectId, requirementId } = record;
+    queueMicrotask(() => {
+      try {
+        listener(projectId, requirementId);
+      } catch (error) {
+        this.#log(`규칙 작성 알림 실패 (${record.requirementDisplayId}): ${errorMessage(error)}`);
+      }
+    });
+  }
+
+  /** 세션을 열지 못하고 끝난 시도를 저장소의 시도 기록에 생략으로 남긴다 (실패는 로그만). */
+  #saveSkip(
+    record: RuleWriterSessionRecord,
+    reason: StoredSkipReason,
+    detail: string | null,
+  ): void {
+    this.#saveAttempt(record, () =>
+      withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+        store.ruleWriterRequests.skip(record.id, {
+          reason,
+          detail,
+          at: record.endedAt ?? this.#timestamp(),
+        }),
+      ),
+    );
   }
 
   /** 재기동 뒤 중복 방지: 이 요구사항을 부모로 하는 규칙 자동 생성 제안이 이미 있는지. */
@@ -419,6 +527,7 @@ export class RuleWriterService implements RuleWriterLauncher {
           startedAt: record.startedAt ?? this.#timestamp(),
         }),
       );
+      if (this.#persisted.has(record.id)) this.#notify(record);
       const outcome = await runGuardedSession({
         adapter: this.#adapter,
         controller,
@@ -482,6 +591,8 @@ export class RuleWriterService implements RuleWriterLauncher {
     record.error = detail;
     record.endedAt = this.#timestamp();
     this.#log(`규칙 작성 생략 (${record.requirementDisplayId}, ${detail})`);
+    // 프로젝트 등록이 해제됐으면 저장할 곳이 없어 로그만 남는다
+    this.#saveSkip(record, 'requirement_unavailable', detail);
     return null;
   }
 
@@ -544,6 +655,10 @@ export class RuleWriterService implements RuleWriterLauncher {
           endedAt,
         }),
       );
+      this.#notify(record);
+    } else {
+      // 세션 행을 만들기 전에 끝났다(종료 중 · 준비 실패): 시도 기록에 생략으로 남긴다
+      this.#saveSkip(record, endReason === 'aborted' ? 'closed' : 'start_failed', detail);
     }
     const cost = record.result?.total_cost_usd;
     this.#log(

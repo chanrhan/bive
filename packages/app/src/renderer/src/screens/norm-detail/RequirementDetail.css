@@ -150,3 +150,33 @@
 .child-rule-detail > .rule-detail-body {
   padding: var(--space-3);
 }
+
+/* 규칙 작성 상태 (ADR-099): 자식 규칙 위 한 줄. 대기 · 진행 중은 흐림, 생략은 경고, 실패는 위험 색. 토큰만 (ADR-044) */
+.rule-writer-status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-2);
+}
+
+.rule-writer-status[data-tone='muted'] {
+  color: var(--color-text-muted);
+}
+
+.rule-writer-status[data-tone='warning'] {
+  color: var(--color-warning);
+}
+
+.rule-writer-status[data-tone='danger'] {
+  color: var(--color-danger);
+}
+
+.rule-writer-detail {
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

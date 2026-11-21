@@ -9,6 +9,9 @@ import {
   createUlidGenerator,
   type Requirement,
   type RoleSettings,
+  RULE_WRITER_ERROR_DISPLAY_MAX,
+  type RuleWriterStatusParams,
+  type RuleWriterStatusResult,
   type RunLimits,
 } from '@bive/shared';
 import { openProjectStore, registerProject, unregisterProject } from '@bive/store';
@@ -18,6 +21,7 @@ import type { AgentAdapter, SessionEvent, SessionSpec } from '../src/agent/adapt
 import { loadScenario, type Scenario, ScenarioSchema } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import type { AgentSelection } from '../src/agent/select.js';
+import { readRuleWriterStatus } from '../src/ipc/rule-writer-handlers.js';
 import type { PipeServer } from '../src/ipc/server.js';
 import { startOrchestrator, type Orchestrator } from '../src/orchestrator.js';
 import { RULE_WRITER_SYSTEM_PROMPT } from '../src/rule-writer/prompts.js';
@@ -29,6 +33,8 @@ import { toolDefinitions } from '../src/tools/definitions.js';
 import { earsStatementProblem, isEarsStatement } from '../src/tools/ears.js';
 // 규칙 화면의 WHEN 조건 표시와 교차 확인한다 (DOM · React에 의존하지 않는 순수 함수, ADR-060 · ADR-062)
 import { whenCondition } from '../../app/src/renderer/src/screens/rules/rulesView.js';
+// 개발용 CLI 본체 (`cli rpc`, 조회 접미사만 허용). 파이프 연결만 이 시험의 클라이언트로 바꾼다
+import { runCli } from '../../app/src/cli-core.js';
 import { connect, type TestClient } from './helpers/client.js';
 import { cleanup, makeBiveHome, waitFor } from './helpers/process.js';
 import { iso, type ProjectHarness, startProjectHarness, T0 } from './helpers/project-harness.js';
@@ -991,5 +997,236 @@ describe('오케스트레이터 기동 경로', () => {
     } finally {
       reader.close();
     }
+  });
+});
+
+describe('규칙 작성 시도 기록 · 조회 · 다시 시도 (M3-26 #206, NRM-02 · NFR-03 · ADR-099)', () => {
+  /** 저장소만 읽는 조회 처리기 (서비스 · 메모리 없이, 재기동 뒤와 같다) */
+  const storedStatus = (h: ProjectHarness, requirementId?: string): RuleWriterStatusResult =>
+    readRuleWriterStatus(
+      h.biveHome,
+      requirementId === undefined
+        ? { projectId: h.project.id }
+        : { projectId: h.project.id, requirementId },
+    );
+
+  /** `cli rpc ruleWriter.status <json>` (앱 CLI 본체를 이 파이프 클라이언트에 붙인다) */
+  const cliStatus = async (h: ProjectHarness, params: unknown) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runCli(['rpc', 'ruleWriter.status', JSON.stringify(params)], {
+      connect: () =>
+        Promise.resolve({
+          request: (method: string, p?: unknown) =>
+            h.client.call(method as 'ruleWriter.status', p as RuleWriterStatusParams),
+          close: () => Promise.resolve(),
+        }),
+      stdout: (text) => out.push(text),
+      stderr: (text) => err.push(text),
+    });
+    return { code, out: out.join('\n'), err };
+  };
+
+  const updateRequirement = (h: ProjectHarness, id: string, text: string) =>
+    h.client.call('requirement.update', { projectId: h.project.id, id, text, author: human });
+
+  /** 첫 세션의 init에만 허용되지 않은 MCP 서버를 넣는다 (세션 가드 위반 재현) */
+  const failFirstInit = (name: string) => {
+    let seen = 0;
+    return (event: SessionEvent): SessionEvent => {
+      if (event.type !== 'init') return event;
+      seen += 1;
+      return seen === 1 ? { ...event, mcpServers: [...event.mcpServers, name] } : event;
+    };
+  };
+
+  it('어댑터 오류(외부 문자열)로 끝난 시도는 ruleWriter.status · cli rpc로 종료 사유 · 오류 문장(이스케이프 · 상한)이 보이고, 값은 저장소에서만 나온다', async () => {
+    // SDK · 어댑터가 던진 오류 문장은 줄바꿈 · 양방향 제어 문자 · 긴 문자열을 담을 수 있다
+    const evil = `SDK 오류\n${String.fromCodePoint(0x202e)}${'x'.repeat(600)}`;
+    const h = await startHarness({
+      transform: (event) => {
+        if (event.type === 'init') throw new Error(evil);
+        return event;
+      },
+    });
+    await saveSettings(h);
+
+    const requirement = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
+    await h.service.whenSettled(h.project.id, requirement.id);
+    const record = onlyRecord(h, requirement.id);
+    expect(record).toMatchObject({ status: 'ended', endReason: 'error_during_execution' });
+
+    const { entries } = await h.client.call('ruleWriter.status', { projectId: h.project.id });
+    expect(entries).toEqual([
+      {
+        requirementId: requirement.id,
+        attemptId: record.id,
+        state: 'ended',
+        skipReason: null,
+        missing: [],
+        endReason: 'error_during_execution',
+        error: expect.any(String) as string,
+        errorTruncated: true,
+        requestedAt: iso(T0),
+        endedAt: iso(T0),
+      },
+    ]);
+    const shown = entries[0]?.error ?? '';
+    expect(shown.startsWith('SDK 오류\\n\\u202exxx')).toBe(true);
+    expect(shown.endsWith('…')).toBe(true);
+    expect(shown).toHaveLength(RULE_WRITER_ERROR_DISPLAY_MAX);
+    expect(shown).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+    // 저장된 기록은 원문 그대로다 (이스케이프는 표시 값에만)
+    expect(h.read((store) => store.sessions.get(record.id)?.error)).toBe(evil);
+
+    // 저장소만 읽는 처리기도 같은 값이다(오케스트레이터 메모리를 읽지 않음)
+    expect(storedStatus(h)).toEqual({ entries });
+    expect(storedStatus(h, requirement.id)).toEqual({ entries });
+
+    // 개발용 CLI의 조회(접미사 .status)로도 같은 값이 나온다
+    const cli = await cliStatus(h, { projectId: h.project.id, requirementId: requirement.id });
+    expect(cli).toMatchObject({ code: 0, err: [] });
+    expect(JSON.parse(cli.out)).toEqual({ entries });
+  });
+
+  it('설정 미비로 생략된 시도는 사유 · 비어 있던 항목이 저장되고, 설정 뒤 직접 편집 저장이 다시 시도해 제안이 한 번만 생긴다', async () => {
+    const h = await startHarness();
+    const requirement = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
+    expect(h.specs).toEqual([]);
+    const skipped = onlyRecord(h, requirement.id);
+    expect(storedStatus(h, requirement.id)).toEqual({
+      entries: [
+        {
+          requirementId: requirement.id,
+          attemptId: skipped.id,
+          state: 'skipped',
+          skipReason: 'settings_incomplete',
+          missing: [
+            'run.maxBudgetUsd',
+            'run.maxTurns',
+            'roles.rule-writer.model',
+            'roles.rule-writer.maxBudgetUsd',
+            'roles.rule-writer.maxTurns',
+          ],
+          endReason: null,
+          error: '예산 · 모델 미설정',
+          errorTruncated: false,
+          requestedAt: iso(T0),
+          endedAt: iso(T0),
+        },
+      ],
+    });
+
+    // 설정을 고쳐도 그것만으로는 다시 시도하지 않는다 (사람의 요구사항 저장이 계기)
+    await saveSettings(h);
+    await h.service.idle();
+    expect(h.specs).toEqual([]);
+
+    h.clock.now = T0 + 1000;
+    await updateRequirement(h, requirement.id, '헬스 체크 응답에 서버 시각을 포함');
+    await h.service.whenSettled(h.project.id, requirement.id);
+    expect(h.specs).toHaveLength(1);
+    expect(h.specs[0]?.prompt).toContain('헬스 체크 응답에 서버 시각을 포함');
+    const [, retried] = h.service.recordsFor(h.project.id, requirement.id);
+    expect(retried).toMatchObject({ status: 'ended', endReason: 'success' });
+    expect(storedStatus(h, requirement.id).entries).toEqual([
+      expect.objectContaining({
+        attemptId: retried?.id,
+        state: 'ended',
+        endReason: 'success',
+        error: null,
+        requestedAt: iso(T0 + 1000),
+      }),
+    ]);
+    expect(h.read((store) => store.proposals.list())).toHaveLength(2);
+    expect(h.logs).toContain('규칙 작성 다시 시도 (REQ-001)');
+
+    // 성공한 요구사항은 다시 편집해도 띄우지 않는다 (중복 제안 없음)
+    await updateRequirement(h, requirement.id, '헬스 체크 응답에 서버 시각 포함');
+    await h.service.idle();
+    expect(h.specs).toHaveLength(1);
+    expect(h.read((store) => store.proposals.list())).toHaveLength(2);
+    expect(
+      h.read((store) => store.ruleWriterRequests.listByRequirement(requirement.id)),
+    ).toHaveLength(2);
+  });
+
+  it('실패한 요구사항의 다시 시도는 진행 중이면 또 띄우지 않고, 끝나면 시도 기록이 실패 → 성공으로 이어진다', async () => {
+    const h = await startHarness({ transform: failFirstInit('evil') });
+    await saveSettings(h);
+    const requirement = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
+    await h.service.whenSettled(h.project.id, requirement.id);
+    expect(storedStatus(h, requirement.id).entries[0]).toMatchObject({
+      state: 'ended',
+      endReason: 'guard_violation',
+      error: '세션 가드: 허용되지 않은 MCP 서버 evil',
+    });
+
+    h.useScenario(ruleWriterScenario([gateTurn, { tool: 'propose_rule', args: validArgs() }]));
+    await updateRequirement(h, requirement.id, '헬스 체크 응답에 서버 시각을 포함');
+    await waitFor(() => existsSync(gatePath(h)), 5000, '다시 시도 세션이 관문에서 대기');
+    expect(storedStatus(h, requirement.id).entries[0]).toMatchObject({
+      state: 'running',
+      endReason: null,
+      endedAt: null,
+    });
+    // 진행 중에 다시 편집해도 새 시도는 없다
+    await updateRequirement(h, requirement.id, '헬스 체크 응답에 서버 시각 포함');
+    expect(h.specs).toHaveLength(2);
+
+    rmSync(gatePath(h));
+    await h.service.whenSettled(h.project.id, requirement.id);
+    expect(h.specs).toHaveLength(2);
+    expect(storedStatus(h, requirement.id).entries[0]).toMatchObject({
+      state: 'ended',
+      endReason: 'success',
+    });
+    expect(h.read((store) => store.proposals.list())).toHaveLength(1);
+    expect(
+      h.read((store) =>
+        store.ruleWriterRequests.listByRequirement(requirement.id).map((a) => a.endReason),
+      ),
+    ).toEqual(['guard_violation', 'success']);
+  });
+
+  it('제안을 남기고 실패한 요구사항(예산 초과)은 편집해도 다시 시도하지 않는다 (이미 있는 제안 규칙 유지)', async () => {
+    const h = await startHarness();
+    await saveSettings(h, { 'rule-writer': { ...RULE_WRITER_SETTINGS, maxBudgetUsd: 0.01 } });
+    const requirement = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
+    await h.service.whenSettled(h.project.id, requirement.id);
+    expect(storedStatus(h, requirement.id).entries[0]).toMatchObject({
+      state: 'ended',
+      endReason: 'error_max_budget_usd',
+    });
+
+    await updateRequirement(h, requirement.id, '헬스 체크 응답에 서버 시각을 포함');
+    await h.service.idle();
+    expect(h.specs).toHaveLength(1);
+    expect(h.read((store) => store.proposals.list())).toHaveLength(2);
+    expect(
+      h.read((store) => store.ruleWriterRequests.listByRequirement(requirement.id)),
+    ).toHaveLength(1);
+  });
+
+  it('시도 기록이 없는 요구사항은 조회 결과에 없고 편집해도 시작하지 않으며, 없는 프로젝트는 -32004', async () => {
+    const h = await startHarness();
+    await saveSettings(h);
+    const old = h.read((store) =>
+      store.requirements.create({
+        id: createUlidGenerator()(),
+        text: '이전 요구사항',
+        author: human,
+        normState: 'approved',
+        createdAt: iso(T0),
+      }),
+    );
+    expect(storedStatus(h)).toEqual({ entries: [] });
+    await updateRequirement(h, old.id, '이전 요구사항 수정');
+    await h.service.idle();
+    expect(h.service.recordsFor(h.project.id, old.id)).toEqual([]);
+    expect(h.specs).toEqual([]);
+    await expect(
+      h.client.call('ruleWriter.status', { projectId: createUlidGenerator()() }),
+    ).rejects.toMatchObject({ code: -32004 });
   });
 });

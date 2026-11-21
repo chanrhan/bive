@@ -10,6 +10,7 @@ import { type AgentSelection, selectAgent } from './agent/select.js';
 import { type InterruptedRun, PipelineEngine } from './engine/pipeline-engine.js';
 import type { StepExecutors } from './engine/types.js';
 import { ProposalEventPublisher } from './events/proposal-events.js';
+import { ruleWriterChangedNotifier } from './events/rule-writer-events.js';
 import { RunEventPublisher } from './events/run-events.js';
 import { createHandlers } from './ipc/handlers.js';
 import { PipeServer } from './ipc/server.js';
@@ -195,6 +196,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       adapter: agent.adapter,
       tasks: lifecycle,
       log,
+      // 시도 기록 저장 뒤 → event.ruleWriter.changed (M3-26, ADR-099). 기다리지 않는다
+      onChanged: ruleWriterChangedNotifier({ sink: () => server, log }),
       proposals: new ProposalService({
         biveHome: options.biveHome,
         onChanged: proposalEvents.changed,

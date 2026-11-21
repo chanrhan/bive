@@ -7,7 +7,9 @@
 // - 삭제: 두 번 눌러 확인(SCR-02). 첫 클릭은 [삭제 확인]으로 바뀌기만 하고(호출 없음), 두 번째 클릭에서
 //   requirement.delete 1회. 버튼을 벗어나면 확인 대기가 풀린다. 실패하면 "요구사항 삭제 실패"
 // - 변경 이력(P1) · 구현 위치(대상 블록, P1) · 자식 계약(P1)은 해당 이슈 전 미노출 (ADR-035)
-// - 값은 requirement.list 항목 · rule.list 결과에서만 (NFR-03)
+// - 자식 규칙 위에 가장 최근 규칙 작성 시도의 상태(대기 · 진행 중 · 생략 · 실패)를 한 줄 보인다. 정상 종료면 없음.
+//   값은 ruleWriter.status에서만, 알림 event.ruleWriter.changed · 재접속 · 직접 편집 저장 때 다시 읽는다 (M3-26, ADR-099)
+// - 값은 requirement.list 항목 · rule.list · ruleWriter.status 결과에서만 (NFR-03)
 import './RequirementDetail.css';
 
 import type { Requirement } from '@bive/shared';
@@ -19,7 +21,9 @@ import { StatusBadge } from '../../components/StatusBadge/StatusBadge.js';
 import { canSaveEdit, REQUIREMENT_DETAIL_TEXT as TEXT } from './requirementDetailView.js';
 import { RuleDetail } from './RuleDetail.js';
 import { ruleAuthorName } from './ruleDetailView.js';
+import { type RuleWriterStatusView, ruleWriterStatusView } from './ruleWriterStatusView.js';
 import { type ChildRulesLoad, useChildRules } from './useChildRules.js';
+import { useRuleWriterStatus } from './useRuleWriterStatus.js';
 
 export interface RequirementDetailProps {
   projectId: string;
@@ -42,6 +46,7 @@ export const RequirementDetail = ({
   onDelete,
 }: RequirementDetailProps): React.JSX.Element => {
   const children = useChildRules(projectId, requirement.id, requirement.updatedAt);
+  const writer = useRuleWriterStatus(projectId, requirement.id, requirement.updatedAt);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [armed, setArmed] = useState(false);
@@ -249,6 +254,7 @@ export const RequirementDetail = ({
         <h3 id="requirement-rules-heading" className="rule-section-heading">
           {TEXT.rules}
         </h3>
+        <RuleWriterStatusLine view={ruleWriterStatusView(writer)} />
         <ChildRules projectId={projectId} requirement={requirement} load={children} />
       </section>
     </div>
@@ -269,6 +275,37 @@ const Field = ({
     <dd>{children}</dd>
   </div>
 );
+
+/** 가장 최근 규칙 작성 시도의 상태 한 줄 (+ 설명 한 줄). 정상 종료 · 기록 없음이면 그리지 않는다 (ADR-099). */
+const RuleWriterStatusLine = ({
+  view,
+}: {
+  view: RuleWriterStatusView | null;
+}): React.JSX.Element | null => {
+  if (view === null) return null;
+  return (
+    <div
+      className="rule-writer-status"
+      data-testid="requirement-rule-writer"
+      data-state={view.kind}
+      data-tone={view.tone}
+      role="status"
+    >
+      <span data-testid="requirement-rule-writer-label">
+        {view.reason === null ? view.label : `${view.label} · ${view.reason}`}
+      </span>
+      {view.detail !== null && (
+        <p
+          className="rule-writer-detail"
+          data-testid="requirement-rule-writer-detail"
+          title={view.detail}
+        >
+          {view.detail}
+        </p>
+      )}
+    </div>
+  );
+};
 
 /** 자식 규칙 목록. 줄을 누르면 그 자리에서 규칙 상세를 펼친다(여러 줄을 함께 펼칠 수 있음). */
 const ChildRules = ({

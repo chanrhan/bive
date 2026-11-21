@@ -7,6 +7,7 @@ import { createProjectHandlers } from './project-handlers.js';
 import { createProposalHandlers } from './proposal-handlers.js';
 import { createRequirementHandlers } from './requirement-handlers.js';
 import { createRuleHandlers } from './rule-handlers.js';
+import { createRuleWriterHandlers } from './rule-writer-handlers.js';
 import { createRunHandlers } from './run-handlers.js';
 import type { MethodHandlers } from './server.js';
 import { createSettingsHandlers } from './settings-handlers.js';
@@ -62,6 +63,7 @@ export const createHandlers = ({
     ...(ruleWriter === undefined ? {} : { ruleWriter }),
   }),
   ...createRuleHandlers({ biveHome }),
+  ...createRuleWriterHandlers({ biveHome }),
   ...createProposalHandlers({
     biveHome,
     now,

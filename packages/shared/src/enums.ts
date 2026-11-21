@@ -251,6 +251,32 @@ export const SESSION_END_REASON_LABELS = {
   guard_violation: '가드 위반',
 } as const satisfies Record<SessionEndReason, string>;
 
+/**
+ * 규칙 작성 세션을 띄우지 않은 이유 중 저장하는 것 (NRM-02, M3-26, ADR-062 · ADR-099). 중복(이미 세션 · 제안이 있음)은
+ * 앞선 시도의 기록이 따로 있으므로 저장하지 않는다.
+ */
+export const RuleWriterSkipReason = z.enum([
+  /** 설정의 rule-writer 모델 · 한도 또는 실행 전체 한도가 비어 있음 (NFR-07) */
+  'settings_incomplete',
+  /** 오케스트레이터가 종료 중이었거나 비정상 종료로 대기 중인 세션이 사라짐 */
+  'closed',
+  /** 시작 준비 중 예상하지 못한 오류 */
+  'start_failed',
+  /** 대기하는 사이 요구사항이 삭제됐거나 읽을 수 없게 됨 */
+  'requirement_unavailable',
+]);
+export type RuleWriterSkipReason = z.infer<typeof RuleWriterSkipReason>;
+export const RULE_WRITER_SKIP_REASON_LABELS = {
+  settings_incomplete: '예산 · 모델 미설정',
+  closed: '오케스트레이터 종료',
+  start_failed: '시작 실패',
+  requirement_unavailable: '요구사항 없음',
+} as const satisfies Record<RuleWriterSkipReason, string>;
+
+/** 규칙 작성 시도 하나의 상태: 대기 · 진행 중 · 끝남(종료 사유는 세션 기록) · 생략. */
+export const RuleWriterState = z.enum(['queued', 'running', 'ended', 'skipped']);
+export type RuleWriterState = z.infer<typeof RuleWriterState>;
+
 /** 판정 실행기 (JDG-01). M1은 vitest만. */
 export const JudgeRunner = z.enum(['vitest']);
 export type JudgeRunner = z.infer<typeof JudgeRunner>;

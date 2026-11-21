@@ -5,6 +5,7 @@
 //   부모 없는 규칙의 추적성 결함 표시는 M3-11
 // - 생성 뒤 같은 저장소 열림에서 rule-writer 세션 시작을 맡긴다 (NRM-02, M1-08, ADR-062). 세션은 비동기로 돌고
 //   응답을 붙잡지 않으며, 설정이 비어 세션을 띄우지 못해도 요구사항 저장은 성공한다
+// - 사람의 직접 편집 저장 뒤에는 가장 최근 규칙 작성 시도가 생략 · 실패였을 때만 다시 시도를 맡긴다 (M3-26, ADR-099)
 import { type Author, createUlidGenerator, ErrorCode } from '@bive/shared';
 
 import type { RuleWriterLauncher } from '../rule-writer/rule-writer-service.js';
@@ -69,9 +70,16 @@ export const createRequirementHandlers = ({
     },
     'requirement.update': ({ projectId, id, text, author }) => {
       assertHuman(author);
-      return withProjectStore(biveHome, projectId, (store) => ({
-        requirement: store.requirements.update(id, { text }, { by: author, at: timestamp() }),
-      }));
+      return withProjectStore(biveHome, projectId, (store) => {
+        const requirement = store.requirements.update(
+          id,
+          { text },
+          { by: author, at: timestamp() },
+        );
+        // 사람의 직접 편집 저장이 다시 시도의 계기다: 가장 최근 시도가 생략 · 실패일 때만 새 시도 (ADR-099)
+        ruleWriter?.retry(store, { projectId, requirement });
+        return { requirement };
+      });
     },
     'requirement.delete': ({ projectId, id, author }) => {
       assertHuman(author);

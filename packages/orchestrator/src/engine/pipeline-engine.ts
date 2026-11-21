@@ -313,7 +313,10 @@ export class PipelineEngine {
     return interrupted;
   }
 
-  /** 실행 밖 세션(규칙 작성, ADR-062) 중 끝나지 않은 것: 앞 프로세스가 죽은 것이므로 `aborted`로 닫는다. */
+  /**
+   * 실행 밖 세션(규칙 작성, ADR-062) 중 끝나지 않은 것: 앞 프로세스가 죽은 것이므로 `aborted`로 닫는다. 세션을 열기 전
+   * 대기열에 남아 있던 규칙 작성 시도도 생략(`closed`)으로 끝낸다(다시 띄우지 않는다, ADR-099).
+   */
   #closeRunlessSessions(store: ProjectStore): void {
     const at = this.#timestamp();
     for (const session of store.sessions.listUnended()) {
@@ -324,6 +327,7 @@ export class PipelineEngine {
         endedAt: at,
       });
     }
+    store.ruleWriterRequests.closePending('오케스트레이터가 비정상 종료됨', at);
   }
 
   #interrupt(store: ProjectStore, run: Run): RunDetail {

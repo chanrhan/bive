@@ -5,6 +5,7 @@
 // e2e/reconnect.spec.ts.
 import {
   PROPOSAL_EVENT_NAMES as SHARED_PROPOSAL_EVENT_NAMES,
+  RULE_WRITER_EVENT_NAMES as SHARED_RULE_WRITER_EVENT_NAMES,
   RUN_EVENT_NAMES as SHARED_RUN_EVENT_NAMES,
 } from '@bive/shared';
 import { describe, expect, it } from 'vitest';
@@ -14,6 +15,7 @@ import {
   createRefreshCoalescer,
   isProjectEvent,
   PROPOSAL_EVENT_NAMES,
+  RULE_WRITER_EVENT_NAMES,
   RUN_EVENT_NAMES,
 } from '../src/renderer/src/runs/refreshCoalescer.js';
 
@@ -163,6 +165,7 @@ describe('실행 알림 이름 · 프로젝트 거르기', () => {
   it('알림 이름이 shared와 같다', () => {
     expect(RUN_EVENT_NAMES).toEqual(SHARED_RUN_EVENT_NAMES);
     expect(PROPOSAL_EVENT_NAMES).toEqual(SHARED_PROPOSAL_EVENT_NAMES);
+    expect(RULE_WRITER_EVENT_NAMES).toEqual(SHARED_RULE_WRITER_EVENT_NAMES);
   });
 
   it('이 프로젝트의 알림만 받는다', () => {

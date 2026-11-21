@@ -255,7 +255,7 @@ describe('0010 tool_call_empty_name: 빈 도구 이름 기록 (M2-11 #190, ADR-0
       const sqlBefore = objectSql();
       expect(sqlBefore).toHaveLength(5);
 
-      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([10]);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 10), { now: fixedNow }).applied).toEqual([10]);
       expect(db.prepare('SELECT * FROM tool_calls').all()).toEqual(before);
       insertCall(db, newId(), 1, '');
       expect(db.prepare('SELECT seq, name FROM tool_calls ORDER BY seq').all()).toEqual([
