@@ -3,17 +3,19 @@
 //   동기로 하고 세션은 대기열에서 하나씩 비동기로 돈다(응답을 세션 종료까지 붙잡지 않는다)
 // - 설정의 rule-writer 모델 · 한도(`roleSessionSettings(settings, 'rule-writer')`, 실행 전체 한도 검사 포함)가 없으면 세션을 띄우지 않고
 //   그 사실을 기록한다. 요구사항 저장 자체는 성공한다 (NRM-01, ADR-062)
-// - 세션 도구는 `propose_rule` 하나다(ADR-024). 제안은 `ProposalService.submit`으로 승인 대기(`pending`)에만 들어가고
-//   규칙 테이블은 건드리지 않는다(NRM-04). 세션 가드가 init의 도구 · MCP 서버 목록을 검사한다(NFR-02)
-// - 같은 요구사항에 세션을 두 번 띄우지 않는다: 프로세스 안에서는 요구사항별 기록으로, 재기동 뒤에는 저장된
-//   `rule_generation` 제안으로 가린다. 재기동 때 끊긴 세션을 다시 띄우지 않는다 (PRD 5.1 자동 재개 없음)
+// - 세션 도구는 규칙 생성 도구 `propose_rule` 하나다(ADR-024). 호출 1건이 승인 대기 제안 없이 규칙 1개(효력 상태, 미확인,
+//   생성 주체 규칙 작성 역할)와 규범 변경 기록 1건(신규)을 트랜잭션 1개로 남긴다(`norms/agent-rule.ts`, M7-02 #214,
+//   ADR-100 D1 · C2, ADR-103). 세션 가드가 init의 도구 · MCP 서버 목록을 검사한다(NFR-02)
+// - 같은 요구사항에 세션을 두 번 띄우지 않는다: 프로세스 안에서는 요구사항별 기록으로, 재기동 뒤에는 그 요구사항에서
+//   규칙 작성 역할이 만든 규칙(또는 이 변경 전의 `rule_generation` 제안)으로 가린다. 재기동 때 끊긴 세션을 다시 띄우지
+//   않는다 (PRD 5.1 자동 재개 없음)
 // - 세션 기록(도구 호출 · 매니페스트 · 결과)은 메모리 · 로그와 함께 프로젝트 저장소(`sessions` · `tool_calls`,
 //   실행 밖 세션, ADR-066)에도 남긴다. 저장 실패는 로그만 남기고 세션을 막지 않는다
 // - 중복이 아닌 시도마다 시도 기록(`rule_writer_requests`, 세션 ID와 같은 ID)을 남기고, 세션을 열지 않으면 생략 사유를
 //   거기에 채운다. 화면 · `ruleWriter.status`는 이 기록과 세션 기록에서만 상태를 만든다 (M3-26, ADR-099)
 // - 시도 기록이 바뀌면(대기 · 시작 · 끝 · 생략) `onChanged`로 알린다 (`event.ruleWriter.changed`)
 // - 다시 시도(`retry`): 사람이 요구사항을 직접 편집해 저장했을 때, 가장 최근 시도가 생략 · 실패(`success` 아닌 종료)이고
-//   규칙 자동 생성 제안이 없으면 새 시도를 띄운다. 진행 중 · 대기 중이거나 성공한 요구사항은 띄우지 않는다 (ADR-099)
+//   그 요구사항에서 규칙 작성 역할이 만든 규칙(이 변경 전의 규칙 자동 생성 제안 포함)이 없으면 새 시도를 띄운다. 진행 중 · 대기 중이거나 성공한 요구사항은 띄우지 않는다 (ADR-099)
 import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -42,7 +44,7 @@ import { runGuardedSession } from '../agent/guarded-session.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import type { TaskTracker } from '../lifecycle.js';
-import { ProposalService } from '../proposals/proposal-service.js';
+import { createAgentRule } from '../norms/agent-rule.js';
 import { roleSessionSettings } from '../settings/settings-service.js';
 import { displayText } from '../text-limit.js';
 import type { ProposeRuleInput } from '../tools/definitions.js';
@@ -55,7 +57,8 @@ export const RULE_WRITER_ROLE = 'rule-writer' as const satisfies AgentRole;
 
 /**
  * 세션을 띄우지 않은 이유. 저장하는 사유(설정 미비 · 종료 중 · 시작 실패 · 요구사항 없음)는 shared `RuleWriterSkipReason`이고,
- * 중복(같은 요구사항에 이미 세션을 띄웠거나 규칙 자동 생성 제안이 있음)은 저장하지 않는다.
+ * 중복(같은 요구사항에 이미 세션을 띄웠거나 그 요구사항에서 만든 규칙 · 이 변경 전의 규칙 자동 생성 제안이 있음)은
+ * 저장하지 않는다.
  */
 export type RuleWriterSkipReason = StoredSkipReason | 'duplicate';
 
@@ -86,8 +89,8 @@ export interface RuleWriterSessionRecord {
   sdkSessionId: string | null;
   /** 모든 도구 호출 (거부 · 오류 포함, ADR-052) */
   toolCalls: ToolCallRecord[];
-  /** 이 세션이 등록한 제안 ID (등록 순서) */
-  proposalIds: string[];
+  /** 이 세션이 바로 반영한 규칙 ID (만든 순서) */
+  ruleIds: string[];
   /** 결과 메시지 (없으면 `null`) */
   result: SessionResultEvent | null;
   /** 종료 사유 (`ended`일 때) */
@@ -128,8 +131,6 @@ export interface RuleWriterServiceOptions {
   readonly adapter: AgentAdapter;
   /** 시계 (ms, 기본 `Date.now`) */
   readonly now?: () => number;
-  /** 제안 등록 창구 (기본: 같은 BIVE_HOME · 시계의 새 인스턴스) */
-  readonly proposals?: ProposalService;
   /** 진행 중 세션이 있으면 유휴 종료를 미룬다 (오케스트레이터의 Lifecycle) */
   readonly tasks?: TaskTracker;
   /** 기록 한 줄 (기본: 버림) */
@@ -158,7 +159,6 @@ export class RuleWriterService implements RuleWriterLauncher {
   readonly #adapter: AgentAdapter;
   readonly #now: () => number;
   readonly #newId: () => string;
-  readonly #proposals: ProposalService;
   readonly #tasks: TaskTracker | undefined;
   readonly #log: (line: string) => void;
   /** 저장소에 세션 행을 만든 기록 ID */
@@ -181,8 +181,6 @@ export class RuleWriterService implements RuleWriterLauncher {
     this.#adapter = options.adapter;
     this.#now = options.now ?? Date.now;
     this.#newId = createUlidGenerator(this.#now);
-    this.#proposals =
-      options.proposals ?? new ProposalService({ biveHome: options.biveHome, now: this.#now });
     this.#tasks = options.tasks;
     const log = options.log;
     // 기록 함수의 예외가 요구사항 저장 · 세션을 깨지 않게 한다
@@ -219,7 +217,7 @@ export class RuleWriterService implements RuleWriterLauncher {
 
   /**
    * 사람이 요구사항을 직접 편집해 저장한 뒤 부른다(같은 저장소 열림). 저장된 가장 최근 시도가 생략이거나 `success`가 아닌
-   * 종료일 때만 `start`와 같은 검사(종료 중 · 중복 · 제안 있음 · 설정)를 거쳐 새 시도를 띄운다. 시도 기록이 없거나
+   * 종료일 때만 `start`와 같은 검사(종료 중 · 중복 · 만든 규칙 있음 · 설정)를 거쳐 새 시도를 띄운다. 시도 기록이 없거나
    * 대기 · 진행 중 · 성공이면 `null`. 던지지 않는다.
    */
   retry(store: ProjectStore, input: RuleWriterStartInput): RuleWriterStartResult | null {
@@ -256,8 +254,10 @@ export class RuleWriterService implements RuleWriterLauncher {
         relaunch && (launched?.status === 'ended' || launched?.status === 'skipped')
           ? undefined
           : launched;
-      if (existing !== undefined || this.#hasGeneratedProposals(store, requirement.id)) {
-        this.#log(`규칙 작성 생략 (${requirement.displayId}, 이미 세션을 띄웠거나 제안이 있음)`);
+      if (existing !== undefined || this.#hasGeneratedNorms(store, requirement.id)) {
+        this.#log(
+          `규칙 작성 생략 (${requirement.displayId}, 이미 세션을 띄웠거나 만든 규칙이 있음)`,
+        );
         return {
           status: 'skipped',
           reason: 'duplicate',
@@ -316,7 +316,7 @@ export class RuleWriterService implements RuleWriterLauncher {
   }
 
   /**
-   * 새 세션을 받지 않고, 진행 중 · 대기 중 세션을 중단한다(기록 `aborted`). 이미 등록된 제안은 승인 대기로 남는다.
+   * 새 세션을 받지 않고, 진행 중 · 대기 중 세션을 중단한다(기록 `aborted`). 이미 반영된 규칙은 그대로 효력을 갖는다.
    * 세션이 중단 신호를 따르지 않아도 `closeTimeoutMs` 뒤에는 돌아온다.
    */
   async close(): Promise<void> {
@@ -351,7 +351,7 @@ export class RuleWriterService implements RuleWriterLauncher {
       manifest: null,
       sdkSessionId: null,
       toolCalls: [],
-      proposalIds: [],
+      ruleIds: [],
       result: null,
       endReason: null,
       error: null,
@@ -433,8 +433,15 @@ export class RuleWriterService implements RuleWriterLauncher {
     );
   }
 
-  /** 재기동 뒤 중복 방지: 이 요구사항을 부모로 하는 규칙 자동 생성 제안이 이미 있는지. */
-  #hasGeneratedProposals(store: ProjectStore, requirementId: string): boolean {
+  /**
+   * 재기동 뒤 중복 방지: 이 요구사항에서 규칙 작성 역할이 이미 규범을 만들었는지. 바로 반영된 규칙(M7-02)과, 이 변경
+   * 전부터 있던 규칙 자동 생성 제안(대기 · 처리 무관)을 함께 본다.
+   */
+  #hasGeneratedNorms(store: ProjectStore, requirementId: string): boolean {
+    const madeRule = store.rules
+      .listByParent(requirementId)
+      .some((rule) => rule.author.kind === 'agent' && rule.author.role === RULE_WRITER_ROLE);
+    if (madeRule) return true;
     return store.proposals
       .list({ kind: 'rule_new' })
       .some(
@@ -663,14 +670,15 @@ export class RuleWriterService implements RuleWriterLauncher {
     const cost = record.result?.total_cost_usd;
     this.#log(
       `규칙 작성 세션 종료 (${record.requirementDisplayId}, ${endReason}, ` +
-        `제안 ${String(record.proposalIds.length)}건, 비용 ${cost === undefined || cost === null ? '없음' : `USD ${String(cost)}`}, ` +
+        `규칙 ${String(record.ruleIds.length)}건, 비용 ${cost === undefined || cost === null ? '없음' : `USD ${String(cost)}`}, ` +
         `턴 ${record.result === null ? '없음' : String(record.result.num_turns)}` +
         `${detail === null ? '' : `, ${detail}`})`,
     );
   }
 
   /**
-   * `propose_rule` 등록 콜백. 입력 형식(제목 · EARS 진술 · 검사 종류 등)은 실행기가 이미 검사했다.
+   * `propose_rule`(규칙 생성) 콜백: 규칙을 바로 반영하고 규범 변경 기록(신규)을 같은 트랜잭션으로 남긴다.
+   * 입력 형식(제목 · EARS 진술 · 검사 종류 등)은 실행기가 이미 검사했다.
    * - 부모가 이 세션의 요구사항이 아니면 `denied`(`invalid_args`)
    * - 부모 요구사항 · 프로젝트가 없으면 `error`(`not_found`), 부모가 삭제됐으면 `error`(`state_conflict`)
    */
@@ -683,15 +691,20 @@ export class RuleWriterService implements RuleWriterLauncher {
     }
     const { rationale, ...payload } = input;
     try {
-      const proposal = this.#proposals.submit(record.projectId, {
-        kind: 'rule_new',
-        payload,
-        rationale,
-        author: { kind: 'agent', role: RULE_WRITER_ROLE },
-        source: 'rule_generation',
-      });
-      record.proposalIds.push(proposal.id);
-      return ok(`제안 ${proposal.displayId} 등록 (승인 대기)`);
+      const { rule } = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+        createAgentRule(
+          store,
+          {
+            payload,
+            rationale,
+            author: { kind: 'agent', role: RULE_WRITER_ROLE },
+            sessionId: record.id,
+          },
+          { now: this.#now, newId: this.#newId },
+        ),
+      );
+      record.ruleIds.push(rule.id);
+      return ok(`규칙 ${rule.displayId} 반영 (바로 효력, 사람은 나중에 봄)`);
     } catch (error) {
       if (error instanceof ConflictError) {
         return failed('state_conflict', `부모 요구사항이 삭제됨: ${input.parentRequirementId}`);

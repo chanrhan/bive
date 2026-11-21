@@ -339,6 +339,38 @@ export const ApprovalAction = z.enum([
 export type ApprovalAction = z.infer<typeof ApprovalAction>;
 
 /**
+ * 규범 변경 기록의 종류 (ADR-100 C2 · A2, NRM-07, M7-02 #214, ADR-103). 에이전트 · 오케스트레이터 행동 1건이 1항목이다
+ * (사람 행동은 승인 기록). 대상 규범의 엔터티는 항목의 `targetRef`가 정한다(규칙 신규 = `created` + 규칙 대상).
+ * M7-02가 쓰는 값은 `created`뿐이고, 나머지는 뒤 이슈가 쓴다: 수정(`updated`, 제목 재생성 등) · 폐기(`retired`) ·
+ * 대체(`superseded`, M7-09) · 규범 담당 역할의 판단(`judgment`, M7-07 · M7-11 · M7-12) · 구현 역할의 이의(`objection`,
+ * M7-11) · 확인 풀림(`unconfirmed`, M7-13) · 실행 자동 시작(`auto_start`, M7-05) · 테스트 변경 알림(`test_changed`, M7-13).
+ * 값을 미리 연 것은 DB CHECK를 뒤 이슈마다 표 재구성으로 넓히지 않기 위해서다(0012의 승인 기록 행동과 같은 방식)
+ */
+export const NormChangeKind = z.enum([
+  'created',
+  'updated',
+  'retired',
+  'superseded',
+  'judgment',
+  'objection',
+  'unconfirmed',
+  'auto_start',
+  'test_changed',
+]);
+export type NormChangeKind = z.infer<typeof NormChangeKind>;
+export const NORM_CHANGE_KIND_LABELS = {
+  created: '신규',
+  updated: '수정',
+  retired: '폐기',
+  superseded: '대체',
+  judgment: '판단',
+  objection: '이의',
+  unconfirmed: '확인 풀림',
+  auto_start: '자동 시작',
+  test_changed: '테스트 변경',
+} as const satisfies Record<NormChangeKind, string>;
+
+/**
  * 확인 상태 (ADR-100 D2 · C1, M7-01): 규범 항목마다 "사람이 보고 OK했는가". 두 값뿐이고 기본은 미확인이다.
  * 사람만 확인됨으로 바꾸며(I1) 실행 생성 · 단계 진행 · 판정 · 병합의 어느 조건에도 쓰이지 않는다.
  */

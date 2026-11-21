@@ -31,16 +31,62 @@ const normalize = (value: unknown): unknown => {
 /** 키를 정렬한 결정적 JSON 문자열. 같은 값이면 키 순서와 무관하게 같은 문자열이다. */
 export const canonicalJson = (value: unknown): string => JSON.stringify(normalize(value));
 
+/**
+ * 해시 체인 항목 1건의 해시: SHA-256(접두 + 정규 JSON(필드)), 소문자 16진수. 접두는 체인마다 다르다(도메인 구분):
+ * 승인 기록과 규범 변경 기록은 같은 계산을 쓰되 접두가 달라, 한 체인의 항목 해시가 다른 체인에서 맞지 않는다 (ADR-103).
+ */
+export const chainHash = (prefix: string, fields: Record<string, unknown>): string =>
+  createHash('sha256').update(prefix, 'utf8').update(canonicalJson(fields), 'utf8').digest('hex');
+
 /** 승인 기록 1건의 해시를 계산한다. */
 export const computeApprovalLogHash = (input: ApprovalLogHashInput): string => {
   const { seq, at, action, actor, targetRef, clientId, detail, prevHash } = input;
-  return createHash('sha256')
-    .update(APPROVAL_LOG_HASH_PREFIX, 'utf8')
-    .update(
-      canonicalJson({ seq, at, action, actor, targetRef, clientId, detail, prevHash }),
-      'utf8',
-    )
-    .digest('hex');
+  return chainHash(APPROVAL_LOG_HASH_PREFIX, {
+    seq,
+    at,
+    action,
+    actor,
+    targetRef,
+    clientId,
+    detail,
+    prevHash,
+  });
+};
+
+/** 체인 검증 실패 가운데 체인 자체에서 드러나는 것 (승인 기록 · 규범 변경 기록 공통). */
+export type HashChainBreakReason = 'seq_gap' | 'prev_hash_mismatch' | 'hash_mismatch' | 'malformed';
+
+export type HashChainVerification =
+  | { valid: true; brokenAtSeq: null; reason: null }
+  | { valid: false; brokenAtSeq: number; reason: HashChainBreakReason };
+
+/**
+ * 순번 순으로 정렬된 전체 기록의 체인을 검증한다 (아래 `verifyApprovalLogChain`과 같은 규칙, 체인마다 해시 · 형식 함수만 다르다).
+ * 저장된 값을 스키마 검증 없이 받아 해시하고, 해시가 맞는 행의 형식을 마지막에 본다.
+ */
+export const verifyHashChain = <E extends { seq: number; prevHash: string; hash: string }>(
+  entries: readonly E[],
+  genesis: string,
+  hashOf: (entry: E) => string,
+  wellFormed: (entry: E) => boolean,
+): HashChainVerification => {
+  let prevHash = genesis;
+  for (const [index, entry] of entries.entries()) {
+    if (entry.seq !== index + 1) {
+      return { valid: false, brokenAtSeq: entry.seq, reason: 'seq_gap' };
+    }
+    if (entry.prevHash !== prevHash) {
+      return { valid: false, brokenAtSeq: entry.seq, reason: 'prev_hash_mismatch' };
+    }
+    if (hashOf(entry) !== entry.hash) {
+      return { valid: false, brokenAtSeq: entry.seq, reason: 'hash_mismatch' };
+    }
+    if (!wellFormed(entry)) {
+      return { valid: false, brokenAtSeq: entry.seq, reason: 'malformed' };
+    }
+    prevHash = entry.hash;
+  }
+  return { valid: true, brokenAtSeq: null, reason: null };
 };
 
 export type ChainBreakReason = ApprovalLogBreakReason;
@@ -64,22 +110,10 @@ export type ChainVerification =
  * 한계: 기준점(외부에 둔 마지막 해시)이 없으므로 끝 기록을 잘라 낸 것은 체인만으로 알 수 없다.
  * 저장소의 `ApprovalLogRepository.verify`가 처리된 제안과 대조해 일부를 잡는다 (ADR-050).
  */
-export const verifyApprovalLogChain = (entries: readonly ApprovalLogEntry[]): ChainVerification => {
-  let prevHash = APPROVAL_LOG_GENESIS_HASH;
-  for (const [index, entry] of entries.entries()) {
-    if (entry.seq !== index + 1) {
-      return { valid: false, brokenAtSeq: entry.seq, reason: 'seq_gap' };
-    }
-    if (entry.prevHash !== prevHash) {
-      return { valid: false, brokenAtSeq: entry.seq, reason: 'prev_hash_mismatch' };
-    }
-    if (computeApprovalLogHash(entry) !== entry.hash) {
-      return { valid: false, brokenAtSeq: entry.seq, reason: 'hash_mismatch' };
-    }
-    if (!ApprovalLogEntry.safeParse(entry).success) {
-      return { valid: false, brokenAtSeq: entry.seq, reason: 'malformed' };
-    }
-    prevHash = entry.hash;
-  }
-  return { valid: true, brokenAtSeq: null, reason: null };
-};
+export const verifyApprovalLogChain = (entries: readonly ApprovalLogEntry[]): ChainVerification =>
+  verifyHashChain(
+    entries,
+    APPROVAL_LOG_GENESIS_HASH,
+    computeApprovalLogHash,
+    (entry) => ApprovalLogEntry.safeParse(entry).success,
+  );

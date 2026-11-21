@@ -17,6 +17,9 @@ import {
   IdeSetting,
   JudgmentResult,
   MissingSettingPath,
+  NormChangeActor,
+  NormChangeBreakReason,
+  NormChangeDetail,
   Project,
   Proposal,
   ProposalPayload,
@@ -27,6 +30,7 @@ import {
   RunLimits,
   ScreenId,
   Settings,
+  Sha256Hex,
   Step,
   StoredCodeOpenRecord,
   Timestamp,
@@ -37,6 +41,7 @@ import {
   AgentRole,
   CodeOpenReason,
   JudgmentStatus,
+  NormChangeKind,
   ProposalKind,
   ProposalState,
   RuleWriterSkipReason,
@@ -408,6 +413,50 @@ export const ApprovalLogListResult = z.strictObject({
   }),
 });
 export type ApprovalLogListResult = z.infer<typeof ApprovalLogListResult>;
+
+// ── 규범 변경 기록 (ADR-100 C2 · A2, NRM-07, M7-02 #214, ADR-103) ─────
+// - `normChange.list`: 에이전트 · 오케스트레이터 행동의 추가 전용 기록을 순번 순으로. `targetRef`로 거른다(대상 규범).
+//   형식이 깨진 기록은 `entries`에서 빠지고, `chain`은 거르기 전 전체 기록의 해시 체인 · 형식 검증 결과다
+// - 사유 · 상세의 글은 에이전트가 쓴 것이라 표시용 표기(제어 · 서식 문자 이스케이프)와 길이 상한을 거친 표시 값으로
+//   내보낸다(ADR-089). 저장은 원문이고 `hash`는 원문 기준이다. 하나라도 잘렸으면 `textTruncated`가 `true`
+// - 쓰기 RPC는 없다. 기록은 오케스트레이터가 규범 변경과 같은 트랜잭션에서 남긴다
+
+/** 규범 변경 기록의 사유 · 상세 문자열 하나의 표시 상한 (UTF-16 코드 단위). */
+export const NORM_CHANGE_TEXT_DISPLAY_MAX = 4000;
+
+export const NormChangeListParams = z.strictObject({
+  projectId: Ulid,
+  targetRef: EntityRef.optional(),
+});
+export type NormChangeListParams = z.infer<typeof NormChangeListParams>;
+
+/** 응답의 기록 1건: 저장된 기록과 같은 칸이되 사유 · 상세의 문자열은 표시 값이다. */
+export const NormChangeView = z.strictObject({
+  seq: z.int().positive(),
+  at: Timestamp,
+  kind: NormChangeKind,
+  actor: NormChangeActor,
+  targetRef: EntityRef,
+  sessionId: Ulid.nullable(),
+  runId: Ulid.nullable(),
+  reason: z.string().max(NORM_CHANGE_TEXT_DISPLAY_MAX).nullable(),
+  detail: NormChangeDetail,
+  /** 사유 · 상세 문자열 가운데 상한 때문에 잘린 것이 있는지 */
+  textTruncated: z.boolean(),
+  prevHash: Sha256Hex,
+  hash: Sha256Hex,
+});
+export type NormChangeView = z.infer<typeof NormChangeView>;
+
+export const NormChangeListResult = z.strictObject({
+  entries: z.array(NormChangeView),
+  chain: z.strictObject({
+    valid: z.boolean(),
+    brokenAtSeq: z.int().positive().nullable(),
+    reason: NormChangeBreakReason.nullable(),
+  }),
+});
+export type NormChangeListResult = z.infer<typeof NormChangeListResult>;
 
 // ── 확인 상태 (ADR-100 D2 · C1 · C2 · A2, NFR-01, M7-01) ─────
 // - `confirmation.set`: 사람이 규범 항목(요구사항 · 규칙)을 보고 OK했다는 표시. 사람 주체만 받는다(에이전트 -32020).
@@ -879,6 +928,7 @@ export const METHODS = {
   'proposal.reject': { params: ProposalRejectParams, result: ProposalRejectResult },
   'approvalLog.list': { params: ApprovalLogListParams, result: ApprovalLogListResult },
   'confirmation.set': { params: ConfirmationSetParams, result: ConfirmationSetResult },
+  'normChange.list': { params: NormChangeListParams, result: NormChangeListResult },
   'project.open': { params: ProjectOpenParams, result: ProjectOpenResult },
   'project.current': { params: ProjectCurrentParams, result: ProjectCurrentResult },
   'project.list': { params: ProjectListParams, result: ProjectListResult },

@@ -24,7 +24,7 @@ import type { AgentSelection } from '../src/agent/select.js';
 import { readRuleWriterStatus } from '../src/ipc/rule-writer-handlers.js';
 import type { PipeServer } from '../src/ipc/server.js';
 import { startOrchestrator, type Orchestrator } from '../src/orchestrator.js';
-import { RULE_WRITER_SYSTEM_PROMPT } from '../src/rule-writer/prompts.js';
+import { RULE_WRITER_SYSTEM_PROMPT, ruleWriterTaskPrompt } from '../src/rule-writer/prompts.js';
 import {
   type RuleWriterSessionRecord,
   RuleWriterService,
@@ -187,6 +187,10 @@ const validArgs = (overrides: Record<string, unknown> = {}): Record<string, unkn
   ...overrides,
 });
 
+/** 도구 인자에서 근거를 뺀 규칙 본문 (근거는 규범 변경 기록 · 제안의 별도 칸). */
+const withoutRationale = (args: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'rationale'));
+
 /** EARS 검사가 받는 진술 (규칙 화면 whenCondition과 교차 확인하는 공용 사례). */
 const EARS_ACCEPTED = [
   'WHEN 결제 후 7일 초과 환불 요청 THE SYSTEM SHALL 요청 거절',
@@ -243,7 +247,7 @@ const gateTurn = { pause: { file: GATE } };
 const gatePath = (h: ProjectHarness): string => path.join(h.biveHome, 'rw-gate');
 
 describe('requirement.create 뒤 rule-writer 세션 (happy-path)', () => {
-  it('세션 1회가 propose_rule로 제안 2개를 승인 대기에 등록하고 규칙 테이블에는 반영되지 않는다', async () => {
+  it('세션 1회의 propose_rule 2건이 승인 대기 제안 없이 같은 트랜잭션에서 규칙(효력 · 미확인 · 에이전트)과 규범 변경 기록(신규)을 남긴다 (M7-02)', async () => {
     const h = await startHarness();
     await saveSettings(h);
 
@@ -263,38 +267,83 @@ describe('requirement.create 뒤 rule-writer 세션 (happy-path)', () => {
       ['propose_rule', 'ok'],
       ['propose_rule', 'ok'],
     ]);
+    // 모델에게 돌려준 본문: 반영된 규칙 (승인 대기 아님)
+    const results = h.events.flatMap((event) =>
+      event.type === 'tool_result' ? [event.result.content] : [],
+    );
+    expect(results).toEqual([
+      expect.stringContaining('규칙 RULE-001 반영'),
+      expect.stringContaining('규칙 RULE-002 반영'),
+    ]);
 
-    const { proposals } = await h.client.call('proposal.list', { projectId: h.project.id });
-    expect(proposals).toHaveLength(2);
-    expect(record.proposalIds).toEqual(proposals.map((proposal) => proposal.id));
-    const expected = happyPathProposals();
-    expect(expected).toHaveLength(2);
-    proposals.forEach((proposal, index) => {
-      const { rationale, ...payload } = expected[index] ?? {};
-      expect(proposal).toMatchObject({
-        displayId: `PRP-00${String(index + 1)}`,
-        kind: 'rule_new',
-        state: 'pending',
-        decision: null,
-        source: 'rule_generation',
-        author: { kind: 'agent', role: 'rule-writer' },
-        targetRef: { entity: 'Requirement', id: requirement.id },
-        rationale,
-        runId: null,
-      });
-      expect(proposal.payload).toEqual({ ...payload, parentRequirementId: requirement.id });
-    });
+    // 승인 대기 제안은 생기지 않는다 (ADR-100 A1)
+    expect((await h.client.call('proposal.list', { projectId: h.project.id })).proposals).toEqual(
+      [],
+    );
     await expect(
       h.client.call('proposal.count', { projectId: h.project.id }),
-    ).resolves.toMatchObject({ pending: 2 });
+    ).resolves.toMatchObject({ pending: 0 });
 
-    // 규칙 · 승인 기록은 그대로다 (NRM-04: 승인 전 제안은 규범 테이블에 없음)
+    // 규칙: 효력 상태(기존 값 approved) · 미확인 · 생성 주체 규칙 작성 역할, 내용은 도구 인자 그대로
+    const rules = (await h.client.call('rule.list', { projectId: h.project.id })).rules.map(
+      (entry) => entry.rule,
+    );
+    expect(rules.map((rule) => rule.id)).toEqual(record.ruleIds);
+    const expected = happyPathProposals();
+    expect(expected).toHaveLength(2);
+    rules.forEach((rule, index) => {
+      expect(rule).toMatchObject({
+        ...withoutRationale(expected[index] ?? {}),
+        displayId: `RULE-00${String(index + 1)}`,
+        parentRequirementId: requirement.id,
+        normState: 'approved',
+        author: { kind: 'agent', role: 'rule-writer' },
+        builtin: false,
+        deletedAt: null,
+        confirmation: { state: 'unconfirmed' },
+      });
+    });
+
     h.read((store) => {
-      expect(store.rules.list()).toEqual([]);
-      expect(store.rules.listByParent(requirement.id)).toEqual([]);
+      // 규범 변경 기록: 규칙마다 신규 1건 (이후 내용 · 사유 · 세션 ID · 시각), 규칙과 같은 시각
+      const changes = store.normChanges.list();
+      expect(changes).toHaveLength(2);
+      changes.forEach((change, index) => {
+        const rule = rules[index];
+        if (rule === undefined) throw new Error('규칙 없음');
+        expect(change).toMatchObject({
+          seq: index + 1,
+          kind: 'created',
+          actor: { kind: 'agent', role: 'rule-writer' },
+          targetRef: { entity: 'Rule', id: rule.id },
+          sessionId: record.id,
+          runId: null,
+          reason: expected[index]?.rationale,
+          at: rule.createdAt,
+          detail: {
+            after: {
+              displayId: rule.displayId,
+              title: rule.title,
+              statement: rule.statement,
+              kind: rule.kind,
+              checkKinds: rule.checkKinds,
+              parentRequirementId: requirement.id,
+            },
+          },
+        });
+        expect(change.detail.before).toBeUndefined();
+      });
+      expect(store.normChanges.verify()).toMatchObject({ valid: true });
+      // 사람 기록(승인 기록) · 확인 상태에는 아무것도 생기지 않는다 (ADR-100 C2 · I1)
       expect(store.approvalLog.list()).toEqual([]);
+      for (const rule of rules) {
+        expect(store.confirmations.get({ entity: 'Rule', id: rule.id })).toEqual({
+          state: 'unconfirmed',
+        });
+      }
+      expect(store.proposals.list()).toEqual([]);
       expect(store.requirements.get(requirement.id)).toEqual(requirement);
-      // 세션 · 도구 호출 기록은 저장소에도 남는다 (실행 밖 세션, ADR-066)
+      // 세션 · 도구 호출 기록은 저장소에도 남는다 (실행 밖 세션, ADR-066). 규범 변경 기록의 세션 ID가 이 세션이다
       const sessions = store.sessions.listByRequirement(requirement.id);
       expect(sessions).toEqual([
         expect.objectContaining({
@@ -318,10 +367,60 @@ describe('requirement.create 뒤 rule-writer 세션 (happy-path)', () => {
         [1, 'propose_rule', 'ok'],
       ]);
     });
+
+    // 조회 RPC: 대상 규칙으로 거르고, 체인 검증 결과를 함께 돌려준다
+    const firstRule = rules[0];
+    if (firstRule === undefined) throw new Error('규칙 없음');
+    const listed = await h.client.call('normChange.list', {
+      projectId: h.project.id,
+      targetRef: { entity: 'Rule', id: firstRule.id },
+    });
+    expect(listed.chain).toEqual({ valid: true, brokenAtSeq: null, reason: null });
+    expect(listed.entries.map((entry) => [entry.seq, entry.kind, entry.textTruncated])).toEqual([
+      [1, 'created', false],
+    ]);
+    expect(
+      (await h.client.call('normChange.list', { projectId: h.project.id })).entries,
+    ).toHaveLength(2);
+    // 규칙 작성 세션 로그는 만든 규칙 수를 적는다
+    expect(h.logs.some((line) => line.includes('success, 규칙 2건'))).toBe(true);
     // 세션 작업 폴더는 끝나면 지운다
     expect(existsSync(path.join(h.biveHome, 'work', h.project.id, 'sessions', record.id))).toBe(
       false,
     );
+  });
+
+  it('규칙 반영이 중간에 실패하면 규칙도 규범 변경 기록도 남지 않는다 (트랜잭션 1개)', async () => {
+    const h = await startHarness();
+    await saveSettings(h);
+    const requirement = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
+    await h.service.whenSettled(h.project.id, requirement.id);
+    const before = h.read((store) => ({
+      rules: store.rules.list(),
+      changes: store.normChanges.list(),
+    }));
+    // 규범 변경 기록 추가가 실패하는 저장소 (DB가 새 행을 거부)
+    h.read((store) =>
+      store.db.exec(`CREATE TRIGGER norm_changes_fail BEFORE INSERT ON norm_changes
+        BEGIN SELECT RAISE(ABORT, '시험: 기록 실패'); END;`),
+    );
+    const { requirement: second } = await h.client.call('requirement.create', {
+      projectId: h.project.id,
+      text: '헬스 체크 응답에 버전 포함',
+      author: human,
+    });
+    await h.service.whenSettled(h.project.id, second.id);
+    const record = onlyRecord(h, second.id);
+    expect(record.toolCalls.map((call) => [call.status, call.reason])).toEqual([
+      ['error', 'tool_failed'],
+      ['error', 'tool_failed'],
+    ]);
+    expect(record.ruleIds).toEqual([]);
+    h.read((store) => {
+      expect(store.rules.list()).toEqual(before.rules);
+      expect(store.normChanges.list()).toEqual(before.changes);
+      expect(store.rules.listByParent(second.id)).toEqual([]);
+    });
   });
 
   it('응답은 세션 종료를 기다리지 않는다', async () => {
@@ -335,12 +434,12 @@ describe('requirement.create 뒤 rule-writer 세션 (happy-path)', () => {
     expect(['queued', 'running']).toContain(onlyRecord(h, requirement.id).status);
     await waitFor(() => existsSync(gatePath(h)), 5000, '세션이 관문에서 대기');
     expect(onlyRecord(h, requirement.id).status).toBe('running');
-    expect(h.read((store) => store.proposals.list())).toEqual([]);
+    expect(h.read((store) => store.rules.list())).toEqual([]);
 
     rmSync(gatePath(h));
     await h.service.whenSettled(h.project.id, requirement.id);
     expect(onlyRecord(h, requirement.id)).toMatchObject({ status: 'ended', endReason: 'success' });
-    expect(h.read((store) => store.proposals.list())).toHaveLength(1);
+    expect(h.read((store) => store.rules.list())).toHaveLength(1);
   });
 });
 
@@ -424,7 +523,7 @@ describe('propose_rule 검증 (제목 · EARS 진술 · 검사 종류 · 부모 
     expect(accepted).toBeGreaterThan(500);
   });
 
-  it('틀린 인자는 denied(invalid_args)로 거부하고 제안을 만들지 않는다', async () => {
+  it('틀린 인자는 denied(invalid_args)로 거부하고 규칙을 만들지 않는다', async () => {
     const h = await startHarness();
     // 다른 살아 있는 요구사항 (설정 전이라 세션이 뜨지 않는다)
     const other = await createRequirement(h, '다른 요구사항');
@@ -470,10 +569,11 @@ describe('propose_rule 검증 (제목 · EARS 진술 · 검사 종류 · 부모 
     expect(results[0]?.content).toContain('WHEN <조건> THE SYSTEM SHALL <응답>');
     expect(results.at(-2)?.content).toContain(`이 세션의 요구사항 ${requirement.id}만`);
 
-    const proposals = h.read((store) => store.proposals.list());
-    expect(proposals).toHaveLength(1);
-    expect(proposals[0]?.payload).toMatchObject({ parentRequirementId: requirement.id });
-    expect(h.read((store) => store.rules.list())).toEqual([]);
+    const rules = h.read((store) => store.rules.list());
+    expect(rules).toHaveLength(1);
+    expect(rules[0]).toMatchObject({ parentRequirementId: requirement.id });
+    // 거부된 호출은 규범 변경 기록도 남기지 않는다
+    expect(h.read((store) => store.normChanges.list())).toHaveLength(1);
   });
 
   it('줄바꿈 · 제어 문자를 담은 도구 이름은 로그 한 줄 안에 표기로 남는다: 가짜 로그 줄을 만들지 못한다 (ADR-089)', async () => {
@@ -523,7 +623,7 @@ describe('propose_rule 검증 (제목 · EARS 진술 · 검사 종류 · 부모 
     expect(
       onlyRecord(h, requirement.id).toolCalls.map((call) => [call.status, call.reason]),
     ).toEqual([['error', 'state_conflict']]);
-    expect(h.read((store) => store.proposals.list())).toEqual([]);
+    expect(h.read((store) => store.rules.list())).toEqual([]);
   });
 
   it('세션 중 프로젝트 등록이 해제되면 error(not_found)', async () => {
@@ -541,7 +641,7 @@ describe('propose_rule 검증 (제목 · EARS 진술 · 검사 종류 · 부모 
     expect(
       onlyRecord(h, requirement.id).toolCalls.map((call) => [call.status, call.reason]),
     ).toEqual([['error', 'not_found']]);
-    expect(h.read((store) => store.proposals.list())).toEqual([]);
+    expect(h.read((store) => store.rules.list())).toEqual([]);
   });
 });
 
@@ -593,7 +693,7 @@ describe('도구 목록 · 모델 · 한도 (ADR-024)', () => {
     expect(h.logs.some((line) => line.includes('모델 test-model, 한도 USD 1 · 턴 20'))).toBe(true);
   });
 
-  it('결과가 역할 한도를 넘으면 그 사유로 끝나고 이미 등록한 제안은 승인 대기로 남는다', async () => {
+  it('결과가 역할 한도를 넘으면 그 사유로 끝나고 이미 반영한 규칙은 효력 그대로 남는다', async () => {
     const h = await startHarness();
     await saveSettings(h, { 'rule-writer': { ...RULE_WRITER_SETTINGS, maxBudgetUsd: 0.01 } });
 
@@ -605,12 +705,15 @@ describe('도구 목록 · 모델 · 한도 (ADR-024)', () => {
       status: 'ended',
       endReason: 'error_max_budget_usd',
     });
-    const proposals = h.read((store) => store.proposals.list());
-    expect(proposals.map((proposal) => proposal.state)).toEqual(['pending', 'pending']);
-    expect(h.read((store) => store.rules.list())).toEqual([]);
+    const rules = h.read((store) => store.rules.list());
+    expect(rules.map((rule) => [rule.normState, rule.confirmation.state])).toEqual([
+      ['approved', 'unconfirmed'],
+      ['approved', 'unconfirmed'],
+    ]);
+    expect(h.read((store) => store.proposals.list())).toEqual([]);
   });
 
-  it('init의 도구 목록이 허용 목록과 다르면 세션 가드가 멈추고 제안을 만들지 않는다', async () => {
+  it('init의 도구 목록이 허용 목록과 다르면 세션 가드가 멈추고 규칙을 만들지 않는다', async () => {
     const h = await startHarness({
       transform: (event) =>
         event.type === 'init' ? { ...event, tools: [...event.tools, 'mcp__evil__run'] } : event,
@@ -627,7 +730,7 @@ describe('도구 목록 · 모델 · 한도 (ADR-024)', () => {
       manifest: { role: 'rule-writer', tools: ['propose_rule', 'mcp__evil__run'] },
     });
     expect(record.toolCalls).toEqual([]);
-    expect(h.read((store) => store.proposals.list())).toEqual([]);
+    expect(h.read((store) => store.rules.list())).toEqual([]);
   });
 
   it('가드 위반의 MCP 서버 이름에 줄바꿈 · 양방향 제어 문자가 있어도 세션 종료 로그는 한 줄이고 이름은 표시 값이다 (M2-11 #190 · ADR-094)', async () => {
@@ -697,7 +800,7 @@ describe('설정 미비 · 중복 · 종료', () => {
     expect(onlyRecord(h, removed.id)).toMatchObject({
       status: 'skipped',
       skipReason: 'requirement_unavailable',
-      proposalIds: [],
+      ruleIds: [],
     });
     expect(onlyRecord(h, removed.id).error).toContain('요구사항 삭제됨');
     expect(h.logs.some((line) => line.startsWith('규칙 작성 생략 (REQ-002, 요구사항 삭제됨'))).toBe(
@@ -706,9 +809,7 @@ describe('설정 미비 · 중복 · 종료', () => {
     expect(h.specs.map((spec) => spec.vars?.requirementId)).toEqual([first.id, edited.id]);
     expect(h.specs[1]?.prompt).toContain('헬스 체크 응답에 호스트 이름 포함');
     expect(onlyRecord(h, edited.id)).toMatchObject({ status: 'ended', endReason: 'success' });
-    const parents = h
-      .read((store) => store.proposals.list())
-      .map((proposal) => proposal.targetRef?.id);
+    const parents = h.read((store) => store.rules.list()).map((rule) => rule.parentRequirementId);
     expect(parents).toEqual([first.id, edited.id]);
   });
 
@@ -764,7 +865,7 @@ describe('설정 미비 · 중복 · 종료', () => {
     expect(ended.find((record) => record.endReason === 'error_during_execution')?.error).toBe(
       '어댑터 시작 실패',
     );
-    expect(h.read((store) => store.proposals.list())).toHaveLength(2);
+    expect(h.read((store) => store.rules.list())).toHaveLength(2);
   });
 
   it('rule-writer 설정이 비면 요구사항은 저장되고 세션은 뜨지 않으며 그 사실이 기록된다', async () => {
@@ -792,7 +893,7 @@ describe('설정 미비 · 중복 · 종료', () => {
     expect(
       h.logs.some((line) => line.startsWith('규칙 작성 생략 (REQ-001, 예산 · 모델 미설정')),
     ).toBe(true);
-    expect(h.read((store) => store.proposals.list())).toEqual([]);
+    expect(h.read((store) => store.rules.list())).toEqual([]);
 
     // 실행 전체 한도가 없어도 생략한다 (ADR-057: 역할 검사에 실행 전체 한도를 늘 포함)
     await h.client.call('settings.update', {
@@ -808,7 +909,7 @@ describe('설정 미비 · 중복 · 종료', () => {
     expect(h.specs).toEqual([]);
   });
 
-  it('동시 requirement.create는 요구사항마다 세션 1회, 제안은 각자의 요구사항을 부모로 한다', async () => {
+  it('동시 requirement.create는 요구사항마다 세션 1회, 규칙은 각자의 요구사항을 부모로 한다', async () => {
     const h = await startHarness();
     await saveSettings(h);
 
@@ -824,14 +925,20 @@ describe('설정 미비 · 중복 · 종료', () => {
     expect(h.specs.map((spec) => spec.vars?.requirementId).sort()).toEqual(
       created.map((requirement) => requirement.id).sort(),
     );
-    const proposals = h.read((store) => store.proposals.list());
-    expect(proposals).toHaveLength(6);
+    const rules = h.read((store) => store.rules.list());
+    expect(rules).toHaveLength(6);
     for (const requirement of created) {
-      expect(onlyRecord(h, requirement.id).proposalIds).toHaveLength(2);
-      expect(
-        proposals.filter((proposal) => proposal.targetRef?.id === requirement.id),
-      ).toHaveLength(2);
+      expect(onlyRecord(h, requirement.id).ruleIds).toHaveLength(2);
+      expect(rules.filter((rule) => rule.parentRequirementId === requirement.id)).toHaveLength(2);
     }
+    // 규범 변경 기록의 세션 ID는 그 규칙을 만든 세션이다
+    h.read((store) => {
+      for (const change of store.normChanges.list()) {
+        const rule = rules.find((r) => r.id === change.targetRef.id);
+        const parent = rule?.parentRequirementId ?? '';
+        expect(change.sessionId).toBe(onlyRecord(h, parent).id);
+      }
+    });
   });
 
   it('같은 요구사항에는 다시 세션을 띄우지 않는다 (프로세스 안 · 재기동 뒤)', async () => {
@@ -846,7 +953,7 @@ describe('설정 미비 · 중복 · 종료', () => {
     expect(again).toMatchObject({ status: 'skipped', reason: 'duplicate' });
     expect(h.specs).toHaveLength(1);
 
-    // 재기동 뒤(새 서비스): 저장된 규칙 자동 생성 제안으로 가린다
+    // 재기동 뒤(새 서비스): 그 요구사항에서 규칙 작성 역할이 만든 규칙으로 가린다 (M7-02, 제안이 없어도)
     const restartedSpecs: SessionSpec[] = [];
     const scripted = new ScriptedAdapter({
       scenario: loadScenario('happy-path'),
@@ -870,8 +977,32 @@ describe('설정 미비 · 중복 · 종료', () => {
       record: null,
     });
     expect(restartedSpecs).toEqual([]);
+    expect(h.read((store) => store.proposals.list())).toEqual([]);
 
-    // 제안이 없는 요구사항은 새 서비스에서도 띄운다 (중복 검사가 넘치지 않음)
+    // 이 변경 전부터 있던 규칙 자동 생성 제안(규칙 없음)도 그대로 가린다 (ADR-100 A1)
+    const legacy = h.read((store) =>
+      store.requirements.create({
+        id: createUlidGenerator()(),
+        text: '헬스 체크 응답에 호스트 이름 포함',
+        author: human,
+        normState: 'approved',
+        createdAt: iso(T0),
+      }),
+    );
+    const legacyPayload = withoutRationale(validArgs({ parentRequirementId: legacy.id }));
+    h.proposals.submit(h.project.id, {
+      kind: 'rule_new',
+      payload: legacyPayload,
+      rationale: '이 변경 전의 제안',
+      author: { kind: 'agent', role: 'rule-writer' },
+      source: 'rule_generation',
+    });
+    expect(
+      h.read((store) => restarted.start(store, { projectId: h.project.id, requirement: legacy })),
+    ).toMatchObject({ status: 'skipped', reason: 'duplicate' });
+    expect(restartedSpecs).toEqual([]);
+
+    // 만든 규칙 · 제안이 없는 요구사항은 새 서비스에서도 띄운다 (중복 검사가 넘치지 않음)
     const fresh = h.read((store) =>
       store.requirements.create({
         id: createUlidGenerator()(),
@@ -886,7 +1017,8 @@ describe('설정 미비 · 중복 · 종료', () => {
     ).toMatchObject({ status: 'queued' });
     await restarted.idle();
     expect(restartedSpecs).toHaveLength(1);
-    expect(h.read((store) => store.proposals.list())).toHaveLength(4);
+    expect(h.read((store) => store.rules.list())).toHaveLength(4);
+    expect(h.read((store) => store.proposals.list())).toHaveLength(1);
   });
 
   it('close는 진행 중 세션을 중단하고 이후 요구사항에는 세션을 띄우지 않는다', async () => {
@@ -900,7 +1032,7 @@ describe('설정 미비 · 중복 · 종료', () => {
     await h.service.close();
 
     expect(onlyRecord(h, requirement.id)).toMatchObject({ status: 'ended', endReason: 'aborted' });
-    expect(h.read((store) => store.proposals.list())).toEqual([]);
+    expect(h.read((store) => store.rules.list())).toEqual([]);
     const later = await createRequirement(h, '헬스 체크 응답에 버전 포함');
     expect(onlyRecord(h, later.id)).toMatchObject({ status: 'skipped', skipReason: 'closed' });
     expect(h.specs).toHaveLength(1);
@@ -955,13 +1087,16 @@ describe('오케스트레이터 기동 경로', () => {
       author: human,
     });
     await first.orchestrator.ruleWriter.whenSettled(project.id, requirement.id);
-    const { proposals } = await client.call('proposal.list', { projectId: project.id });
-    expect(proposals.map((proposal) => [proposal.state, proposal.targetRef?.id])).toEqual([
-      ['pending', requirement.id],
-      ['pending', requirement.id],
+    const rules = (await client.call('rule.list', { projectId: project.id })).rules.map(
+      (entry) => entry.rule,
+    );
+    expect(rules.map((rule) => [rule.normState, rule.parentRequirementId])).toEqual([
+      ['approved', requirement.id],
+      ['approved', requirement.id],
     ]);
+    expect((await client.call('proposal.list', { projectId: project.id })).proposals).toEqual([]);
     expect(
-      logs.some((line) => line.startsWith('규칙 작성 세션 종료 (REQ-001, success, 제안 2건')),
+      logs.some((line) => line.startsWith('규칙 작성 세션 종료 (REQ-001, success, 규칙 2건')),
     ).toBe(true);
 
     // 세션 없이 남은 요구사항(세션 도중 강제 종료를 흉내 냄)이 있어도 재기동은 세션을 띄우지 않는다
@@ -992,8 +1127,9 @@ describe('오케스트레이터 기동 경로', () => {
     expect(second.orchestrator.ruleWriter.records).toEqual([]);
     const reader = openProjectStore(project.id, { home: biveHome, create: false });
     try {
-      expect(reader.proposals.list()).toHaveLength(2);
-      expect(reader.rules.list()).toEqual([]);
+      expect(reader.rules.list()).toHaveLength(2);
+      expect(reader.normChanges.list()).toHaveLength(2);
+      expect(reader.proposals.list()).toEqual([]);
     } finally {
       reader.close();
     }
@@ -1089,7 +1225,7 @@ describe('규칙 작성 시도 기록 · 조회 · 다시 시도 (M3-26 #206, NR
     expect(JSON.parse(cli.out)).toEqual({ entries });
   });
 
-  it('설정 미비로 생략된 시도는 사유 · 비어 있던 항목이 저장되고, 설정 뒤 직접 편집 저장이 다시 시도해 제안이 한 번만 생긴다', async () => {
+  it('설정 미비로 생략된 시도는 사유 · 비어 있던 항목이 저장되고, 설정 뒤 직접 편집 저장이 다시 시도해 규칙이 한 번만 생긴다', async () => {
     const h = await startHarness();
     const requirement = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
     expect(h.specs).toEqual([]);
@@ -1138,14 +1274,14 @@ describe('규칙 작성 시도 기록 · 조회 · 다시 시도 (M3-26 #206, NR
         requestedAt: iso(T0 + 1000),
       }),
     ]);
-    expect(h.read((store) => store.proposals.list())).toHaveLength(2);
+    expect(h.read((store) => store.rules.list())).toHaveLength(2);
     expect(h.logs).toContain('규칙 작성 다시 시도 (REQ-001)');
 
-    // 성공한 요구사항은 다시 편집해도 띄우지 않는다 (중복 제안 없음)
+    // 성공한 요구사항은 다시 편집해도 띄우지 않는다 (중복 규칙 없음)
     await updateRequirement(h, requirement.id, '헬스 체크 응답에 서버 시각 포함');
     await h.service.idle();
     expect(h.specs).toHaveLength(1);
-    expect(h.read((store) => store.proposals.list())).toHaveLength(2);
+    expect(h.read((store) => store.rules.list())).toHaveLength(2);
     expect(
       h.read((store) => store.ruleWriterRequests.listByRequirement(requirement.id)),
     ).toHaveLength(2);
@@ -1181,7 +1317,7 @@ describe('규칙 작성 시도 기록 · 조회 · 다시 시도 (M3-26 #206, NR
       state: 'ended',
       endReason: 'success',
     });
-    expect(h.read((store) => store.proposals.list())).toHaveLength(1);
+    expect(h.read((store) => store.rules.list())).toHaveLength(1);
     expect(
       h.read((store) =>
         store.ruleWriterRequests.listByRequirement(requirement.id).map((a) => a.endReason),
@@ -1189,7 +1325,7 @@ describe('규칙 작성 시도 기록 · 조회 · 다시 시도 (M3-26 #206, NR
     ).toEqual(['guard_violation', 'success']);
   });
 
-  it('제안을 남기고 실패한 요구사항(예산 초과)은 편집해도 다시 시도하지 않는다 (이미 있는 제안 규칙 유지)', async () => {
+  it('규칙을 남기고 실패한 요구사항(예산 초과)은 편집해도 다시 시도하지 않는다 (이미 만든 규칙 유지)', async () => {
     const h = await startHarness();
     await saveSettings(h, { 'rule-writer': { ...RULE_WRITER_SETTINGS, maxBudgetUsd: 0.01 } });
     const requirement = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
@@ -1202,7 +1338,7 @@ describe('규칙 작성 시도 기록 · 조회 · 다시 시도 (M3-26 #206, NR
     await updateRequirement(h, requirement.id, '헬스 체크 응답에 서버 시각을 포함');
     await h.service.idle();
     expect(h.specs).toHaveLength(1);
-    expect(h.read((store) => store.proposals.list())).toHaveLength(2);
+    expect(h.read((store) => store.rules.list())).toHaveLength(2);
     expect(
       h.read((store) => store.ruleWriterRequests.listByRequirement(requirement.id)),
     ).toHaveLength(1);
@@ -1228,5 +1364,119 @@ describe('규칙 작성 시도 기록 · 조회 · 다시 시도 (M3-26 #206, NR
     await expect(
       h.client.call('ruleWriter.status', { projectId: createUlidGenerator()() }),
     ).rejects.toMatchObject({ code: -32004 });
+  });
+});
+
+describe('사후 확인 전환: 프롬프트 · 대기 중이던 제안 (M7-02 #214 수용 기준 3, ADR-100 A1 · D1)', () => {
+  /** 사람 승인을 전제한 문장 (이 변경 전 프롬프트 · 도구 설명의 표현) */
+  const APPROVAL_PREMISE =
+    /승인해야|승인 대기|승인을 받|제안을 등록|제안으로 등록|제안한다|제안하라/;
+
+  it('규칙 작성 역할의 시스템 프롬프트 · 작업 지시 · 도구 설명에 사람 승인을 전제한 문장이 없고, 바로 효력 · 사후 확인을 밝힌다', () => {
+    const task = ruleWriterTaskPrompt({
+      id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      displayId: 'REQ-001',
+      text: '헬스 체크 응답에 서버 시각 포함',
+    });
+    const [tool] = toolDefinitions('rule-writer');
+    for (const text of [RULE_WRITER_SYSTEM_PROMPT, task, tool?.description ?? '']) {
+      expect(text).not.toMatch(APPROVAL_PREMISE);
+      expect(text).not.toContain('제안');
+    }
+    expect(RULE_WRITER_SYSTEM_PROMPT).toContain('그 즉시 효력을 갖고');
+    expect(RULE_WRITER_SYSTEM_PROMPT).toContain('사람은 나중에');
+    expect(tool?.description).toContain('바로 효력');
+    // 이 변경 전 문장이 남아 있지 않다 (ADR-100 결과 절의 ADR-062 항목)
+    expect(RULE_WRITER_SYSTEM_PROMPT).not.toContain('제안은 사람이 승인해야 규칙이 되고');
+  });
+
+  it('이 변경 전부터 대기 중이던 제안은 proposal.approve(확인됨) · proposal.reject로 처리되고, 규칙 작성 세션은 새 제안을 만들지 않는다', async () => {
+    const h = await startHarness();
+    await saveSettings(h);
+    // 이 변경 전 데이터: 사람이 쓴 요구사항과 그 요구사항의 대기 중 규칙 제안 2개 (세션 없이 저장소에 직접)
+    const legacy = h.read((store) =>
+      store.requirements.create({
+        id: createUlidGenerator()(),
+        text: '헬스 체크 응답에 서버 시각 포함',
+        author: human,
+        normState: 'approved',
+        createdAt: iso(T0),
+      }),
+    );
+    const payload = withoutRationale(validArgs({ parentRequirementId: legacy.id }));
+    const [kept, dropped] = ['헬스 체크 응답의 서버 시각', '헬스 체크 응답 형식 유지'].map(
+      (title) =>
+        h.proposals.submit(h.project.id, {
+          kind: 'rule_new',
+          payload: { ...payload, title },
+          rationale: '이 변경 전의 제안',
+          author: { kind: 'agent', role: 'rule-writer' },
+          source: 'rule_generation',
+        }),
+    );
+    if (kept === undefined || dropped === undefined) throw new Error('제안 없음');
+
+    // 새 요구사항의 규칙 작성 세션은 제안을 만들지 않고 규칙을 바로 반영한다
+    const fresh = await createRequirement(h, '헬스 체크 응답에 버전 포함');
+    await h.service.whenSettled(h.project.id, fresh.id);
+    expect(onlyRecord(h, fresh.id).ruleIds).toHaveLength(2);
+    expect(
+      (await h.client.call('proposal.list', { projectId: h.project.id })).proposals.map(
+        (proposal) => proposal.id,
+      ),
+    ).toEqual([kept.id, dropped.id]);
+    await expect(
+      h.client.call('proposal.count', { projectId: h.project.id }),
+    ).resolves.toMatchObject({ pending: 2 });
+
+    // 대기 중이던 제안: 승인하면 규칙이 되고 사람 행동이라 확인됨, 거절은 그대로
+    const approved = await h.client.call('proposal.approve', {
+      projectId: h.project.id,
+      id: kept.id,
+      author: human,
+    });
+    if (approved.applied.entity !== 'Rule') throw new Error('규칙 아님');
+    expect(approved.applied.rule).toMatchObject({
+      title: '헬스 체크 응답의 서버 시각',
+      parentRequirementId: legacy.id,
+      confirmation: {
+        state: 'confirmed',
+        by: human,
+        basis: { kind: 'approval_log', seq: approved.approvalLog.seq },
+      },
+    });
+    const rejected = await h.client.call('proposal.reject', {
+      projectId: h.project.id,
+      id: dropped.id,
+      author: human,
+      reason: '중복',
+    });
+    expect(rejected.proposal.state).toBe('rejected');
+    await expect(
+      h.client.call('proposal.count', { projectId: h.project.id }),
+    ).resolves.toMatchObject({ pending: 0 });
+
+    h.read((store) => {
+      // 승인 기록: 사람의 승인 · 거절 2건뿐. 규범 변경 기록: 에이전트의 신규 2건뿐 (사람 행동은 섞이지 않는다, C2)
+      expect(store.approvalLog.list().map((entry) => [entry.action, entry.actor.kind])).toEqual([
+        ['approve', 'human'],
+        ['reject', 'human'],
+      ]);
+      expect(
+        store.normChanges.list().map((entry) => [entry.kind, entry.actor.kind, entry.sessionId]),
+      ).toEqual([
+        ['created', 'agent', onlyRecord(h, fresh.id).id],
+        ['created', 'agent', onlyRecord(h, fresh.id).id],
+      ]);
+      // 바로 반영된 규칙은 미확인, 승인한 옛 제안의 규칙은 확인됨
+      const states = store.rules
+        .list()
+        .map((rule) => [rule.parentRequirementId, rule.confirmation.state]);
+      expect(states).toEqual([
+        [fresh.id, 'unconfirmed'],
+        [fresh.id, 'unconfirmed'],
+        [legacy.id, 'confirmed'],
+      ]);
+    });
   });
 });
