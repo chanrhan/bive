@@ -144,11 +144,6 @@ jobs:
         budget-exceeded.test.ts
         extra-mcp.test.ts
     steps:
-      # 임시(실패 흉내): 묶음 2를 곧바로 실패시켜 pipeline-e2e · ci가 빨강이 되는지 본다. 확인 뒤 되돌린다
-      - name: 임시 실패 흉내
-        if: ${{ matrix.group == 2 }}
-        run: exit 1
-
       - name: 체크아웃
         uses: actions/checkout@v7
 
