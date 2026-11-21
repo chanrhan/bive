@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import {
   type AgentRole,
@@ -759,10 +760,12 @@ describe('재개 · 재기동의 예외 경로 (리뷰 반영)', () => {
     return { h, engine };
   };
 
-  it('워크트리를 되돌리지 못하면 -32009, 실행은 interrupted 그대로, 예약은 풀린다', async () => {
+  it('워크트리를 되돌리지 못하면(일시적일 수 있는 명령 실패) -32009, 실행은 interrupted 그대로, 예약은 풀린다', async () => {
     const { h, engine } = await interruptedHarness();
     const before = detailOf(h);
-    fs.rmSync(String(before.run.worktreePath), { recursive: true, force: true });
+    // 명령 실패(워크트리의 .git 연결이 깨짐). 워크트리가 아예 없는 것 같은 복구 불가 사유는 그 재개 안에서 실행을
+    // 실패로 끝낸다 (ADR-105, run-queue.test.ts)
+    fs.writeFileSync(path.join(String(before.run.worktreePath), '.git'), 'gitdir: /nonexistent\n');
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const error: unknown = await engine
@@ -1026,13 +1029,95 @@ describe('상태 기계', () => {
     const first = engineFor(paused, pausedExecutors);
     expect(first.evaluateApproval(paused.project.id, paused.runId)).toBe(true);
     await waitFor(() => detailOf(paused).run.worktreePath !== null, 20_000, '워크트리 생성');
+    // waiting_approval → queued: 진행 중인 실행이 있는 프로젝트의 새 실행 2개 (ADR-105). 둘째의 대상 규칙은 대기 중 삭제
+    const doomedRule = withProject(paused.biveHome, paused.project.id, (store) =>
+      store.rules.create({
+        id: newId(),
+        title: '삭제될 규칙',
+        statement: paused.rule.statement,
+        kind: 'business',
+        checkKinds: ['test'],
+        parentRequirementId: paused.rule.parentRequirementId,
+        builtin: false,
+        targetBlockIds: [],
+        risk: null,
+        contractId: null,
+        author: { kind: 'agent', role: 'rule-writer' },
+        normState: 'approved',
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const queuedIds = [paused.rule.id, doomedRule.id].map((ruleId) => {
+      const runId = withProject(paused.biveHome, paused.project.id, (store) =>
+        createRun(
+          store,
+          { ruleIds: [ruleId], author: human },
+          { clientId: null },
+          { now: Date.now, newId },
+        ),
+      ).run.id;
+      expect(first.evaluateApproval(paused.project.id, runId)).toBe(true);
+      return runId;
+    });
+    withProject(paused.biveHome, paused.project.id, (store) =>
+      store.db
+        .prepare('UPDATE rules SET deleted_at = ? WHERE id = ?')
+        .run(new Date().toISOString(), doomedRule.id),
+    );
     await first.stop();
     const second = engineFor(paused, pausedExecutors);
     expect(second.recoverInterruptedRuns()).toHaveLength(1);
     release = true;
     await second.resume(paused.project.id, paused.runId, human);
+    // 재개한 실행이 끝나면 queued → running(첫째) → merged, 그다음 queued → failed(둘째, 대상 규칙 재검사)
     await second.settled();
     expect(detailOf(paused).run.status).toBe('merged');
+    expect(
+      queuedIds.map((id) =>
+        withProject(paused.biveHome, paused.project.id, (store) => store.runs.get(id)?.status),
+      ),
+    ).toEqual(['merged', 'failed']);
+
+    // interrupted → failed: 워크트리가 사라진 중단 실행의 재개는 그 자리에서 실패로 끝난다 (ADR-105)
+    const broken = setup();
+    const brokenFirst = engineFor(broken, pausedExecutors);
+    release = false;
+    expect(brokenFirst.evaluateApproval(broken.project.id, broken.runId)).toBe(true);
+    await waitFor(() => detailOf(broken).run.worktreePath !== null, 20_000, '워크트리 생성');
+    await brokenFirst.stop();
+    const brokenSecond = engineFor(broken, pausedExecutors);
+    expect(brokenSecond.recoverInterruptedRuns()).toHaveLength(1);
+    fs.rmSync(String(detailOf(broken).run.worktreePath), { recursive: true, force: true });
+    await expect(brokenSecond.resume(broken.project.id, broken.runId, human)).rejects.toThrow(
+      /재개할 수 없어/,
+    );
+    expect(detailOf(broken).run.status).toBe('failed');
+
+    // interrupted → merged: 병합 커밋이 기록된 중단 실행(화면 갱신 도중)을 재개할 수 없으면 병합 완료로 끝난다 (runEnding)
+    const mergedBroken = setup();
+    const holdScreen = stub({
+      screen_update: (context) =>
+        new Promise((_resolve, reject) => {
+          context.signal.addEventListener('abort', () => reject(context.signal.reason as Error), {
+            once: true,
+          });
+        }),
+    });
+    const mergedFirst = engineFor(mergedBroken, holdScreen);
+    expect(mergedFirst.evaluateApproval(mergedBroken.project.id, mergedBroken.runId)).toBe(true);
+    await waitFor(
+      () => detailOf(mergedBroken).run.currentStep === 'screen_update',
+      20_000,
+      '화면 갱신 단계',
+    );
+    await mergedFirst.stop();
+    const mergedSecond = engineFor(mergedBroken, holdScreen);
+    expect(mergedSecond.recoverInterruptedRuns()).toHaveLength(1);
+    fs.rmSync(String(detailOf(mergedBroken).run.worktreePath), { recursive: true, force: true });
+    await expect(
+      mergedSecond.resume(mergedBroken.project.id, mergedBroken.runId, human),
+    ).rejects.toThrow(/병합 완료로 끝냈습니다/);
+    expect(detailOf(mergedBroken).run.status).toBe('merged');
 
     const all = Object.entries(RUN_STATUS_TRANSITIONS).flatMap(([from, tos]) =>
       (tos as readonly string[]).map((to) => `${from}→${to}`),
@@ -1281,6 +1366,18 @@ describe('실행의 종료 상태는 한 곳(runEnding)에서 정한다: #halt�
     await second.settled();
     return detailOf(h);
   };
+
+  it('엔진 코드에서 실행 상태를 failed로 직접 쓰는 곳이 없다: 실패 쪽 종료는 모두 runEnding을 거친다 (재개 불가 종료 포함, ADR-105)', () => {
+    const source = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/engine/pipeline-engine.ts'),
+      'utf8',
+    );
+    // 실행 패치(`run: { ... }`) 안의 `status: 'failed'` · `'budget_exceeded'` 리터럴이 없다 (단계 시도의 status는 대상 아님)
+    expect(source.match(/run:\s*\{[^{}]*status:\s*'(failed|budget_exceeded)'/g) ?? []).toEqual([]);
+    // 재개 불가 종료도 runEnding을 부른다
+    const body = source.slice(source.indexOf('#failUnresumable('), source.indexOf('// ── 수명'));
+    expect(body).toContain('runEnding(run,');
+  });
 
   it('#failAfterError(시도가 이미 끝남): 병합 커밋이 기록된 실행은 merged(실패 사유 없음), 보존하지 않음', async () => {
     const h = setup({ executors: { screen_update: closeAttemptThenThrow } });

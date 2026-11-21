@@ -65,6 +65,7 @@ const interrupted = {
   pipeline: {
     run: run({ status: 'interrupted', currentStep: 'implementation' }),
     stages: stages('implementation', 'pending'),
+    queued: 0,
   },
 } as const;
 
@@ -451,6 +452,114 @@ test.describe('이동 · 재개 (수용 기준 4)', () => {
     await openScreen(page);
     await expect(page.getByTestId('pipeline-run-status')).toHaveText('진행 중');
     await expect(page.getByRole('button', { name: '재개' })).toHaveCount(0);
+  });
+
+  test('자리를 차지한 실행이 없고 최근 실행이 실행 대기면(시작 직전) 상태 "실행 대기", 현재 단계 표시 없음, [재개] · 대기 건수 없음, 금지 문구 없음 (ADR-105)', async ({
+    page,
+  }) => {
+    // 승인 단계만 통과하고 아직 시작하지 않은 실행 (워크트리 · 기준 커밋 · 시작 시각 없음)
+    const queued = {
+      ...SUMMARY,
+      pipeline: {
+        run: run({
+          status: 'queued',
+          currentStep: 'test_writing',
+          lastCompletedStep: 'approval',
+          branch: null,
+          worktreePath: null,
+          baseCommit: null,
+          startedAt: null,
+          costUsd: null,
+          turns: null,
+        }),
+        stages: stages('test_writing', 'pending'),
+        queued: 0,
+      },
+    } as const;
+    await openScreen(page, { 'verification.summary': { result: queued } });
+    await expect(page.getByTestId('pipeline-run-status')).toHaveText('실행 대기');
+    await expect(page.getByTestId('pipeline-run-status')).toHaveAttribute('data-status', 'queued');
+    await expect(page.getByTestId('pipeline-run')).toHaveText(queued.pipeline.run.displayId);
+    // 아직 시작하지 않았으므로 현재 단계 글자 · 현재 단계 표시(aria-current)가 없다
+    await expect(page.getByTestId('pipeline-current')).toHaveCount(0);
+    await expect(page.locator('[data-testid="pipeline-stage"][aria-current]')).toHaveCount(0);
+    const stagesEl = page.getByTestId('pipeline-stage');
+    await expect(stagesEl.first()).toHaveAttribute('data-status', 'passed');
+    await expect(stagesEl.nth(1)).toHaveAttribute('data-status', 'pending');
+    await expect(page.getByRole('button', { name: '재개' })).toHaveCount(0);
+    await expect(page.getByTestId('pipeline-queued')).toHaveCount(0);
+    const texts = await collectVisibleText(page);
+    expect(findForbiddenText(texts)).toEqual([]);
+  });
+
+  test('중단된 실행이 자리를 지키고 뒤에 실행 대기 2건: 파이프라인은 중단된 실행과 [재개], 같은 줄에 "실행 대기 2", [재개]는 그 실행 ID로 run.resume (ADR-105)', async ({
+    page,
+  }) => {
+    // 요약이 보일 실행으로 중단된 실행을 고르고(최근에 만든 실행 대기가 아님) 뒤 실행 대기 건수를 싣는다
+    const blocked = { ...interrupted, pipeline: { ...interrupted.pipeline, queued: 2 } } as const;
+    const bive = await openScreen(page, { 'verification.summary': { result: blocked } });
+    await expect(page.getByTestId('pipeline-run')).toHaveText(blocked.pipeline.run.displayId);
+    await expect(page.getByTestId('pipeline-run-status')).toHaveText('중단');
+    await expect(page.getByTestId('pipeline-queued')).toHaveText('실행 대기 2');
+    await expect(page.getByTestId('pipeline-queued')).toBeVisible();
+    await expect(page.getByTestId('pipeline-resume')).toBeVisible();
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
+    await bive.setResponse('run.resume', {
+      result: { run: run({ status: 'running' }), steps: [] },
+    });
+    await page.getByRole('button', { name: '재개', exact: true }).click();
+    await expect.poll(async () => (await callsOf(bive, 'run.resume')).length).toBe(1);
+    expect((await callsOf(bive, 'run.resume'))[0]?.params).toEqual({
+      projectId: PROJECT.id,
+      id: blocked.pipeline.run.id,
+      author: { kind: 'human' },
+    });
+  });
+
+  test('재개할 수 없어 실행이 실패로 끝났다는 거부면 "<표시 ID> 재개 불가 · 실패 처리"이고 요약을 다시 읽는다 (ADR-105)', async ({
+    page,
+  }) => {
+    const blocked = { ...interrupted, pipeline: { ...interrupted.pipeline, queued: 1 } } as const;
+    const bive = await openScreen(page, {
+      'verification.summary': { result: blocked },
+      'run.resume': {
+        error: {
+          code: -32009,
+          message: '재개할 수 없어 실행을 실패로 끝냈습니다',
+          data: { reason: 'resume_unrecoverable', code: 'worktree_missing' },
+        },
+      },
+    });
+    const before = (await callsOf(bive, 'verification.summary')).length;
+    await page.getByRole('button', { name: '재개', exact: true }).click();
+    await expect(page.getByTestId('pipeline-resume-error')).toHaveText(
+      `${blocked.pipeline.run.displayId} 재개 불가 · 실패 처리`,
+    );
+    await expect
+      .poll(async () => (await callsOf(bive, 'verification.summary')).length)
+      .toBeGreaterThan(before);
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
+  });
+
+  test('이미 병합된 중단 실행을 재개할 수 없어 병합 완료로 끝났다는 거부면 "<표시 ID> 재개 불가 · 병합 완료"(실패라고 하지 않음) (ADR-105)', async ({
+    page,
+  }) => {
+    await openScreen(page, {
+      'verification.summary': { result: interrupted },
+      'run.resume': {
+        error: {
+          code: -32009,
+          message:
+            '재개할 수 없어 남은 단계를 끝내지 못했습니다. 실행은 이미 병합돼 병합 완료로 끝냈습니다',
+          data: { reason: 'resume_unrecoverable', code: 'worktree_missing', runStatus: 'merged' },
+        },
+      },
+    });
+    await page.getByRole('button', { name: '재개', exact: true }).click();
+    await expect(page.getByTestId('pipeline-resume-error')).toHaveText(
+      `${interrupted.pipeline.run.displayId} 재개 불가 · 병합 완료`,
+    );
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
   });
 
   test('최근 실행이 중단이면 [재개]가 run.resume(사람 주체)을 부르고 요약을 다시 읽는다', async ({

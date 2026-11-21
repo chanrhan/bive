@@ -243,6 +243,9 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
     await server.listen();
     if (unixSocket) boundSocket = fileIdentity(paths.pipe);
     lifecycle.start();
+    // 연결을 받기 시작한 뒤: 저장된 실행 대기를 생성 순으로 이어간다. 자리를 차지한 실행(진행 중 · 중단)이 있는 프로젝트는
+    // 그대로다 (ADR-105). 재기동으로 중단된 실행은 자동으로 이어가지 않는다(위 recoverInterruptedRuns)
+    engine.startQueuedRuns();
 
     const listening = server;
     return {

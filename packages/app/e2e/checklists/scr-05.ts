@@ -131,7 +131,7 @@ export const SUMMARY: VerificationSummaryResult = {
   denominator: DENOMINATOR,
   costPerRunUsd: 0.2,
   rules: rows(LIVE),
-  pipeline: { run: run(), stages: stages('implementation', 'running') },
+  pipeline: { run: run(), stages: stages('implementation', 'running'), queued: 0 },
 };
 
 /**
@@ -152,6 +152,7 @@ export const SKIPPED_SUMMARY: VerificationSummaryResult = {
       status: kind === 'mutation' ? ('skipped' as const) : ('passed' as const),
       attempt: 1,
     })),
+    queued: 0,
   },
 };
 
@@ -200,6 +201,7 @@ export const SCREEN_UPDATE_FAILED_SUMMARY: VerificationSummaryResult = {
             : ('passed' as const),
       attempt: 1,
     })),
+    queued: 0,
   },
 };
 

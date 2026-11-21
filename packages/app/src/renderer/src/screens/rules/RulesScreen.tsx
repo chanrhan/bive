@@ -16,7 +16,8 @@ import { ListView } from '../../components/ListView/ListView.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { useProject } from '../../project/ProjectContext.js';
 import { RuleDetail } from '../norm-detail/RuleDetail.js';
-import { RunStart } from './RunStart.js';
+import { CreatedRunStatus } from './CreatedRunStatus.js';
+import { type CreatedRun, RunStart } from './RunStart.js';
 import {
   RULE_CRITERIA,
   RULES_LIST_ID,
@@ -48,6 +49,8 @@ export const RulesScreen = (): React.JSX.Element => {
 const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => {
   const load = useRules(projectId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // [실행]으로 만든 마지막 실행과 그 대상 규칙 (그 규칙의 상세에서만 보인다, ADR-105)
+  const [created, setCreated] = useState<{ ruleId: string; run: CreatedRun } | null>(null);
 
   const items = load.state === 'ready' ? load.items : [];
   // 목록에서 사라진 항목은 고른 것으로 보지 않는다
@@ -95,7 +98,18 @@ const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => 
             projectId={projectId}
             item={selected}
             sourceScreen="SCR-03"
-            actions={<RunStart projectId={projectId} rule={selected.rule} />}
+            actions={
+              <RunStart
+                projectId={projectId}
+                rule={selected.rule}
+                onCreated={(run) => setCreated({ ruleId: selected.rule.id, run })}
+              />
+            }
+            notice={
+              created !== null && created.ruleId === selected.rule.id ? (
+                <CreatedRunStatus key={created.run.id} projectId={projectId} run={created.run} />
+              ) : null
+            }
           />
         )}
       </section>

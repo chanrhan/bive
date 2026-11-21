@@ -10,6 +10,9 @@
 // - 재기동(`recoverInterruptedRuns`)은 `running` 실행을 `interrupted`로 바꾸고 자동으로 이어가지 않는다(PRD 5.1)
 // - 재개(`resume`)는 사람이 `interrupted` 실행에만: 워크트리를 마지막 완료 단계 커밋으로 hard reset + clean 한 뒤
 //   지금 단계의 새 시도 · 새 세션으로 이어간다. `regressionCount`는 그대로 둔다 (ADR-027)
+// - 프로젝트당 동시 실행 1개 (ADR-100 B⑥, ADR-105): 승인 단계 통과 때 자리가 없으면 실행 대기(`queued`). 실행의 구동이
+//   끝나면(종료 상태 저장 뒤) · 실행 대기가 생기면 · 기동하면(`startQueuedRuns`) `#advanceQueue`가 저장된 상태에서 다음
+//   실행 대기를 생성 순으로 시작한다(메모리 대기열 없음). 다른 실행이 진행 중이면 재개는 -32009
 import {
   type Author,
   CommitSha,
@@ -28,6 +31,7 @@ import {
   type Ulid,
 } from '@bive/shared';
 import {
+  ConflictError,
   NotFoundError,
   openRegistry,
   type ProjectStore,
@@ -40,6 +44,8 @@ import { runGuardedSession } from '../agent/guarded-session.js';
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import {
   createWorktreeManager,
+  GitWorktreeError,
+  type GitWorktreeErrorCode,
   type RunGitRef,
   type WorktreeManager,
 } from '../git/worktree-manager.js';
@@ -47,7 +53,7 @@ import { resetRunWorktree } from '../git/worktree-reset.js';
 import { toRpcError, withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import type { RunTracker } from '../lifecycle.js';
-import { completeStep, evaluateApprovalStep } from '../runs/run-service.js';
+import { completeStep, evaluateApprovalStep, startNextQueuedRun } from '../runs/run-service.js';
 import { createCheckExecutor } from '../steps/check.js';
 import { createImplementationExecutor } from '../steps/implementation.js';
 import { createMergeExecutor } from '../steps/merge.js';
@@ -172,6 +178,9 @@ const untilAborted = (promise: Promise<unknown>, signal: AbortSignal): Promise<v
   });
 };
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
@@ -237,6 +246,26 @@ export const runEnding = (
     ? { merged: true, run: { status: 'merged', currentStep: null } }
     : { merged: false, run: { status: runStatus, failureReason: reason } };
 
+/**
+ * 재개의 워크트리 되돌리기가 이 사유로 실패하면 다시 눌러도 같은 결과다(ADR-105): 워크트리 폴더가 없음
+ * (`worktree_missing`), 워크트리가 실행 브랜치에 있지 않음(`worktree_branch_mismatch`), 실행 참조 · 되돌릴 커밋이
+ * 규칙과 다름 · 폴더가 아님 · 되돌릴 커밋이 브랜치에 없음 · 되돌린 뒤에도 변경이 남음(`invalid_input`). 이때 재개는 그
+ * 호출 안에서 실행을 `failed`(`worktree_error`)로 끝내 프로젝트의 자리를 비운다. git 명령 실패(`GitCommandError`)와
+ * 다른 실행이 진행 중인 경우는 일시적일 수 있어 상태를 바꾸지 않는다.
+ */
+export const UNRECOVERABLE_RESUME_CODES = [
+  'worktree_missing',
+  'worktree_branch_mismatch',
+  'invalid_input',
+] as const satisfies readonly GitWorktreeErrorCode[];
+
+/** 재개할 수 없어 실행을 실패로 끝냈을 때 `run.resume` 오류의 `data.reason` (ADR-105). */
+export const RESUME_UNRECOVERABLE = 'resume_unrecoverable';
+
+const isUnrecoverableResume = (error: unknown): error is GitWorktreeError =>
+  error instanceof GitWorktreeError &&
+  (UNRECOVERABLE_RESUME_CODES as readonly string[]).includes(error.code);
+
 interface ActiveRun {
   readonly controller: AbortController;
   readonly done: Promise<void>;
@@ -283,20 +312,8 @@ export class PipelineEngine {
    * `pending`으로 더하며, 끝나지 않은 세션은 `aborted`로 닫는다. 자동으로 이어가지 않는다.
    */
   recoverInterruptedRuns(): InterruptedRun[] {
-    let projectIds: string[];
-    try {
-      const registry = openRegistry({ home: this.#biveHome, create: false });
-      try {
-        projectIds = registry.entries.list().map((entry) => entry.projectId);
-      } finally {
-        registry.close();
-      }
-    } catch (error) {
-      if (error instanceof NotFoundError) return [];
-      throw error;
-    }
     const interrupted: InterruptedRun[] = [];
-    for (const projectId of projectIds) {
+    for (const projectId of this.#registeredProjectIds()) {
       try {
         const details = this.#store(projectId, (store) => {
           this.#closeRunlessSessions(store);
@@ -312,6 +329,34 @@ export class PipelineEngine {
       }
     }
     return interrupted;
+  }
+
+  /**
+   * 기동 뒤 (연결을 받기 시작한 다음 한 번): 등록된 프로젝트마다 실행 대기를 저장된 상태에서 이어간다(`#advanceQueue`).
+   * 자리를 차지한 실행(진행 중 · 중단)이 없는 프로젝트에서만 가장 먼저 만든 실행 대기가 시작된다. 재기동으로 중단된 실행이
+   * 있는 프로젝트는 사람이 재개하거나 그 실행이 끝날 때까지 그대로다 (ADR-105).
+   */
+  startQueuedRuns(): void {
+    for (const projectId of this.#registeredProjectIds()) {
+      this.#quietly(`실행 대기 시작 (프로젝트 ${projectId})`, () => {
+        this.#advanceQueue(projectId);
+      });
+    }
+  }
+
+  /** 등록된 프로젝트 ID들. 등록부가 아직 없으면 빈 목록. */
+  #registeredProjectIds(): string[] {
+    try {
+      const registry = openRegistry({ home: this.#biveHome, create: false });
+      try {
+        return registry.entries.list().map((entry) => entry.projectId);
+      } finally {
+        registry.close();
+      }
+    } catch (error) {
+      if (error instanceof NotFoundError) return [];
+      throw error;
+    }
   }
 
   /**
@@ -397,7 +442,8 @@ export class PipelineEngine {
   }
 
   /**
-   * 승인 단계를 판정한다 (RUN-02). 대상 규칙이 전부 승인 상태면 `running`으로 저장하고 구동을 시작한다.
+   * 승인 단계를 판정한다 (RUN-02). 대상 규칙이 전부 승인 상태면 `running`으로 저장하고 구동을 시작한다. 프로젝트에 자리가
+   * 없으면 `queued`(실행 대기)로 저장하고 대기열을 한 번 살핀다(자리가 나 있으면 생성 순으로 시작, ADR-105).
    * @returns 승인 단계가 끝났는지
    */
   evaluateApproval(projectId: string, runId: string): boolean {
@@ -407,8 +453,32 @@ export class PipelineEngine {
     );
     if (!result.approved) return false;
     this.#emit({ type: 'run.saved', projectId, detail: { run: result.run, steps: result.steps } });
+    if (result.run.status === 'queued') {
+      this.#log(`실행 대기 (${result.run.displayId})`);
+      this.#advanceQueue(projectId);
+      return true;
+    }
     this.#launch(projectId, runId);
     return true;
+  }
+
+  /**
+   * 자리가 났으면 다음 실행 대기를 시작하고 구동한다 (`startNextQueuedRun`, 트랜잭션 1회 · 저장된 상태 기준, ADR-105).
+   * 시작 때 대상 규칙 재검사로 끝난 실행 대기는 저장 알림만 보낸다. 종료 중이면 아무것도 하지 않는다.
+   */
+  #advanceQueue(projectId: string): void {
+    if (this.#closed) return;
+    const advance = this.#store(projectId, (store) =>
+      startNextQueuedRun(store, { now: this.#now }),
+    );
+    for (const detail of advance.failed) {
+      this.#emit({ type: 'run.saved', projectId, detail });
+      this.#log(`실행 대기 종료 (${detail.run.displayId}, ${String(detail.run.failureReason)})`);
+    }
+    if (advance.started === null) return;
+    this.#emit({ type: 'run.saved', projectId, detail: advance.started });
+    this.#log(`실행 대기에서 시작 (${advance.started.run.displayId})`);
+    this.#launch(projectId, advance.started.run.id);
   }
 
   // ── 재개 ──────────────────────────────────────────────
@@ -417,7 +487,10 @@ export class PipelineEngine {
    * 중단된 실행을 재개한다 (`run.resume`, PRD 5.1 · ADR-011 · ADR-027). 사람만, `interrupted`만 받는다.
    * 워크트리를 마지막 완료 단계 커밋(`headCommit`, 없으면 `baseCommit`)으로 hard reset + clean 하고, 지금 단계의
    * 대기 시도를 시작해 `running`으로 저장한 뒤 구동한다(새 세션). `regressionCount`는 바꾸지 않는다.
-   * @throws {RpcError} -32020 사람 아님 · -32004 없음 · -32009 `interrupted` 아님 · 이미 구동 중 · 되돌리기 실패
+   * 프로젝트에 다른 진행 중 실행이 있으면 재개하지 않는다(-32009, 프로젝트당 진행 중 1개, ADR-105). 실행 대기가 있어도
+   * 재개는 된다(중단된 실행은 자리를 비우지 않았으므로 먼저다).
+   * @throws {RpcError} -32020 사람 아님 · -32004 없음 · -32009 `interrupted` 아님 · 이미 구동 중 · 다른 실행이 진행 중 ·
+   *   되돌리기 실패
    */
   async resume(projectId: string, ref: string, author: Author): Promise<RunDetail> {
     if (author.kind !== 'human') {
@@ -430,6 +503,7 @@ export class PipelineEngine {
           ? store.runs.getDetail(ref)
           : store.runs.getDetailByDisplayId(ref),
       project: store.getProject(),
+      running: store.runs.list({ status: 'running' }),
     }));
     if (loaded.detail === null || loaded.project === null) {
       throw new RpcError(ErrorCode.NotFound, `실행을 찾을 수 없습니다: ${ref}`);
@@ -444,6 +518,14 @@ export class PipelineEngine {
     if (this.#active.has(run.id)) {
       throw new RpcError(ErrorCode.StateConflict, `이미 진행 중인 실행입니다: ${run.displayId}`);
     }
+    // 프로젝트당 진행 중 1개 (ADR-105): 워크트리를 되돌리기 전에 거른다. 저장 트랜잭션에서 한 번 더 본다
+    const other = loaded.running.find((r) => r.id !== run.id);
+    if (other !== undefined) {
+      throw new RpcError(
+        ErrorCode.StateConflict,
+        `다른 실행이 진행 중입니다 (${other.displayId}). 그 실행이 끝난 뒤 재개할 수 있습니다`,
+      );
+    }
     const reservation = this.#reserve(run.id);
     let saved: RunDetail;
     try {
@@ -453,6 +535,9 @@ export class PipelineEngine {
         try {
           await resetRunWorktree(git, target, { biveHome: this.#biveHome, git: this.#git });
         } catch (error) {
+          if (isUnrecoverableResume(error)) {
+            throw this.#failUnresumable(projectId, run, steps, error);
+          }
           throw new RpcError(
             ErrorCode.StateConflict,
             `워크트리를 마지막 완료 단계 커밋으로 되돌리지 못했습니다: ${errorMessage(error)}`,
@@ -467,21 +552,107 @@ export class PipelineEngine {
               .at(-1);
       const at = this.#timestamp();
       saved = this.#rpcStore(projectId, (store) =>
-        store.runs.transition(run.id, {
-          expectedStatus: 'interrupted',
-          run: { status: 'running' },
-          steps:
-            pending === undefined ? [] : [{ id: pending.id, status: 'running', startedAt: at }],
+        store.transaction(() => {
+          // 프로젝트당 진행 중 1개 (ADR-105): 다른 실행이 진행 중이면 재개하지 않는다(-32009, 사람이 그 실행이 끝난 뒤 다시)
+          const other = store.runs.list({ status: 'running' }).find((r) => r.id !== run.id);
+          if (other !== undefined) {
+            throw new ConflictError(
+              '실행',
+              run.displayId,
+              `다른 실행이 진행 중입니다 (${other.displayId})`,
+            );
+          }
+          return store.runs.transition(run.id, {
+            expectedStatus: 'interrupted',
+            run: { status: 'running' },
+            steps:
+              pending === undefined ? [] : [{ id: pending.id, status: 'running', startedAt: at }],
+          });
         }),
       );
     } catch (error) {
       reservation.release();
+      // 재개할 수 없어 실패로 끝냈으면 자리가 났다: 다음 실행 대기를 시작한다 (ADR-105)
+      if (
+        error instanceof RpcError &&
+        isRecord(error.data) &&
+        error.data.reason === RESUME_UNRECOVERABLE
+      ) {
+        this.#defer(() => this.#advanceQueue(projectId));
+      }
       throw error;
     }
     this.#emit({ type: 'run.saved', projectId, detail: saved });
     this.#log(`실행 재개 (${run.displayId}, ${String(run.currentStep)})`);
     reservation.start(projectId);
     return saved;
+  }
+
+  /**
+   * 재개할 수 없는 중단 실행을 끝낸다 (사람의 재개 행동의 결과, ADR-105). 실행의 종료 상태는 다른 실패 쪽 종료와 같이
+   * `runEnding` 한 곳에서 정한다(ADR-091 · ADR-094): 병합 커밋이 기록된 실행은 `interrupted → merged`(실패 사유 없음,
+   * `currentStep = null`), 아니면 `interrupted → failed`(`worktree_error`). 어느 쪽이든 재개 불가라는 실패는 지금 단계의
+   * 대기 시도에 남긴다(사유 · git 오류 코드 · 메시지). 워크트리가 없거나 어긋나 보존(잠금)은 하지 않는다(브랜치는
+   * 지우지 않으므로 남는다). 저장 뒤 돌려줄 RPC 오류(-32009, `data.reason = resume_unrecoverable`)를 만든다. 저장이 실패하면
+   * (다른 쪽이 먼저 바꿈) 그 오류를 돌려준다.
+   */
+  #failUnresumable(
+    projectId: string,
+    run: Run,
+    steps: readonly Step[],
+    error: GitWorktreeError,
+  ): RpcError {
+    const at = this.#timestamp();
+    const pending =
+      run.currentStep === null
+        ? undefined
+        : steps.filter((s) => s.kind === run.currentStep && s.status === 'pending').at(-1);
+    const detail = {
+      reason: 'worktree_error',
+      detail: { code: error.code, message: error.message },
+    };
+    const ending = runEnding(run, 'failed', 'worktree_error');
+    let saved: RunDetail;
+    try {
+      saved = this.#rpcStore(projectId, (store) =>
+        store.runs.transition(run.id, {
+          expectedStatus: 'interrupted',
+          run: { ...ending.run, endedAt: at },
+          steps:
+            pending === undefined
+              ? []
+              : [
+                  {
+                    id: pending.id,
+                    status: 'failed',
+                    exitDetail: detail,
+                    startedAt: at,
+                    endedAt: at,
+                  },
+                ],
+        }),
+      );
+    } catch (failure) {
+      return failure instanceof RpcError
+        ? failure
+        : new RpcError(ErrorCode.StateConflict, errorMessage(failure));
+    }
+    this.#emit({ type: 'run.saved', projectId, detail: saved });
+    this.#logEnding(run, ending.merged, 'failed', `재개 불가 ${error.code}`);
+    const message = ending.merged
+      ? `재개할 수 없어 남은 단계를 끝내지 못했습니다. 실행은 이미 병합돼 병합 완료로 끝냈습니다`
+      : `재개할 수 없어 실행을 실패로 끝냈습니다`;
+    return new RpcError(
+      ErrorCode.StateConflict,
+      `${message} (${run.displayId}, ${error.code}): ${error.message}`,
+      {
+        reason: RESUME_UNRECOVERABLE,
+        runId: run.id,
+        displayId: run.displayId,
+        code: error.code,
+        runStatus: saved.run.status,
+      },
+    );
   }
 
   // ── 수명 ──────────────────────────────────────────────
@@ -536,7 +707,11 @@ export class PipelineEngine {
     return {
       release: finish,
       start: (projectId) => {
-        void this.#drive(projectId, runId, controller.signal).finally(finish);
+        void this.#drive(projectId, runId, controller.signal).finally(() => {
+          finish();
+          // 구동이 끝났다(종료 상태 저장 뒤): 자리가 났으면 다음 실행 대기를 시작한다 (ADR-105). 중단 · 종료 중이면 하지 않는다
+          this.#defer(() => this.#advanceQueue(projectId));
+        });
       },
     };
   }

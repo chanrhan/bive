@@ -34,7 +34,7 @@ const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInPro
 const OTHER_PROJECT_ID = '01JCCCCCCCCCCCCCCCCCCCCCCC';
 const RUN_ID = '01JE0000000000000000000003';
 
-/** run.create 가짜 성공 응답에 쓸 값은 화면이 읽지 않으므로 형식만 맞춘다 (테스트 전용 데이터). */
+/** run.create 가짜 성공 응답 (테스트 전용 데이터). 화면은 실행의 ID · 표시 ID · 상태만 읽는다(만든 실행 표시, ADR-105). */
 const CREATED = {
   run: summaryRun({ status: 'waiting_approval', currentStep: 'approval' }),
   steps: [],
@@ -333,6 +333,7 @@ test.describe('실행 알림 → 다시 조회 (수용 기준 3, 렌더러 쪽)'
       pipeline: {
         run: summaryRun({ currentStep: 'check' }),
         stages: stages('check', 'running'),
+        queued: 0,
       },
     };
     await bive.setResponse('verification.summary', { result: next });

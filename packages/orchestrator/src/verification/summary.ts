@@ -15,7 +15,10 @@
 // - 실행당 비용: 끝난 실행(병합 · 실패 · 예산 초과) 중 세션 비용을 모두 아는 실행(`usage.run.costUsd`가 있고
 //   값 모르는 세션 0개)의 비용 평균(1e-9 USD 반올림). 그런 실행이 없으면 `null`
 // - 실행 링크: 위 판정의 실행(= 기준 실행)과 그 실행의 비용 합계 · 턴(`runs.usage`, 값 없으면 `null`)
-// - 파이프라인: 가장 최근에 만든 실행의 단계 계획(`RUN_STEP_PLANS`) 순서와 단계별 마지막 시도 상태
+// - 파이프라인: 보일 실행(`pipelineRunOf`)의 단계 계획(`RUN_STEP_PLANS`) 순서와 단계별 마지막 시도 상태, 그 밖의 실행 대기
+//   건수. 보일 실행은 자리를 차지한 실행(진행 중, 없으면 가장 먼저 만든 중단)이고 없으면 가장 최근에 만든 실행이다
+//   (ADR-105: 실행 대기는 아직 시작하지 않은 실행이라 "최근 실행"을 가장 최근에 시작된 실행으로 읽는다. 중단된 실행이 자리를
+//   지키는 동안 그 [재개]가 화면에서 가려지지 않게)
 import {
   isTerminalRunStatus,
   type JudgmentResult,
@@ -183,7 +186,17 @@ export const costPerRun = (finished: readonly UsageTotals[]): number | null => {
 };
 
 /** 단계 계획 순서의 단계와 단계별 마지막 시도 상태 (시도가 없으면 `pending` · 시도 0). */
-export const pipelineOf = (run: Run, steps: readonly Step[]): VerificationPipeline => {
+/**
+ * 검증 화면 파이프라인에 보일 실행 (ADR-105). 진행 중인 실행이 있으면 그것(여럿이면 표시 ID가 가장 큰 것), 없으면 가장 먼저
+ * 만든 중단 실행(사람이 재개해야 자리가 나는 실행), 둘 다 없으면 가장 최근에 만든 실행. 실행이 없으면 `undefined`.
+ * `runs`는 표시 ID 순(= 생성 순).
+ */
+export const pipelineRunOf = (runs: readonly Run[]): Run | undefined =>
+  runs.filter((run) => run.status === 'running').at(-1) ??
+  runs.find((run) => run.status === 'interrupted') ??
+  runs.at(-1);
+
+export const pipelineOf = (run: Run, steps: readonly Step[], queued = 0): VerificationPipeline => {
   const plan: readonly StepKind[] =
     run.type in RUN_STEP_PLANS ? RUN_STEP_PLANS[run.type as keyof typeof RUN_STEP_PLANS] : [];
   // 계획에 없는 단계 시도가 있으면(유형이 더해진 경우) 시도 순서대로 뒤에 붙인다
@@ -197,7 +210,7 @@ export const pipelineOf = (run: Run, steps: readonly Step[]): VerificationPipeli
       ? { kind, status: 'pending' as const, attempt: 0 }
       : { kind, status: last.status, attempt: last.attempt };
   });
-  return { run, stages };
+  return { run, stages, queued };
 };
 
 /** 열린 프로젝트 저장소에서 검증 화면 요약을 만든다. */
@@ -243,14 +256,14 @@ export const verificationSummary = (
     .map((run) => usageOf(run.id))
     .filter((usage): usage is UsageTotals => usage !== null);
 
-  const latestRun = runs.at(-1);
+  const shown = pipelineRunOf(runs);
+  const queued = runs.filter((run) => run.status === 'queued' && run.id !== shown?.id).length;
   return {
     basis,
     compliance: { passed, judgeable: judgeable.length },
     denominator: judgeable.map(({ rule }) => rule.id),
     costPerRunUsd: costPerRun(finished),
     rules: rows,
-    pipeline:
-      latestRun === undefined ? null : pipelineOf(latestRun, store.runs.steps(latestRun.id)),
+    pipeline: shown === undefined ? null : pipelineOf(shown, store.runs.steps(shown.id), queued),
   };
 };

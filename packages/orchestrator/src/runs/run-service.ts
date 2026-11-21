@@ -3,6 +3,9 @@
 //   실행 저장과 승인 기록 `run_start` 추가를 트랜잭션 1개로 한다. 하나라도 실패하면 아무것도 남지 않는다
 // - 승인 단계(`evaluateApprovalStep`)는 대상 규칙이 전부 승인(`normState = approved`, 삭제 안 됨)일 때만 끝난다.
 //   아니면 아무것도 저장하지 않고 `waiting_approval`에 머문다 (RUN-02: 실행 시작 확인과 별개)
+// - 프로젝트당 동시 실행 1개 (ADR-100 B⑥ · A13, ADR-105): 승인 단계를 통과할 때 프로젝트에 자리가 없으면(진행 중 · 중단된
+//   실행이나 실행 대기가 있음) `running` 대신 `queued`(실행 대기)로 저장한다. 자리가 나면 `startNextQueuedRun`이 실행
+//   대기 중 가장 먼저 만든 것(표시 ID 순)을 시작한다. 판단과 저장은 같은 트랜잭션이라 두 요청이 겹쳐도 `running`은 1개다
 // - 단계 종료(`completeStep`)는 상태 저장 1회 = 트랜잭션 1회다 (RUN-01). 실패 · 회귀 · 중단 · 재개처럼 단계 순서를
 //   벗어나는 전이는 엔진(M1-14)이 `store.runs.transition`으로 직접 저장한다
 // - 엔진 · 상태 기계 · 세션 실행은 M1-14, 워크트리 · 브랜치는 M1-13이 맡는다
@@ -16,6 +19,7 @@ import {
   isFinalStepStatus,
   M1_RUN_TYPE,
   RUN_STEP_PLANS,
+  type Run,
   type RunCreateResult,
   type RunStatus,
   type Settings,
@@ -57,12 +61,47 @@ export interface RunClock {
   readonly newId: () => Ulid;
 }
 
-/** 승인 단계 판정 결과. `approved = false`면 아무것도 저장하지 않았다. */
+/**
+ * 승인 단계 판정 결과. `approved = false`면 아무것도 저장하지 않았다. `approved = true`면 실행은 `running`이거나
+ * 프로젝트에 자리가 없어 `queued`(실행 대기)다.
+ */
 export interface ApprovalStepResult extends RunDetail {
   readonly approved: boolean;
   /** 승인 상태가 아닌 대상 규칙 (없음 · 삭제됨 · 잠정 승인), 요청 순서 */
   readonly unapprovedRuleIds: Ulid[];
 }
+
+/** `startNextQueuedRun`의 결과: 시작한 실행(없으면 `null`)과 시작 때 대상 규칙 재검사로 끝낸 실행 대기들. */
+export interface QueueAdvance {
+  readonly started: RunDetail | null;
+  readonly failed: RunDetail[];
+}
+
+/** 실행 대기가 시작 때 대상 규칙 재검사에 걸려 끝날 때의 실패 사유 (ADR-105). */
+export const QUEUED_TARGET_UNAVAILABLE = 'target_rule_unavailable';
+
+/**
+ * 프로젝트의 실행 자리를 차지하는 상태 (ADR-105): 진행 중과 중단. 중단된 실행은 사람이 재개할 때까지 자리를 비우지 않는다
+ * (재개와 뒤 실행이 겹치지 않고, 병합 순서가 시작 순서를 따른다). 승인 대기는 차지하지 않는다(승인을 못 받은 실행이 대기열을
+ * 막지 않게). 종료 상태(병합 완료 · 실패 · 예산 초과)가 되면 자리가 난다.
+ */
+export const SLOT_HOLDING_RUN_STATUSES = [
+  'running',
+  'interrupted',
+] as const satisfies readonly RunStatus[];
+
+/** 프로젝트에 자리가 있는지: 자리를 차지한 실행(진행 중 · 중단)이 `exceptRunId` 밖에 없다. */
+const slotHolders = (store: ProjectStore, exceptRunId: string | null): Run[] =>
+  SLOT_HOLDING_RUN_STATUSES.flatMap((status) => store.runs.list({ status })).filter(
+    (run) => run.id !== exceptRunId,
+  );
+
+/** 대상 규칙 중 승인 상태가 아닌 것 (없음 · 삭제됨 · 승인 아님), 요청 순서. 승인 단계와 실행 대기 시작이 같은 기준을 쓴다. */
+const unapprovedTargets = (store: ProjectStore, run: Run): Ulid[] =>
+  run.targetRuleIds.filter((ruleId) => {
+    const rule = store.rules.get(ruleId);
+    return rule === null || rule.deletedAt !== null || rule.normState !== 'approved';
+  });
 
 /** 단계 종료 입력 (`completeStep`). */
 export interface StepCompletion {
@@ -214,8 +253,11 @@ const requireDetail = (store: ProjectStore, runId: string): RunDetail => {
 };
 
 /**
- * 승인 단계를 판정한다 (RUN-02). 대상 규칙이 전부 승인 상태면 승인 단계 통과 · 다음 단계 시작 · 실행 `running`
- * (`startedAt` = 지금)을 트랜잭션 1회로 저장한다. 아니면 아무것도 저장하지 않고 `approved = false`.
+ * 승인 단계를 판정한다 (RUN-02). 대상 규칙이 전부 승인 상태면 승인 단계 통과와 함께 트랜잭션 1회로 저장한다:
+ * - 프로젝트에 자리가 있고(진행 중 · 중단된 실행 없음) 실행 대기가 없으면 다음 단계 시작 · 실행 `running`(`startedAt` = 지금)
+ * - 아니면 실행 `queued`(실행 대기): 다음 단계는 대기 그대로, `startedAt`은 비운다. 시작은 `startNextQueuedRun`이 한다
+ *   (실행 대기가 이미 있으면 생성 순을 지키려고 이 실행도 그 뒤에 선다. 더 먼저 만든 실행이면 먼저 시작된다)
+ * 아니면 아무것도 저장하지 않고 `approved = false`.
  * @throws {NotFoundError} 실행이 없음
  * @throws {ConflictError} 실행이 `waiting_approval`이 아니거나 현재 단계가 승인이 아님
  */
@@ -234,26 +276,70 @@ export const evaluateApprovalStep = (
         `승인 단계가 아닙니다 (${run.status}, ${String(run.currentStep)})`,
       );
     }
-    const unapprovedRuleIds = run.targetRuleIds.filter((ruleId) => {
-      const rule = store.rules.get(ruleId);
-      return rule === null || rule.deletedAt !== null || rule.normState !== 'approved';
-    });
+    const unapprovedRuleIds = unapprovedTargets(store, run);
     if (unapprovedRuleIds.length > 0) return { ...detail, approved: false, unapprovedRuleIds };
     const at = new Date(clock.now()).toISOString();
+    const free =
+      slotHolders(store, run.id).length === 0 && store.runs.list({ status: 'queued' }).length === 0;
+    const passed = completionTransition(
+      detail,
+      {
+        status: 'passed',
+        exitDetail: { approvedRuleIds: [...run.targetRuleIds] },
+        run: free ? { status: 'running', startedAt: at } : { status: 'queued' },
+      },
+      at,
+      'waiting_approval',
+    );
+    // 실행 대기: 승인 단계만 끝내고 다음 단계는 시작하지 않는다 (시작 때 `startNextQueuedRun`이 연다)
     const saved = store.runs.transition(
       runId,
-      completionTransition(
-        detail,
-        {
-          status: 'passed',
-          exitDetail: { approvedRuleIds: [...run.targetRuleIds] },
-          run: { status: 'running', startedAt: at },
-        },
-        at,
-        'waiting_approval',
-      ),
+      free ? passed : { ...passed, steps: (passed.steps ?? []).slice(0, 1) },
     );
     return { ...saved, approved: true, unapprovedRuleIds: [] };
+  });
+
+/**
+ * 프로젝트에 자리가 났으면 실행 대기 중 가장 먼저 만든 실행(표시 ID 순 = 생성 순)을 시작한다. 트랜잭션 1회 (ADR-105).
+ * - 자리를 차지한 실행(진행 중 · 중단)이 있으면 아무것도 하지 않는다
+ * - 시작 때 대상 규칙을 승인 단계와 같은 기준으로 다시 본다. 효력이 없는 규칙(삭제됨 등)이 있으면 그 실행은
+ *   `failed`(`target_rule_unavailable`)로 끝내고(워크트리 · 브랜치를 만들기 전이라 보존할 것이 없다) 다음 실행 대기를 본다
+ * - 시작: 지금 단계(승인 뒤 첫 대기 시도)를 시작하고 실행 `running`(`startedAt` = 지금). 워크트리 · 브랜치 · 기준 커밋은
+ *   엔진이 구동을 시작할 때 만든다(앞 실행의 병합 결과 위에서 돈다). 예산 · 모델 스냅샷은 생성 때(사람의 실행 시작 확인) 값이다
+ * 엔진이 실행이 끝날 때 · 승인 단계가 실행 대기로 끝날 때 · 기동할 때 부른다. 여러 번 불러도 안전하다.
+ */
+export const startNextQueuedRun = (
+  store: ProjectStore,
+  clock: Pick<RunClock, 'now'>,
+): QueueAdvance =>
+  store.transaction(() => {
+    const failed: RunDetail[] = [];
+    if (slotHolders(store, null).length > 0) return { started: null, failed };
+    for (const run of store.runs.list({ status: 'queued' })) {
+      const at = new Date(clock.now()).toISOString();
+      const unavailable = unapprovedTargets(store, run);
+      if (unavailable.length > 0) {
+        failed.push(
+          store.runs.transition(run.id, {
+            expectedStatus: 'queued',
+            run: { status: 'failed', failureReason: QUEUED_TARGET_UNAVAILABLE, endedAt: at },
+          }),
+        );
+        continue;
+      }
+      const steps = store.runs.steps(run.id);
+      const next =
+        run.currentStep === null
+          ? undefined
+          : steps.find((step) => step.kind === run.currentStep && step.status === 'pending');
+      const started = store.runs.transition(run.id, {
+        expectedStatus: 'queued',
+        run: { status: 'running', startedAt: at },
+        steps: next === undefined ? [] : [{ id: next.id, status: 'running', startedAt: at }],
+      });
+      return { started, failed };
+    }
+    return { started: null, failed };
   });
 
 /**

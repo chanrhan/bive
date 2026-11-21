@@ -41,6 +41,8 @@ export interface RuleDetailProps {
   sourceScreen: ScreenId;
   /** 머리 오른쪽에 둘 동작 (규칙 화면의 [실행]) */
   actions?: ReactNode;
+  /** 머리줄 아래 한 줄 (규칙 화면이 만든 실행의 상태, ADR-105). 머리줄의 폭을 먹지 않는다 */
+  notice?: ReactNode;
   /** 이미 가진 부모 요구사항 (요구사항 상세에서 펼칠 때). 주면 `requirement.get`을 부르지 않는다 */
   parent?: Requirement;
 }
@@ -51,6 +53,7 @@ export const RuleDetail = ({
   item,
   sourceScreen,
   actions,
+  notice,
   parent: knownParent,
 }: RuleDetailProps): React.JSX.Element => {
   const { rule, judgment } = item;
@@ -75,6 +78,7 @@ export const RuleDetail = ({
         <StatusBadge kind="judgment" status={judgment.status} />
         {actions}
       </header>
+      {notice}
 
       <dl className="rule-fields">
         <Field id="statement" label={TEXT.statement}>

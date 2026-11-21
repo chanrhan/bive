@@ -603,7 +603,7 @@ describe('겹쳐 도는 세션: 진행 중 세션은 넘긴 한도 전부로 센
     });
   };
 
-  it('그날 끝난 세션이 있어도, 실행 세션이 도는 동안 차례로 시작한 다른 실행들의 한도 합 + 끝난 지출이 하루 한도를 넘지 않고 잔여 0이면 막힌다 (실행 + 실행)', async () => {
+  it('실행 세션이 도는 동안 만든 다른 실행들은 실행 대기라 세션이 없어 하루 합산에 들어가지 않고, 앞 실행이 끝나면 차례로 깨어나 하루 한도에 이른 날에는 세션 없이 budget_exceeded(project_daily_budget_exceeded)로 끝난다 (실행 + 실행, ADR-105)', async () => {
     const biveHome = makeBiveHome();
     const repo = copyFixture(temps);
     const seeded = seedProject(biveHome, repo, {
@@ -638,23 +638,36 @@ describe('겹쳐 도는 세션: 진행 중 세션은 넘긴 한도 전부로 센
       withProject(biveHome, seeded.project.id, (store) => store.runs.getDetail(runId));
 
     // 첫 실행의 test-writer: min(0.05, 0.1 - 0.001) = 0.05, 붙잡힌 채 진행 중
-    start();
+    const first = start();
     await waitFor(() => held.budgets.length === 1, '첫 세션');
-    // 둘째 실행: 진행 중 세션을 0.05로 세어 min(0.05, 0.1 - 0.001 - 0.05) = 0.049
-    start();
-    await waitFor(() => held.budgets.length === 2, '둘째 세션');
-    expect(held.budgets).toEqual([
-      { role: 'test-writer', maxBudgetUsd: 0.05 },
-      { role: 'test-writer', maxBudgetUsd: 0.049 },
-    ]);
-    expect(withProject(biveHome, seeded.project.id, committedToday)).toBe(0.1);
-    // 셋째 실행: 잔여 0 → 세션 없이 budget_exceeded(project_daily_budget_exceeded)
+    // 둘째 · 셋째 실행: 프로젝트당 진행 중 1개라 실행 대기(ADR-105). 세션이 없어 하루 합산에 들어가지 않는다
+    const second = start();
     const third = start();
-    await waitFor(() => detail(third)?.run.status === 'budget_exceeded', '셋째 실행 종료');
-    expect(detail(third)?.run.failureReason).toBe('project_daily_budget_exceeded');
-    expect(held.budgets).toHaveLength(2);
+    expect([detail(second)?.run.status, detail(third)?.run.status]).toEqual(['queued', 'queued']);
+    expect(held.budgets).toEqual([{ role: 'test-writer', maxBudgetUsd: 0.05 }]);
+    expect(withProject(biveHome, seeded.project.id, committedToday)).toBe(0.051);
+    // 첫 실행이 끝나면 대기가 생성 순으로 깨어난다. 하루 지출이 한도에 이르렀으면 깨어난 실행도 세션 없이
+    // budget_exceeded(project_daily_budget_exceeded)로 끝나고, 그 종료가 다음 대기를 깨운다
     held.release();
     await engine.settled();
+    const ends = [first, second, third].map((id) => detail(id)?.run);
+    expect(ends.map((run) => run?.status)).toEqual([
+      'budget_exceeded',
+      'budget_exceeded',
+      'budget_exceeded',
+    ]);
+    expect(ends.slice(1).map((run) => run?.failureReason)).toEqual([
+      'project_daily_budget_exceeded',
+      'project_daily_budget_exceeded',
+    ]);
+    expect(Date.parse(String(ends[1]?.startedAt))).toBeGreaterThanOrEqual(
+      Date.parse(String(ends[0]?.endedAt)),
+    );
+    expect(Date.parse(String(ends[2]?.startedAt))).toBeGreaterThanOrEqual(
+      Date.parse(String(ends[1]?.endedAt)),
+    );
+    // 깨어난 두 실행은 세션을 열지 않았다
+    expect(held.budgets.filter((b) => b.role === 'test-writer')).toHaveLength(1);
   }, 120_000);
 
   it('규칙 작성 세션이 도는 동안 시작한 실행 세션은 그 세션의 한도만큼 덜 받는다 (실행 + 규칙 작성)', async () => {

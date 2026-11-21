@@ -30,6 +30,10 @@ export const TEXT = {
   noRun: '실행 없음',
   resume: '재개',
   resumeFailed: '재개 실패',
+  /** 재개할 수 없어 실행이 실패로 끝남 (앞에 표시 ID, ADR-105) */
+  resumeUnrecoverable: '재개 불가 · 실패 처리',
+  /** 재개할 수 없지만 이미 병합된 실행이라 병합 완료로 끝남 (앞에 표시 ID, ADR-105) */
+  resumeUnrecoverableMerged: '재개 불가 · 병합 완료',
   rules: '규칙별 최신 판정',
   noRules: '규칙 없음',
   turnsSuffix: '턴',
@@ -65,6 +69,7 @@ export const STEP_STATUS_TEXT = {
 /** 실행 상태 표시명 (shared RUN_STATUS_LABELS와 같음). */
 export const RUN_STATUS_TEXT = {
   waiting_approval: '승인 대기',
+  queued: '실행 대기',
   running: '진행 중',
   merged: '병합 완료',
   failed: '실패',
@@ -121,6 +126,48 @@ export const COMPLIANCE_FILTER: FilterState = Object.freeze({
   selected: Object.freeze({ compliance: Object.freeze(['judgeable']) }),
   problemOnly: false,
 });
+
+/**
+ * 파이프라인 머리줄의 현재 단계. 실행 대기(`queued`)는 아직 시작하지 않았으므로 현재 단계가 없다(다음에 시작할 단계를
+ * 현재 단계로 보이지 않는다, ADR-105). 그 밖에는 실행의 `currentStep` 그대로.
+ */
+export const currentStepOf = (run: {
+  status: RunStatus;
+  currentStep: StepKind | null;
+}): StepKind | null => (run.status === 'queued' ? null : run.currentStep);
+
+/**
+ * 파이프라인 머리줄의 실행 대기 건수 구절: "실행 대기 N" (보이는 실행 밖의 실행 대기, ADR-105). 0이면 `null`(보이지 않음).
+ */
+export const queuedText = (queued: number): string | null =>
+  queued > 0 ? `${RUN_STATUS_TEXT.queued} ${String(queued)}` : null;
+
+/** `run.resume` 거부가 "재개할 수 없어 실패로 끝냄"(`data.reason = resume_unrecoverable`)인지 (ADR-105). */
+export const isResumeUnrecoverable = (error: unknown): boolean => {
+  if (typeof error !== 'object' || error === null) return false;
+  const data = (error as { data?: unknown }).data;
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { reason?: unknown }).reason === 'resume_unrecoverable'
+  );
+};
+
+/** 재개 불가 거부의 `data.runStatus` (끝난 상태). 없으면 `null`. */
+export const resumeEndedStatus = (error: unknown): string | null => {
+  if (typeof error !== 'object' || error === null) return null;
+  const data = (error as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return null;
+  const status = (data as { runStatus?: unknown }).runStatus;
+  return typeof status === 'string' ? status : null;
+};
+
+/** "EXE-001 재개 불가 · 실패 처리", 병합 완료로 끝났으면 "EXE-001 재개 불가 · 병합 완료". */
+export const resumeUnrecoverableText = (
+  displayId: string,
+  endedStatus: string | null = null,
+): string =>
+  `${displayId} ${endedStatus === 'merged' ? TEXT.resumeUnrecoverableMerged : TEXT.resumeUnrecoverable}`;
 
 /** [재개]를 보일지: 최근 실행이 중단(`interrupted`)일 때만 (ADR-011). */
 export const canResume = (status: RunStatus): boolean => status === 'interrupted';
