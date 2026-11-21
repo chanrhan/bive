@@ -9,7 +9,7 @@ description: 마일스톤 하나의 이슈를 의존 순서대로 서브에이�
 
 ## 준비
 
-1. `scripts/gh-rest.sh GET "repos/chanrhan/bive/issues?milestone=<번호>&state=open&per_page=100"`로 이슈 목록을 받고, 본문의 `## 의존`과 로드맵 표로 위상 정렬한다. 의존이 다른 마일스톤의 미완료 이슈면 그 이슈를 먼저 처리하거나 needs-human으로 보고.
+1. `scripts/gh-rest.sh GET "repos/chanrhan/bive/issues?milestone=<번호>&state=open&per_page=100"`로 이슈 목록을 받고, 본문의 `## 의존`과 로드맵 표로 위상 정렬한다. 의존이 다른 마일스톤의 미완료 이슈면 그 이슈를 먼저 처리하거나 needs-human으로 보고. 로드맵 표의 제목에 철회 · 보류 표기(`(철회, ADR-…)` · `(보류, ADR-…)`, roadmap-format 2절)가 있는 행의 이슈는 집지 않는다.
 2. 📍 이슈(#1)에 "Mn 시작: 이슈 k개" 한 줄.
 3. 기본 브랜치를 최신으로: `git fetch origin main && git checkout main && git reset --hard origin/main`.
 
@@ -58,4 +58,4 @@ APPROVE + CI 초록이면 `merge_pull_request`(squash, 제목 = 이슈 제목). 
 2. CLAUDE.md `<!-- KICKOFF -->` 칸의 완료 조건 명령과 `dev-env` 스킬의 명령 표가 현재 저장소에서 실제로 도는지 한 번 실행해 보고 다르면 고친다(PR `chore/kickoff-commands`).
 3. QA는 운영 프롬프트 4-b 절차로 **구현에 관여하지 않은 새 서브에이전트**에게 맡긴다. 버그 이슈가 생기면 이 스킬의 "이슈 처리"로 같은 마일스톤에서 처리. 검수 → 수정 반복은 최대 2회.
 4. 📍 이슈에 회고 코멘트: 머지된 PR 수 · 검수 판정 · needs-human 목록 · 새 ADR · 로드맵 조정이 필요해 보이는 점.
-5. 다음 마일스톤은 사용자 지시를 기다린다. (운영 프롬프트가 "계속"을 대신 지시한 경우 바로 다음 마일스톤으로 간다.)
+5. 다음 마일스톤(번호가 아니라 로드맵 0장의 실행 순서로 다음)은 사용자 지시를 기다린다. (운영 프롬프트가 "계속"을 대신 지시한 경우 바로 다음 마일스톤으로 간다.)
