@@ -88,8 +88,18 @@ describe('happy-path: 요구사항 저장부터 merged까지', () => {
     ]);
     const changes = await e.client.call('normChange.list', { projectId: e.projectId });
     expect(changes.chain.valid).toBe(true);
-    expect(changes.entries.map((entry) => [entry.kind, entry.targetRef.id])).toEqual(
-      rules.map((r) => ['created', r.id]),
+    // 규칙마다 신규 · 모순 판단(모순 없음) 1쌍 (M7-07, ADR-106)
+    expect(
+      changes.entries.map((entry) => [
+        entry.kind,
+        entry.targetRef.id,
+        entry.detail.judgment?.verdict,
+      ]),
+    ).toEqual(
+      rules.flatMap((r) => [
+        ['created', r.id, undefined],
+        ['judgment', r.id, 'no_contradiction'],
+      ]),
     );
     expect((await e.client.call('proposal.list', { projectId: e.projectId })).proposals).toEqual(
       [],
