@@ -803,10 +803,15 @@ export const VerificationStage = z.strictObject({
 });
 export type VerificationStage = z.infer<typeof VerificationStage>;
 
-/** 파이프라인: 최근 실행과 단계 계획 순서의 단계 (현재 단계는 `run.currentStep`). */
+/**
+ * 파이프라인: 보일 실행과 단계 계획 순서의 단계 (현재 단계는 `run.currentStep`). 보일 실행은 프로젝트의 자리를 차지한
+ * 실행(진행 중, 없으면 가장 먼저 만든 중단)이고, 없으면 가장 최근에 만든 실행이다(ADR-105). `queued`는 그 실행 밖의
+ * 실행 대기 건수다.
+ */
 export const VerificationPipeline = z.strictObject({
   run: Run,
   stages: z.array(VerificationStage).min(1),
+  queued: z.int().nonnegative(),
 });
 export type VerificationPipeline = z.infer<typeof VerificationPipeline>;
 

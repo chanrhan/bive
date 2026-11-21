@@ -18,6 +18,9 @@ import {
   COMPLIANCE_FILTER,
   complianceText,
   currentStepOf,
+  isResumeUnrecoverable,
+  queuedText,
+  resumeUnrecoverableText,
   formatTurns,
   formatUsd,
   RUN_STATUS_TEXT,
@@ -95,6 +98,21 @@ describe('값 표시', () => {
     expect(currentStepOf({ status: 'running', currentStep: 'test_writing' })).toBe('test_writing');
     expect(currentStepOf({ status: 'waiting_approval', currentStep: 'approval' })).toBe('approval');
     expect(currentStepOf({ status: 'merged', currentStep: null })).toBeNull();
+    // 보이는 실행 밖의 실행 대기 건수: 0이면 보이지 않음
+    expect(queuedText(0)).toBeNull();
+    expect(queuedText(2)).toBe('실행 대기 2');
+    // 재개할 수 없어 실패로 끝난 거부만 따로 (그 밖의 거부는 "재개 실패")
+    expect(
+      isResumeUnrecoverable({
+        code: -32009,
+        message: 'x',
+        data: { reason: 'resume_unrecoverable' },
+      }),
+    ).toBe(true);
+    expect(isResumeUnrecoverable({ code: -32009, message: 'x' })).toBe(false);
+    expect(isResumeUnrecoverable({ code: -32009, data: { reason: 'other' } })).toBe(false);
+    expect(isResumeUnrecoverable(null)).toBe(false);
+    expect(resumeUnrecoverableText('EXE-001')).toBe('EXE-001 재개 불가 · 실패 처리');
   });
 
   it('준수 카드의 필터는 규칙 목록 준수 집계 기준의 "판정 가능" 값 하나만 고른다', () => {

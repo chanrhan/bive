@@ -189,6 +189,7 @@ stateDiagram-v2
   running --> budget_exceeded: 실행 · 역할 예산 초과
   running --> interrupted: 비정상 종료 후 재기동
   interrupted --> running: run.resume (사람)
+  interrupted --> failed: run.resume (사람)이 복구 불가 사유로 실패
   merged --> [*]
   failed --> [*]
   budget_exceeded --> [*]
@@ -197,7 +198,7 @@ stateDiagram-v2
 - 상태 저장 시점: 단계 종료마다 트랜잭션 1회 (RUN-01, `ProjectStore.runs.transition`, ADR-061). 단계 중간 진행은 이벤트 로그만
 - 생성 직후: `waiting_approval` · 현재 단계 승인(진행 중). 승인 단계는 대상 규칙이 전부 승인 상태(삭제 안 됨 · `normState = approved`)일 때만 끝나고, 아니면 아무것도 저장하지 않고 머문다 (ADR-061)
 - `failed` · `budget_exceeded`: 브랜치 · 워크트리 보존, 병합 없음 (RUN-08, COST-01)
-- 프로젝트당 동시 실행 1개 (ADR-100 B⑥, ADR-105): 자리를 차지하는 상태는 `running` · `interrupted`. 승인 단계 통과 때 자리가 없거나 실행 대기가 있으면 `queued`(실행 대기, 워크트리 · 기준 커밋 없음). 종료 상태(`merged` · `failed` · `budget_exceeded`)가 되면 엔진이 저장된 실행 대기 중 표시 ID가 가장 작은 것을 시작한다(기동 때도). `interrupted`가 있으면 사람이 재개해 끝날 때까지 시작하지 않고, 다른 실행이 `running`이면 `run.resume`은 -32009. DB 트리거(`project/0014_run_queue`)도 `running` 2건 · 순서 어김을 막는다
+- 프로젝트당 동시 실행 1개 (ADR-100 B⑥, ADR-105): 자리를 차지하는 상태는 `running` · `interrupted`. 승인 단계 통과 때 자리가 없거나 실행 대기가 있으면 `queued`(실행 대기, 워크트리 · 기준 커밋 없음). 종료 상태(`merged` · `failed` · `budget_exceeded`)가 되면 엔진이 저장된 실행 대기 중 표시 ID가 가장 작은 것을 시작한다(기동 때도). `interrupted`가 있으면 사람이 재개해 끝날 때까지 시작하지 않고, 다른 실행이 `running`이면 `run.resume`은 -32009. 재개의 워크트리 되돌리기가 복구 불가 사유(`worktree_missing` · `worktree_branch_mismatch` · `invalid_input`)로 실패하면 그 재개 안에서 `interrupted → failed`(`worktree_error`)로 끝내 자리를 비운다. 검증 화면 파이프라인은 자리를 차지한 실행(진행 중, 없으면 가장 먼저 만든 중단)을 보이고 없으면 최근 실행, 그 밖 실행 대기 건수를 함께 싣는다. DB 트리거(`project/0014_run_queue`)도 `running` 2건 · 순서 어김을 막는다
 - 검토 대기열 등록은 P1부터 (COST-01, TODO-02)
 
 단계 · 종료 조건 (유형 A, M1)
@@ -277,7 +278,7 @@ stateDiagram-v2
 | `run.create` | `{projectId, ruleIds, author}` → `{run, steps, approvalLog}` (실행 시작 확인, 사람만, 유형 A · `waiting_approval` · 승인 기록 `run_start`. 설정 미비 `-32010` · 없는 규칙 `-32004` · 삭제된 규칙 `-32009`이면 아무것도 만들지 않음) | RUN-01, RUN-02, NFR-07, ADR-061 | M1 |
 | `run.list` · `run.get` | `{projectId, status?}` → `{runs}` (표시 ID 순) / `{projectId, id}`(ULID 또는 `EXE-NNN`) → `{run, steps, usage}` (`usage` = 실행 · 역할 · 에이전트 단계 시도별 비용 · 턴 · 모델별 사용량, 값 없으면 `null`, ADR-067) | RUN-01, SCR-05, COST-02, ADR-061, ADR-067 | M1 |
 | `toolCall.list` | `{projectId, runId}`(ULID 또는 `EXE-NNN`) → `{runId, displayId, calls: [{sessionId, seq, at, role, step, name, nameTruncated, status, reason, path, pathTruncated}], truncated}` (조회 전용, 사람(앱 · CLI)만 · 역할 세션 도구에는 없음. 시각 → 세션 → 순번 순 500건까지, 넘으면 `truncated: true`. 인자 · 결과 원문은 싣지 않고 파일 도구의 대상 경로만 `path`. `name` · `path`는 제어 · 서식 문자(Cc · Cf · Zl · Zp · 짝 없는 서로게이트 · 한글 채움 문자)를 `\n` · `\uXXXX`로 이스케이프한 표시 값이고 각각 128 · 1024자를 넘으면 이름은 끝, 경로는 가운데를 `…`로 줄이고 `nameTruncated` · `pathTruncated`. 없는 실행 · 다른 프로젝트의 실행 `-32004`) | NFR-01, NFR-02, RUN-08, ADR-052, ADR-083, ADR-089 | M1 |
-| `run.resume` | `{projectId, id, author}` → `{run, steps}` (사람만 -32020, `interrupted`만 · 이미 구동 중 · 다른 실행이 진행 중 · 되돌리기 실패 -32009, 없음 -32004. 워크트리를 마지막 완료 단계 커밋으로 hard reset + clean 뒤 새 세션) | PRD 5.1, ADR-011, ADR-027, ADR-066 | M1 |
+| `run.resume` | `{projectId, id, author}` → `{run, steps}` (사람만 -32020, `interrupted`만 · 이미 구동 중 · 다른 실행이 진행 중 · 되돌리기 실패 -32009(복구 불가 사유면 실행을 `failed`로 끝내고 `data.reason = resume_unrecoverable`), 없음 -32004. 워크트리를 마지막 완료 단계 커밋으로 hard reset + clean 뒤 새 세션) | PRD 5.1, ADR-011, ADR-027, ADR-066 | M1 |
 | `settings.get` · `settings.update` | `{projectId}` / `{projectId, patch, author}` → `{settings}` (사람만, 미설정 저장 허용) | COST-01, NFR-07, ADR-010, ADR-057 | M1 |
 | `settings.validateForRun` | `{projectId, roles?}` → `{ok: true}` 또는 `{ok: false, code: -32010, reason: 'SETTINGS_INCOMPLETE', message, missing[]}` | NFR-07, ADR-057 | M1 |
 | `codeOpen.record` | `{projectId, author, reason, sourceScreen, itemRef, file, line}` → `{record}` (사람만 -32020, 시각은 오케스트레이터 시계, `file`은 프로젝트 루트 기준 상대 경로만, 추가만. main의 `app.openInIde`가 IDE를 열기 전에 부르고 기록이 실패하면 열지 않는다) | MET-01, ADR-084 | M2 |

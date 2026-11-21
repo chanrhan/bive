@@ -36,6 +36,7 @@ const INTERRUPTED = {
   pipeline: {
     run: run({ status: 'interrupted', currentStep: 'implementation' }),
     stages: stages('implementation', 'pending'),
+    queued: 0,
   },
 } as const;
 

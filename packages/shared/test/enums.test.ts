@@ -131,7 +131,7 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
       waiting_approval: ['running', 'queued'],
       queued: ['running', 'failed'],
       running: ['merged', 'failed', 'budget_exceeded', 'interrupted'],
-      interrupted: ['running'],
+      interrupted: ['running', 'failed'],
       merged: [],
       failed: [],
       budget_exceeded: [],
@@ -146,6 +146,9 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
     expect(canTransitionRun('queued', 'interrupted')).toBe(false);
     expect(canTransitionRun('running', 'queued')).toBe(false);
     expect(canTransitionRun('interrupted', 'queued')).toBe(false);
+    // 재개할 수 없는 중단 실행은 사람의 재개 행동 안에서 실패로 끝난다 (ADR-105)
+    expect(canTransitionRun('interrupted', 'failed')).toBe(true);
+    expect(canTransitionRun('interrupted', 'merged')).toBe(false);
     expect(canTransitionRun('running', 'running')).toBe(false);
     expect(canTransitionRun('merged', 'running')).toBe(false);
     for (const status of RunStatus.options) {

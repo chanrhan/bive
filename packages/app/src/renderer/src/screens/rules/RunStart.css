@@ -14,14 +14,12 @@
   cursor: pointer;
 }
 
-/* 만든 실행의 표시 ID · 상태 (실행 대기 등, ADR-105) */
+/* 만든 실행의 표시 ID · 상태: 상세 머리줄 아래 한 줄 (머리줄의 폭을 먹지 않는다, ADR-105) */
 .run-start-created {
-  flex: none;
-  align-self: center;
-  margin-left: var(--space-2);
+  margin: 0 0 var(--space-2);
   color: var(--color-text-muted);
   font-size: var(--font-size-1);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 /* 확인 대화는 내용 크기만큼 (모달 기본 820 × 600은 설정 모달 크기) */

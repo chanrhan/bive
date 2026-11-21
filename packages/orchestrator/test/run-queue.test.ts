@@ -13,10 +13,17 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentAdapter } from '../src/agent/adapter.js';
 import { loadScenario } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
-import { PipelineEngine } from '../src/engine/pipeline-engine.js';
+import { PipelineEngine, RESUME_UNRECOVERABLE } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor, StepExecutors, StepOutcome } from '../src/engine/types.js';
 import { RpcError } from '../src/ipc/server.js';
-import { createRun, QUEUED_TARGET_UNAVAILABLE } from '../src/runs/run-service.js';
+import { selectAgent } from '../src/agent/select.js';
+import { startOrchestrator } from '../src/orchestrator.js';
+import {
+  createRun,
+  evaluateApprovalStep,
+  QUEUED_TARGET_UNAVAILABLE,
+} from '../src/runs/run-service.js';
+import { verificationSummary } from '../src/verification/summary.js';
 import {
   copyFixture,
   human,
@@ -482,17 +489,29 @@ describe('재기동 · 중단 · 재개 (수용 기준 2, ADR-105)', () => {
     // 중단된 실행이 자리를 차지한다: 대기는 그대로(메모리 대기열 없이 저장된 상태에서 판단)
     expect(statuses(h)).toEqual({ [first]: 'interrupted', [second]: 'queued', [third]: 'queued' });
     expect(restarted.activeRunIds).toEqual([]);
+    // 검증 화면 파이프라인은 최근에 만든 실행 대기가 아니라 자리를 지킨 중단 실행(그래야 [재개]가 보인다)과 뒤 대기 건수
+    const blocked = withProject(h.biveHome, h.project.id, (store) => verificationSummary(store));
+    expect(blocked.pipeline?.run).toMatchObject({ displayId: first, status: 'interrupted' });
+    expect(blocked.pipeline?.queued).toBe(2);
 
     // 재개는 실행 대기가 있어도 된다(중단된 실행이 먼저). 재개한 실행이 끝나면 생성 순으로 이어진다
     h.gates.open(first);
     await restarted.resume(h.project.id, first, human);
     await waitGate(h, second);
     expect(statuses(h)).toEqual({ [first]: 'merged', [second]: 'running', [third]: 'queued' });
+    // 진행 중인 실행이 생기면 파이프라인은 그 실행, 뒤 대기 1건
+    const running = withProject(h.biveHome, h.project.id, (store) => verificationSummary(store));
+    expect(running.pipeline?.run).toMatchObject({ displayId: second, status: 'running' });
+    expect(running.pipeline?.queued).toBe(1);
     h.gates.open(second);
     await waitGate(h, third);
     h.gates.open(third);
     await restarted.settled();
     expect(startOrder(h)).toEqual([first, second, third]);
+    // 다 끝나면 최근에 만든 실행, 대기 0
+    const done = withProject(h.biveHome, h.project.id, (store) => verificationSummary(store));
+    expect(done.pipeline?.run.displayId).toBe(third);
+    expect(done.pipeline?.queued).toBe(0);
     expect(h.maxRunning).toBe(1);
   }, 60_000);
 
@@ -536,6 +555,53 @@ describe('재기동 · 중단 · 재개 (수용 기준 2, ADR-105)', () => {
     expect(h.maxRunning).toBe(1);
   }, 60_000);
 
+  it('오케스트레이터 기동(startOrchestrator)은 연결을 받은 뒤 남은 실행 대기를 시작한다', async () => {
+    const biveHome = makeBiveHome();
+    const repo = copyFixture(temps);
+    const seeded = seedProject(biveHome, repo);
+    // 엔진 없이 저장만: EXE-001 진행 중 → EXE-002 실행 대기 → EXE-001 실패 저장(다음 시작 전에 프로세스가 끝난 상태)
+    const [first, second] = withProject(biveHome, seeded.project.id, (store) => {
+      const make = () =>
+        createRun(
+          store,
+          { ruleIds: [seeded.rule.id], author: human },
+          { clientId: null },
+          { now: Date.now, newId },
+        ).run.id;
+      const a = make();
+      evaluateApprovalStep(store, a, { now: Date.now });
+      const b = make();
+      expect(evaluateApprovalStep(store, b, { now: Date.now }).run.status).toBe('queued');
+      store.runs.transition(a, {
+        expectedStatus: 'running',
+        run: {
+          status: 'failed',
+          failureReason: 'scripted_halt',
+          endedAt: new Date().toISOString(),
+        },
+      });
+      return [a, b];
+    });
+    const gates = new Gates();
+    const result = await startOrchestrator({
+      biveHome,
+      idleShutdownMs: 60_000,
+      agent: selectAgent({ BIVE_AGENT: 'scripted' }, { biveHome }),
+      executors: gatedExecutors(gates),
+      log: () => undefined,
+    });
+    if (result.status !== 'started') throw new Error('기동 실패');
+    try {
+      await waitFor(() => gates.waiting.includes('EXE-002'), 20_000, 'EXE-002 시작');
+      const runs = withProject(biveHome, seeded.project.id, (store) =>
+        [first, second].map((id) => store.runs.get(id)?.status),
+      );
+      expect(runs).toEqual(['failed', 'running']);
+    } finally {
+      await result.orchestrator.stop();
+    }
+  }, 60_000);
+
   it('중단된 실행이 있으면 새 실행은 승인 단계 뒤 실행 대기다 (중단은 자리를 비우지 않는다)', async () => {
     const h = setup();
     const first = startRun(h);
@@ -546,6 +612,84 @@ describe('재기동 · 중단 · 재개 (수용 기준 2, ADR-105)', () => {
     const second = startRun(h, restarted);
     await restarted.settled();
     expect(statuses(h)).toEqual({ [first]: 'interrupted', [second]: 'queued' });
+  }, 60_000);
+
+  /** 진행 중이던 EXE-001을 재기동으로 중단시키고 그 뒤 EXE-002를 실행 대기로 만든다. */
+  const interruptWithQueue = async (
+    h: QueueHarness,
+  ): Promise<{ engine: PipelineEngine; first: string; second: string; worktree: string }> => {
+    const first = startRun(h);
+    await waitGate(h, first);
+    await h.engine.stop();
+    const engine = h.newEngine();
+    expect(engine.recoverInterruptedRuns().map((run) => run.displayId)).toEqual([first]);
+    const second = startRun(h, engine);
+    await waitFor(() => statusOf(h, second) === 'queued', 10_000, '실행 대기');
+    return { engine, first, second, worktree: String(detailOf(h, first).run.worktreePath) };
+  };
+
+  it.each([
+    [
+      'worktree_missing',
+      (worktree: string) => fs.rmSync(worktree, { recursive: true, force: true }),
+    ],
+    [
+      'worktree_branch_mismatch',
+      (worktree: string) => userGit(worktree, 'checkout', '-q', '--detach'),
+    ],
+  ] as const)(
+    '재개할 수 없는 중단 실행(%s)은 사람의 재개 안에서 실패(worktree_error)로 끝나 자리를 비우고, 다음 실행 대기가 시작한다',
+    async (code, breakWorktree) => {
+      const h = setup();
+      const { engine, first, second, worktree } = await interruptWithQueue(h);
+      breakWorktree(worktree);
+      const refused = await engine.resume(h.project.id, first, human).catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(RpcError);
+      expect((refused as RpcError).code).toBe(ErrorCode.StateConflict);
+      expect((refused as RpcError).message).toContain('재개할 수 없어 실행을 실패로 끝냈습니다');
+      expect((refused as RpcError).data).toMatchObject({
+        reason: RESUME_UNRECOVERABLE,
+        displayId: first,
+        code,
+      });
+      const ended = detailOf(h, first);
+      expect(ended.run).toMatchObject({ status: 'failed', failureReason: 'worktree_error' });
+      expect(ended.run.endedAt).not.toBeNull();
+      const closed = ended.steps.find((step) => step.kind === 'test_writing' && step.attempt === 2);
+      expect(closed?.status).toBe('failed');
+      expect(closed?.exitDetail).toMatchObject({ reason: 'worktree_error', detail: { code } });
+      // 자리가 났으므로 다음 실행 대기가 시작한다
+      await waitGate(h, second);
+      expect(statuses(h)).toEqual({ [first]: 'failed', [second]: 'running' });
+      h.gates.open(second);
+      await engine.settled();
+      expect(statusOf(h, second)).toBe('merged');
+      expect(h.maxRunning).toBe(1);
+    },
+    60_000,
+  );
+
+  it('일시적일 수 있는 재개 실패(git 명령 오류)는 상태를 바꾸지 않고, 고친 뒤 다시 재개하면 이어진다', async () => {
+    const h = setup();
+    const { engine, first, second, worktree } = await interruptWithQueue(h);
+    const gitFile = path.join(worktree, '.git');
+    const original = fs.readFileSync(gitFile);
+    fs.writeFileSync(gitFile, 'gitdir: /nonexistent\n');
+    const before = detailOf(h, first);
+    const refused = await engine.resume(h.project.id, first, human).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(RpcError);
+    expect((refused as RpcError).code).toBe(ErrorCode.StateConflict);
+    expect((refused as RpcError).data).toBeUndefined();
+    expect(detailOf(h, first)).toEqual(before);
+    await engine.settled();
+    expect(statuses(h)).toEqual({ [first]: 'interrupted', [second]: 'queued' });
+    fs.writeFileSync(gitFile, original);
+    h.gates.open(first);
+    await engine.resume(h.project.id, first, human);
+    await waitGate(h, second);
+    h.gates.open(second);
+    await engine.settled();
+    expect(statuses(h)).toEqual({ [first]: 'merged', [second]: 'merged' });
   }, 60_000);
 
   it('다른 실행이 진행 중이면 재개는 -32009이고 아무것도 바뀌지 않는다 (예전 데이터의 중단 실행 둘)', async () => {

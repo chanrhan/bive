@@ -1075,6 +1075,21 @@ describe('상태 기계', () => {
       ),
     ).toEqual(['merged', 'failed']);
 
+    // interrupted → failed: 워크트리가 사라진 중단 실행의 재개는 그 자리에서 실패로 끝난다 (ADR-105)
+    const broken = setup();
+    const brokenFirst = engineFor(broken, pausedExecutors);
+    release = false;
+    expect(brokenFirst.evaluateApproval(broken.project.id, broken.runId)).toBe(true);
+    await waitFor(() => detailOf(broken).run.worktreePath !== null, 20_000, '워크트리 생성');
+    await brokenFirst.stop();
+    const brokenSecond = engineFor(broken, pausedExecutors);
+    expect(brokenSecond.recoverInterruptedRuns()).toHaveLength(1);
+    fs.rmSync(String(detailOf(broken).run.worktreePath), { recursive: true, force: true });
+    await expect(brokenSecond.resume(broken.project.id, broken.runId, human)).rejects.toThrow(
+      /재개할 수 없어/,
+    );
+    expect(detailOf(broken).run.status).toBe('failed');
+
     const all = Object.entries(RUN_STATUS_TRANSITIONS).flatMap(([from, tos]) =>
       (tos as readonly string[]).map((to) => `${from}→${to}`),
     );

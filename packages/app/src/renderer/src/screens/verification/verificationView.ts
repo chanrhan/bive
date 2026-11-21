@@ -30,6 +30,8 @@ export const TEXT = {
   noRun: '실행 없음',
   resume: '재개',
   resumeFailed: '재개 실패',
+  /** 재개할 수 없어 실행이 실패로 끝남 (앞에 표시 ID, ADR-105) */
+  resumeUnrecoverable: '재개 불가 · 실패 처리',
   rules: '규칙별 최신 판정',
   noRules: '규칙 없음',
   turnsSuffix: '턴',
@@ -131,6 +133,27 @@ export const currentStepOf = (run: {
   status: RunStatus;
   currentStep: StepKind | null;
 }): StepKind | null => (run.status === 'queued' ? null : run.currentStep);
+
+/**
+ * 파이프라인 머리줄의 실행 대기 건수 구절: "실행 대기 N" (보이는 실행 밖의 실행 대기, ADR-105). 0이면 `null`(보이지 않음).
+ */
+export const queuedText = (queued: number): string | null =>
+  queued > 0 ? `${RUN_STATUS_TEXT.queued} ${String(queued)}` : null;
+
+/** `run.resume` 거부가 "재개할 수 없어 실패로 끝냄"(`data.reason = resume_unrecoverable`)인지 (ADR-105). */
+export const isResumeUnrecoverable = (error: unknown): boolean => {
+  if (typeof error !== 'object' || error === null) return false;
+  const data = (error as { data?: unknown }).data;
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { reason?: unknown }).reason === 'resume_unrecoverable'
+  );
+};
+
+/** "EXE-001 재개 불가 · 실패 처리" */
+export const resumeUnrecoverableText = (displayId: string): string =>
+  `${displayId} ${TEXT.resumeUnrecoverable}`;
 
 /** [재개]를 보일지: 최근 실행이 중단(`interrupted`)일 때만 (ADR-011). */
 export const canResume = (status: RunStatus): boolean => status === 'interrupted';

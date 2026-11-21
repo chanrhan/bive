@@ -44,6 +44,8 @@ import { runGuardedSession } from '../agent/guarded-session.js';
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import {
   createWorktreeManager,
+  GitWorktreeError,
+  type GitWorktreeErrorCode,
   type RunGitRef,
   type WorktreeManager,
 } from '../git/worktree-manager.js';
@@ -175,6 +177,9 @@ const untilAborted = (promise: Promise<unknown>, signal: AbortSignal): Promise<v
   });
 };
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
@@ -239,6 +244,26 @@ export const runEnding = (
   run.mergeCommit !== null
     ? { merged: true, run: { status: 'merged', currentStep: null } }
     : { merged: false, run: { status: runStatus, failureReason: reason } };
+
+/**
+ * 재개의 워크트리 되돌리기가 이 사유로 실패하면 다시 눌러도 같은 결과다(ADR-105): 워크트리 폴더가 없음
+ * (`worktree_missing`), 워크트리가 실행 브랜치에 있지 않음(`worktree_branch_mismatch`), 실행 참조 · 되돌릴 커밋이
+ * 규칙과 다름 · 폴더가 아님 · 되돌릴 커밋이 브랜치에 없음 · 되돌린 뒤에도 변경이 남음(`invalid_input`). 이때 재개는 그
+ * 호출 안에서 실행을 `failed`(`worktree_error`)로 끝내 프로젝트의 자리를 비운다. git 명령 실패(`GitCommandError`)와
+ * 다른 실행이 진행 중인 경우는 일시적일 수 있어 상태를 바꾸지 않는다.
+ */
+export const UNRECOVERABLE_RESUME_CODES = [
+  'worktree_missing',
+  'worktree_branch_mismatch',
+  'invalid_input',
+] as const satisfies readonly GitWorktreeErrorCode[];
+
+/** 재개할 수 없어 실행을 실패로 끝냈을 때 `run.resume` 오류의 `data.reason` (ADR-105). */
+export const RESUME_UNRECOVERABLE = 'resume_unrecoverable';
+
+const isUnrecoverableResume = (error: unknown): error is GitWorktreeError =>
+  error instanceof GitWorktreeError &&
+  (UNRECOVERABLE_RESUME_CODES as readonly string[]).includes(error.code);
 
 interface ActiveRun {
   readonly controller: AbortController;
@@ -509,6 +534,9 @@ export class PipelineEngine {
         try {
           await resetRunWorktree(git, target, { biveHome: this.#biveHome, git: this.#git });
         } catch (error) {
+          if (isUnrecoverableResume(error)) {
+            throw this.#failUnresumable(projectId, run, steps, error);
+          }
           throw new RpcError(
             ErrorCode.StateConflict,
             `워크트리를 마지막 완료 단계 커밋으로 되돌리지 못했습니다: ${errorMessage(error)}`,
@@ -543,12 +571,75 @@ export class PipelineEngine {
       );
     } catch (error) {
       reservation.release();
+      // 재개할 수 없어 실패로 끝냈으면 자리가 났다: 다음 실행 대기를 시작한다 (ADR-105)
+      if (
+        error instanceof RpcError &&
+        isRecord(error.data) &&
+        error.data.reason === RESUME_UNRECOVERABLE
+      ) {
+        this.#defer(() => this.#advanceQueue(projectId));
+      }
       throw error;
     }
     this.#emit({ type: 'run.saved', projectId, detail: saved });
     this.#log(`실행 재개 (${run.displayId}, ${String(run.currentStep)})`);
     reservation.start(projectId);
     return saved;
+  }
+
+  /**
+   * 재개할 수 없는 중단 실행을 끝낸다 (사람의 재개 행동의 결과, ADR-105): `interrupted → failed`(`worktree_error`), 지금
+   * 단계의 대기 시도도 실패(사유 · git 오류 코드 · 메시지)로 끝낸다. 워크트리가 없거나 어긋나 보존(잠금)은 하지 않는다(브랜치는
+   * 지우지 않으므로 남는다). 저장 뒤 돌려줄 RPC 오류(-32009, `data.reason = resume_unrecoverable`)를 만든다. 저장이 실패하면
+   * (다른 쪽이 먼저 바꿈) 그 오류를 돌려준다.
+   */
+  #failUnresumable(
+    projectId: string,
+    run: Run,
+    steps: readonly Step[],
+    error: GitWorktreeError,
+  ): RpcError {
+    const at = this.#timestamp();
+    const pending =
+      run.currentStep === null
+        ? undefined
+        : steps.filter((s) => s.kind === run.currentStep && s.status === 'pending').at(-1);
+    const detail = {
+      reason: 'worktree_error',
+      detail: { code: error.code, message: error.message },
+    };
+    let saved: RunDetail;
+    try {
+      saved = this.#rpcStore(projectId, (store) =>
+        store.runs.transition(run.id, {
+          expectedStatus: 'interrupted',
+          run: { status: 'failed', failureReason: 'worktree_error', endedAt: at },
+          steps:
+            pending === undefined
+              ? []
+              : [
+                  {
+                    id: pending.id,
+                    status: 'failed',
+                    exitDetail: detail,
+                    startedAt: at,
+                    endedAt: at,
+                  },
+                ],
+        }),
+      );
+    } catch (failure) {
+      return failure instanceof RpcError
+        ? failure
+        : new RpcError(ErrorCode.StateConflict, errorMessage(failure));
+    }
+    this.#emit({ type: 'run.saved', projectId, detail: saved });
+    this.#log(`실행 종료 (${run.displayId}, failed: worktree_error, 재개 불가 ${error.code})`);
+    return new RpcError(
+      ErrorCode.StateConflict,
+      `재개할 수 없어 실행을 실패로 끝냈습니다 (${run.displayId}, ${error.code}): ${error.message}`,
+      { reason: RESUME_UNRECOVERABLE, runId: run.id, displayId: run.displayId, code: error.code },
+    );
   }
 
   // ── 수명 ──────────────────────────────────────────────

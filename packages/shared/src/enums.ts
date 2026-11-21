@@ -57,13 +57,13 @@ export const TERMINAL_RUN_STATUSES = [
  * 실행 상태 전이 (architecture.md 4장 상태 기계, ADR-061). 키 상태에서 갈 수 있는 상태 목록이고,
  * 종료 상태는 빈 목록이다. 생성 직후 상태는 항상 `waiting_approval`(실행 시작 확인 → 승인 단계). 승인 단계를 통과할 때
  * 프로젝트에 자리가 없으면 `queued`, 자리가 나면 생성 순으로 `running`이다. 시작 때 대상 규칙을 다시 보아 효력이 없으면
- * `failed`(ADR-105).
+ * `failed`(ADR-105). 중단된 실행은 사람의 재개가 복구 불가 사유로 실패하면 그 자리에서 `failed`(ADR-105).
  */
 export const RUN_STATUS_TRANSITIONS = {
   waiting_approval: ['running', 'queued'],
   queued: ['running', 'failed'],
   running: ['merged', 'failed', 'budget_exceeded', 'interrupted'],
-  interrupted: ['running'],
+  interrupted: ['running', 'failed'],
   merged: [],
   failed: [],
   budget_exceeded: [],

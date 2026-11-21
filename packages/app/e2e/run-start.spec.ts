@@ -333,6 +333,7 @@ test.describe('실행 알림 → 다시 조회 (수용 기준 3, 렌더러 쪽)'
       pipeline: {
         run: summaryRun({ currentStep: 'check' }),
         stages: stages('check', 'running'),
+        queued: 0,
       },
     };
     await bive.setResponse('verification.summary', { result: next });
