@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PipeServer } from '../src/ipc/server.js';
 import {
   requireRunnableSettings,
+  roleSessionSettings,
+  validateSettingsForAutoStart,
   validateSettingsForRun,
 } from '../src/settings/settings-service.js';
 import { RpcCallError, type TestClient } from './helpers/client.js';
@@ -20,6 +22,7 @@ import { cleanup } from './helpers/process.js';
 import { iso, startProjectHarness, T0, type ProjectHarness } from './helpers/project-harness.js';
 
 const human = { kind: 'human' } as const satisfies Author;
+const newId = createUlidGenerator();
 const implementerAgent = { kind: 'agent', role: 'implementer' } as const satisfies Author;
 
 const servers: PipeServer[] = [];
@@ -131,6 +134,8 @@ describe('settings.get · settings.update 저장 왕복', () => {
     ['소수 턴', { run: { maxTurns: 1.5 } }],
     ['공백 모델', { roles: { 'test-writer': { model: '   ' } } }],
     ['모르는 키', { autoMode: true }],
+    ['음수 하루 한도', { dailyBudgetUsd: -1 }],
+    ['글자 하루 한도', { dailyBudgetUsd: '3' }],
   ])('스키마 위반(%s)은 -32602이고 저장하지 않는다', async (_, patch) => {
     const response = (await h.client.requestRaw({
       jsonrpc: '2.0',
@@ -343,5 +348,95 @@ describe('settings.validateForRun (NFR-07)', () => {
     await update({ run: { maxTurns: null } });
     const onlyRun = await validate(['rule-writer']);
     expect(onlyRun.ok === false && onlyRun.missing).toEqual(['run.maxTurns']);
+  });
+});
+
+describe('프로젝트 하루 예산 한도 (M7-04 수용 기준 3, ADR-100 B⑤, ADR-104)', () => {
+  it('저장 왕복: 비움(null) · 0 · 소수를 저장하고, 키가 없는 패치는 그대로 둔다', async () => {
+    expect(
+      (await h.client.call('settings.get', { projectId: h.project.id })).settings,
+    ).toMatchObject({ dailyBudgetUsd: null });
+    expect((await update({ dailyBudgetUsd: 0 })).settings.dailyBudgetUsd).toBe(0);
+    expect((await update({ dailyBudgetUsd: 3.5 })).settings.dailyBudgetUsd).toBe(3.5);
+    expect((await update(COMPLETE)).settings.dailyBudgetUsd).toBe(3.5);
+    expect((await update({ dailyBudgetUsd: null })).settings.dailyBudgetUsd).toBeNull();
+    // 음수 · 글자는 스키마 위반(-32602, 위 '스키마 위반' 표)
+    expect(
+      (await h.client.call('settings.get', { projectId: h.project.id })).settings,
+    ).toMatchObject({ dailyBudgetUsd: null, run: COMPLETE.run });
+    // 에이전트 주체는 하루 한도도 바꿀 수 없다 (NFR-07)
+    expect((await rpcError(update({ dailyBudgetUsd: 100 }, implementerAgent))).code).toBe(-32020);
+  });
+
+  it('자동 시작 검사 함수가 하루 한도가 비었는지를 돌려준다 (비움 = 자동 시작 없음, 0은 비움이 아니다)', async () => {
+    const at = () => h.read((store) => validateSettingsForAutoStart(store.settings.get()));
+    // 아무것도 저장하지 않음: 하루 한도 비움 + 실행 설정 빈 항목
+    const initial = at();
+    expect(initial.ok).toBe(false);
+    if (!initial.ok) {
+      expect(initial.dailyBudgetUnset).toBe(true);
+      expect(initial.missing).toContain('run.maxBudgetUsd');
+    }
+    // 실행 설정은 다 채웠지만 하루 한도 비움 → 자동 시작 없음
+    await update(COMPLETE);
+    expect(at()).toEqual({ ok: false, dailyBudgetUnset: true, missing: [] });
+    // 하루 한도가 있으면 통과 (0도 비움이 아니다: 자동 시작 검사는 통과하지만 세션은 하루 한도가 모두 막는다)
+    await update({ dailyBudgetUsd: 10 });
+    expect(at()).toEqual({ ok: true, dailyBudgetUsd: 10 });
+    await update({ dailyBudgetUsd: 0 });
+    expect(at()).toEqual({ ok: true, dailyBudgetUsd: 0 });
+    // 하루 한도가 있어도 실행 설정이 비면 자동 시작 없음
+    await update({ dailyBudgetUsd: 10, roles: { implementer: { model: null } } });
+    expect(at()).toEqual({
+      ok: false,
+      dailyBudgetUnset: false,
+      missing: ['roles.implementer.model'],
+    });
+  });
+
+  it('빈 하루 한도는 수동 [실행](run.create)과 규칙 작성 세션의 설정 검사를 막지 않는다', async () => {
+    await update(COMPLETE);
+    expect(h.read((store) => store.settings.get().dailyBudgetUsd)).toBeNull();
+    // 실행 전 검사 · 화면의 검증 상태는 하루 한도를 보지 않는다
+    expect(await validate()).toEqual({ ok: true });
+    expect(h.read((store) => requireRunnableSettings(store)).dailyBudgetUsd).toBeNull();
+    // 규칙 작성 세션의 모델 · 한도 (역할 한도 그대로, 하루 잔여로 묶지 않음)
+    expect(h.read((store) => roleSessionSettings(store.settings.get(), 'rule-writer'))).toEqual({
+      model: 'test-model',
+      budget: { maxBudgetUsd: 1, maxTurns: 20 },
+    });
+    // 수동 [실행]: 사람의 run.create가 실행을 만든다
+    const ruleId = h.read((store) => {
+      const requirement = store.requirements.create({
+        id: newId(),
+        text: '헬스 체크 응답에 서버 시각 포함',
+        author: human,
+        normState: 'approved',
+        createdAt: iso(T0),
+      });
+      return store.rules.create({
+        id: newId(),
+        title: '헬스 체크 서버 시각',
+        statement:
+          'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 time 필드에 서버 시각을 담는다',
+        kind: 'business',
+        checkKinds: ['test'],
+        parentRequirementId: requirement.id,
+        builtin: false,
+        targetBlockIds: [],
+        risk: null,
+        contractId: null,
+        author: human,
+        normState: 'approved',
+        createdAt: iso(T0),
+      }).id;
+    });
+    const { run } = await h.client.call('run.create', {
+      projectId: h.project.id,
+      ruleIds: [ruleId],
+      author: human,
+    });
+    expect(run.status).toBe('waiting_approval');
+    // 규칙 작성 세션이 실제로 열리는지는 project-budget.test.ts '하루 한도 0은 첫 세션부터 막고, 비움은 막지 않는다'
   });
 });

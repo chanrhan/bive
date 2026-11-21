@@ -37,6 +37,36 @@ export const validateSettingsForRun = (
   };
 };
 
+/**
+ * 자동 시작(M7-05)용 설정 검사 결과. `ok`는 자동 시작을 해도 되는지다: 프로젝트 하루 예산 한도가 있고(`dailyBudgetUnset`
+ * 거짓) 실행 설정(`validateSettingsForRun`과 같은 범위)에 빈 항목이 없을 때만 참이다 (ADR-100 B⑤, ADR-104).
+ */
+export type AutoStartSettingsCheck =
+  | { readonly ok: true; readonly dailyBudgetUsd: number }
+  | {
+      readonly ok: false;
+      /** 하루 한도가 비어 있음 (비움 = 자동 시작 없음) */
+      readonly dailyBudgetUnset: boolean;
+      /** 실행 설정의 빈 항목 (`validateSettingsForRun`의 `missing`과 같다) */
+      readonly missing: MissingSetting[];
+    };
+
+/**
+ * 자동 시작 전 설정 검사 (M7-05가 부른다, ADR-104). 하루 한도가 비어 있으면 자동 시작을 하지 않는다(B⑤). 하루 한도가
+ * 비어 있는 것은 이 검사에서만 막는 조건이다: `validateSettingsForRun` · `requireRunnableSettings`(수동 [실행]) ·
+ * 규칙 작성 세션은 하루 한도를 보지 않는다. 오늘 지출이 한도에 이르렀는지는 설정이 아니라 기록에서 정해지므로
+ * 세션을 열 때(`projectDailyBudget`) 따로 본다.
+ */
+export const validateSettingsForAutoStart = (
+  settings: Pick<Settings, 'run' | 'roles' | 'dailyBudgetUsd'>,
+  roles: readonly AgentRole[] = RUN_REQUIRED_ROLES,
+): AutoStartSettingsCheck => {
+  const missing = findMissingSettings(settings, roles);
+  const daily = settings.dailyBudgetUsd;
+  if (daily !== null && missing.length === 0) return { ok: true, dailyBudgetUsd: daily };
+  return { ok: false, dailyBudgetUnset: daily === null, missing };
+};
+
 /** 설정 미비 오류 (-32010). `data`는 `{ reason: 'SETTINGS_INCOMPLETE', missing }`. */
 export const settingsIncompleteError = (missing: readonly MissingSetting[]): RpcError => {
   const data: SettingsIncompleteData = {

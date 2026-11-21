@@ -72,6 +72,7 @@ describe('settings 테이블 · 리포지토리', () => {
       expect(Object.keys(JSON.parse(row.body) as object).sort()).toEqual([
         'approvalQueueLimit',
         'autoMode',
+        'dailyBudgetUsd',
         'ide',
         'installAllowlist',
         'provisionalPolicy',
@@ -124,6 +125,41 @@ describe('settings 테이블 · 리포지토리', () => {
     });
     withStore(projectId, (store) => {
       expect(store.settings.get().ide).toEqual({ kind: 'cursor' });
+    });
+  });
+
+  it('프로젝트 하루 한도(M7-04, ADR-104): 기본 비움, 0 · 소수를 저장하고 키가 없는 패치는 그대로이며, 키가 없는 이전 본문은 비움으로 읽는다', () => {
+    const projectId = newId();
+    withStore(projectId, (store) => {
+      expect(store.settings.get().dailyBudgetUsd).toBeNull();
+      store.settings.update({ run: { maxTurns: 10 } }, { by: human, at: T0 });
+      const row = store.db.prepare('SELECT body FROM settings').get() as { body: string };
+      const legacy = JSON.parse(row.body) as Record<string, unknown>;
+      expect(legacy.dailyBudgetUsd).toBeNull();
+      delete legacy.dailyBudgetUsd;
+      store.db.prepare('UPDATE settings SET body = ?').run(JSON.stringify(legacy));
+      expect(store.settings.get().dailyBudgetUsd).toBeNull();
+      expect(
+        store.settings.update({ dailyBudgetUsd: 0 }, { by: human, at: T1 }).dailyBudgetUsd,
+      ).toBe(0);
+      expect(store.settings.update({ run: { maxTurns: 20 } }, { by: human, at: T1 })).toMatchObject(
+        {
+          dailyBudgetUsd: 0,
+          run: { maxTurns: 20 },
+        },
+      );
+      expect(() =>
+        store.settings.update({ dailyBudgetUsd: -0.5 }, { by: human, at: T1 }),
+      ).toThrow();
+      expect(
+        store.settings.update({ dailyBudgetUsd: 2.5 }, { by: human, at: T1 }).dailyBudgetUsd,
+      ).toBe(2.5);
+    });
+    withStore(projectId, (store) => {
+      expect(store.settings.get().dailyBudgetUsd).toBe(2.5);
+      expect(store.settings.update({ dailyBudgetUsd: null }, { by: human, at: T1 })).toMatchObject({
+        dailyBudgetUsd: null,
+      });
     });
   });
 

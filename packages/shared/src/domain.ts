@@ -177,6 +177,12 @@ export const DEFAULT_APPROVAL_QUEUE_LIMIT = 40;
 
 /** 예산 한도 (USD). 0보다 커야 한다 (NFR-07: 예산 한도 없는 실행 금지). `null` = 미설정. */
 export const BudgetLimitUsd = z.number().positive().nullable();
+/**
+ * 프로젝트 하루 예산 한도 (USD, COST-01 · NFR-07, ADR-100 B⑤ · A12, M7-04, ADR-104). 0 이상 수.
+ * `null`(비움) = 하루 한도 없음: 수동 실행 · 규칙 작성 세션은 막지 않고 자동 시작(M7-05)만 하지 않는다.
+ * `0` = 하루 지출이 0 이상이면 이미 한도에 이른 것이라 새 에이전트 세션을 모두 막는다.
+ */
+export const DailyBudgetUsd = z.number().nonnegative().nullable();
 /** 턴 한도 (plan.md 4.5 `maxTurns`). 1 이상 정수. `null` = 미설정. */
 export const TurnLimit = z.int().positive().nullable();
 /** 모델 ID. 사용자가 입력한 문자열 그대로 저장한다 (공백만 있는 값 금지, 200자 이하). `null` = 미설정. */
@@ -334,6 +340,8 @@ export const Settings = z.strictObject({
   projectId: Ulid,
   run: RunLimits,
   roles: RoleSettingsMap,
+  /** 프로젝트 하루 예산 한도 (USD, 기기의 로컬 날짜 기준, ADR-104). `null` = 비움(한도 없음 · 자동 시작 없음) */
+  dailyBudgetUsd: DailyBudgetUsd,
   /** 승인 대기 유입 상한 (TODO-04, 기본 40). 화면 표시 · 변경은 M3-13 */
   approvalQueueLimit: z.int().positive(),
   /** 잠정 승인 정책 (ADR-012 기본 '사용 안 함'). 화면 · 변경은 해당 이슈 */
@@ -363,6 +371,7 @@ export const defaultSettings = (projectId: Ulid): Settings => ({
   roles: Object.fromEntries(
     AgentRole.options.map((role) => [role, emptyRoleSettings()]),
   ) as RoleSettingsMap,
+  dailyBudgetUsd: null,
   approvalQueueLimit: DEFAULT_APPROVAL_QUEUE_LIMIT,
   provisionalPolicy: 'off',
   autoMode: false,

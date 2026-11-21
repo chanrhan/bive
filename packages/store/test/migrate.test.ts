@@ -607,6 +607,72 @@ describe('0012 confirmations: 확인 상태 · 승인 기록 행동 넓히기 ·
   });
 });
 
+describe('0014 rule_writer_daily_budget_skip: 생략 사유 프로젝트 하루 예산 초과 (M7-04 #216, ADR-104)', () => {
+  const insertRequirement = (db: SqliteDatabase, id: string) =>
+    db
+      .prepare(
+        `INSERT INTO requirements (id, display_id, text, author, norm_state, created_at, updated_at, updated_by)
+         VALUES (?, 'REQ-001', '요구사항', '{"kind":"human"}', 'approved', '2026-11-21T00:00:00.000Z',
+         '2026-11-21T00:00:00.000Z', '{"kind":"human"}')`,
+      )
+      .run(id);
+  const insertAttempt = (db: SqliteDatabase, id: string, requirementId: string, reason: string) =>
+    db
+      .prepare(
+        `INSERT INTO rule_writer_requests (id, requirement_id, requested_at, skip_reason, skip_detail, missing, skipped_at)
+         VALUES (?, ?, '2026-11-21T00:00:01.000Z', ?, '설명', '[]', '2026-11-21T00:00:01.000Z')`,
+      )
+      .run(id, requirementId, reason);
+  const objectSql = (db: SqliteDatabase) =>
+    db
+      .prepare(
+        "SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'rule_writer_requests' AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY name",
+      )
+      .all();
+
+  it('0013까지의 시도 기록은 값 그대로 옮기고, 새 생략 사유를 받게 되며, 트리거 · 색인 · 다른 CHECK는 그대로다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 13), { now: fixedNow });
+      const requirementId = newId();
+      insertRequirement(db, requirementId);
+      insertAttempt(db, newId(), requirementId, 'settings_incomplete');
+      // 0013까지는 새 사유를 DB CHECK가 막는다
+      expect(() =>
+        insertAttempt(db, newId(), requirementId, 'project_daily_budget_exceeded'),
+      ).toThrow(/CHECK/);
+      const before = db.prepare('SELECT * FROM rule_writer_requests').all();
+      const sqlBefore = objectSql(db);
+      expect(sqlBefore).toHaveLength(5);
+
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 14), { now: fixedNow }).applied).toEqual([14]);
+      expect(db.prepare('SELECT * FROM rule_writer_requests').all()).toEqual(before);
+      insertAttempt(db, newId(), requirementId, 'project_daily_budget_exceeded');
+      expect(
+        db.prepare('SELECT skip_reason FROM rule_writer_requests ORDER BY rowid').all(),
+      ).toEqual([
+        { skip_reason: 'settings_incomplete' },
+        { skip_reason: 'project_daily_budget_exceeded' },
+      ]);
+      // 모르는 사유 · 덮어쓰기 · 생략된 시도 수정 · 삭제는 그대로 거부한다
+      expect(() => insertAttempt(db, newId(), requirementId, 'budget')).toThrow(/CHECK/);
+      const [first] = before as { id: string }[];
+      expect(() => insertAttempt(db, first?.id ?? '', requirementId, 'closed')).toThrow(
+        /덮어쓰기 금지/,
+      );
+      expect(() => db.prepare("UPDATE rule_writer_requests SET skip_detail = 'x'").run()).toThrow(
+        /바꿀 수 없/,
+      );
+      expect(() => db.prepare('DELETE FROM rule_writer_requests').run()).toThrow(/지울 수 없/);
+      // 트리거 4개 · 색인 1개의 SQL 본문은 0011과 글자까지 같다
+      expect(objectSql(db)).toEqual(sqlBefore);
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%_v14%'").all()).toEqual(
+        [],
+      );
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+    });
+  });
+});
+
 describe('마이그레이션 파일 규칙', () => {
   const dirOf = (set: string) =>
     fileURLToPath(new URL(`../src/migrations/${set}/`, import.meta.url));

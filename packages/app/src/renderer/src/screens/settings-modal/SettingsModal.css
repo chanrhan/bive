@@ -98,6 +98,19 @@
   font-size: var(--font-size-2);
 }
 
+/* 실행 전체 · 프로젝트 하루 한도를 한 줄에 둔다 (좁으면 줄바꿈) */
+.settings-limits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+}
+
+.settings-note {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  overflow-wrap: anywhere;
+}
+
 .settings-run-fields {
   display: flex;
   gap: var(--space-4);
@@ -108,6 +121,11 @@
   flex-direction: column;
   gap: var(--space-1);
   width: 160px;
+}
+
+/* 하루 한도 칸은 안내 한 줄이 들어가도록 조금 넓다 */
+.settings-run-field.settings-daily-field {
+  width: 200px;
 }
 
 .settings-label {
