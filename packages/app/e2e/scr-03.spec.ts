@@ -397,8 +397,10 @@ test.describe('[실행]으로 만든 실행의 표시 (프로젝트당 동시 �
       const before = await headBoxes(page);
       await page.getByTestId('run-start').click();
       await page.getByTestId('run-start-confirm').click();
-      await bive.emit('event.run.updated', runUpdated('queued'));
       const createdEl = page.getByTestId('run-start-created');
+      // 표시가 생겨(알림 구독 뒤) 알림을 보낸다
+      await expect(createdEl).toHaveText('EXE-004 · 승인 대기');
+      await bive.emit('event.run.updated', runUpdated('queued'));
       await expect(createdEl).toHaveText('EXE-004 · 실행 대기');
       expect(await headBoxes(page)).toEqual(before);
       const pane = page.getByTestId('rule-detail');
