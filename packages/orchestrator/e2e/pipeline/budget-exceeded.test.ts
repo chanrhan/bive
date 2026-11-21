@@ -9,7 +9,6 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  approveRule,
   attempts,
   branchExists,
   cleanupPipeline,
@@ -31,10 +30,9 @@ describe('budget-exceeded: budget_exceeded, 브랜치 보존, 병합 없음', ()
     const e = await startPipeline('budget-exceeded');
     const base = mainTip(e);
 
-    const { proposals } = await saveRequirement(e, '헬스 체크 응답에 호스트 이름 포함', 1);
-    const [proposal] = proposals;
-    if (proposal === undefined) throw new Error('제안 없음');
-    const rule = await approveRule(e, proposal);
+    const { rules } = await saveRequirement(e, '헬스 체크 응답에 호스트 이름 포함', 1);
+    const [rule] = rules;
+    if (rule === undefined) throw new Error('규칙 없음');
 
     const done = await runToEnd(e, [rule.id], 300_000);
     expect(done.run).toMatchObject({

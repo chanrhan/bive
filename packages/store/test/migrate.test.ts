@@ -556,7 +556,7 @@ describe('0012 confirmations: 확인 상태 · 승인 기록 행동 넓히기 ·
   it('0011까지의 빈 DB(규칙 · 요구사항 · 승인 기록 없음)에도 적용되고 확인 상태 행이 생기지 않는다', () => {
     withDb((db) => {
       migrate(db, PROJECT_MIGRATIONS.slice(0, 11), { now: fixedNow });
-      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([12]);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 12), { now: fixedNow }).applied).toEqual([12]);
       expect(confirmationRows(db)).toEqual([]);
       expect(db.prepare('SELECT count(*) AS n FROM approval_log').get()).toEqual({ n: 0 });
       expect(new ApprovalLogRepository(db).verify()).toEqual({

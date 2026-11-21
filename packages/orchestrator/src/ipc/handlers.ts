@@ -4,6 +4,7 @@ import type { RuleWriterLauncher } from '../rule-writer/rule-writer-service.js';
 import type { RunEngineHooks } from './run-handlers.js';
 import { createCodeOpenHandlers } from './code-open-handlers.js';
 import { createConfirmationHandlers } from './confirmation-handlers.js';
+import { createNormChangeHandlers } from './norm-change-handlers.js';
 import { createProjectHandlers } from './project-handlers.js';
 import { createProposalHandlers } from './proposal-handlers.js';
 import { createRequirementHandlers } from './requirement-handlers.js';
@@ -72,6 +73,7 @@ export const createHandlers = ({
     ...(onProposalChanged === undefined ? {} : { onProposalChanged }),
   }),
   ...createConfirmationHandlers({ biveHome, now }),
+  ...createNormChangeHandlers({ biveHome }),
   ...createSettingsHandlers({ biveHome, now }),
   ...createRunHandlers({ biveHome, now, ...(engine === undefined ? {} : { engine }) }),
   ...createVerificationHandlers({ biveHome }),

@@ -6,7 +6,6 @@ import fs from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  approveRule,
   attempts,
   branchExists,
   cleanupPipeline,
@@ -28,10 +27,9 @@ describe('fail-check: 구현 3회(회귀 2회) 뒤 failed', () => {
     const e = await startPipeline('fail-check');
     const base = mainTip(e);
 
-    const { proposals } = await saveRequirement(e, '헬스 체크 응답에 버전 포함', 1);
-    const [proposal] = proposals;
-    if (proposal === undefined) throw new Error('제안 없음');
-    const rule = await approveRule(e, proposal);
+    const { rules } = await saveRequirement(e, '헬스 체크 응답에 버전 포함', 1);
+    const [rule] = rules;
+    if (rule === undefined) throw new Error('규칙 없음');
 
     const done = await runToEnd(e, [rule.id], 480_000);
     expect(done.run).toMatchObject({
