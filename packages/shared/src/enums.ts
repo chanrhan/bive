@@ -22,9 +22,13 @@ export const MUTATION_STATUS_LABELS = {
   survived: '변이 생존',
 } as const satisfies Record<MutationStatus, string>;
 
-/** 실행 상태 6종 (architecture.md 4장 상태 기계, RUN-01). */
+/**
+ * 실행 상태 7종 (architecture.md 4장 상태 기계, RUN-01). `queued`(실행 대기)는 승인 단계를 통과했지만 프로젝트에 진행 중 ·
+ * 중단된 실행이나 먼저 기다리는 실행이 있어 시작을 기다리는 상태다(프로젝트당 동시 실행 1개, ADR-100 B⑥ · ADR-105).
+ */
 export const RunStatus = z.enum([
   'waiting_approval',
+  'queued',
   'running',
   'merged',
   'failed',
@@ -34,6 +38,7 @@ export const RunStatus = z.enum([
 export type RunStatus = z.infer<typeof RunStatus>;
 export const RUN_STATUS_LABELS = {
   waiting_approval: '승인 대기',
+  queued: '실행 대기',
   running: '진행 중',
   merged: '병합 완료',
   failed: '실패',
@@ -50,10 +55,13 @@ export const TERMINAL_RUN_STATUSES = [
 
 /**
  * 실행 상태 전이 (architecture.md 4장 상태 기계, ADR-061). 키 상태에서 갈 수 있는 상태 목록이고,
- * 종료 상태는 빈 목록이다. 생성 직후 상태는 항상 `waiting_approval`(실행 시작 확인 → 승인 단계).
+ * 종료 상태는 빈 목록이다. 생성 직후 상태는 항상 `waiting_approval`(실행 시작 확인 → 승인 단계). 승인 단계를 통과할 때
+ * 프로젝트에 자리가 없으면 `queued`, 자리가 나면 생성 순으로 `running`이다. 시작 때 대상 규칙을 다시 보아 효력이 없으면
+ * `failed`(ADR-105).
  */
 export const RUN_STATUS_TRANSITIONS = {
-  waiting_approval: ['running'],
+  waiting_approval: ['running', 'queued'],
+  queued: ['running', 'failed'],
   running: ['merged', 'failed', 'budget_exceeded', 'interrupted'],
   interrupted: ['running'],
   merged: [],

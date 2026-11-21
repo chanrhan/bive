@@ -65,6 +65,7 @@ export const STEP_STATUS_TEXT = {
 /** 실행 상태 표시명 (shared RUN_STATUS_LABELS와 같음). */
 export const RUN_STATUS_TEXT = {
   waiting_approval: '승인 대기',
+  queued: '실행 대기',
   running: '진행 중',
   merged: '병합 완료',
   failed: '실패',
@@ -121,6 +122,15 @@ export const COMPLIANCE_FILTER: FilterState = Object.freeze({
   selected: Object.freeze({ compliance: Object.freeze(['judgeable']) }),
   problemOnly: false,
 });
+
+/**
+ * 파이프라인 머리줄의 현재 단계. 실행 대기(`queued`)는 아직 시작하지 않았으므로 현재 단계가 없다(다음에 시작할 단계를
+ * 현재 단계로 보이지 않는다, ADR-105). 그 밖에는 실행의 `currentStep` 그대로.
+ */
+export const currentStepOf = (run: {
+  status: RunStatus;
+  currentStep: StepKind | null;
+}): StepKind | null => (run.status === 'queued' ? null : run.currentStep);
 
 /** [재개]를 보일지: 최근 실행이 중단(`interrupted`)일 때만 (ADR-011). */
 export const canResume = (status: RunStatus): boolean => status === 'interrupted';

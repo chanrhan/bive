@@ -104,12 +104,13 @@ describe('판정 · 변이 상태 (기획서 3.4)', () => {
 });
 
 describe('실행 (architecture.md 4장, RUN-07)', () => {
-  it('실행 상태 6종', () => {
+  it('실행 상태 7종 (실행 대기 포함, ADR-105)', () => {
     expectEnum(
       RunStatus,
-      ['waiting_approval', 'running', 'merged', 'failed', 'budget_exceeded', 'interrupted'],
+      ['waiting_approval', 'queued', 'running', 'merged', 'failed', 'budget_exceeded', 'interrupted'],
       RUN_STATUS_LABELS,
     );
+    expect(RUN_STATUS_LABELS.queued).toBe('실행 대기');
   });
 
   it('종료 상태는 병합 완료 · 실패 · 예산 초과뿐이고 중단은 재개 가능', () => {
@@ -119,7 +120,8 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
 
   it('상태 전이는 architecture.md 4장 상태 기계 그대로이고 종료 상태에서는 나가지 않는다 (ADR-061)', () => {
     expect(RUN_STATUS_TRANSITIONS).toEqual({
-      waiting_approval: ['running'],
+      waiting_approval: ['running', 'queued'],
+      queued: ['running', 'failed'],
       running: ['merged', 'failed', 'budget_exceeded', 'interrupted'],
       interrupted: ['running'],
       merged: [],
@@ -129,6 +131,13 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
     expect(canTransitionRun('waiting_approval', 'running')).toBe(true);
     expect(canTransitionRun('interrupted', 'running')).toBe(true);
     expect(canTransitionRun('waiting_approval', 'merged')).toBe(false);
+    // 실행 대기는 시작(진행 중)이나 시작 때 대상 규칙 재검사 실패(실패)로만 나간다 (ADR-105)
+    expect(canTransitionRun('waiting_approval', 'queued')).toBe(true);
+    expect(canTransitionRun('queued', 'running')).toBe(true);
+    expect(canTransitionRun('queued', 'failed')).toBe(true);
+    expect(canTransitionRun('queued', 'interrupted')).toBe(false);
+    expect(canTransitionRun('running', 'queued')).toBe(false);
+    expect(canTransitionRun('interrupted', 'queued')).toBe(false);
     expect(canTransitionRun('running', 'running')).toBe(false);
     expect(canTransitionRun('merged', 'running')).toBe(false);
     for (const status of RunStatus.options) {

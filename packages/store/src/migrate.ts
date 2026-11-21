@@ -16,6 +16,12 @@ export interface Migration {
   readonly name: string;
   /** 실행할 SQL. 여러 문장을 둘 수 있다. */
   readonly up: string;
+  /**
+   * `true`면 이번 적용 묶음 동안 외래 키 검사를 끈다(트랜잭션 밖에서 끄고, 끝나면 원래대로). 다른 표가 가리키는 표를
+   * 다시 만드는 마이그레이션용이다(SQLite 권장 순서). 위반은 트랜잭션 안의 `foreign_key_check`가 잡아 전부 되돌린다.
+   * SQL 해시에는 들어가지 않는다.
+   */
+  readonly disableForeignKeys?: boolean;
 }
 
 /** `schema_migrations`의 행. */
@@ -139,7 +145,27 @@ export const migrate = (
 ): MigrateResult => {
   validateMigrations(migrations);
   const now = options.now ?? (() => new Date().toISOString());
-  return withTransaction(db, () => {
+  // 외래 키 검사는 트랜잭션 안에서 바꿀 수 없어 먼저 정한다. 적용할 것 중 하나라도 요청하면 묶음 전체에서 끈다
+  const disableForeignKeys = migrations
+    .slice(listAppliedMigrations(db).length)
+    .some((migration) => migration.disableForeignKeys === true);
+  const foreignKeys: unknown = db.pragma('foreign_keys', { simple: true });
+  if (!disableForeignKeys || foreignKeys !== 1) return applyPending(db, migrations, now);
+  db.pragma('foreign_keys = OFF');
+  try {
+    return applyPending(db, migrations, now);
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+};
+
+/** 적용 기록을 확인하고 남은 마이그레이션을 트랜잭션 1개로 적용한다 (`migrate`). */
+const applyPending = (
+  db: SqliteDatabase,
+  migrations: readonly Migration[],
+  now: () => string,
+): MigrateResult =>
+  withTransaction(db, () => {
     db.exec(CREATE_MIGRATIONS_TABLE);
     const applied = listAppliedMigrations(db);
     assertAppliedMatches(applied, migrations);
@@ -162,4 +188,3 @@ export const migrate = (
     }
     return { applied: pending.map((m) => m.version), version: migrations.length };
   });
-};

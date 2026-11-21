@@ -33,6 +33,7 @@ import {
   codeOpenRows,
   COMPLIANCE_FILTER,
   complianceText,
+  currentStepOf,
   formatUsd,
   RUN_STATUS_TEXT,
   runLinkParts,
@@ -227,6 +228,7 @@ const Pipeline = ({
   onChanged: () => void;
 }): React.JSX.Element => {
   const { run, stages } = pipeline;
+  const currentStep = currentStepOf(run);
   const [resume, setResume] = useState<'idle' | 'pending' | 'failed'>('idle');
 
   const onResume = useCallback(() => {
@@ -253,9 +255,9 @@ const Pipeline = ({
         >
           {RUN_STATUS_TEXT[run.status]}
         </span>
-        {run.currentStep !== null && (
+        {currentStep !== null && (
           <span className="pipeline-current" data-testid="pipeline-current">
-            {STEP_LABELS[run.currentStep]}
+            {STEP_LABELS[currentStep]}
           </span>
         )}
         {canResume(run.status) && (
@@ -277,7 +279,7 @@ const Pipeline = ({
       </div>
       <ol className="pipeline-stepper" data-testid="pipeline-stepper">
         {stages.map((stage) => {
-          const current = run.currentStep === stage.kind;
+          const current = currentStep === stage.kind;
           return (
             <li
               key={stage.kind}
