@@ -1,6 +1,7 @@
 # 저장소 기본 검사. 검사 이름 `ci`는 브랜치 보호의 필수 상태 검사 이름으로 쓰이므로 바꾸지 않는다.
 # 구조 (ADR-077): 잡 `checks`(린트 · 타입 · 단위 · 빌드 · 형식 · 픽스처 · 화면 e2e)와 `pipeline-e2e`(파이프라인 e2e)가
 # 병렬로 돌고, 이름이 `ci`인 집계 잡이 둘을 기다려 둘 다 성공일 때만 성공한다.
+# `pipeline-e2e`는 두 묶음 잡 `pipeline-e2e-group (1)` · `(2)`를 모으는 집계 잡이다 (M3-24).
 name: ci
 
 on:
@@ -62,8 +63,9 @@ jobs:
       - name: 초기화 스크립트 검사
         run: scripts/test-reset-fixture.sh
 
-      # 로드맵 발행 스크립트의 재발행 시험 (M2-05). 가짜 gh 응답으로 돌고 GitHub를 부르지 않는다
-      - name: 로드맵 발행 스크립트 검사
+      # 로드맵 발행 스크립트의 재발행 시험 (M2-05, 가짜 gh 응답으로 돌고 GitHub를 부르지 않는다)과
+      # 파이프라인 e2e 묶음 대조 스크립트의 시험 (M3-24)
+      - name: 파이썬 스크립트 검사
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
       # 테스트 대상 픽스처 (M0-08). 루트 워크스페이스 밖의 독립 프로젝트라 자기 lockfile로 따로 설치한다.
@@ -120,11 +122,28 @@ jobs:
           retention-days: 14
 
   # 파이프라인 e2e (M1-21 · M1-29, architecture.md 8장, ADR-071 · ADR-077): 픽스처 복사본 · 실제 git · 실제 판정 러너 ·
-  # ScriptedAdapter로 요구사항 저장부터 실행 종료까지. 시험마다 실제 설치 · next build를 여러 번 해서 `checks`와 나눠 병렬로 돈다
-  pipeline-e2e:
-    name: pipeline-e2e
+  # ScriptedAdapter로 요구사항 저장부터 실행 종료까지. 시험마다 실제 설치 · next build를 여러 번 해서 `checks`와 나눠 병렬로 돈다.
+  # 한 잡이 15 ~ 20분 걸려 두 묶음으로 나눠 병렬로 돈다 (M3-24): 묶음 1은 아래 PIPELINE_E2E_GROUP1에 적은 파일만,
+  # 묶음 2는 그 밖의 모든 파일(새 파일 포함)을 돈다. 묶음별로 실제로 돈 파일을 vitest json 보고서로 남기고
+  # 집계 잡 `pipeline-e2e`가 시험 폴더의 파일 목록과 대조한다. 각 묶음은 따로 러너라 포트 · TMPDIR이 겹치지 않는다
+  pipeline-e2e-group:
+    name: pipeline-e2e-group (${{ matrix.group }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      # 한 묶음이 실패해도 다른 묶음의 결과를 본다
+      fail-fast: false
+      matrix:
+        group: [1, 2]
+    env:
+      # 묶음 1의 파일(시험 폴더 기준). 가장 느린 multi-rule(CI에서 약 4 ~ 7분)과 나머지를 시간으로 맞춰 둔다.
+      # 묶음 2는 이 목록 밖의 전부다. 파일을 옮길 때는 여기만 고친다
+      PIPELINE_E2E_GROUP1: >-
+        multi-rule.test.ts
+        fail-check.test.ts
+        network.test.ts
+        budget-exceeded.test.ts
+        extra-mcp.test.ts
     steps:
       - name: 체크아웃
         uses: actions/checkout@v7
@@ -149,10 +168,71 @@ jobs:
         working-directory: fixtures/sample-next-app
         run: pnpm install --frozen-lockfile
 
+      # 로컬 `pnpm e2e:pipeline`과 같은 설정(vitest.pipeline.config.ts)에 묶음의 파일 필터만 더한다
       - name: 파이프라인 e2e
-        run: pnpm e2e:pipeline
         env:
           NEXT_TELEMETRY_DISABLED: '1'
+          GROUP: ${{ matrix.group }}
+        run: |
+          args=()
+          for f in $PIPELINE_E2E_GROUP1; do
+            if [ "$GROUP" = 1 ]; then
+              args+=("e2e/pipeline/$f")
+            else
+              args+=(--exclude "e2e/pipeline/$f")
+            fi
+          done
+          pnpm --filter @bive/orchestrator e2e:pipeline \
+            --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/pipeline-e2e-report.json" \
+            "${args[@]}"
+
+      # 이 묶음에서 실제로 돈 파일 목록(대조용). 실패해도 올린다
+      - name: 파이프라인 e2e 보고서 업로드
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pipeline-e2e-report-${{ matrix.group }}
+          path: ${{ runner.temp }}/pipeline-e2e-report.json
+          if-no-files-found: error
+          retention-days: 14
+
+  # 검사 `pipeline-e2e`: 나뉜 묶음이 모두 성공이고 시험 폴더의 모든 파일이 정확히 한 묶음에서 돌았을 때만 성공한다.
+  # 묶음 잡이 실패 · 취소 · 건너뜀이어도 `always()`로 돌아 실패로 끝난다(건너뛴 잡은 성공으로 처리되므로 이 잡이
+  # 건너뛰어지면 안 된다). 대조와 결과 확인은 앞 단계가 실패해도 각각 돌아 둘 다 로그에 남는다
+  pipeline-e2e:
+    name: pipeline-e2e
+    needs: [pipeline-e2e-group]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v7
+
+      - name: 파이프라인 e2e 보고서 내려받기
+        uses: actions/download-artifact@v8
+        with:
+          pattern: pipeline-e2e-report-*
+          path: ${{ runner.temp }}/pipeline-e2e-reports
+
+      # 새 파일이 어느 묶음에서도 빠지거나 두 묶음에서 겹쳐 돌지 않았는지 본다 (자체 시험: scripts/test_check_pipeline_groups.py).
+      # 받은 보고서가 하나뿐이면 download-artifact가 하위 폴더 없이 풀므로 위치를 가정하지 않고 찾는다
+      - name: 묶음 대조
+        if: ${{ always() }}
+        run: |
+          mapfile -t reports < <(find "$RUNNER_TEMP/pipeline-e2e-reports" -name pipeline-e2e-report.json 2>/dev/null | sort)
+          python3 scripts/check-pipeline-groups.py --dir packages/orchestrator/e2e/pipeline "${reports[@]}"
+
+      - name: 묶음 결과 확인
+        if: ${{ always() }}
+        env:
+          GROUPS_RESULT: ${{ needs.pipeline-e2e-group.result }}
+        run: |
+          echo "pipeline-e2e-group: $GROUPS_RESULT"
+          if [ "$GROUPS_RESULT" != "success" ]; then
+            echo "파이프라인 e2e 묶음이 모두 성공하지 않았습니다" >&2
+            exit 1
+          fi
 
   # 필수 검사 `ci`: 두 잡이 모두 성공일 때만 성공한다. 한쪽이 실패 · 취소 · 건너뜀이어도 이 잡은 `always()`로 돌아
   # 실패로 끝난다(건너뛴 잡은 브랜치 보호에서 성공으로 처리되므로 이 잡 자체가 건너뛰어지면 안 된다).
