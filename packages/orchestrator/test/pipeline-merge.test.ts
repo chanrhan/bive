@@ -9,6 +9,8 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import type { Run } from '@bive/shared';
+
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import {
   createWorktreeManager,
@@ -17,7 +19,13 @@ import {
 } from '../src/git/worktree-manager.js';
 import { DEFAULT_INSTALL_TIMEOUT_MS } from '../src/judge/checkout.js';
 import { DEFAULT_JUDGE_TIMEOUT_MS } from '../src/steps/judging.js';
-import { MERGE_CHECK_MARGIN_MS } from '../src/steps/merge.js';
+import { createGitRunner, type GitRunner } from '../src/git/git-exec.js';
+import {
+  MERGE_CHECK_MARGIN_MS,
+  MERGE_ORDER_TIMEOUT_MS,
+  readMergeOrder,
+} from '../src/steps/merge.js';
+import { basisOf, mergeRecordOf } from '../src/verification/summary.js';
 import { human, ROUTE, userGit, withProject } from './helpers/engine-harness.js';
 import {
   attempts,
@@ -48,6 +56,36 @@ const setup = (options: Omit<PipelineSetupOptions, 'temps' | 'engines'> = {}): P
 const mainTip = (h: PipelineHarness): string => userGit(h.repo, 'rev-parse', 'refs/heads/main');
 const parentsOf = (h: PipelineHarness, commit: string): string[] =>
   userGit(h.repo, 'rev-list', '--parents', '-n', '1', commit).split(' ').slice(1);
+/** 그 커밋의 전체 조상 수 (병합 순서 값과 같은 계산, 시험 쪽은 사용자 git, ADR-096). */
+const ancestorCount = (h: PipelineHarness, commit: string): number =>
+  Number(userGit(h.repo, 'rev-list', '--count', commit));
+/** 첫 부모 커밋 수 (이전 시도의 순서 값, 빨리 감기에서 줄어드는 것을 보이는 대조용). */
+const firstParentCount = (h: PipelineHarness, commit: string): number =>
+  Number(userGit(h.repo, 'rev-list', '--count', '--first-parent', commit));
+/** 제품의 순서 값 읽기로 커밋의 순서 값을 읽는다 (BIVE 실행이 아닌 병합 커밋용). */
+const productOrder = async (h: PipelineHarness, commit: string): Promise<number> => {
+  const read = await readMergeOrder(createGitRunner(), h.repo, commit);
+  if (read.mergeOrder === null) throw new Error(`순서 값 읽기 실패: ${read.mergeOrderError}`);
+  return read.mergeOrder;
+};
+/** 사람이 기준 브랜치에서 작업 브랜치를 만들어 커밋하고 `--no-ff`로 병합한다 (제품 병합과 같은 모양). 병합 커밋을 돌려준다. */
+const humanMerge = (repo: string, branch: string, file: string): string => {
+  userGit(repo, 'checkout', '-q', '-b', branch);
+  fs.writeFileSync(path.join(repo, file), `${branch}\n`);
+  userGit(repo, 'add', file);
+  userGit(repo, 'commit', '-q', '-m', `${branch} 작업`);
+  userGit(repo, 'checkout', '-q', 'main');
+  userGit(repo, 'merge', '-q', '--no-ff', '-m', `${branch} 병합`, branch);
+  return userGit(repo, 'rev-parse', 'HEAD');
+};
+/** 판정 기준 고르기에 넘길 다른 실행 (테스트 전용: 순서에 쓰는 칸만 바꾼다). */
+const otherRun = (like: Run, mergeCommit: string): Run => ({
+  ...like,
+  id: '01JE0000000000000000000000',
+  displayId: 'EXE-900',
+  mergeCommit,
+});
+
 const mergeCount = (h: PipelineHarness): number =>
   Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'refs/heads/main'));
 
@@ -105,6 +143,10 @@ describe('판정 통과 → merge → main에 merge commit (수용 기준 4, RUN
       'BIVE <bive@bive.invalid>',
     );
     expect(exitOf(done, 'merge')).toMatchObject({ mergeCommit: merge, rechecked: false });
+    // 병합 순서 값: 병합 커밋의 전체 조상 수 (ADR-096). 기준 커밋보다 크다
+    expect(exitOf(done, 'merge').mergeOrder).toBe(ancestorCount(h, merge));
+    expect(exitOf(done, 'merge')).not.toHaveProperty('mergeOrderError');
+    expect(ancestorCount(h, merge)).toBeGreaterThan(ancestorCount(h, base));
     // 판정 재검사는 없었다 (구현 · 검사 판정만)
     expect(h.judgeCalls.map((c) => c.kind)).toEqual(['red_check', 'implementation', 'check']);
     // ADR-065: 관리자 기본 제한 없음 → 실행기가 설치 + 판정 제한 + 여유를 넘긴다
@@ -254,12 +296,118 @@ describe('병합 단계 중단 뒤 재개 (코멘트 기준, ADR-066 한계)', (
     expect(attempts(done, 'merge')).toEqual(['merge#1:failed', 'merge#2:passed']);
     expect(exitOf(done, 'merge', 2)).toEqual({
       mergeCommit: merged,
+      mergeOrder: ancestorCount(h, merged),
       headCommit: done.run.headCommit,
       recovered: true,
     });
     // 병합 커밋은 하나뿐이다
     expect(mainTip(h)).toBe(merged);
     expect(mergeCount(h)).toBe(1);
+  }, 60_000);
+
+  it('A 병합 직후 중단 → 다른 병합 B가 쌓임 → A 재개 복구: A의 순서 값은 A의 병합 커밋 값이라 B보다 작고, 판정 기준은 B다 (#195 ⓐ)', async () => {
+    let stopped = false;
+    const ref: { harness?: PipelineHarness } = {};
+    const h = setup({
+      worktrees: recordingManager([], () => {
+        if (stopped || ref.harness === undefined) return;
+        stopped = true;
+        void ref.harness.engine.stop();
+      }),
+    });
+    ref.harness = h;
+    expect(h.engine.evaluateApproval(h.project.id, h.runId)).toBe(true);
+    await h.engine.settled();
+    expect(detailOf(h).run).toMatchObject({ status: 'running', currentStep: 'merge' });
+    const merged = mainTip(h);
+    // A가 중단된 동안 기준 브랜치 끝에서 다른 병합 B가 쌓인다 (제품 병합과 같은 모양의 실제 git 병합 커밋)
+    const later = humanMerge(h.repo, 'other-work', 'OTHER.md');
+    expect(parentsOf(h, later)[0]).toBe(merged);
+    const bMergedAt = new Date().toISOString();
+
+    const engine = h.newEngine();
+    expect(engine.recoverInterruptedRuns().map((r) => r.runId)).toEqual([h.runId]);
+    await engine.resume(h.project.id, h.runId, human);
+    await engine.settled();
+    const done = detailOf(h);
+    expect(done.run).toMatchObject({ status: 'merged', mergeCommit: merged });
+    expect(attempts(done, 'merge')).toEqual(['merge#1:failed', 'merge#2:passed']);
+    const recovered = exitOf(done, 'merge', 2);
+    expect(recovered).toMatchObject({ mergeCommit: merged, recovered: true });
+    // 저장된 값은 기준 브랜치 끝(B)이 아니라 찾은 A의 병합 커밋의 조상 수다
+    expect(recovered.mergeOrder).toBe(ancestorCount(h, merged));
+    expect(recovered.mergeOrder).not.toBe(ancestorCount(h, mainTip(h)));
+    const bOrder = await productOrder(h, later);
+    expect(recovered.mergeOrder as number).toBeLessThan(bOrder);
+    expect(mainTip(h)).toBe(later);
+    expect(mergeCount(h)).toBe(2);
+
+    // 통과 기록 시각은 A(재개 시점)가 B보다 늦다: 시각으로 고르면 A, 저장된 순서 값으로 고르면 B
+    const aRecord = mergeRecordOf(done.run, done.steps);
+    expect(aRecord?.order).toBe(recovered.mergeOrder);
+    expect(Date.parse(String(aRecord?.at))).toBeGreaterThan(Date.parse(bMergedAt));
+    const b = otherRun(done.run, later);
+    /** 두 후보의 순서 값을 쓰거나(`true`) 지운(`false`, 저장 전 기록처럼 시각만) 기록으로 판정 기준을 고른다. */
+    const pick = (withOrder: boolean) =>
+      basisOf([done.run, b], {
+        mergeOf: (run) => {
+          const record =
+            run.id === b.id ? { at: bMergedAt, order: bOrder } : mergeRecordOf(run, done.steps);
+          return record === null || withOrder ? record : { ...record, order: null };
+        },
+        branch: 'main',
+      })?.commit;
+    expect(pick(true)).toBe(later);
+    expect(pick(false)).toBe(merged);
+  }, 60_000);
+
+  it('A 병합 → 사람이 오래된 작업 브랜치에 main을 병합하고 main을 빨리 감기 → 제품 병합 B: B의 순서 값이 A보다 크고 판정 기준은 B다 (#195 ⓑ)', async () => {
+    const history = { a: '', featureBase: '' };
+    const h = setup({
+      merge: { checkTimeoutMs: 90_000 },
+      executors: (defaults) => ({
+        ...defaults,
+        merge: before(defaults.merge, (context) => {
+          const repo = context.git.repoPath;
+          history.featureBase = userGit(repo, 'rev-parse', 'HEAD');
+          // 기준 브랜치에 커밋이 쌓인 뒤 A가 병합된다
+          for (const n of [1, 2, 3, 4, 5, 6]) {
+            fs.writeFileSync(path.join(repo, `NOTE${String(n)}.md`), `${String(n)}\n`);
+            userGit(repo, 'add', `NOTE${String(n)}.md`);
+            userGit(repo, 'commit', '-q', '-m', `사용자 커밋 ${String(n)}`);
+          }
+          history.a = humanMerge(repo, 'run-a', 'A.md');
+          // 사람: 오래전에 갈라진 작업 브랜치에 main을 병합(main이 둘째 부모)하고 main을 그 커밋으로 빨리 감기
+          userGit(repo, 'checkout', '-q', '-b', 'feature', history.featureBase);
+          fs.writeFileSync(path.join(repo, 'FEATURE.md'), '사람 작업\n');
+          userGit(repo, 'add', 'FEATURE.md');
+          userGit(repo, 'commit', '-q', '-m', '사람 작업');
+          userGit(repo, 'merge', '-q', '--no-edit', 'main');
+          userGit(repo, 'checkout', '-q', 'main');
+          userGit(repo, 'merge', '-q', '--ff-only', 'feature');
+        }),
+      }),
+    });
+    const done = await runToEnd(h);
+    expect(done.run.status).toBe('merged');
+    const b = String(done.run.mergeCommit);
+    expect(mainTip(h)).toBe(b);
+    expect(exitOf(done, 'merge')).toMatchObject({ mergeCommit: b, rechecked: true });
+    const bOrder = exitOf(done, 'merge').mergeOrder as number;
+    expect(bOrder).toBe(ancestorCount(h, b));
+    const aOrder = await productOrder(h, history.a);
+    // 첫 부모 커밋 수는 이 흐름에서 거꾸로 된다 (이전 시도의 값). 전체 조상 수는 나중 병합이 크다
+    expect(firstParentCount(h, b)).toBeLessThan(firstParentCount(h, history.a));
+    expect(aOrder).toBeLessThan(bOrder);
+    // A의 통과 기록이 더 늦어도 순서 값으로 B를 고른다
+    const a = otherRun(done.run, history.a);
+    const late = new Date(Date.now() + 60_000).toISOString();
+    const basis = basisOf([a, done.run], {
+      mergeOf: (run) =>
+        run.id === a.id ? { at: late, order: aOrder } : mergeRecordOf(run, done.steps),
+      branch: 'main',
+    });
+    expect(basis).toEqual({ branch: 'main', commit: b, runId: done.run.id });
   }, 60_000);
 
   it('이 실행의 BIVE 병합 커밋이 아니면(사람이 직접 병합) no_changes로 failed', async () => {
@@ -359,6 +507,87 @@ describe('병합 단계 중단 뒤 재개 (코멘트 기준, ADR-066 한계)', (
       reason: 'no_changes',
       detail: { recovery: { mergeCommit: mainTip(h), reason: 'tree_mismatch' } },
     });
+  }, 60_000);
+});
+
+describe('병합 순서 값 읽기의 실패 · 시간 제한 (#195 · ADR-096)', () => {
+  /** 실제 git에 `rev-list --count`만 바꿔 끼운 실행기. 받은 제한 시간을 기록한다. */
+  const orderGit = (
+    behave: (args: readonly string[]) => Promise<{ stdout: string; stderr: string; code: number }>,
+    seen: (number | undefined)[],
+  ): GitRunner => {
+    const real = createGitRunner();
+    return (args, options) => {
+      if (args.includes('rev-list') && args.includes('--count')) {
+        seen.push(options.timeoutMs);
+        return behave(args);
+      }
+      return real(args, options);
+    };
+  };
+
+  /** 순서 값만 없고 나머지는 정상 병합과 같은지 본다. */
+  const expectMergedWithoutOrder = (
+    h: PipelineHarness,
+    done: Awaited<ReturnType<typeof runToEnd>>,
+  ) => {
+    expect(done.run).toMatchObject({ status: 'merged', failureReason: null, currentStep: null });
+    expect(attempts(done, 'merge', 'screen_update')).toEqual([
+      'merge#1:passed',
+      'screen_update#1:passed',
+    ]);
+    const merge = String(done.run.mergeCommit);
+    expect(mainTip(h)).toBe(merge);
+    expect(exitOf(done, 'merge')).toMatchObject({
+      mergeCommit: merge,
+      rechecked: false,
+      mergeOrder: null,
+    });
+    expect(mergeRecordOf(done.run, done.steps)?.order).toBeNull();
+  };
+
+  it('읽기가 던지면 순서 값 없음(사유 기록)으로 남고 병합 결과 · 단계 기록 · 실행 종료 상태는 그대로다 (기본 제한 시간을 git에 넘긴다)', async () => {
+    const seen: (number | undefined)[] = [];
+    const h = setup({
+      merge: { git: orderGit(() => Promise.reject(new Error('가짜 git 실패')), seen) },
+    });
+    const done = await runToEnd(h);
+    expectMergedWithoutOrder(h, done);
+    expect(exitOf(done, 'merge').mergeOrderError).toBe('가짜 git 실패');
+    expect(seen).toEqual([MERGE_ORDER_TIMEOUT_MS]);
+    expect(MERGE_ORDER_TIMEOUT_MS).toBeLessThanOrEqual(10_000);
+  }, 60_000);
+
+  it('git 오류 종료 코드면 그 메시지로, 조상 수가 아닌 출력이면 값 없음으로 남는다', async () => {
+    const h = setup({
+      merge: {
+        git: orderGit(
+          () => Promise.resolve({ stdout: '', stderr: 'fatal: bad object\n', code: 128 }),
+          [],
+        ),
+      },
+    });
+    const done = await runToEnd(h);
+    expectMergedWithoutOrder(h, done);
+    expect(exitOf(done, 'merge').mergeOrderError).toBe('fatal: bad object');
+  }, 60_000);
+
+  it('읽기가 끝나지 않아도 제한 시간 뒤 순서 값 없음(timeout)으로 병합 단계를 통과한다 (실행기가 제한 시간을 지키지 않아도)', async () => {
+    const seen: (number | undefined)[] = [];
+    const h = setup({
+      merge: {
+        mergeOrderTimeoutMs: 200,
+        git: orderGit(() => new Promise(() => undefined), seen),
+      },
+    });
+    const done = await runToEnd(h);
+    expectMergedWithoutOrder(h, done);
+    expect(exitOf(done, 'merge').mergeOrderError).toBe('timeout');
+    expect(seen).toEqual([200]);
+    const merge = stepOf(done, 'merge');
+    expect(Date.parse(String(merge.endedAt)) - Date.parse(String(merge.startedAt))).toBeLessThan(
+      10_000,
+    );
   }, 60_000);
 });
 

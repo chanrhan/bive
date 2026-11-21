@@ -26,7 +26,7 @@ import { createRun } from '../../src/runs/run-service.js';
 import { createCheckExecutor } from '../../src/steps/check.js';
 import { createImplementationExecutor } from '../../src/steps/implementation.js';
 import type { JudgingOptions } from '../../src/steps/judging.js';
-import { createMergeExecutor } from '../../src/steps/merge.js';
+import { createMergeExecutor, type MergeStepOptions } from '../../src/steps/merge.js';
 import { createRedCheckExecutor } from '../../src/steps/red-check.js';
 import { createTestWritingExecutor } from '../../src/steps/test-writing.js';
 import {
@@ -248,7 +248,8 @@ export interface PipelineSetupOptions {
   ) => StepExecutors;
   /** 워크트리 관리자 (기본 엔진 기본값). 같은 하네스의 엔진들이 같은 관리자를 쓴다 */
   worktrees?: (biveHome: string) => WorktreeManager;
-  merge?: { checkTimeoutMs?: number };
+  /** 병합 실행기 선택 (검사 제한 시간 · 순서 값 읽기 제한 시간 · git 실행기) */
+  merge?: Pick<MergeStepOptions, 'checkTimeoutMs' | 'mergeOrderTimeoutMs' | 'git'>;
   /** 엔진의 저장 · 알림 이벤트 (기본 없음). 같은 하네스의 엔진들이 같은 처리기를 쓴다 */
   onEvent?: (biveHome: string) => (event: EngineEvent) => void | Promise<void>;
   /** 실제 설치 · 판정 러너 (판정 1회 제한 시간 ms). 지정하면 `decide` · `onJudge`는 쓰지 않는다 */

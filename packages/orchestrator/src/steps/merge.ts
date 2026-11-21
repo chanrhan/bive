@@ -7,6 +7,9 @@
 // - 관리자에 검사 제한 시간(`checkTimeoutMs` = 설치 + 판정 제한 + 여유)과 엔진의 중단 신호를 넘긴다(ADR-065: 관리자 기본값 없음).
 //   검사 함수는 관리자의 검사 신호로 설치 · 판정 프로세스를 멈춘다
 // - 병합 성공 → `passed`(`run.mergeCommit`), 실패 → `failed`(사유는 ADR-058 값 그대로), 브랜치 · 워크트리는 엔진이 보존
+// - 병합 순서 값(ADR-096): 기준 브랜치 갱신을 확인한 뒤(정상 병합 · 재개 복구 모두) 이 실행의 병합 커밋의 전체 조상 수를
+//   한 번 읽어 단계 결과 `mergeOrder`에 남긴다(판정 기준 순서, `verification/summary.ts`). 짧은 제한 시간 안에 못 읽거나
+//   실패하면 `null`(+ `mergeOrderError`)이고 병합 결과 · 단계 상태는 바뀌지 않는다
 // - 재개(ADR-066 한계): 병합 단계 도중 비정상 종료로 기준 브랜치가 이미 갱신된 뒤 다시 병합하면 `no_changes`가 된다.
 //   직전 병합 시도가 재기동 중단(`interrupted`)일 때만, 기준 브랜치에 이 실행의 BIVE 병합 커밋(트레일러 `Bive-Run` ·
 //   `Bive-Project`, 둘째 부모 = 검사한 커밋)이 있고 그 트리가 첫 부모와 검사한 커밋의 병합 결과(`git merge-tree`)와 같으면
@@ -38,6 +41,8 @@ export const MERGE_CHECK_MARGIN_MS = 60_000;
 export interface MergeStepOptions extends JudgingOptions {
   /** 병합 검사 제한 시간 (기본: 설치 + 판정 제한 시간 + 여유 1분) */
   checkTimeoutMs?: number;
+  /** 병합 순서 값 읽기 제한 시간 (기본 `MERGE_ORDER_TIMEOUT_MS`) */
+  mergeOrderTimeoutMs?: number;
 }
 
 const halt = (reason: string, exitDetail: Record<string, unknown>): StepOutcome => ({
@@ -119,6 +124,69 @@ export const verifyRecordedMergeTree = async (
   return expectedTree === actual
     ? { ok: true }
     : { ok: false, reason: 'tree_mismatch', expectedTree, actualTree: actual };
+};
+
+/**
+ * 병합 순서 값 읽기 제한 시간 (ADR-096). git 기본 제한(5분)을 쓰지 않는다: 기준 브랜치를 이미 갱신한 뒤의 부가 기록이라
+ * 오래 걸리면 기다리지 않고 값 없음으로 남긴다. 이 VM에서 커밋 100만 개 선형 저장소의 `rev-list --count`가 commit-graph
+ * 없이 약 5초, 있으면 약 1.4초였다.
+ */
+export const MERGE_ORDER_TIMEOUT_MS = 10_000;
+
+/** 병합 순서 값 읽기 결과. 값이 없으면 사유(`timeout` · `aborted` · git 오류 문장 등, 200자 이하)를 함께 남긴다. */
+export type MergeOrderRead = { mergeOrder: number } | { mergeOrder: null; mergeOrderError: string };
+
+const ORDER_ERROR_MAX = 200;
+
+/**
+ * 병합 커밋의 병합 순서 값: 그 커밋의 전체 조상 수(자신 포함, `git rev-list --count`, ADR-096). 커밋 자체의 성질이라
+ * 언제 읽어도 같고(얕은 저장소 · 이력 재작성 제외), 같은 저장소에서 나중 병합은 앞 병합의 자손이라 값이 엄격히 크다.
+ * `--first-parent`는 쓰지 않는다(사람이 기준 브랜치를 빨리 감기하면 줄어든다). replace 참조는 따르지 않는다.
+ * 어떤 실패도 던지지 않는다: 예외 · git 오류 · 제한 시간 · 중단 신호는 `null`과 사유로 돌려준다.
+ */
+export const readMergeOrder = async (
+  git: GitRunner,
+  repoPath: string,
+  mergeCommit: string,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<MergeOrderRead> => {
+  const timeoutMs = options.timeoutMs ?? MERGE_ORDER_TIMEOUT_MS;
+  const missing = (reason: string): MergeOrderRead => ({
+    mergeOrder: null,
+    mergeOrderError: reason.slice(0, ORDER_ERROR_MAX),
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  // git 실행기가 제한 시간을 지키지 않아도(주입된 실행기 등) 이 함수는 제한 시간 뒤에 돌아온다
+  const deadline = new Promise<MergeOrderRead>((resolve) => {
+    timer = setTimeout(() => resolve(missing('timeout')), timeoutMs);
+    onAbort = () => resolve(missing('aborted'));
+    if (options.signal?.aborted === true) onAbort();
+    else options.signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  const read = (async (): Promise<MergeOrderRead> => {
+    try {
+      const result = await git(['--no-replace-objects', 'rev-list', '--count', mergeCommit, '--'], {
+        cwd: repoPath,
+        okCodes: [0, 128],
+        timeoutMs,
+      });
+      if (result.code !== 0)
+        return missing(result.stderr.trim() || `git 종료 코드 ${String(result.code)}`);
+      const count = Number(result.stdout.trim());
+      return Number.isSafeInteger(count) && count > 0
+        ? { mergeOrder: count }
+        : missing(`읽은 값이 조상 수가 아님: ${result.stdout.trim()}`);
+    } catch (error) {
+      return missing(error instanceof Error ? error.message : String(error));
+    }
+  })();
+  try {
+    return await Promise.race([read, deadline]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort !== undefined) options.signal?.removeEventListener('abort', onAbort);
+  }
 };
 
 /** 이 병합 단계의 앞 시도가 재기동 중단으로 끝났는지 (재개 뒤의 새 시도). */
@@ -271,11 +339,19 @@ export const createMergeExecutor =
         mergeStatus: result.status,
       });
     }
+    // 병합 커밋이 기준 브랜치에 들어간 뒤의 부가 기록: 실패해도 병합 결과는 바뀌지 않는다 (ADR-096)
+    const orderOf = (mergeCommit: string): Promise<MergeOrderRead> =>
+      readMergeOrder(git, context.git.repoPath, mergeCommit, {
+        timeoutMs: options.mergeOrderTimeoutMs ?? MERGE_ORDER_TIMEOUT_MS,
+        signal: context.signal,
+      });
     if (result.status === 'merged') {
+      const order = await orderOf(result.mergeCommit);
       return {
         status: 'passed',
         exitDetail: {
           mergeCommit: result.mergeCommit,
+          ...order,
           previousBaseCommit: result.previousBaseCommit,
           headCommit: result.headCommit,
           rechecked: result.rechecked,
@@ -294,9 +370,11 @@ export const createMergeExecutor =
       } else {
         const tree = await verifyRecordedMergeTree(git, context.git.repoPath, recorded, headCommit);
         if (tree.ok) {
+          // 순서 값은 기준 브랜치 끝이 아니라 찾은 이 실행의 병합 커밋에서 읽는다 (그 뒤 다른 병합이 쌓였을 수 있다)
+          const order = await orderOf(recorded.hash);
           return {
             status: 'passed',
-            exitDetail: { mergeCommit: recorded.hash, headCommit, recovered: true },
+            exitDetail: { mergeCommit: recorded.hash, ...order, headCommit, recovered: true },
             run: { mergeCommit: recorded.hash },
           };
         }

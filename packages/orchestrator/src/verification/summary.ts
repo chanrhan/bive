@@ -1,6 +1,10 @@
 // 검증 화면 요약 (JDG-03, COST-02, SCR-05, M1-18, ADR-072).
 // 값은 규칙 · 판정 기록 · 실행 · 세션 기록에서만 만든다(NFR-03). 꾸며 낸 값 · 추정 공식 없음.
-// - 판정 기준: 가장 최근에 병합된 실행(종료 시각 → 표시 ID 순)의 기준 브랜치 · 병합 커밋. 없으면 `null`
+// - 판정 기준: 가장 나중에 병합된 실행의 기준 브랜치 · 병합 커밋. 없으면 `null` (ADR-096)
+//   후보 = 병합 커밋이 기록된 실행(상태와 무관: 병합 뒤 화면 갱신 도중 종료돼 `interrupted`인 실행 포함). 순서는 후보마다
+//   혼자 정해지는 열쇠 하나의 사전식 비교(후보 전체에 하나의 전순서, 입력 순서와 무관): ① 기준 브랜치가 프로젝트의 지금
+//   기준 브랜치인 후보 먼저 ② 병합 순서 값(병합 실행기가 병합 커밋의 전체 조상 수를 읽어 병합 단계 통과 시도의 결과에 저장한
+//   값)이 있는 후보 먼저, 있으면 그 값 ③ 병합 단계가 통과로 끝난 시각 ④ 생성 시각 ⑤ ID. 조회 때 git을 부르지 않는다
 // - 판정: 화면의 모든 판정은 판정 기준 커밋에서 낸 판정이다(screens.md SCR-05 머리줄). 기준 실행의 병합 재검사 판정
 //   (병합 커밋)이 있으면 그것, 없으면 기준 실행의 검사 단계 판정(`headCommit`, 기준 브랜치가 움직이지 않아 병합 커밋의
 //   트리와 같다, ADR-069). 규칙별로 그중 최신(판정 시각 → ID). 구현 단계 판정 · 다른 실행 · 실행 밖 판정 · 미래 시각
@@ -41,21 +45,101 @@ const FUTURE_LIMIT_MS = 60_000;
 export const isJudgeable = (rule: Rule, judgment: RuleJudgment): boolean =>
   rule.normState === 'approved' && judgment.status !== 'quarantined';
 
-/** 시각 → 정렬 값. 없으면 가장 앞. */
-const timeOf = (iso: string | null): number => (iso === null ? -Infinity : Date.parse(iso));
+/** 시각 → 정렬 값. 없거나 읽을 수 없으면 가장 앞. */
+const timeOf = (iso: string | null): number => {
+  const ms = iso === null ? NaN : Date.parse(iso);
+  return Number.isNaN(ms) ? -Infinity : ms;
+};
 
-/** 가장 최근에 병합된 실행의 판정 기준. 병합된 실행이 없으면 `null`. */
-export const basisOf = (runs: readonly Run[]): VerificationBasis | null => {
-  let latest: (Run & { mergeCommit: string }) | null = null;
+/** 판정 기준 후보의 병합 단계 기록: 병합 단계 통과 시도의 끝난 시각과 그 시도가 저장한 병합 순서 값. */
+export interface MergeRecord {
+  /** 병합 단계가 통과로 끝난 시각 (통과 시도가 없으면 `null`) */
+  at: string | null;
+  /** 병합 커밋의 전체 조상 수 (ADR-096. 이 값을 저장하기 전의 기록 · 읽기 실패면 `null`) */
+  order: number | null;
+}
+
+export interface BasisOptions {
+  /** 실행의 병합 단계 기록 (기본: 기록 없음) */
+  mergeOf?: (run: Run) => MergeRecord | null;
+  /** 프로젝트의 지금 기준 브랜치 (모르면 `null`: 브랜치로 먼저 가르지 않는다) */
+  branch?: string | null;
+}
+
+/** 후보의 순서 열쇠: 앞 칸부터 비교해 큰 쪽이 나중이다 (ADR-096). */
+type BasisKey = readonly [
+  onBranch: number,
+  hasOrder: number,
+  order: number,
+  at: number,
+  createdAt: number,
+];
+
+const compareBasis = (
+  a: { key: BasisKey; id: string },
+  b: { key: BasisKey; id: string },
+): number => {
+  // 뺄셈을 쓰지 않는다: 두 칸이 모두 -Infinity(시각 없음)면 차가 NaN이라 순서가 입력 순서를 따르게 된다
+  for (let i = 0; i < a.key.length; i += 1) {
+    const x = a.key[i] as number;
+    const y = b.key[i] as number;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+};
+
+/**
+ * 가장 나중에 병합된 실행의 판정 기준. 병합 커밋이 기록된 실행이 없으면 `null`.
+ * 병합 커밋이 기록된 실행은 상태와 무관하게 후보다: 그 값은 병합 실행기가 기준 브랜치 갱신을 확인한 통과일 때만 채워진다
+ * (ADR-091 · ADR-094 · ADR-096). 순서는 후보마다 혼자 정해지는 열쇠의 사전식 비교라 결과가 목록 순서와 무관하다.
+ */
+export const basisOf = (
+  runs: readonly Run[],
+  options: BasisOptions = {},
+): VerificationBasis | null => {
+  let latest: { run: Run & { mergeCommit: string }; key: BasisKey; id: string } | null = null;
   for (const run of runs) {
-    if (run.status !== 'merged' || run.mergeCommit === null) continue;
-    if (latest === null || timeOf(run.endedAt) >= timeOf(latest.endedAt)) {
-      latest = { ...run, mergeCommit: run.mergeCommit };
-    }
+    if (run.mergeCommit === null) continue;
+    const merge = options.mergeOf?.(run) ?? null;
+    const order = merge?.order ?? null;
+    const candidate = {
+      run: { ...run, mergeCommit: run.mergeCommit },
+      key: [
+        options.branch != null && run.baseBranch === options.branch ? 1 : 0,
+        order === null ? 0 : 1,
+        order ?? 0,
+        timeOf(merge?.at ?? null),
+        timeOf(run.createdAt),
+      ] as const,
+      id: run.id,
+    };
+    if (latest === null || compareBasis(candidate, latest) > 0) latest = candidate;
   }
   return latest === null
     ? null
-    : { branch: latest.baseBranch, commit: latest.mergeCommit, runId: latest.id };
+    : { branch: latest.run.baseBranch, commit: latest.run.mergeCommit, runId: latest.run.id };
+};
+
+/** 병합 단계 결과에 저장된 병합 순서 값 (1 이상의 안전한 정수가 아니면 `null`). */
+const mergeOrderIn = (exitDetail: unknown): number | null => {
+  if (typeof exitDetail !== 'object' || exitDetail === null) return null;
+  const value = (exitDetail as { mergeOrder?: unknown }).mergeOrder;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
+};
+
+/**
+ * 실행의 병합 단계 기록: 병합 단계 통과 시도 중 시도 번호가 가장 큰 것. 통과 시도가 없으면 `null`.
+ * 순서 값은 그 시도의 결과가 실행의 병합 커밋을 가리킬 때만 쓴다(다른 커밋의 값이면 `null`).
+ */
+export const mergeRecordOf = (run: Run, steps: readonly Step[]): MergeRecord | null => {
+  const passed = steps
+    .filter((step) => step.kind === 'merge' && step.status === 'passed')
+    .reduce<Step | null>((a, b) => (a === null || b.attempt > a.attempt ? b : a), null);
+  if (passed === null) return null;
+  const detail = passed.exitDetail as { mergeCommit?: unknown } | null;
+  const sameCommit =
+    typeof detail === 'object' && detail !== null && detail.mergeCommit === run.mergeCommit;
+  return { at: passed.endedAt, order: sameCommit ? mergeOrderIn(passed.exitDetail) : null };
 };
 
 /**
@@ -122,7 +206,10 @@ export const verificationSummary = (
   now: number = Date.now(),
 ): VerificationSummaryResult => {
   const runs = store.runs.list();
-  const basis = basisOf(runs);
+  const basis = basisOf(runs, {
+    mergeOf: (run) => mergeRecordOf(run, store.runs.steps(run.id)),
+    branch: store.getProject()?.baseBranch ?? null,
+  });
   const judged = basisJudgments(store, basis, now);
   const runsById = new Map(runs.map((run) => [run.id, run]));
 
