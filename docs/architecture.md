@@ -75,7 +75,7 @@ interface AgentAdapter {
 - `ScriptedAdapter`: 시나리오 파일의 도구 호출 · 파일 변경 · 비용 메시지를 순서대로 재생. 도구 호출은 실제 고정 도구 · 경로 가드를 통과 (가드도 함께 검증). 모든 자동 테스트가 사용 (Claude 인증 없음)
 - 설정 → 세션 값: `settings/settings-service.ts`의 `roleSessionSettings(settings, role, cap?)`가 역할별 모델 · 한도를 `SessionSpec`의 `model` · `budget`으로 바꾼다. 미설정이면 `requireRunnableSettings`와 같은 -32010
 - 실행 엔진은 `AgentEvent`만 소비. 에이전트 텍스트는 이벤트 로그로만 저장, 상태 전이 입력 아님 (JDG-01)
-- 규칙 자동 생성 (M1-08, ADR-062): `orchestrator/src/rule-writer/`의 `RuleWriterService`. `requirement.create`가 요구사항을 저장한 같은 저장소 열림에서 `start`를 부르고, 중복 · 설정 검사(`roleSessionSettings(settings, 'rule-writer')`, cap 없음) 뒤 세션을 대기열(동시 1개)에서 비동기로 돌린다. 설정 미비면 세션 없이 생략 기록 · 로그만 남기고 요구사항 저장은 성공. 세션은 선택된 어댑터 · 설정의 rule-writer 모델 · 한도 · 도구 `propose_rule` 하나 · 세션 가드로 돌고, 제안은 `ProposalService.submit`으로 `pending`만 등록한다. 기록(도구 호출 · 매니페스트 · 결과)은 메모리 `Orchestrator.ruleWriter.records`와 표준 출력 로그뿐이고 저장은 M1-14
+- 규칙 자동 생성 (M1-08, ADR-062): `orchestrator/src/rule-writer/`의 `RuleWriterService`. `requirement.create`가 요구사항을 저장한 같은 저장소 열림에서 `start`를 부르고, 중복 · 설정 검사(`roleSessionSettings(settings, 'rule-writer')`, cap 없음) 뒤 세션을 대기열(동시 1개)에서 비동기로 돌린다. 설정 미비면 세션 없이 생략 기록 · 로그만 남기고 요구사항 저장은 성공. 세션은 선택된 어댑터 · 설정의 rule-writer 모델 · 한도 · 도구 `propose_rule` 하나 · 세션 가드로 돌고, 제안은 `ProposalService.submit`으로 `pending`만 등록한다. 기록(도구 호출 · 매니페스트 · 결과)은 메모리 `Orchestrator.ruleWriter.records`와 표준 출력 로그뿐이고 저장은 M1-14. 시도마다 `rule_writer_requests` 행(생략이면 사유), 세션은 `sessions` 행에 남고 `ruleWriter.status` · 요구사항 상세가 그것만 읽으며, 기록이 바뀌면 `event.ruleWriter.changed`. 생략 · 실패한 요구사항은 사람의 직접 편집 저장이 다시 시도한다 (M3-26, ADR-099)
 
 패키지 간 import 해석 (M0-03)
 - `@bive/shared`의 `exports` 맨 앞에 사용자 정의 조건 `@bive/source` → `./src/index.ts`를 두고, 그 뒤 `types` · `default`는 `dist`를 가리킨다. store · parser가 import 대상이 되면 같은 조건을 추가한다 (store는 M0-04에서 추가)
@@ -166,6 +166,7 @@ interface AgentAdapter {
 - 세션 · 도구 호출 기록 (M1-14, ADR-066): 마이그레이션 `project/0006_sessions_tool_calls`(`sessions` · `tool_calls`). 세션을 열 때 행을 만들고 init 보고 · 결과를 채우며, 도구 호출은 호출마다 추가만 한다(`ProjectStore.sessions`). 실행 상태가 아닌 기록이라 세션 도중에 바로 저장한다(재기동 뒤 세션 순번 · 거부 기록). 규칙 작성 세션(ADR-062)도 실행 · 단계 없이 같은 테이블에 남는다. 끝난 세션 · 호출 기록의 변경 · 삭제는 DB 트리거로 막는다. 빈 도구 이름(`""`, `unknown_tool` 거부)도 받은 그대로 남기도록 `project/0010_tool_call_empty_name`이 `tool_calls.name`의 CHECK를 푼다(M2-11, ADR-094)
 - 판정 기록 (M1-16, ADR-069): 마이그레이션 `project/0008_judgments`(`judgments`). 판정 러너가 `completed`로 끝난 판정(구현 · 검사 · 병합 재검사) 1회마다 다룬 규칙별 1건을 바로 남긴다(`ProjectStore.judgments.record`, 세션 기록처럼 실행 상태 저장과 별개). 상태는 규칙 케이스가 1개 이상이고 전부 통과면 `pass`, 아니면 `fail`. 수집 · 러너 오류는 기록하지 않는다. 수정 · 삭제 · 덮어쓰기는 트리거로 막는다. 규칙의 최신 판정 = 판정 시각이 가장 늦은 기록(같으면 ID가 큰 것): `latestByRule` · `latestForRules`, 이력 `listByRun` · `listByRule`, RPC 결합 `orchestrator/src/judgments/latest-judgment.ts`의 `storedLatestJudgments`(ADR-060)
 - 코드 열람 기록 (M2-01, ADR-084): 마이그레이션 `project/0009_code_open_records`(`code_open_records`). 사람이 `file:line` 링크에서 사유를 골라 연 1회마다 1건(`ProjectStore.codeOpens.record`), 수정 · 삭제 · 덮어쓰기는 트리거로 막는다. 조회는 최신부터 `listLatest`, 사유별 건수는 전체 기록을 SQL로 세는 `countByReason`(M2-02, ADR-088). 쓰기는 엄격하게(`CodeOpenRecord`), 읽기는 느슨하게(`StoredCodeOpenRecord`: 경로의 세부 규칙은 다시 적용하지 않음): 타입 · 열거형이 깨진 행만 건너뛰고 경고 한 줄(M2-11, ADR-094)
+- 규칙 작성 시도 기록 (M3-26, ADR-099): 마이그레이션 `project/0011_rule_writer_requests`(`rule_writer_requests`). 중복이 아닌 규칙 작성 시도 1개 = 행 1개(ID는 세션 ID와 같다). 세션을 열지 않으면 생략 사유 · 설명 · 비어 있던 설정 항목을 한 번 채우고, 식별 정보 · 생략된 행은 바뀌지 않으며 지우지 않는다(트리거). 상태는 이 행과 같은 ID의 `sessions` 행에서 만든다(`ProjectStore.ruleWriterRequests`, 0011 전의 규칙 작성 세션도 시도로 읽는다). 재기동 복구가 세션도 생략도 없는 행을 `closed`로 끝낸다
 - 마이그레이션 (M0-04): `packages/store/src/migrations/<project|registry>/<NNNN>_<snake_name>.ts` (`export const migration`)를 다음 번호로 추가하고 같은 폴더 `index.ts` 배열 끝에 넣는다. 적용 기록 `schema_migrations`에 SQL 해시를 남기므로 머지된 파일은 고치지 않는다. 테이블은 `STRICT`, 연결은 WAL · `foreign_keys` ON · `synchronous` FULL · `recursive_triggers` ON(ADR-050)
 
 ## 4. 실행 파이프라인 상태 기계
@@ -249,7 +250,8 @@ stateDiagram-v2
 | `requirement.list` | `{projectId}` → `{requirements}` (삭제 제외, 표시 ID 순). 필터는 화면 이슈에서 | NRM-01, SCR-02, ADR-047 | M1 |
 | `requirement.get` | `{projectId, id}` → `{requirement}` (삭제된 것도). 자식 규칙 · 이력은 해당 이슈에서 | SCR-06, ADR-047 | M1 |
 | `requirement.create` | `{projectId, text, author}` → `{requirement}` (사람 작성만, 승인 불필요). 저장 뒤 rule-writer 세션을 비동기로 시작하고 응답은 기다리지 않는다. 설정 미비면 세션만 생략(기록 · 로그), 응답은 그대로 | NRM-01, NRM-02, ADR-047, ADR-062 | M1 |
-| `requirement.update` · `requirement.delete` | `{projectId, id, text, author}` / `{projectId, id, author}` → `{requirement}` (사람만, 삭제는 소프트) | NRM-01, ADR-047 | M1 |
+| `requirement.update` · `requirement.delete` | `{projectId, id, text, author}` / `{projectId, id, author}` → `{requirement}` (사람만, 삭제는 소프트). 수정 저장 뒤 가장 최근 규칙 작성 시도가 생략 · 실패(성공 아닌 종료)이고 규칙 자동 생성 제안이 없으면 다시 시도한다(비동기, 응답은 그대로, ADR-099) | NRM-01, NRM-02, ADR-047, ADR-099 | M1 · M3 |
+| `ruleWriter.status` | `{projectId, requirementId?}` → `{entries: [{requirementId, attemptId, state, skipReason, missing, endReason, error, errorTruncated, requestedAt, endedAt}]}` (조회 전용. 시도 기록이 있는 요구사항마다 가장 최근 시도 하나, 요구사항 ID 순. `state` = `queued` · `running` · `ended` · `skipped`. 값은 `rule_writer_requests` · `sessions` 행에서만. `error`는 생략 설명 · 세션 오류의 표시 값(ADR-089 이스케이프, 500자 넘으면 끝을 `…`로 줄이고 `errorTruncated`). 없는 프로젝트 `-32004`) | NRM-02, NFR-03, SCR-02, ADR-099 | M3 |
 | `requirement.markUnrulable` | `{id, reason}` | NRM-08 | M2 |
 | `rule.list` | `{projectId}` → `{rules: [{rule, judgment}]}` (규칙 테이블의 규범만 · 제안 제외, 삭제 제외, 표시 ID 순). `judgment = {status, latest}`, 판정 기록이 없으면 `{status: 'unjudged', latest: null}`, 실행 링크는 `latest.runId`. 필터는 렌더러 목록 | NRM-02, JDG-02, SCR-03, ADR-060 | M1 |
 | `rule.get` | `{projectId, id}` → `{rule, judgment}` (삭제된 것도, 제안 ID는 `-32004`). 최신 판정 결합 지점은 `orchestrator/src/judgments/latest-judgment.ts` | NRM-02, JDG-02, ADR-060 | M1 |
@@ -279,6 +281,7 @@ stateDiagram-v2
 | `event.run.updated` | 실행 상태 · 현재 단계 · 회귀 수 · 비용 (`{projectId, runId, displayId, status, currentStep, regressionCount, costUsd}`, ADR-076) | RUN-01, COST-02 |
 | `event.step.updated` | 단계 상태 · 종료 조건 결과 (`{projectId, runId, stepId, kind, attempt, status}`, 원문 `exitDetail`은 `run.get`, ADR-076) | RUN-02 |
 | `event.proposal.changed` | 제안 생성 · 처리 (`{projectId, proposalId, displayId, kind, state}`, 본문 · 근거는 싣지 않음. 등록 · 승인 · 수정 후 승인 · 거절 저장 뒤 제안마다 1개, 기다리지 않음, ADR-076) | TODO-01 |
+| `event.ruleWriter.changed` | 규칙 작성 시도 기록 변경 (`{projectId, requirementId}`. 대기 · 시작 · 끝 · 생략 저장 뒤 1개, 기다리지 않음. 받는 쪽은 `ruleWriter.status`를 다시 조회, ADR-099) | NRM-02, SCR-02 |
 | `event.norm.changed` | 요구사항 · 규칙 변경 | NRM-07 |
 | `event.judgment.recorded` | 규칙 판정 결과 | JDG-02 |
 | `event.todo.count` | 할 일 배지 (승인 대기 · 상한) | SCR-17, TODO-04 |
