@@ -11,7 +11,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { type CanUseTool, query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentRole } from '@bive/shared';
+import { type AgentRole, createUlidGenerator } from '@bive/shared';
+import { openProjectStore, registerProject } from '@bive/store';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import type { SessionEvent, SessionSpec, ToolResult } from '../src/agent/adapter.js';
@@ -22,6 +23,8 @@ import {
   SDK_DENIED_REASON,
   sdkToolName,
 } from '../src/agent/claude-sdk-adapter.js';
+import { collectNormInput } from '../src/norms/norm-input.js';
+import { RULE_WRITER_SYSTEM_PROMPT, ruleWriterTaskPrompt } from '../src/rule-writer/prompts.js';
 import { BIVE_MCP_SERVER, roleToolNames } from '../src/tools/definitions.js';
 import { guardSession, REQUIRED_PERMISSION_MODE } from '../src/tools/session-guard.js';
 
@@ -34,6 +37,7 @@ const FAKE_API_KEY = `sk-ant-api03-${'x'.repeat(93)}-AA`;
 const AGENTS_MD_MARKER = 'AGENTS_MD_MARKER_205';
 const CLAUDE_MD_MARKER = 'CLAUDE_MD_MARKER_205';
 const PROMPT_MARKER = 'PROMPT_MARKER_205';
+const AT = '2026-11-21T00:00:00.000Z';
 
 interface ScriptedToolUse {
   name: string;
@@ -159,6 +163,9 @@ interface CliRunOptions {
   files?: Record<string, string>;
   /** 제품 옵션에서 뺄 허용 도구 (허용 목록 밖 도구의 거부 경로를 보는 시험만) */
   dropAllowedTool?: string;
+  /** 세션의 시스템 프롬프트 · 작업 지시 (기본: 표시 문자열) */
+  systemPrompt?: string;
+  prompt?: string;
 }
 
 /**
@@ -207,8 +214,8 @@ const runCli = async (role: AgentRole, options: CliRunOptions = {}): Promise<Cli
   });
   const spec: SessionSpec = {
     role,
-    systemPrompt: '역할 지침',
-    prompt: `작업 지시 ${PROMPT_MARKER}`,
+    systemPrompt: options.systemPrompt ?? '역할 지침',
+    prompt: options.prompt ?? `작업 지시 ${PROMPT_MARKER}`,
     workDir,
     tools: {
       toolNames: roleToolNames(role),
@@ -324,6 +331,87 @@ describe('실제 CLI의 지침 파일 · 권한 경로 (수용 기준 2 · 4, AD
       ).toEqual([['propose_rule', 'denied', SDK_DENIED_REASON]]);
       expect(run.executed).toEqual([]);
       expect(run.canUseToolCalls).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
+
+/** 요청 본문 JSON 안의 모든 문자열 값. */
+const stringsIn = (value: unknown): string[] => {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(stringsIn);
+  if (typeof value === 'object' && value !== null) return Object.values(value).flatMap(stringsIn);
+  return [];
+};
+
+describe('실제 CLI에 실리는 규칙 작성 작업 지시 (M7-07 #219, ADR-100 K1 · A14)', () => {
+  it(
+    '작업 지시의 규범 자료(틀 · 표시 값 포함)와 고정 시스템 프롬프트가 모델 API 요청 본문에 글자 그대로 실리고, 규칙 생성 도구 스키마는 모순 판단을 필수로 알린다',
+    async () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), 'bive-cli-norms-'));
+      tempDirs.push(root);
+      const home = path.join(root, 'bive');
+      const projectId = createUlidGenerator()();
+      const newId = createUlidGenerator();
+      registerProject(
+        { id: projectId, name: '실제 CLI', rootPath: root, baseBranch: 'main', createdAt: AT },
+        { home },
+      );
+      const store = openProjectStore(projectId, { home, create: true });
+      let prompt: string;
+      try {
+        const parent = store.requirements.create({
+          id: newId(),
+          text: '헬스 체크 응답에 서버 시각 포함',
+          author: { kind: 'human' },
+          normState: 'approved',
+          createdAt: AT,
+        });
+        store.rules.create({
+          id: newId(),
+          title: `헬스 체크 응답의 서버 시각${String.fromCodePoint(0x202e)}`,
+          statement: 'WHEN 요청이 오면 THE SYSTEM SHALL time을 담는다',
+          kind: 'business',
+          checkKinds: ['test'],
+          parentRequirementId: parent.id,
+          builtin: false,
+          targetBlockIds: [],
+          risk: null,
+          contractId: null,
+          author: { kind: 'agent', role: 'rule-writer' },
+          normState: 'approved',
+          createdAt: AT,
+        });
+        const target = store.requirements.create({
+          id: newId(),
+          text: '헬스 체크 응답에서 서버 시각 제거',
+          author: { kind: 'human' },
+          normState: 'approved',
+          createdAt: AT,
+        });
+        prompt = ruleWriterTaskPrompt(
+          target,
+          collectNormInput(store, { requirementIds: [target.id], ruleIds: [] }),
+        );
+      } finally {
+        store.close();
+      }
+      expect(prompt).toContain('  제목: 헬스 체크 응답의 서버 시각\\u202e');
+
+      const run = await runCli('rule-writer', { systemPrompt: RULE_WRITER_SYSTEM_PROMPT, prompt });
+      expect(run.events.at(-1)).toMatchObject({ type: 'result', subtype: 'success' });
+      const main = api.bodies
+        .map((body) => JSON.parse(body) as { tools?: { name?: string; input_schema?: unknown }[] })
+        .filter((body) => (body.tools ?? []).some((tool) => tool.name?.startsWith('mcp__bive__')));
+      expect(main.length).toBeGreaterThan(0);
+      for (const body of main) {
+        const texts = stringsIn(body);
+        // 작업 지시는 틀 · 표시 값까지 글자 그대로 (CLI가 자료를 고치거나 빼지 않는다)
+        expect(texts.some((text) => text.includes(prompt))).toBe(true);
+        expect(texts.some((text) => text.includes(RULE_WRITER_SYSTEM_PROMPT))).toBe(true);
+        const tool = body.tools?.find((entry) => entry.name === sdkToolName('propose_rule'));
+        expect((tool?.input_schema as { required?: string[] }).required).toContain('contradiction');
+      }
     },
     TEST_TIMEOUT_MS,
   );

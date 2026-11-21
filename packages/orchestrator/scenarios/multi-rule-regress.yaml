@@ -16,6 +16,7 @@ roles:
               kind: business
               checkKinds: [test]
               rationale: 요구사항의 '서버 시각 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+              contradiction: { verdict: none }
           - tool: propose_rule
             args:
               parentRequirementId: '{{requirementId}}'
@@ -24,6 +25,7 @@ roles:
               kind: business
               checkKinds: [test]
               rationale: 요구사항의 '버전 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+              contradiction: { verdict: none }
           - message: 규칙 제안 2건을 등록했습니다.
         result:
           subtype: success

@@ -145,6 +145,7 @@ const OTHER_ROLE_TOOL_ARGS: Readonly<Record<string, Record<string, unknown>>> = 
     kind: 'business',
     checkKinds: ['test'],
     rationale: '무결성 시험',
+    contradiction: { verdict: 'none' },
   },
 };
 
@@ -599,10 +600,12 @@ describe('agent-approve: 세션의 승인 호출 거부 (수용 기준 2, NFR-01
         expect(store.approvalLog.list({ entity: 'Rule', id })).toEqual([]);
       }
       expect(store.approvalLog.list()).toEqual([]);
-      // 에이전트 행동은 규범 변경 기록에만 남는다 (ADR-100 C2)
+      // 에이전트 행동은 규범 변경 기록에만 남는다 (ADR-100 C2). 규칙마다 신규 · 모순 판단 (M7-07)
       expect(store.normChanges.list().map((entry) => [entry.kind, entry.actor])).toEqual([
         ['created', { kind: 'agent', role: 'rule-writer' }],
+        ['judgment', { kind: 'agent', role: 'rule-writer' }],
         ['created', { kind: 'agent', role: 'rule-writer' }],
+        ['judgment', { kind: 'agent', role: 'rule-writer' }],
       ]);
       // 거부된 호출도 세션 도구 호출 기록으로 남는다 (NFR-02)
       expect(
@@ -777,6 +780,48 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
     // 제안 등록(submit)을 부르는 제품 코드가 없다: 새 제안은 생기지 않는다 (ADR-100 A1)
     expect(using(/\bsubmitProposal\(|\.submit\(/)).toEqual(['proposals/proposal-service.ts']);
     expect(using(/new ProposalService\(/)).toEqual([]);
+  });
+});
+
+describe('규칙 작성 역할의 기존 규범 입력: 도구 목록 불변 (M7-07 #219 수용 기준 4, ADR-100 K1 · D4 · NFR-02)', () => {
+  it('규칙 작성 역할의 도구 목록 · MCP 목록 · 실행기에 파일 · 명령 도구가 없고, 기존 규범은 도구가 아니라 작업 지시로만 들어온다', async () => {
+    const fileAndCommand: readonly string[] = [...FILE_TOOL_NAMES, ...COMMAND_TOOL_NAMES];
+    // 리터럴: 규칙 작성 역할의 도구는 규칙 생성 도구 하나뿐 (규범 입력이 도구로 늘지 않았다)
+    expect([...roleToolNames('rule-writer')]).toEqual(['propose_rule']);
+    expect(EXPECTED_ROLE_TOOLS['rule-writer']).toEqual(['propose_rule']);
+    expect(roleToolNames('rule-writer').filter((name) => fileAndCommand.includes(name))).toEqual(
+      [],
+    );
+    expect(
+      biveMcpToolList('rule-writer')
+        .map((tool) => tool.name)
+        .filter((name) => fileAndCommand.includes(name)),
+    ).toEqual([]);
+    // 실행기는 올바른 인자의 파일 · 명령 도구 호출도 이름만 보고 거부한다
+    const executor = new FixedToolExecutor({
+      role: 'rule-writer',
+      sessionRoot: tempDir(),
+      biveHome: tempDir(),
+    });
+    for (const name of fileAndCommand) {
+      await expect(
+        executor.execute(name, OTHER_ROLE_TOOL_ARGS[name] ?? {}),
+        name,
+      ).resolves.toMatchObject({ status: 'denied', reason: 'unknown_tool' });
+    }
+    // 코드 구조: 규범 입력 모듈을 가져오는 곳은 규칙 작성 역할의 작업 지시 · 서비스와 반영 모듈(모순 대상 확인)뿐이고,
+    // 도구 정의 · 실행기(tools/)는 가져오지 않는다 (M7-08이 테스트 작성 · 구현 역할을 더할 때 이 목록을 고친다)
+    const importers = sourceFiles(SRC_DIR)
+      .filter((file) =>
+        /from '[./]*(?:norms\/)?norm-input\.js'/.test(fs.readFileSync(file, 'utf8')),
+      )
+      .map((file) => path.relative(SRC_DIR, file).split(path.sep).join('/'))
+      .sort();
+    expect(importers).toEqual([
+      'norms/agent-rule.ts',
+      'rule-writer/prompts.ts',
+      'rule-writer/rule-writer-service.ts',
+    ]);
   });
 });
 

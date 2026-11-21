@@ -144,3 +144,73 @@ describe('normChange.list 표시 값 (ADR-089)', () => {
     });
   });
 });
+
+describe('판단 기록 (종류 judgment, M7-07 #219, ADR-106)', () => {
+  const judgmentDetail = (overrides: Record<string, unknown> = {}) => ({
+    judgment: {
+      subject: 'new_rule',
+      verdict: 'contradiction',
+      contradicts: [{ id: newId(), displayId: 'RULE-001' }],
+      createdSeq: 1,
+      input: { requirements: { total: 2, included: 2 }, rules: { total: 1, included: 1 } },
+      ...overrides,
+    },
+  });
+  const appendJudgment = (detail: unknown, reason = `근거${RLO}뒤집기`) =>
+    h.read((store) =>
+      store.normChanges.append({
+        at: iso(T0),
+        kind: 'judgment',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        targetRef: { entity: 'Rule', id: newId() },
+        sessionId: newId(),
+        runId: null,
+        reason,
+        detail: detail as NormChangeEntry['detail'],
+      }),
+    );
+
+  it('판단 상세는 결과 · 대상 규칙 · 신규 기록 순번 · 받은 입력 수를 담고, 근거(사유)는 응답에서 표시 값이다', async () => {
+    const stored = appendJudgment(judgmentDetail());
+    const { entries, chain } = await h.client.call('normChange.list', {
+      projectId: h.project.id,
+    });
+    expect(chain.valid).toBe(true);
+    expect(entries[0]?.detail).toEqual(stored.detail);
+    expect(entries[0]?.reason).toBe('근거\\u202e뒤집기');
+    expect(entries[0]?.textTruncated).toBe(false);
+  });
+
+  it('어긋난 판단 상세(모순인데 대상 없음 · 모순 없음인데 대상 · 대상 중복 · 신규 순번 없음 · 입력 수 모순 · 이전 내용 섞임 · 상세 없음)는 저장되지 않는다', () => {
+    const dup = { id: newId(), displayId: 'RULE-001' };
+    for (const detail of [
+      judgmentDetail({ contradicts: [] }),
+      judgmentDetail({ verdict: 'no_contradiction' }),
+      judgmentDetail({ contradicts: [dup, dup] }),
+      judgmentDetail({ createdSeq: undefined }),
+      judgmentDetail({
+        input: { requirements: { total: 1, included: 2 }, rules: { total: 0, included: 0 } },
+      }),
+      { ...judgmentDetail(), before: { title: '옛 제목' } },
+      {},
+    ]) {
+      expect(() => appendJudgment(detail), JSON.stringify(detail)).toThrow();
+    }
+    // 판단 상세는 판단 기록에만 둔다
+    expect(() =>
+      h.read((store) =>
+        store.normChanges.append({
+          at: iso(T0),
+          kind: 'created',
+          actor: { kind: 'agent', role: 'rule-writer' },
+          targetRef: { entity: 'Rule', id: newId() },
+          sessionId: newId(),
+          runId: null,
+          reason: '근거',
+          detail: { after: { title: '제목' }, ...judgmentDetail() } as NormChangeEntry['detail'],
+        }),
+      ),
+    ).toThrow();
+    expect(h.read((store) => store.normChanges.list())).toEqual([]);
+  });
+});
