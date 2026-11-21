@@ -82,6 +82,7 @@ describe('rules 테이블 · 리포지토리', () => {
         parentDetachedAt: null,
         updatedAt: T1,
         deletedAt: null,
+        confirmation: { state: 'unconfirmed' },
       });
       expect(store.rules.get(rule.id)).toEqual(rule);
       const second = store.rules.create(ruleInput(req.id, { checkKinds: ['test', 'pbt'] }));

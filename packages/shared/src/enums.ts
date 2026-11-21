@@ -321,15 +321,33 @@ export type BlockKind = z.infer<typeof BlockKind>;
 export const AdrStatus = z.enum(['proposed', 'accepted']);
 export type AdrStatus = z.infer<typeof AdrStatus>;
 
-/** 승인 기록 행동 (NFR-01, ADR-031의 provisional_grant 포함). */
+/**
+ * 승인 기록 행동 (NFR-01, ADR-031의 provisional_grant 포함). 승인 기록은 사람 행동만 담는다 (ADR-100 C2).
+ * 사후 확인 전환(ADR-100 A2)으로 사람의 확인(`confirm`, M7-01) · 규칙 직접 편집(`rule_edit`, M7-03) ·
+ * 계약 직접 편집(`contract_edit`, M3-10)이 더해졌다. 편집 두 값은 그 이슈가 쓴다 (M7-01은 DB CHECK와 값만 연다)
+ */
 export const ApprovalAction = z.enum([
   'approve',
   'approve_edited',
   'reject',
   'run_start',
   'provisional_grant',
+  'confirm',
+  'rule_edit',
+  'contract_edit',
 ]);
 export type ApprovalAction = z.infer<typeof ApprovalAction>;
+
+/**
+ * 확인 상태 (ADR-100 D2 · C1, M7-01): 규범 항목마다 "사람이 보고 OK했는가". 두 값뿐이고 기본은 미확인이다.
+ * 사람만 확인됨으로 바꾸며(I1) 실행 생성 · 단계 진행 · 판정 · 병합의 어느 조건에도 쓰이지 않는다.
+ */
+export const ConfirmationState = z.enum(['unconfirmed', 'confirmed']);
+export type ConfirmationState = z.infer<typeof ConfirmationState>;
+export const CONFIRMATION_STATE_LABELS = {
+  unconfirmed: '미확인',
+  confirmed: '확인됨',
+} as const satisfies Record<ConfirmationState, string>;
 
 /** 코드 열기 사유 (MET-01). */
 export const CodeOpenReason = z.enum(['screen_error', 'info_lacking', 'debugging']);

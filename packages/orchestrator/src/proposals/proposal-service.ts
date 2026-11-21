@@ -2,12 +2,14 @@
 // - 등록(`submit`)은 오케스트레이터 내부 전용이다. 파이프 RPC가 없고, 역할 세션의 제안 도구(#21 `propose_rule` 등)가
 //   부른다. 제안은 항상 승인 대기(`pending`)로 들어가고 규범 테이블에는 반영되지 않는다
 // - 승인 · 거절은 사람만 한다. 파이프 처리기(`proposal-handlers.ts`)가 토큰 인증된 연결에서만 부른다
-// - 승인은 규범 반영 · 제안 처리 · 승인 기록 추가를 트랜잭션 1개로 한다. 하나라도 실패하면 아무것도 남지 않는다
+// - 승인은 규범 반영 · 제안 처리 · 승인 기록 추가 · 반영 규범의 확인됨(근거 = 그 승인 기록, ADR-100 A1)을 트랜잭션 1개로
+//   한다. 하나라도 실패하면 아무것도 남지 않는다. 등록(`submit`)은 확인 상태를 쓰지 않는다
 import {
   type AgentAuthor,
   AgentAuthor as AgentAuthorSchema,
   type AppliedNorm,
   type Author,
+  type ConfirmationTarget,
   createUlidGenerator,
   DomainErrorReason,
   type EntityRef,
@@ -27,6 +29,7 @@ import {
 } from '@bive/shared';
 import { canonicalJson, ConflictError, NotFoundError, type ProjectStore } from '@bive/store';
 
+import { confirmApprovedNorm } from '../confirmations/confirmation-service.js';
 import type { ProposalChangeListener } from '../events/proposal-events.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
@@ -203,7 +206,7 @@ const applyNorm = (
   };
 };
 
-const appliedRefOf = (applied: AppliedNorm): EntityRef =>
+const appliedRefOf = (applied: AppliedNorm): ConfirmationTarget =>
   applied.entity === 'Rule'
     ? { entity: 'Rule', id: applied.rule.id }
     : { entity: 'Requirement', id: applied.requirement.id };
@@ -278,7 +281,13 @@ export const approveProposal = (
         ? { diff: { before: proposal.payload, after: payload }, appliedRef }
         : { appliedRef },
     });
-    return { proposal: decided, applied, approvalLog };
+    // 사람이 보고 승인한 규범은 확인됨이다. 근거는 이 승인 기록 (ADR-100 A1, 이행 마이그레이션 0012와 같은 규칙)
+    const confirmation = confirmApprovedNorm(store, appliedRefOf(applied), approvalLog);
+    const confirmed: AppliedNorm =
+      applied.entity === 'Rule'
+        ? { entity: 'Rule', rule: { ...applied.rule, confirmation } }
+        : { entity: 'Requirement', requirement: { ...applied.requirement, confirmation } };
+    return { proposal: decided, applied: confirmed, approvalLog };
   });
 };
 

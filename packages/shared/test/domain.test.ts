@@ -74,6 +74,7 @@ const requirement = {
   updatedAt: AT,
   updatedBy: human,
   deletedAt: null,
+  confirmation: { state: 'confirmed', at: AT, by: human, basis: { kind: 'requirement_record', at: AT } },
 };
 
 const rule = {
@@ -94,6 +95,7 @@ const rule = {
   createdAt: AT,
   updatedAt: AT,
   deletedAt: null,
+  confirmation: { state: 'unconfirmed' },
 };
 
 const proposal = {
