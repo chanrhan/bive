@@ -13,6 +13,7 @@ import {
   type Options,
   query as sdkQuery,
   type SDKMessage,
+  type Settings as SdkSettings,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentRole } from '@bive/shared';
 import {
@@ -49,8 +50,9 @@ import {
 export type QueryFn = (params: { prompt: string; options: Options }) => AsyncIterable<SDKMessage>;
 
 /**
- * `query()` 옵션에 둘 수 있는 키 전부 (ADR-059). 이 밖의 키(프록시 · `baseUrl` · 원격 MCP · `agents` · `plugins` ·
- * `settings` · `sandbox` · `extraArgs` · `pathToClaudeCodeExecutable` 등)는 넣지 않는다. 테스트가 이 목록과 정확히 대조한다.
+ * `query()` 옵션에 둘 수 있는 키 전부 (ADR-059 · ADR-098). 이 밖의 키(프록시 · `baseUrl` · 원격 MCP · `agents` ·
+ * `plugins` · `sandbox` · `extraArgs` · `pathToClaudeCodeExecutable` 등)는 넣지 않는다. `settings`는 내장 플러그인을
+ * 끄는 값({@link AGENT_FLAG_SETTINGS}) 하나만 싣는다. 테스트가 이 목록과 정확히 대조한다.
  */
 export const QUERY_OPTION_KEYS = [
   'abortController',
@@ -64,12 +66,51 @@ export const QUERY_OPTION_KEYS = [
   'model',
   'permissionMode',
   'persistSession',
+  'settings',
   'settingSources',
   'strictMcpConfig',
   'systemPrompt',
   'tools',
   'verbatimPrompts',
 ] as const satisfies readonly (keyof Options)[];
+
+/**
+ * 내장 플러그인 목록을 확인한 SDK 판 (ADR-098). `package.json`의 SDK 판이 이것과 다르면 시험이 실패한다.
+ * SDK를 올릴 때는 새 판의 CLI 실행 파일이 스스로 등록하는 내장 플러그인(`cc-plugin-*`) 이름을 다시 확인해
+ * {@link AGENT_DISABLED_BUILTIN_PLUGINS}를 고치고 이 값을 올린다.
+ */
+export const BUILTIN_PLUGINS_CHECKED_SDK_VERSION = '0.3.289';
+
+/**
+ * 세션에서 끄는 CLI 내장 플러그인 (ADR-098). SDK 0.3.289에 든 CLI 2.1.289 실행 파일이 스스로 등록하는 내장
+ * 플러그인 11개 가운데, 설정 `enabledPlugins`로 끌 수 있는 10개의 정확한 이름이다(플랫폼 · 기능 게이트 · 진입점에 따라
+ * 실리는 것이 달라 전부 끈다). `cc-plugin-agents-md`는 작업 폴더의 `AGENTS.md`를 세션 지침으로 싣는다.
+ * `cc-plugin-sec-default`는 관리 정책(managed settings)으로만 켜고 끌 수 있어 여기 넣지 않는다: 관리 정책이 있는
+ * 기계나 Team · Enterprise 조직에서 그것이 실리면 세션 가드가 거부한다(ADR-098 한계).
+ */
+export const AGENT_DISABLED_BUILTIN_PLUGINS = [
+  'cc-plugin-agents-md',
+  'cc-plugin-claude-test',
+  'cc-plugin-diff',
+  'cc-plugin-mermaid',
+  'cc-plugin-mods-guide',
+  'cc-plugin-plugin-authoring',
+  'cc-plugin-responsive-mode',
+  'cc-plugin-telemetry',
+  'cc-plugin-tips',
+  'cc-plugin-you-should-know',
+] as const;
+
+/**
+ * `query()`의 `settings`(CLI `--settings`, 플래그 설정 층): 내장 플러그인을 `<이름>@builtin: false`로 끈다 (ADR-098).
+ * 파일 설정은 `settingSources: []`로 읽지 않으므로 이 값이 사용자 쪽 설정의 전부다. 끈 뒤 init의 `plugins`가 비어야
+ * 세션 가드를 통과한다.
+ */
+export const AGENT_FLAG_SETTINGS = {
+  enabledPlugins: Object.fromEntries(
+    AGENT_DISABLED_BUILTIN_PLUGINS.map((name) => [`${name}@builtin`, false] as const),
+  ),
+} as const satisfies SdkSettings;
 
 /** 모델 제공자 인증 변수. 이것만 인증으로 받는다(API 키 방식, ADR-059). */
 export const AGENT_API_KEY_ENV = 'ANTHROPIC_API_KEY';
@@ -237,7 +278,12 @@ const assertRunnable = (spec: SessionSpec): void => {
  * SessionSpec → `query()` 옵션 (순수 함수, ADR-059). 키는 `QUERY_OPTION_KEYS`뿐이다.
  * - 내장 도구 전부 끔(`tools: []`), MCP는 인프로세스 `bive` 하나 + `strictMcpConfig`(계정 · 프로젝트 MCP 무시)
  * - 파일 설정 비로드(`settingSources: []`), 세션 저장 안 함(`persistSession: false`), `agents` 없음(ADR-007)
- * - 권한: 역할 도구만 미리 허용하고 나머지는 묻지 않고 거부(`dontAsk`). `canUseTool`은 권한 모드가 바뀔 때의 대비
+ * - 내장 플러그인 끔(`settings` = {@link AGENT_FLAG_SETTINGS}, ADR-098)
+ * - 권한: 역할 도구만 미리 허용하고 나머지는 묻지 않고 거부(`dontAsk`). 실제 CLI(2.1.289)로 확인한 경로(ADR-098):
+ *   `allowedTools`에 든 도구는 `canUseTool` 없이 허용되고(SDK 경고 `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED`는 이 뜻),
+ *   허용 목록 밖 도구는 `dontAsk`가 `canUseTool`을 부르지 않고 거부하며(`permission_denied`), 세션에 없는 도구
+ *   (`tools: []`로 꺼진 내장 도구 · 다른 역할 도구)는 CLI가 "No such tool" 오류로 끝낸다. 그래서 지금 구성에서
+ *   `canUseTool`은 불리지 않고, 권한 모드가 바뀔 때의 대비로만 둔다
  * - 프롬프트는 원문 그대로(`verbatimPrompts`): `@경로` 파일 펼침 · `/` 슬래시 명령 실행이 없다. 프롬프트에는
  *   요구사항 · 규칙 · 이전 역할 산출물처럼 사람이 직접 치지 않은 글이 들어가므로, 고정 도구 · 경로 가드를 거치지 않는
  *   파일 읽기를 막는다
@@ -267,6 +313,7 @@ export const buildQueryOptions = (spec: SessionSpec, deps: QueryOptionsDeps): Op
     strictMcpConfig: true,
     settingSources: [],
     persistSession: false,
+    settings: { enabledPlugins: { ...AGENT_FLAG_SETTINGS.enabledPlugins } },
     verbatimPrompts: true,
     maxTurns: spec.budget.maxTurns,
     maxBudgetUsd: spec.budget.maxBudgetUsd,
