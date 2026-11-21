@@ -218,6 +218,56 @@ describe('마이그레이션 러너 규칙', () => {
       expect(schemaOf(db)).toEqual([]);
     });
   });
+
+  describe('외래 키 검사를 끄는 마이그레이션 (disableForeignKeys, 표 재구성용, ADR-105)', () => {
+    const parentChild = m(
+      1,
+      'parent_child',
+      `CREATE TABLE p (id INTEGER PRIMARY KEY) STRICT;
+       CREATE TABLE c (id INTEGER PRIMARY KEY, p INTEGER NOT NULL REFERENCES p (id)) STRICT;
+       INSERT INTO p (id) VALUES (1); INSERT INTO c (id, p) VALUES (10, 1);`,
+    );
+    const rebuild = (extra = ''): Migration => ({
+      ...m(
+        2,
+        'rebuild_parent',
+        `CREATE TABLE p_v2 (id INTEGER PRIMARY KEY, note TEXT) STRICT;
+         INSERT INTO p_v2 (id) SELECT id FROM p ${extra};
+         DROP TABLE p; ALTER TABLE p_v2 RENAME TO p;`,
+      ),
+      disableForeignKeys: true,
+    });
+
+    it('부모 표를 다시 만들어도 자식 행이 그대로 이어지고, 끝나면 외래 키 검사가 다시 켜진다', () => {
+      withDb((db) => {
+        migrate(db, [parentChild]);
+        // 요청하지 않으면 켜진 외래 키 검사가 부모 표 삭제를 막는다 (이 재구성이 필요한 이유)
+        expect(() =>
+          migrate(db, [parentChild, { ...rebuild(), disableForeignKeys: false }]),
+        ).toThrow(/FOREIGN KEY/);
+        expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+        expect(migrate(db, [parentChild, rebuild()]).applied).toEqual([2]);
+        expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+        expect(db.prepare('SELECT id, p FROM c').all()).toEqual([{ id: 10, p: 1 }]);
+        expect(() => db.prepare('INSERT INTO c (id, p) VALUES (11, 99)').run()).toThrow(
+          /FOREIGN KEY/,
+        );
+      });
+    });
+
+    it('재구성 뒤 외래 키 위반이 남으면 이번 실행분 전체를 되돌리고 외래 키 검사를 다시 켠다', () => {
+      withDb((db) => {
+        migrate(db, [parentChild]);
+        const schema = schemaOf(db);
+        expect(() => migrate(db, [parentChild, rebuild('WHERE id <> 1')])).toThrow(
+          /외래 키 위반 1건/,
+        );
+        expect(listAppliedMigrations(db).map((r) => r.version)).toEqual([1]);
+        expect(schemaOf(db)).toEqual(schema);
+        expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+      });
+    });
+  });
 });
 
 describe('0010 tool_call_empty_name: 빈 도구 이름 기록 (M2-11 #190, ADR-094)', () => {
@@ -668,6 +718,207 @@ describe('0014 rule_writer_daily_budget_skip: 생략 사유 프로젝트 하루 
       expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%_v14%'").all()).toEqual(
         [],
       );
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+    });
+  });
+});
+
+describe('0015 run_queue: 실행 대기 상태 · 프로젝트당 진행 중 1개 (M7-06 #218, ADR-100 B⑥, ADR-105)', () => {
+  const T = (minute: number) => `2026-11-21T00:${String(minute).padStart(2, '0')}:00.000Z`;
+  const human = '{"kind":"human"}';
+  const SHA = 'c'.repeat(40);
+  const BUDGET = '{"run":{"maxBudgetUsd":5,"maxTurns":100},"roles":{}}';
+
+  /** 0014까지 적용한 DB에 그때의 스키마 그대로 요구사항 · 규칙을 넣는다. 규칙 ID를 돌려준다. */
+  const seedNorms = (db: SqliteDatabase): string => {
+    const req = newId();
+    const rule = newId();
+    db.prepare(
+      `INSERT INTO requirements (id, display_id, text, author, norm_state, unrulable_reason, created_at,
+       updated_at, updated_by, deleted_at) VALUES (?, 'REQ-001', '본문', ?, 'approved', NULL, ?, ?, ?, NULL)`,
+    ).run(req, human, T(0), T(0), human);
+    db.prepare(
+      `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
+       parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
+       updated_at, deleted_at) VALUES (?, 'RULE-001', '제목', '진술', 'business', '["test"]', ?, NULL, 0, '[]',
+       NULL, NULL, '{"kind":"agent","role":"rule-writer"}', 'approved', ?, ?, NULL)`,
+    ).run(rule, req, T(0), T(0));
+    return rule;
+  };
+  const insertRun = (
+    db: SqliteDatabase,
+    rule: string,
+    row: { id: string; seq: number; status: string; mergeCommit?: string | null },
+  ) => {
+    const display = `EXE-${String(row.seq).padStart(3, '0')}`;
+    db.prepare(
+      `INSERT INTO runs (id, display_id, type, status, current_step, last_completed_step, regression_count,
+       failure_reason, branch, worktree_path, base_branch, base_commit, head_commit, merge_commit, budget_snapshot,
+       model_snapshot, cost_usd, turns, tool_manifest, started_by, created_at, started_at, ended_at)
+       VALUES (?, ?, 'A', ?, 'implementation', 'red_check', 1, NULL, ?, ?, 'main', ?, ?, ?, ?, '{"implementer":"m"}',
+       0.5, 7, '[]', ?, ?, ?, NULL)`,
+    ).run(
+      row.id,
+      display,
+      row.status,
+      `bive/run-${display}`,
+      `/w/${display}`,
+      SHA,
+      SHA,
+      row.mergeCommit ?? null,
+      BUDGET,
+      human,
+      T(row.seq),
+      T(row.seq + 1),
+    );
+    db.prepare('INSERT INTO run_target_rules (run_id, rule_id, position) VALUES (?, ?, 0)').run(
+      row.id,
+      rule,
+    );
+  };
+  const insertStep = (db: SqliteDatabase, runId: string, kind: string): string => {
+    const id = newId();
+    db.prepare(
+      `INSERT INTO steps (id, run_id, kind, attempt, status, role, exit_detail, commit_sha, cost_usd, turns,
+       started_at, ended_at) VALUES (?, ?, ?, 1, 'pending', NULL, '{}', NULL, NULL, NULL, ?, NULL)`,
+    ).run(id, runId, kind, T(5));
+    return id;
+  };
+  /** `runs` · `steps`의 색인 · 트리거 SQL. */
+  const objectSql = (db: SqliteDatabase) =>
+    db
+      .prepare(
+        "SELECT type, name, sql FROM sqlite_master WHERE tbl_name IN ('runs', 'steps') AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY name",
+      )
+      .all() as { type: string; name: string; sql: string }[];
+  const tableSql = (db: SqliteDatabase, name: string): string =>
+    (
+      db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as {
+        sql: string;
+      }
+    ).sql;
+  const setStatus = (db: SqliteDatabase, id: string, status: string) =>
+    db.prepare('UPDATE runs SET status = ? WHERE id = ?').run(status, id);
+
+  it('0014까지의 DB(실행 · 단계 · 세션 · 도구 호출 · 판정 있음): 실행 행은 값 · 순서 그대로, 자식 표의 행 · 외래 키 · 트리거 · 색인은 그대로이고 실행 대기를 받는다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 14), { now: fixedNow });
+      const rule = seedNorms(db);
+      const merged = newId();
+      const interrupted = newId();
+      const waiting = newId();
+      insertRun(db, rule, { id: merged, seq: 1, status: 'merged', mergeCommit: SHA });
+      insertRun(db, rule, { id: interrupted, seq: 2, status: 'interrupted' });
+      insertRun(db, rule, { id: waiting, seq: 3, status: 'waiting_approval' });
+      const step = insertStep(db, interrupted, 'implementation');
+      const session = newId();
+      db.prepare(
+        `INSERT INTO sessions (id, run_id, step_id, role, model, work_dir, model_usage, tools, mcp_servers, started_at)
+         VALUES (?, ?, ?, 'implementer', 'm', '/w', '{}', '[]', '[]', ?)`,
+      ).run(session, interrupted, step, T(6));
+      db.prepare(
+        `INSERT INTO tool_calls (id, run_id, session_id, seq, at, role, name, args_summary, status, reason, duration_ms)
+         VALUES (?, ?, ?, 0, ?, 'implementer', 'read_file', '{}', 'ok', NULL, 3)`,
+      ).run(newId(), interrupted, session, T(7));
+      db.prepare(
+        `INSERT INTO judgments (id, rule_id, run_id, step_id, commit_sha, judged_at, status, runner, exit_code,
+         reporter_path, cases, quarantine_reason) VALUES (?, ?, ?, ?, ?, ?, 'pass', 'vitest', 0, NULL, '[]', NULL)`,
+      ).run(newId(), rule, interrupted, step, SHA, T(8));
+      // 0014까지는 실행 대기를 DB CHECK가 막는다
+      expect(() => insertRun(db, rule, { id: newId(), seq: 9, status: 'queued' })).toThrow(/CHECK/);
+
+      const rows = (table: string) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
+      const childTables = ['run_target_rules', 'steps', 'sessions', 'tool_calls', 'judgments'];
+      const runsBefore = rows('runs');
+      const childrenBefore = childTables.map(rows);
+      const childSqlBefore = childTables.map((name) => tableSql(db, name));
+      const sqlBefore = objectSql(db);
+      const runsTableBefore = tableSql(db, 'runs');
+
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 15), { now: fixedNow }).applied).toEqual([15]);
+
+      // 행 · 순서 · 값 그대로, 자식 표의 행 · 정의(외래 키 `REFERENCES runs`) 그대로, 위반 없음, 외래 키 검사는 켜진 채
+      expect(rows('runs')).toEqual(runsBefore);
+      expect(childTables.map(rows)).toEqual(childrenBefore);
+      expect(childTables.map((name) => tableSql(db, name))).toEqual(childSqlBefore);
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+      expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'runs_v15%'").all(),
+      ).toEqual([]);
+      // 표 정의는 상태 CHECK에 실행 대기가 더해진 것뿐이다 (시작 주체의 사람 CHECK도 그대로, ADR-105)
+      expect(tableSql(db, 'runs').replace(/^CREATE TABLE "runs"/, 'CREATE TABLE runs')).toBe(
+        runsTableBefore.replace(
+          "'waiting_approval', 'running'",
+          "'queued', 'waiting_approval', 'running'",
+        ),
+      );
+      expect(tableSql(db, 'runs')).toContain("json_extract(started_by, '$.kind') = 'human'");
+      // 0005의 색인 · 트리거(steps 트리거 포함)는 글자까지 같고, 새 트리거는 진행 중 1개 방어 2개뿐이다
+      const sqlAfter = objectSql(db);
+      expect(sqlAfter.filter((o) => !o.name.startsWith('runs_one_running'))).toEqual(sqlBefore);
+      expect(sqlAfter.map((o) => o.name).filter((n) => n.startsWith('runs_one_running'))).toEqual([
+        'runs_one_running_insert',
+        'runs_one_running_update',
+      ]);
+
+      // 옮긴 트리거가 그대로 동작한다: 종료된 실행 · 생성 정보 · 삭제 · 덮어쓰기 · 종료된 실행의 단계 · 외래 키
+      expect(() => setStatus(db, merged, 'failed')).toThrow(/종료된 실행/);
+      expect(() =>
+        db.prepare("UPDATE runs SET base_branch = 'dev' WHERE id = ?").run(waiting),
+      ).toThrow(/생성 정보/);
+      expect(() => db.prepare('DELETE FROM runs WHERE id = ?').run(waiting)).toThrow(/지울 수 없/);
+      expect(() =>
+        insertRun(db, rule, { id: waiting, seq: 3, status: 'waiting_approval' }),
+      ).toThrow(/덮어쓰기 금지/);
+      expect(() => insertStep(db, merged, 'merge')).toThrow(/종료된 실행에는/);
+      expect(() => insertStep(db, newId(), 'merge')).toThrow(/FOREIGN KEY/);
+      // 사람 아닌 시작 주체는 그대로 거부 (CHECK를 넓히지 않았다)
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO runs (id, display_id, type, status, regression_count, base_branch, budget_snapshot,
+             model_snapshot, tool_manifest, started_by, created_at)
+             VALUES (?, 'EXE-010', 'A', 'queued', 0, 'main', ?, '{}', '[]', '{"kind":"orchestrator"}', ?)`,
+          )
+          .run(newId(), BUDGET, T(10)),
+      ).toThrow(/CHECK/);
+
+      // 실행 대기를 받는다
+      const queued4 = newId();
+      const queued5 = newId();
+      insertRun(db, rule, { id: queued4, seq: 4, status: 'queued' });
+      insertRun(db, rule, { id: queued5, seq: 5, status: 'queued' });
+      // 중단된 실행이 있으면 승인 대기 · 실행 대기는 진행 중이 될 수 없다
+      expect(() => setStatus(db, queued4, 'running')).toThrow(/진행 중 · 중단된 실행/);
+      expect(() => setStatus(db, waiting, 'running')).toThrow(/진행 중 · 중단된 실행/);
+      // 중단 → 진행 중(재개)은 실행 대기가 있어도 된다. 그 뒤 진행 중은 1개뿐이다(갱신 · 삽입 모두)
+      setStatus(db, interrupted, 'running');
+      expect(() => setStatus(db, queued4, 'running')).toThrow(/진행 중/);
+      expect(() => insertRun(db, rule, { id: newId(), seq: 11, status: 'running' })).toThrow(
+        /진행 중인 실행이 이미/,
+      );
+      db.prepare("UPDATE runs SET status = 'merged', merge_commit = ? WHERE id = ?").run(
+        SHA,
+        interrupted,
+      );
+      // 생성 순: 먼저 만든 실행 대기가 있으면 뒤 실행 대기 · 승인 대기는 진행 중이 될 수 없다
+      expect(() => setStatus(db, queued5, 'running')).toThrow(/먼저 기다리는 실행/);
+      expect(() => setStatus(db, waiting, 'running')).toThrow(/먼저 기다리는 실행/);
+      setStatus(db, queued4, 'running');
+      expect(db.prepare("SELECT display_id FROM runs WHERE status = 'running'").all()).toEqual([
+        { display_id: 'EXE-004' },
+      ]);
+    });
+  });
+
+  it('0014까지의 빈 DB에도 적용되고, 다시 실행해도 스키마가 같다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 14), { now: fixedNow });
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([15]);
+      const schema = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
+      expect(schemaOf(db)).toEqual(schema);
       expect(db.pragma('foreign_key_check')).toEqual([]);
     });
   });

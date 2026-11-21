@@ -599,7 +599,9 @@ export type SettingsValidateResult = z.infer<typeof SettingsValidateResult>;
 // - 만든 실행은 유형 A · 상태 `waiting_approval` · 현재 단계 승인이고, 같은 트랜잭션에서 승인 기록
 //   `run_start`(대상 규칙 포함)를 1건 추가한다. 승인 단계의 판정과 이후 단계 진행은 오케스트레이터 엔진이 한다
 // - `run.get`의 `id`는 ULID 또는 표시 ID(`EXE-001`)
-// - `run.resume`은 `interrupted` 실행만 받는다(사람 주체, ADR-066)
+// - `run.resume`은 `interrupted` 실행만 받는다(사람 주체, ADR-066). 다른 실행이 `running`이면 -32009(ADR-105)
+// - 프로젝트당 진행 중 실행은 1개다(ADR-100 B⑥, ADR-105): 승인 단계를 통과할 때 진행 중 · 중단된 실행이나 실행 대기가
+//   있으면 `queued`(실행 대기)가 되고, 자리가 나면 생성 순으로 시작한다. 생성 응답의 상태는 생성 직후의 `waiting_approval`
 
 /** 대상 규칙 ID 목록: 1개 이상, 중복 없음. 순서는 요청 그대로 저장한다. */
 export const RunTargetRuleIds = z
@@ -804,10 +806,15 @@ export const VerificationStage = z.strictObject({
 });
 export type VerificationStage = z.infer<typeof VerificationStage>;
 
-/** 파이프라인: 최근 실행과 단계 계획 순서의 단계 (현재 단계는 `run.currentStep`). */
+/**
+ * 파이프라인: 보일 실행과 단계 계획 순서의 단계 (현재 단계는 `run.currentStep`). 보일 실행은 프로젝트의 자리를 차지한
+ * 실행(진행 중, 없으면 가장 먼저 만든 중단)이고, 없으면 가장 최근에 만든 실행이다(ADR-105). `queued`는 그 실행 밖의
+ * 실행 대기 건수다.
+ */
 export const VerificationPipeline = z.strictObject({
   run: Run,
   stages: z.array(VerificationStage).min(1),
+  queued: z.int().nonnegative(),
 });
 export type VerificationPipeline = z.infer<typeof VerificationPipeline>;
 

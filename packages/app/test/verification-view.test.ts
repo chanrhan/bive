@@ -17,6 +17,11 @@ import {
   codeOpenRows,
   COMPLIANCE_FILTER,
   complianceText,
+  currentStepOf,
+  isResumeUnrecoverable,
+  queuedText,
+  resumeEndedStatus,
+  resumeUnrecoverableText,
   formatTurns,
   formatUsd,
   RUN_STATUS_TEXT,
@@ -78,6 +83,7 @@ describe('값 표시', () => {
     expect(canResume('interrupted')).toBe(true);
     for (const status of [
       'waiting_approval',
+      'queued',
       'running',
       'merged',
       'failed',
@@ -85,6 +91,36 @@ describe('값 표시', () => {
     ] as const) {
       expect(canResume(status), status).toBe(false);
     }
+  });
+
+  it('실행 대기는 "실행 대기"이고 현재 단계가 없다(다음에 시작할 단계를 현재 단계로 보이지 않음), 그 밖은 저장된 현재 단계 (ADR-105)', () => {
+    expect(RUN_STATUS_TEXT.queued).toBe('실행 대기');
+    expect(currentStepOf({ status: 'queued', currentStep: 'test_writing' })).toBeNull();
+    expect(currentStepOf({ status: 'running', currentStep: 'test_writing' })).toBe('test_writing');
+    expect(currentStepOf({ status: 'waiting_approval', currentStep: 'approval' })).toBe('approval');
+    expect(currentStepOf({ status: 'merged', currentStep: null })).toBeNull();
+    // 보이는 실행 밖의 실행 대기 건수: 0이면 보이지 않음
+    expect(queuedText(0)).toBeNull();
+    expect(queuedText(2)).toBe('실행 대기 2');
+    // 재개할 수 없어 실패로 끝난 거부만 따로 (그 밖의 거부는 "재개 실패")
+    expect(
+      isResumeUnrecoverable({
+        code: -32009,
+        message: 'x',
+        data: { reason: 'resume_unrecoverable' },
+      }),
+    ).toBe(true);
+    expect(isResumeUnrecoverable({ code: -32009, message: 'x' })).toBe(false);
+    expect(isResumeUnrecoverable({ code: -32009, data: { reason: 'other' } })).toBe(false);
+    expect(isResumeUnrecoverable(null)).toBe(false);
+    expect(resumeUnrecoverableText('EXE-001')).toBe('EXE-001 재개 불가 · 실패 처리');
+    // 이미 병합된 실행이면 "실패 처리"라고 하지 않는다 (병합 완료로 끝남, ADR-105)
+    expect(resumeUnrecoverableText('EXE-001', 'failed')).toBe('EXE-001 재개 불가 · 실패 처리');
+    expect(resumeUnrecoverableText('EXE-001', 'merged')).toBe('EXE-001 재개 불가 · 병합 완료');
+    expect(
+      resumeEndedStatus({ data: { reason: 'resume_unrecoverable', runStatus: 'merged' } }),
+    ).toBe('merged');
+    expect(resumeEndedStatus({ data: { reason: 'resume_unrecoverable' } })).toBeNull();
   });
 
   it('준수 카드의 필터는 규칙 목록 준수 집계 기준의 "판정 가능" 값 하나만 고른다', () => {

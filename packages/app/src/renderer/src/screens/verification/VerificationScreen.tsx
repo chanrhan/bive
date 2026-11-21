@@ -5,7 +5,7 @@
 // - 코드 열람 = 열람 사유 분포(MET-01, M2-02 · ADR-088): 사유 3종의 건수, 기록이 없으면 '없음'. 검증 요약과 따로 불러
 //   이 영역의 로딩 · 실패는 이 영역 안에서만 보인다(로딩 = 자리 비움, 실패 = "코드 열람 불러오기 실패")
 // - 준수 카드 → 규칙 화면 `준수 집계: 판정 가능` 필터 (분모 목록, JDG-03)
-// - 파이프라인 = 최근 실행의 단계 순서와 현재 단계, 생략 단계는 흐림 + 보이는 "생략"(#165). 중단이면 [재개] → run.resume (ADR-011)
+// - 파이프라인 = 보일 실행(자리를 차지한 실행, 없으면 최근 실행, ADR-105)의 단계 순서와 현재 단계, 생략 단계는 흐림 + 보이는 "생략"(#165). 중단이면 [재개] → run.resume (ADR-011)
 // - 실행 알림(event.run.updated · event.step.updated)을 받으면 요약을 다시 읽는다(useVerification, ADR-076)
 // - 상태(ADR-072, ADR-060과 같은 방식): 프로젝트 조회 중 = 비움 · 프로젝트 없음 = "프로젝트 없음" ·
 //   로딩 = 자리 비움(문구 · 스켈레톤 없음) · 불러오기 실패 = "검증 불러오기 실패" · 실행 없음 = 파이프라인 자리 "실행 없음"(ADR-029)
@@ -33,7 +33,12 @@ import {
   codeOpenRows,
   COMPLIANCE_FILTER,
   complianceText,
+  currentStepOf,
   formatUsd,
+  isResumeUnrecoverable,
+  queuedText,
+  resumeEndedStatus,
+  resumeUnrecoverableText,
   RUN_STATUS_TEXT,
   runLinkParts,
   STEP_LABELS,
@@ -227,7 +232,12 @@ const Pipeline = ({
   onChanged: () => void;
 }): React.JSX.Element => {
   const { run, stages } = pipeline;
-  const [resume, setResume] = useState<'idle' | 'pending' | 'failed'>('idle');
+  const currentStep = currentStepOf(run);
+  const queued = queuedText(pipeline.queued);
+  // 'failed' = 재개 실패(실행은 중단 그대로), 'ended' = 재개할 수 없어 실행이 실패로 끝남(그 실행의 표시 ID, ADR-105)
+  const [resume, setResume] = useState<
+    'idle' | 'pending' | 'failed' | { ended: string; status: string | null }
+  >('idle');
 
   const onResume = useCallback(() => {
     setResume('pending');
@@ -236,9 +246,23 @@ const Pipeline = ({
         setResume('idle');
         onChanged();
       },
-      () => setResume('failed'),
+      (error: unknown) => {
+        if (isResumeUnrecoverable(error)) {
+          // 실행이 끝나 자리가 났으므로 다시 읽는다(다음 실행 대기가 보인다)
+          setResume({ ended: run.displayId, status: resumeEndedStatus(error) });
+          onChanged();
+          return;
+        }
+        setResume('failed');
+      },
     );
-  }, [projectId, run.id, onChanged]);
+  }, [projectId, run.id, run.displayId, onChanged]);
+  const resumeError =
+    resume === 'failed'
+      ? TEXT.resumeFailed
+      : typeof resume === 'object'
+        ? resumeUnrecoverableText(resume.ended, resume.status)
+        : null;
 
   return (
     <div className="pipeline" data-run-status={run.status}>
@@ -253,9 +277,14 @@ const Pipeline = ({
         >
           {RUN_STATUS_TEXT[run.status]}
         </span>
-        {run.currentStep !== null && (
+        {currentStep !== null && (
           <span className="pipeline-current" data-testid="pipeline-current">
-            {STEP_LABELS[run.currentStep]}
+            {STEP_LABELS[currentStep]}
+          </span>
+        )}
+        {queued !== null && (
+          <span className="pipeline-queued" data-testid="pipeline-queued">
+            {queued}
           </span>
         )}
         {canResume(run.status) && (
@@ -269,15 +298,15 @@ const Pipeline = ({
             {TEXT.resume}
           </button>
         )}
-        {resume === 'failed' && (
+        {resumeError !== null && (
           <span className="pipeline-resume-error" data-testid="pipeline-resume-error" role="alert">
-            {TEXT.resumeFailed}
+            {resumeError}
           </span>
         )}
       </div>
       <ol className="pipeline-stepper" data-testid="pipeline-stepper">
         {stages.map((stage) => {
-          const current = run.currentStep === stage.kind;
+          const current = currentStep === stage.kind;
           return (
             <li
               key={stage.kind}
