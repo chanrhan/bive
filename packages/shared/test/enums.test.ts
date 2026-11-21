@@ -107,7 +107,15 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
   it('실행 상태 7종 (실행 대기 포함, ADR-105)', () => {
     expectEnum(
       RunStatus,
-      ['waiting_approval', 'queued', 'running', 'merged', 'failed', 'budget_exceeded', 'interrupted'],
+      [
+        'waiting_approval',
+        'queued',
+        'running',
+        'merged',
+        'failed',
+        'budget_exceeded',
+        'interrupted',
+      ],
       RUN_STATUS_LABELS,
     );
     expect(RUN_STATUS_LABELS.queued).toBe('실행 대기');

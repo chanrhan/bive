@@ -242,9 +242,9 @@ describe('마이그레이션 러너 규칙', () => {
       withDb((db) => {
         migrate(db, [parentChild]);
         // 요청하지 않으면 켜진 외래 키 검사가 부모 표 삭제를 막는다 (이 재구성이 필요한 이유)
-        expect(() => migrate(db, [parentChild, { ...rebuild(), disableForeignKeys: false }])).toThrow(
-          /FOREIGN KEY/,
-        );
+        expect(() =>
+          migrate(db, [parentChild, { ...rebuild(), disableForeignKeys: false }]),
+        ).toThrow(/FOREIGN KEY/);
         expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
         expect(migrate(db, [parentChild, rebuild()]).applied).toEqual([2]);
         expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
@@ -759,9 +759,7 @@ describe('0014 run_queue: 실행 대기 상태 · 프로젝트당 진행 중 1�
          reporter_path, cases, quarantine_reason) VALUES (?, ?, ?, ?, ?, ?, 'pass', 'vitest', 0, NULL, '[]', NULL)`,
       ).run(newId(), rule, interrupted, step, SHA, T(8));
       // 0013까지는 실행 대기를 DB CHECK가 막는다
-      expect(() => insertRun(db, rule, { id: newId(), seq: 9, status: 'queued' })).toThrow(
-        /CHECK/,
-      );
+      expect(() => insertRun(db, rule, { id: newId(), seq: 9, status: 'queued' })).toThrow(/CHECK/);
 
       const rows = (table: string) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
       const childTables = ['run_target_rules', 'steps', 'sessions', 'tool_calls', 'judgments'];
@@ -779,12 +777,15 @@ describe('0014 run_queue: 실행 대기 상태 · 프로젝트당 진행 중 1�
       expect(childTables.map((name) => tableSql(db, name))).toEqual(childSqlBefore);
       expect(db.pragma('foreign_key_check')).toEqual([]);
       expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
-      expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'runs_v14%'").all()).toEqual(
-        [],
-      );
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'runs_v14%'").all(),
+      ).toEqual([]);
       // 표 정의는 상태 CHECK에 실행 대기가 더해진 것뿐이다 (시작 주체의 사람 CHECK도 그대로, ADR-105)
       expect(tableSql(db, 'runs').replace(/^CREATE TABLE "runs"/, 'CREATE TABLE runs')).toBe(
-        runsTableBefore.replace("'waiting_approval', 'running'", "'queued', 'waiting_approval', 'running'"),
+        runsTableBefore.replace(
+          "'waiting_approval', 'running'",
+          "'queued', 'waiting_approval', 'running'",
+        ),
       );
       expect(tableSql(db, 'runs')).toContain("json_extract(started_by, '$.kind') = 'human'");
       // 0005의 색인 · 트리거(steps 트리거 포함)는 글자까지 같고, 새 트리거는 진행 중 1개 방어 2개뿐이다

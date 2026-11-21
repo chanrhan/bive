@@ -1,13 +1,24 @@
 // SCR-03 규칙 (이슈 #24 수용 기준 2 · 3, screens.md SCR-03 · 1.4, ADR-029 · ADR-035 · ADR-060).
 // 2) checklists/scr-03.ts의 기본(카드 1줄 제목, 2줄 ID · WHEN 조건 · 예외) · 빈("규칙 없음") 상태
 // 3) 필터 칩 6종(판정 · 변이 · 준수 집계 · 블록 · 위험도 · 종류), 변이 · 블록 · 위험도는 값이 없어 0건 비활성
+// 이슈 #218(M7-06): [실행]으로 만든 실행이 프로젝트의 진행 중 실행 때문에 실행 대기면 [실행] 옆에 "표시 ID · 실행 대기"
+// (run.create · run.get 응답과 event.run.updated 알림으로만, ADR-105)
 // 데이터는 가짜 브리지의 project.current · rule.list 응답과 project.opened 알림(PROJECT_OPENED_EVENT)으로만 만든다.
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
-import type { Project } from '@bive/shared';
+import type {
+  Project,
+  Run,
+  RunCreateResult,
+  RunGetResult,
+  RunStatus,
+  RunUpdatedEvent,
+  StepKind,
+} from '@bive/shared';
 
 import { PROJECT_OPENED_EVENT } from '../src/common/bridge.js';
 import { CHIPS, PROJECT, RULES, VISIBLE_ORDER } from './checklists/scr-03.js';
+import { run as summaryRun } from './checklists/scr-05.js';
 import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
 import { collectVisibleText, expectScreen, findForbiddenText } from './support/expectScreen.js';
 
@@ -251,6 +262,104 @@ test.describe('프로젝트 전환 (ADR-034 · ADR-060)', () => {
     await expect(page.getByTestId('list-view').getByTestId('empty-state')).toHaveText('규칙 없음');
     const listCalls = await callsOf(bive, 'rule.list');
     expect(listCalls.at(-1)?.params).toEqual({ projectId: OTHER_PROJECT.id });
+  });
+});
+
+test.describe('[실행]으로 만든 실행의 표시 (프로젝트당 동시 실행 1개 · 실행 대기, ADR-105)', () => {
+  /** 테스트 전용 실행 값 (NFR-03: 화면은 run.create · run.get 응답만 쓴다). */
+  const created = (status: RunStatus, currentStep: StepKind | null): Run =>
+    summaryRun({
+      id: '01JE0000000000000000000004',
+      displayId: 'EXE-004',
+      projectId: PROJECT.id,
+      targetRuleIds: [RULES[0]?.rule.id ?? ''],
+      status,
+      currentStep,
+      lastCompletedStep: status === 'waiting_approval' ? null : 'approval',
+      branch: null,
+      worktreePath: null,
+      baseCommit: null,
+      startedAt: null,
+      costUsd: null,
+      turns: null,
+    });
+  /** `run.get` 가짜 응답: 비용 · 턴 집계는 화면이 읽지 않으므로 빈 값 (테스트 전용 데이터). */
+  const got = (run: Run): RunGetResult =>
+    ({
+      run,
+      steps: [],
+      usage: {
+        run: {
+          costUsd: null,
+          turns: null,
+          modelUsage: null,
+          sessionCount: 0,
+          costUnknownCount: 0,
+          turnsUnknownCount: 0,
+        },
+        roles: {},
+        steps: [],
+      },
+    }) as unknown as RunGetResult;
+  const runUpdated = (status: RunStatus): RunUpdatedEvent => ({
+    projectId: PROJECT.id,
+    runId: '01JE0000000000000000000004',
+    displayId: 'EXE-004',
+    status,
+    currentStep: 'test_writing',
+    regressionCount: 0,
+    costUsd: null,
+  });
+
+  test('진행 중인 실행이 있을 때 만든 실행은 [실행] 옆에 "EXE-004 · 실행 대기"로 보이고, 시작하면 "진행 중"으로 바뀐다', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page, {
+      'run.create': {
+        result: {
+          run: created('waiting_approval', 'approval'),
+          steps: [],
+          approvalLog: {
+            seq: 1,
+            at: '2026-10-16T05:00:00.000Z',
+            action: 'run_start',
+            actor: { kind: 'human' },
+            targetRef: { entity: 'Run', id: '01JE0000000000000000000004' },
+            clientId: null,
+            detail: { ruleIds: [RULES[0]?.rule.id ?? ''] },
+            prevHash: '0'.repeat(64),
+            hash: 'a'.repeat(64),
+          },
+        } as unknown as RunCreateResult,
+      },
+      'run.get': { result: got(created('queued', 'test_writing')) },
+    });
+    await page.getByTestId('card').filter({ hasText: 'RULE-001' }).click();
+    // 아직 실행을 만들지 않았으면 표시가 없다
+    await expect(page.getByTestId('run-start-created')).toHaveCount(0);
+    await page.getByTestId('run-start').click();
+    await page.getByTestId('run-start-confirm').click();
+    await expect(page.getByTestId('run-start-dialog')).toHaveCount(0);
+    // 생성 응답의 상태(승인 대기) → 실행 알림 뒤 다시 읽은 상태(실행 대기)
+    const createdEl = page.getByTestId('run-start-created');
+    await expect(createdEl).toHaveText('EXE-004 · 승인 대기');
+    await bive.emit('event.run.updated', runUpdated('queued'));
+    await expect(createdEl).toHaveText('EXE-004 · 실행 대기');
+    await expect(createdEl).toHaveAttribute('data-status', 'queued');
+    await expect(createdEl).toBeVisible();
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
+    for (const call of await callsOf(bive, 'run.get')) {
+      expect(call.params).toEqual({ projectId: PROJECT.id, id: '01JE0000000000000000000004' });
+    }
+
+    // 앞 실행이 끝나 시작하면 "진행 중"
+    await bive.setResponse('run.get', { result: got(created('running', 'test_writing')) });
+    await bive.emit('event.run.updated', runUpdated('running'));
+    await expect(createdEl).toHaveText('EXE-004 · 진행 중');
+
+    // 다른 규칙을 고르면 보이지 않는다 (그 규칙으로 만든 실행이 아님)
+    await page.getByTestId('card').filter({ hasText: 'RULE-002' }).click();
+    await expect(page.getByTestId('run-start-created')).toHaveCount(0);
   });
 });
 

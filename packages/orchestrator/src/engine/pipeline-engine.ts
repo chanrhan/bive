@@ -51,11 +51,7 @@ import { resetRunWorktree } from '../git/worktree-reset.js';
 import { toRpcError, withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import type { RunTracker } from '../lifecycle.js';
-import {
-  completeStep,
-  evaluateApprovalStep,
-  startNextQueuedRun,
-} from '../runs/run-service.js';
+import { completeStep, evaluateApprovalStep, startNextQueuedRun } from '../runs/run-service.js';
 import { createCheckExecutor } from '../steps/check.js';
 import { createImplementationExecutor } from '../steps/implementation.js';
 import { createMergeExecutor } from '../steps/merge.js';

@@ -453,6 +453,42 @@ test.describe('이동 · 재개 (수용 기준 4)', () => {
     await expect(page.getByRole('button', { name: '재개' })).toHaveCount(0);
   });
 
+  test('최근 실행이 실행 대기면 상태 "실행 대기", 현재 단계 표시 없음(승인만 통과), [재개] 없음, 금지 문구 없음 (ADR-105)', async ({
+    page,
+  }) => {
+    // 앞 실행이 진행 중이라 승인 단계만 통과하고 시작을 기다리는 실행 (워크트리 · 기준 커밋 · 시작 시각 없음)
+    const queued = {
+      ...SUMMARY,
+      pipeline: {
+        run: run({
+          status: 'queued',
+          currentStep: 'test_writing',
+          lastCompletedStep: 'approval',
+          branch: null,
+          worktreePath: null,
+          baseCommit: null,
+          startedAt: null,
+          costUsd: null,
+          turns: null,
+        }),
+        stages: stages('test_writing', 'pending'),
+      },
+    } as const;
+    await openScreen(page, { 'verification.summary': { result: queued } });
+    await expect(page.getByTestId('pipeline-run-status')).toHaveText('실행 대기');
+    await expect(page.getByTestId('pipeline-run-status')).toHaveAttribute('data-status', 'queued');
+    await expect(page.getByTestId('pipeline-run')).toHaveText(queued.pipeline.run.displayId);
+    // 아직 시작하지 않았으므로 현재 단계 글자 · 현재 단계 표시(aria-current)가 없다
+    await expect(page.getByTestId('pipeline-current')).toHaveCount(0);
+    await expect(page.locator('[data-testid="pipeline-stage"][aria-current]')).toHaveCount(0);
+    const stagesEl = page.getByTestId('pipeline-stage');
+    await expect(stagesEl.first()).toHaveAttribute('data-status', 'passed');
+    await expect(stagesEl.nth(1)).toHaveAttribute('data-status', 'pending');
+    await expect(page.getByRole('button', { name: '재개' })).toHaveCount(0);
+    const texts = await collectVisibleText(page);
+    expect(findForbiddenText(texts)).toEqual([]);
+  });
+
   test('최근 실행이 중단이면 [재개]가 run.resume(사람 주체)을 부르고 요약을 다시 읽는다', async ({
     page,
   }) => {

@@ -85,7 +85,10 @@ export const QUEUED_TARGET_UNAVAILABLE = 'target_rule_unavailable';
  * (재개와 뒤 실행이 겹치지 않고, 병합 순서가 시작 순서를 따른다). 승인 대기는 차지하지 않는다(승인을 못 받은 실행이 대기열을
  * 막지 않게). 종료 상태(병합 완료 · 실패 · 예산 초과)가 되면 자리가 난다.
  */
-export const SLOT_HOLDING_RUN_STATUSES = ['running', 'interrupted'] as const satisfies readonly RunStatus[];
+export const SLOT_HOLDING_RUN_STATUSES = [
+  'running',
+  'interrupted',
+] as const satisfies readonly RunStatus[];
 
 /** 프로젝트에 자리가 있는지: 자리를 차지한 실행(진행 중 · 중단)이 `exceptRunId` 밖에 없다. */
 const slotHolders = (store: ProjectStore, exceptRunId: string | null): Run[] =>
@@ -305,7 +308,10 @@ export const evaluateApprovalStep = (
  *   엔진이 구동을 시작할 때 만든다(앞 실행의 병합 결과 위에서 돈다). 예산 · 모델 스냅샷은 생성 때(사람의 실행 시작 확인) 값이다
  * 엔진이 실행이 끝날 때 · 승인 단계가 실행 대기로 끝날 때 · 기동할 때 부른다. 여러 번 불러도 안전하다.
  */
-export const startNextQueuedRun = (store: ProjectStore, clock: Pick<RunClock, 'now'>): QueueAdvance =>
+export const startNextQueuedRun = (
+  store: ProjectStore,
+  clock: Pick<RunClock, 'now'>,
+): QueueAdvance =>
   store.transaction(() => {
     const failed: RunDetail[] = [];
     if (slotHolders(store, null).length > 0) return { started: null, failed };

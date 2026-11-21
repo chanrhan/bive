@@ -50,7 +50,9 @@ export const RunStart = ({ projectId, rule }: RunStartProps): React.JSX.Element 
     const target = createdRef.current;
     if (target === null) return;
     const { run } = await window.bive.invoke('run.get', { projectId, id: target.id });
-    setCreated((current) => (current?.id === run.id ? { ...current, status: run.status } : current));
+    setCreated((current) =>
+      current?.id === run.id ? { ...current, status: run.status } : current,
+    );
   }, [projectId]);
   useRunEventRefresh(projectId, refreshCreated);
 

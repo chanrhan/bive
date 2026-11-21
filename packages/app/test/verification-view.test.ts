@@ -17,6 +17,7 @@ import {
   codeOpenRows,
   COMPLIANCE_FILTER,
   complianceText,
+  currentStepOf,
   formatTurns,
   formatUsd,
   RUN_STATUS_TEXT,
@@ -78,6 +79,7 @@ describe('값 표시', () => {
     expect(canResume('interrupted')).toBe(true);
     for (const status of [
       'waiting_approval',
+      'queued',
       'running',
       'merged',
       'failed',
@@ -85,6 +87,14 @@ describe('값 표시', () => {
     ] as const) {
       expect(canResume(status), status).toBe(false);
     }
+  });
+
+  it('실행 대기는 "실행 대기"이고 현재 단계가 없다(다음에 시작할 단계를 현재 단계로 보이지 않음), 그 밖은 저장된 현재 단계 (ADR-105)', () => {
+    expect(RUN_STATUS_TEXT.queued).toBe('실행 대기');
+    expect(currentStepOf({ status: 'queued', currentStep: 'test_writing' })).toBeNull();
+    expect(currentStepOf({ status: 'running', currentStep: 'test_writing' })).toBe('test_writing');
+    expect(currentStepOf({ status: 'waiting_approval', currentStep: 'approval' })).toBe('approval');
+    expect(currentStepOf({ status: 'merged', currentStep: null })).toBeNull();
   });
 
   it('준수 카드의 필터는 규칙 목록 준수 집계 기준의 "판정 가능" 값 하나만 고른다', () => {

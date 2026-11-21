@@ -1026,13 +1026,54 @@ describe('상태 기계', () => {
     const first = engineFor(paused, pausedExecutors);
     expect(first.evaluateApproval(paused.project.id, paused.runId)).toBe(true);
     await waitFor(() => detailOf(paused).run.worktreePath !== null, 20_000, '워크트리 생성');
+    // waiting_approval → queued: 진행 중인 실행이 있는 프로젝트의 새 실행 2개 (ADR-105). 둘째의 대상 규칙은 대기 중 삭제
+    const doomedRule = withProject(paused.biveHome, paused.project.id, (store) =>
+      store.rules.create({
+        id: newId(),
+        title: '삭제될 규칙',
+        statement: paused.rule.statement,
+        kind: 'business',
+        checkKinds: ['test'],
+        parentRequirementId: paused.rule.parentRequirementId,
+        builtin: false,
+        targetBlockIds: [],
+        risk: null,
+        contractId: null,
+        author: { kind: 'agent', role: 'rule-writer' },
+        normState: 'approved',
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const queuedIds = [paused.rule.id, doomedRule.id].map((ruleId) => {
+      const runId = withProject(paused.biveHome, paused.project.id, (store) =>
+        createRun(
+          store,
+          { ruleIds: [ruleId], author: human },
+          { clientId: null },
+          { now: Date.now, newId },
+        ),
+      ).run.id;
+      expect(first.evaluateApproval(paused.project.id, runId)).toBe(true);
+      return runId;
+    });
+    withProject(paused.biveHome, paused.project.id, (store) =>
+      store.db
+        .prepare('UPDATE rules SET deleted_at = ? WHERE id = ?')
+        .run(new Date().toISOString(), doomedRule.id),
+    );
     await first.stop();
     const second = engineFor(paused, pausedExecutors);
     expect(second.recoverInterruptedRuns()).toHaveLength(1);
     release = true;
     await second.resume(paused.project.id, paused.runId, human);
+    // 재개한 실행이 끝나면 queued → running(첫째) → merged, 그다음 queued → failed(둘째, 대상 규칙 재검사)
     await second.settled();
     expect(detailOf(paused).run.status).toBe('merged');
+    expect(
+      queuedIds.map((id) =>
+        withProject(paused.biveHome, paused.project.id, (store) => store.runs.get(id)?.status),
+      ),
+    ).toEqual(['merged', 'failed']);
 
     const all = Object.entries(RUN_STATUS_TRANSITIONS).flatMap(([from, tos]) =>
       (tos as readonly string[]).map((to) => `${from}→${to}`),
