@@ -1,6 +1,6 @@
 // ClaudeSdkAdapter 옵션 조립 · 스냅샷 (이슈 #39 수용 기준 1~3, NFR-02 · NFR-04 · ADR-007 · ADR-024 · ADR-059).
 // `query()`는 주입한 가짜 함수로 바꾸므로 실제 SDK 호출 · 네트워크 · API 키가 없다(ADR-016).
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -12,10 +12,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { SessionEvent, SessionSpec, ToolExecutor, ToolResult } from '../src/agent/adapter.js';
 import {
+  AGENT_DISABLED_BUILTIN_PLUGINS,
   AGENT_FIXED_ENV,
+  AGENT_FLAG_SETTINGS,
   AgentNotConfiguredError,
   agentEnv,
   biveMcpToolList,
+  BUILTIN_PLUGINS_CHECKED_SDK_VERSION,
   buildQueryOptions,
   ClaudeSdkAdapter,
   createBiveMcpServer,
@@ -94,6 +97,23 @@ const SOURCE_ENV = {
   BIVE_AGENT: 'claude',
 };
 
+/**
+ * 끄는 내장 플러그인 (ADR-098). SDK 0.3.289의 CLI 실행 파일에서 확인한 정확한 이름이라 시험에도 그대로 적는다
+ * (`cc-plugin-sec-default`는 관리 정책으로만 켜고 끄므로 없음).
+ */
+const EXPECTED_DISABLED_PLUGINS = {
+  'cc-plugin-agents-md@builtin': false,
+  'cc-plugin-claude-test@builtin': false,
+  'cc-plugin-diff@builtin': false,
+  'cc-plugin-mermaid@builtin': false,
+  'cc-plugin-mods-guide@builtin': false,
+  'cc-plugin-plugin-authoring@builtin': false,
+  'cc-plugin-responsive-mode@builtin': false,
+  'cc-plugin-telemetry@builtin': false,
+  'cc-plugin-tips@builtin': false,
+  'cc-plugin-you-should-know@builtin': false,
+};
+
 const deps = (overrides: Partial<QueryOptionsDeps> = {}): QueryOptionsDeps => ({
   env: SOURCE_ENV,
   configDir: CONFIG_DIR,
@@ -157,6 +177,7 @@ describe('buildQueryOptions 스냅샷 (수용 기준 1 · 2)', () => {
       strictMcpConfig: true,
       settingSources: [],
       persistSession: false,
+      settings: { enabledPlugins: EXPECTED_DISABLED_PLUGINS },
       verbatimPrompts: true,
       maxTurns: 120,
       maxBudgetUsd: 3,
@@ -213,8 +234,36 @@ describe('buildQueryOptions 스냅샷 (수용 기준 1 · 2)', () => {
       expect(options).not.toHaveProperty('agents');
       expect(options).not.toHaveProperty('agent');
       expect(options).not.toHaveProperty('plugins');
-      expect(options).not.toHaveProperty('settings');
       expect(options).not.toHaveProperty('extraArgs');
+      // 플래그 설정은 내장 플러그인 끄기 하나뿐 (ADR-098)
+      expect(options.settings).toEqual({ enabledPlugins: EXPECTED_DISABLED_PLUGINS });
+    },
+  );
+
+  it('내장 플러그인 끄기 목록은 확인한 SDK 판에 묶여 있다: package.json의 SDK 판이 바뀌면 다시 확인해야 한다 (ADR-098)', () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { dependencies: Record<string, string> };
+    expect(manifest.dependencies['@anthropic-ai/claude-agent-sdk']).toBe(
+      BUILTIN_PLUGINS_CHECKED_SDK_VERSION,
+    );
+    expect(BUILTIN_PLUGINS_CHECKED_SDK_VERSION).toBe('0.3.289');
+    expect(AGENT_FLAG_SETTINGS).toEqual({ enabledPlugins: EXPECTED_DISABLED_PLUGINS });
+    expect(AGENT_DISABLED_BUILTIN_PLUGINS).not.toContain('cc-plugin-sec-default');
+  });
+
+  it.each(['rule-writer', 'test-writer', 'implementer'] as const)(
+    '%s: 작업 폴더의 AGENTS.md · CLAUDE.md가 세션 지침이 되지 않는 설정이 세 겹으로 있다 (ADR-098)',
+    (role) => {
+      const options = buildQueryOptions(specFor(role), deps());
+      // ① 지침 파일을 싣는 내장 플러그인 끔 ② 프로젝트 설정 원천 없음 ③ CLAUDE.md 계열 읽기 끔
+      expect(options.settings).toMatchObject({
+        enabledPlugins: { 'cc-plugin-agents-md@builtin': false },
+      });
+      expect(options.settingSources).toEqual([]);
+      expect(options.env).toMatchObject({ CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' });
+      // 호출마다 새 객체 (공유 상수를 SDK에 넘기지 않음)
+      expect(options.settings).not.toBe(AGENT_FLAG_SETTINGS);
     },
   );
 
@@ -740,6 +789,19 @@ describe('ClaudeSdkAdapter (가짜 query)', () => {
     const cases = [
       [{ plugins: [{ name: 'evil-plugin', path: '/x/evil' }] }, 'plugins_loaded'],
       [{ plugins: [{ path: '/x/unnamed' }] }, 'plugins_loaded'],
+      // 실제 CLI 2.1.289의 내장 플러그인 항목 모양 (#126). 끄기가 듣지 않아 보고되면 여전히 멈춘다 (ADR-098)
+      [
+        {
+          plugins: [
+            {
+              name: 'cc-plugin-agents-md',
+              path: 'builtin',
+              source: 'cc-plugin-agents-md@builtin',
+            },
+          ],
+        },
+        'plugins_loaded',
+      ],
       [{ permissionMode: 'default' }, 'permission_mode_mismatch'],
       [{ permissionMode: 'bypassPermissions' }, 'permission_mode_mismatch'],
       // 권한 모드 보고가 없으면 확인할 수 없으므로 위반 (보수적)

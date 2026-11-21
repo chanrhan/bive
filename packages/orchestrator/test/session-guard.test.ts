@@ -346,6 +346,27 @@ describe('checkSessionInit', () => {
     expect(check({ mcpServers: [], plugins: ['a-plugin'] })?.kind).toBe('mcp_mismatch');
   });
 
+  it('플러그인은 내장 이름이든 아니든 하나라도 보고되면 거부한다: 내장 플러그인은 어댑터가 끄고 가드는 허용 목록을 두지 않는다 (ADR-098)', () => {
+    const tools = [...ROLE_TOOL_NAMES['rule-writer']];
+    const base = init(tools, ['bive']);
+    const check = (plugins: string[]) =>
+      checkSessionInit({ ...base, plugins, permissionMode: 'dontAsk' }, { role: 'rule-writer' })
+        .violation;
+    // #126 실제 실행에서 보고된 내장 플러그인 (끄기가 듣지 않은 경우에도 통과시키지 않는다)
+    expect(check(['cc-plugin-agents-md', 'cc-plugin-plugin-authoring'])).toMatchObject({
+      kind: 'plugins_loaded',
+      unexpectedPlugins: ['cc-plugin-agents-md', 'cc-plugin-plugin-authoring'],
+    });
+    // 관리 정책으로만 켜지는 내장 플러그인 · 내장 접두를 흉내 낸 이름 · 내장이 아닌 플러그인
+    for (const name of ['cc-plugin-sec-default', 'cc-plugin-evil', 'my-plugin', '/x/unnamed']) {
+      expect(check([name]), name).toMatchObject({
+        kind: 'plugins_loaded',
+        unexpectedPlugins: [name],
+      });
+    }
+    expect(check([])).toBeNull();
+  });
+
   it('도구가 없는 역할(chat)은 기대 MCP 서버를 지정해 검사할 수 있다', () => {
     expect(checkSessionInit(init([], []), { role: 'chat', mcpServers: [] }).violation).toBeNull();
     expect(
