@@ -103,6 +103,9 @@ export type StepRunPatch = Pick<RunPatch, 'mergeCommit' | 'headCommit'>;
  * - `skipped`: 이 실행에서 하지 않는 단계 (M1의 변이 주입) → 다음 단계
  * - `unmet`: 종료 조건 미충족 → `UNMET_POLICY`대로 재시도 · 회귀, 상한을 넘거나 규칙이 없으면 실행 `failed`
  * - `halt`: 실행을 끝낸다 (`failed` · `budget_exceeded`, 예: 병합 충돌 · 가드 위반). 브랜치 · 워크트리는 보존한다
+ * 단, 병합 커밋이 실행에 기록된 뒤(병합 단계 다음)에는 `unmet` 상한 · `halt` · 실행기 예외 어느 것도 실행을 `failed`로 쓰지
+ * 않는다: 실행은 `merged`로 끝나고 실패는 그 단계 시도에만 남으며 보존하지 않는다(`pipeline-engine.ts` `runEnding()`,
+ * ADR-091 · ADR-094).
  */
 export type StepOutcome =
   | { readonly status: 'passed'; readonly exitDetail?: unknown; readonly run?: StepRunPatch }
