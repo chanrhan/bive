@@ -16,6 +16,7 @@ roles:
               kind: business
               checkKinds: [test]
               rationale: 요구사항의 '데이터베이스 상태 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+              contradiction: { verdict: none }
           - message: 규칙 제안 1건을 등록했습니다.
         result:
           subtype: success

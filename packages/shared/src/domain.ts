@@ -754,9 +754,69 @@ export type NormChangeBreakReason = z.infer<typeof NormChangeBreakReason>;
  * 종류별 상세. 신규는 `after`(만든 규범의 내용)만, 그 밖의 종류가 쓰는 칸은 그 이슈가 더한다.
  * 값은 에이전트가 쓴 글을 담을 수 있어 화면 · 응답에는 표시 값으로만 내보낸다(ADR-089).
  */
+/**
+ * 판단의 주제 (M7-07 #219, ADR-106). `new_rule` = 규칙 작성 역할이 새 규칙을 만들며 효력 있는 기존 규칙과의 모순을
+ * 판단함. 이의(M7-11) · 검사 단계의 기존 규칙 실패(M7-12)는 그 이슈가 값을 더한다(넓히기만).
+ */
+export const NormJudgmentSubject = z.enum(['new_rule']);
+export type NormJudgmentSubject = z.infer<typeof NormJudgmentSubject>;
+
+/** 판단 결과. 모순 없음 · 모순 (M7-11의 유지 등은 그 이슈가 더한다). */
+export const NormJudgmentVerdict = z.enum(['no_contradiction', 'contradiction']);
+export type NormJudgmentVerdict = z.infer<typeof NormJudgmentVerdict>;
+
+/** 판단이 가리키는 규칙 (판단 시점의 ID와 표시 ID). */
+export const NormJudgmentRuleRef = z.strictObject({ id: Ulid, displayId: displayIdSchema('RULE') });
+export type NormJudgmentRuleRef = z.infer<typeof NormJudgmentRuleRef>;
+
+/** 판단할 때 받은 규범 입력의 수 (효력 있는 전체 · 실은 것, ADR-100 A15). */
+const NormJudgmentInputCount = z
+  .strictObject({ total: NonNegativeInt, included: NonNegativeInt })
+  .refine((count) => count.included <= count.total, '실은 수가 전체보다 많습니다');
+
+/**
+ * 규범 담당 역할의 판단 상세 (종류 `judgment`, M7-07 #219, ADR-106). 근거 글은 기록의 `reason`에 있다.
+ * - `contradicts`: 모순 대상 규칙. 결과가 모순이면 1개 이상, 모순 없음이면 빈 목록
+ * - `createdSeq`: 주제가 새 규칙이면 같은 트랜잭션에서 남긴 그 규칙의 신규 기록 순번(필수)
+ * - `input`: 판단할 때 작업 지시에 실린 규범 수 (잘렸으면 `included < total`)
+ */
+export const NormJudgmentDetail = z
+  .strictObject({
+    subject: NormJudgmentSubject,
+    verdict: NormJudgmentVerdict,
+    contradicts: z.array(NormJudgmentRuleRef),
+    createdSeq: z.int().positive().optional(),
+    input: z.strictObject({
+      requirements: NormJudgmentInputCount,
+      rules: NormJudgmentInputCount,
+    }),
+  })
+  .superRefine((judgment, ctx) => {
+    if ((judgment.verdict === 'contradiction') !== judgment.contradicts.length > 0) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '모순 판단에는 대상 규칙이 1개 이상, 모순 없음에는 대상 규칙이 없어야 합니다',
+        path: ['contradicts'],
+      });
+    }
+    if (new Set(judgment.contradicts.map((rule) => rule.id)).size !== judgment.contradicts.length) {
+      ctx.addIssue({ code: 'custom', message: '대상 규칙이 중복됐습니다', path: ['contradicts'] });
+    }
+    if (judgment.subject === 'new_rule' && judgment.createdSeq === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '새 규칙의 판단에는 그 규칙의 신규 기록 순번이 필요합니다',
+        path: ['createdSeq'],
+      });
+    }
+  });
+export type NormJudgmentDetail = z.infer<typeof NormJudgmentDetail>;
+
 export const NormChangeDetail = z.strictObject({
   before: z.unknown().optional(),
   after: z.unknown().optional(),
+  /** 판단 (종류 `judgment`에만, M7-07) */
+  judgment: NormJudgmentDetail.optional(),
 });
 export type NormChangeDetail = z.infer<typeof NormChangeDetail>;
 
@@ -813,6 +873,24 @@ export const NormChangeEntry = z
           path: ['detail', 'before'],
         });
       }
+    }
+    // 판단 상세는 판단 기록에만, 판단 기록에는 판단 상세만 (M7-07)
+    if ((entry.kind === 'judgment') !== (entry.detail.judgment !== undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '판단 상세(judgment)는 판단 기록에만 있고 판단 기록에는 반드시 있습니다',
+        path: ['detail', 'judgment'],
+      });
+    }
+    if (
+      entry.kind === 'judgment' &&
+      (entry.detail.before !== undefined || entry.detail.after !== undefined)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '판단 기록에는 이전 · 이후 내용이 없습니다',
+        path: ['detail'],
+      });
     }
   });
 export type NormChangeEntry = z.infer<typeof NormChangeEntry>;

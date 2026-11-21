@@ -145,6 +145,7 @@ const OTHER_ROLE_TOOL_ARGS: Readonly<Record<string, Record<string, unknown>>> = 
     kind: 'business',
     checkKinds: ['test'],
     rationale: '무결성 시험',
+    contradiction: { verdict: 'none' },
   },
 };
 
@@ -599,10 +600,12 @@ describe('agent-approve: 세션의 승인 호출 거부 (수용 기준 2, NFR-01
         expect(store.approvalLog.list({ entity: 'Rule', id })).toEqual([]);
       }
       expect(store.approvalLog.list()).toEqual([]);
-      // 에이전트 행동은 규범 변경 기록에만 남는다 (ADR-100 C2)
+      // 에이전트 행동은 규범 변경 기록에만 남는다 (ADR-100 C2). 규칙마다 신규 · 모순 판단 (M7-07)
       expect(store.normChanges.list().map((entry) => [entry.kind, entry.actor])).toEqual([
         ['created', { kind: 'agent', role: 'rule-writer' }],
+        ['judgment', { kind: 'agent', role: 'rule-writer' }],
         ['created', { kind: 'agent', role: 'rule-writer' }],
+        ['judgment', { kind: 'agent', role: 'rule-writer' }],
       ]);
       // 거부된 호출도 세션 도구 호출 기록으로 남는다 (NFR-02)
       expect(

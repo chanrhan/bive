@@ -24,6 +24,8 @@ import type { AgentSelection } from '../src/agent/select.js';
 import { readRuleWriterStatus } from '../src/ipc/rule-writer-handlers.js';
 import type { PipeServer } from '../src/ipc/server.js';
 import { startOrchestrator, type Orchestrator } from '../src/orchestrator.js';
+import { NO_CONTRADICTION_REASON } from '../src/norms/agent-rule.js';
+import { type NormInput } from '../src/norms/norm-input.js';
 import { RULE_WRITER_SYSTEM_PROMPT, ruleWriterTaskPrompt } from '../src/rule-writer/prompts.js';
 import {
   type RuleWriterSessionRecord,
@@ -44,6 +46,17 @@ const human = { kind: 'human' } as const satisfies Author;
 /** roadmap M1 흐름 2: rule-writer만 먼저 저장한다 */
 const RULE_WRITER_SETTINGS: RoleSettings = { model: 'test-model', maxBudgetUsd: 1, maxTurns: 20 };
 const RUN_LIMITS: RunLimits = { maxBudgetUsd: 5, maxTurns: 200 };
+
+/** 효력 있는 규범이 없는 입력 (프롬프트 문장 시험용). */
+const NO_NORMS: NormInput = {
+  requirements: [],
+  rules: [],
+  summary: {
+    requirements: { total: 0, included: 0, omitted: 0 },
+    rules: { total: 0, included: 0, omitted: 0 },
+    truncated: false,
+  },
+};
 
 const servers: PipeServer[] = [];
 const clients: TestClient[] = [];
@@ -184,12 +197,15 @@ const validArgs = (overrides: Record<string, unknown> = {}): Record<string, unkn
   kind: 'business',
   checkKinds: ['test'],
   rationale: "요구사항의 '서버 시각 포함'",
+  contradiction: { verdict: 'none' },
   ...overrides,
 });
 
-/** 도구 인자에서 근거를 뺀 규칙 본문 (근거는 규범 변경 기록 · 제안의 별도 칸). */
+/** 도구 인자에서 근거 · 모순 판단을 뺀 규칙 본문 (둘은 규범 변경 기록 · 제안의 별도 칸). */
 const withoutRationale = (args: Record<string, unknown>): Record<string, unknown> =>
-  Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'rationale'));
+  Object.fromEntries(
+    Object.entries(args).filter(([key]) => key !== 'rationale' && key !== 'contradiction'),
+  );
 
 /** EARS 검사가 받는 진술 (규칙 화면 whenCondition과 교차 확인하는 공용 사례). */
 const EARS_ACCEPTED = [
@@ -305,14 +321,45 @@ describe('requirement.create 뒤 rule-writer 세션 (happy-path)', () => {
     });
 
     h.read((store) => {
-      // 규범 변경 기록: 규칙마다 신규 1건 (이후 내용 · 사유 · 세션 ID · 시각), 규칙과 같은 시각
-      const changes = store.normChanges.list();
-      expect(changes).toHaveLength(2);
+      // 규범 변경 기록: 규칙마다 신규 1건 (이후 내용 · 사유 · 세션 ID · 시각, 규칙과 같은 시각)과 바로 뒤의 모순 판단 1건 (M7-07)
+      const all = store.normChanges.list();
+      expect(all.map((change) => change.kind)).toEqual([
+        'created',
+        'judgment',
+        'created',
+        'judgment',
+      ]);
+      const changes = all.filter((change) => change.kind === 'created');
+      all
+        .filter((change) => change.kind === 'judgment')
+        .forEach((judgment, index) => {
+          const rule = rules[index];
+          expect(judgment).toMatchObject({
+            seq: index * 2 + 2,
+            actor: { kind: 'agent', role: 'rule-writer' },
+            targetRef: { entity: 'Rule', id: rule?.id },
+            sessionId: record.id,
+            reason: NO_CONTRADICTION_REASON,
+            at: rule?.createdAt,
+            detail: {
+              judgment: {
+                subject: 'new_rule',
+                verdict: 'no_contradiction',
+                contradicts: [],
+                createdSeq: index * 2 + 1,
+                input: {
+                  requirements: { total: 1, included: 1 },
+                  rules: { total: 0, included: 0 },
+                },
+              },
+            },
+          });
+        });
       changes.forEach((change, index) => {
         const rule = rules[index];
         if (rule === undefined) throw new Error('규칙 없음');
         expect(change).toMatchObject({
-          seq: index + 1,
+          seq: index * 2 + 1,
           kind: 'created',
           actor: { kind: 'agent', role: 'rule-writer' },
           targetRef: { entity: 'Rule', id: rule.id },
@@ -378,10 +425,11 @@ describe('requirement.create 뒤 rule-writer 세션 (happy-path)', () => {
     expect(listed.chain).toEqual({ valid: true, brokenAtSeq: null, reason: null });
     expect(listed.entries.map((entry) => [entry.seq, entry.kind, entry.textTruncated])).toEqual([
       [1, 'created', false],
+      [2, 'judgment', false],
     ]);
     expect(
       (await h.client.call('normChange.list', { projectId: h.project.id })).entries,
-    ).toHaveLength(2);
+    ).toHaveLength(4);
     // 규칙 작성 세션 로그는 만든 규칙 수를 적는다
     expect(h.logs.some((line) => line.includes('success, 규칙 2건'))).toBe(true);
     // 세션 작업 폴더는 끝나면 지운다
@@ -572,8 +620,11 @@ describe('propose_rule 검증 (제목 · EARS 진술 · 검사 종류 · 부모 
     const rules = h.read((store) => store.rules.list());
     expect(rules).toHaveLength(1);
     expect(rules[0]).toMatchObject({ parentRequirementId: requirement.id });
-    // 거부된 호출은 규범 변경 기록도 남기지 않는다
-    expect(h.read((store) => store.normChanges.list())).toHaveLength(1);
+    // 거부된 호출은 규범 변경 기록도 남기지 않는다 (받은 호출 1건의 신규 · 모순 판단만)
+    expect(h.read((store) => store.normChanges.list().map((entry) => entry.kind))).toEqual([
+      'created',
+      'judgment',
+    ]);
   });
 
   it('줄바꿈 · 제어 문자를 담은 도구 이름은 로그 한 줄 안에 표기로 남는다: 가짜 로그 줄을 만들지 못한다 (ADR-089)', async () => {
@@ -1128,7 +1179,12 @@ describe('오케스트레이터 기동 경로', () => {
     const reader = openProjectStore(project.id, { home: biveHome, create: false });
     try {
       expect(reader.rules.list()).toHaveLength(2);
-      expect(reader.normChanges.list()).toHaveLength(2);
+      expect(reader.normChanges.list().map((entry) => entry.kind)).toEqual([
+        'created',
+        'judgment',
+        'created',
+        'judgment',
+      ]);
       expect(reader.proposals.list()).toEqual([]);
     } finally {
       reader.close();
@@ -1373,11 +1429,14 @@ describe('사후 확인 전환: 프롬프트 · 대기 중이던 제안 (M7-02 #
     /승인해야|승인 대기|승인을 받|제안을 등록|제안으로 등록|제안한다|제안하라/;
 
   it('규칙 작성 역할의 시스템 프롬프트 · 작업 지시 · 도구 설명에 사람 승인을 전제한 문장이 없고, 바로 효력 · 사후 확인을 밝힌다', () => {
-    const task = ruleWriterTaskPrompt({
-      id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
-      displayId: 'REQ-001',
-      text: '헬스 체크 응답에 서버 시각 포함',
-    });
+    const task = ruleWriterTaskPrompt(
+      {
+        id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+        displayId: 'REQ-001',
+        text: '헬스 체크 응답에 서버 시각 포함',
+      },
+      NO_NORMS,
+    );
     const [tool] = toolDefinitions('rule-writer');
     for (const text of [RULE_WRITER_SYSTEM_PROMPT, task, tool?.description ?? '']) {
       expect(text).not.toMatch(APPROVAL_PREMISE);
@@ -1457,7 +1516,7 @@ describe('사후 확인 전환: 프롬프트 · 대기 중이던 제안 (M7-02 #
     ).resolves.toMatchObject({ pending: 0 });
 
     h.read((store) => {
-      // 승인 기록: 사람의 승인 · 거절 2건뿐. 규범 변경 기록: 에이전트의 신규 2건뿐 (사람 행동은 섞이지 않는다, C2)
+      // 승인 기록: 사람의 승인 · 거절 2건뿐. 규범 변경 기록: 에이전트의 신규 · 모순 판단 2쌍뿐 (사람 행동은 섞이지 않는다, C2)
       expect(store.approvalLog.list().map((entry) => [entry.action, entry.actor.kind])).toEqual([
         ['approve', 'human'],
         ['reject', 'human'],
@@ -1466,7 +1525,9 @@ describe('사후 확인 전환: 프롬프트 · 대기 중이던 제안 (M7-02 #
         store.normChanges.list().map((entry) => [entry.kind, entry.actor.kind, entry.sessionId]),
       ).toEqual([
         ['created', 'agent', onlyRecord(h, fresh.id).id],
+        ['judgment', 'agent', onlyRecord(h, fresh.id).id],
         ['created', 'agent', onlyRecord(h, fresh.id).id],
+        ['judgment', 'agent', onlyRecord(h, fresh.id).id],
       ]);
       // 바로 반영된 규칙은 미확인, 승인한 옛 제안의 규칙은 확인됨
       const states = store.rules

@@ -105,9 +105,45 @@ export const InstallPackageInput = z.strictObject({
 const NonBlank = (schema: z.ZodString) =>
   schema.refine((value) => value.trim().length > 0, '비어 있음');
 
+/** 모순 판단의 대상 규칙 수 상한 (ADR-106). */
+export const MAX_CONTRADICTION_RULES = 20;
+/** 모순 판단 근거의 길이 상한 (ADR-106). */
+export const MAX_CONTRADICTION_GROUNDS = 4000;
+
+/**
+ * 새 규칙과 효력 있는 기존 규칙의 모순 판단 (NRM-02, ADR-100 D5 · K1, M7-07, ADR-106). 규칙 생성마다 필수다.
+ * - `none`: 모순 없음. 다른 칸을 두면 거부한다(strict)
+ * - `contradicts`: 모순 대상 규칙(표시 ID 또는 ID, 1개 이상 · 중복 없음)과 근거(빈 글 불가)
+ * 대상 규칙이 지금 효력 있는 규칙인지는 반영 모듈이 저장소에서 확인한다(`norms/agent-rule.ts`).
+ */
+export const RuleContradictionInput = z
+  .discriminatedUnion('verdict', [
+    z.strictObject({
+      verdict: z.literal('none').describe('모순 없음'),
+    }),
+    z.strictObject({
+      verdict: z.literal('contradicts').describe('모순 있음'),
+      ruleIds: z
+        .array(z.string().min(1).max(64))
+        .min(1)
+        .max(MAX_CONTRADICTION_RULES)
+        .refine((ids) => new Set(ids).size === ids.length, '대상 규칙이 중복됨')
+        .describe(
+          '모순 대상 규칙의 표시 ID(RULE-001 형식) 또는 ID. 작업 지시의 효력 있는 규칙 가운데',
+        ),
+      grounds: NonBlank(z.string().min(1).max(MAX_CONTRADICTION_GROUNDS)).describe(
+        '근거: 새 규칙이 대상 규칙의 진술 · 인수 테스트 케이스의 어느 부분과 동시에 만족될 수 없는지',
+      ),
+    }),
+  ])
+  .describe(
+    '효력 있는 기존 규칙과의 모순 판단. 모순이 없으면 {"verdict":"none"}, 있으면 대상 규칙과 근거',
+  );
+export type RuleContradictionInput = z.infer<typeof RuleContradictionInput>;
+
 /**
  * 규칙 생성 입력 (NRM-02, ADR-062, M7-02). 제목(한 줄) · EARS 진술 · 종류 · 검사 종류(1개 이상, 중복 없음) ·
- * 부모 요구사항 · 근거. 부모 요구사항이 세션의 요구사항인지 · 살아 있는지는 등록 콜백이 확인한다.
+ * 부모 요구사항 · 근거 · 모순 판단(M7-07, 필수). 부모 요구사항이 세션의 요구사항인지 · 살아 있는지는 등록 콜백이 확인한다.
  */
 export const ProposeRuleInput = z.strictObject({
   parentRequirementId: z
@@ -134,6 +170,7 @@ export const ProposeRuleInput = z.strictObject({
     .refine((kinds) => new Set(kinds).size === kinds.length, '검사 종류가 중복됨')
     .describe('검사 종류 1개 이상 (중복 없이)'),
   rationale: NonBlank(z.string().min(1).max(4000)).describe('요구사항의 어느 부분을 옮겼는지'),
+  contradiction: RuleContradictionInput,
 });
 export type ProposeRuleInput = z.infer<typeof ProposeRuleInput>;
 
@@ -188,7 +225,7 @@ const DEFINITIONS: Record<FixedToolName, ToolDefinition> = {
   },
   propose_rule: {
     name: 'propose_rule',
-    description: `요구사항에서 도출한 규칙을 만든다. 만든 규칙은 바로 효력을 갖고 근거와 함께 규범 변경 기록에 남으며, 사람은 나중에 확인한다. 진술은 ${EARS_FORMAT} 형식 한 줄.`,
+    description: `요구사항에서 도출한 규칙을 만든다. 만든 규칙은 바로 효력을 갖고 근거와 함께 규범 변경 기록에 남으며, 사람은 나중에 확인한다. 진술은 ${EARS_FORMAT} 형식 한 줄. 효력 있는 기존 규칙과의 모순 판단(contradiction)이 필수이고 그 판단도 규범 변경 기록에 남는다. 모순이어도 규칙은 만들어지고 기존 규칙은 그대로 효력을 갖는다.`,
     inputSchema: ProposeRuleInput,
   },
 };
