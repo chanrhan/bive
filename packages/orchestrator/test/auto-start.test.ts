@@ -178,7 +178,7 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
     expect(run).toMatchObject({
       displayId: 'EXE-001',
       targetRuleIds: rules.map((rule) => rule.id),
-      startedBy: { kind: 'orchestrator', causeSeqs: [1, 2] },
+      startedBy: { kind: 'orchestrator', causeSeqs: [1, 3] },
     });
     await waitFor(
       async () => (await statusOf(h, run.id)) === 'merged',
@@ -197,27 +197,29 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
       'screen_update:passed',
     ]);
 
-    // 규범 변경 기록: 신규 2건 뒤 자동 시작 1건 (주체 오케스트레이터, 대상 = 실행, 원인 = 신규 기록 순번), 체인 정상
+    // 규범 변경 기록: 규칙마다 신규 · 모순 판단 1쌍(M7-07) 뒤 자동 시작 1건 (주체 오케스트레이터, 대상 = 실행,
+    // 원인 = 신규 기록 순번이고 판단 기록 순번이 아니다), 체인 정상
     const changes = await h.client.call('normChange.list', { projectId: h.projectId });
     expect(changes.chain.valid).toBe(true);
     expect(changes.entries.map((entry) => [entry.seq, entry.kind, entry.targetRef.id])).toEqual([
       [1, 'created', rules[0]?.id],
-      [2, 'created', rules[1]?.id],
-      [3, 'auto_start', run.id],
+      [2, 'judgment', rules[0]?.id],
+      [3, 'created', rules[1]?.id],
+      [4, 'judgment', rules[1]?.id],
+      [5, 'auto_start', run.id],
     ]);
-    expect(changes.entries[2]).toMatchObject({
+    expect(changes.entries[4]).toMatchObject({
       actor: { kind: 'orchestrator' },
       targetRef: { entity: 'Run', id: run.id },
       sessionId: null,
       runId: run.id,
       reason: AUTO_START_REASON,
-      detail: { causeSeqs: [1, 2], ruleIds: rules.map((rule) => rule.id) },
+      detail: { causeSeqs: [1, 3], ruleIds: rules.map((rule) => rule.id) },
     });
     // 원인 순번은 그 세션(= 시도)의 신규 기록이다
-    expect(changes.entries.slice(0, 2).map((entry) => entry.sessionId)).toEqual([
-      status.attemptId,
-      status.attemptId,
-    ]);
+    expect(
+      changes.entries.filter((entry) => entry.kind === 'created').map((entry) => entry.sessionId),
+    ).toEqual([status.attemptId, status.attemptId]);
     // 승인 기록(사람 행동만, C2)에는 아무것도 없다: 실행 시작 확인 · 승인이 없었다
     const approvals = await h.client.call('approvalLog.list', { projectId: h.projectId });
     expect(approvals.entries).toEqual([]);
@@ -227,7 +229,7 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
       { state: 'started', runId: run.id, runDisplayId: 'EXE-001' },
     ]);
     expect(h.read((store) => store.autoStartSkips.get(status.attemptId))).toBeNull();
-    expect(h.logs).toContain('실행 자동 시작 (EXE-001, 규칙 2건, 규범 변경 기록 3)');
+    expect(h.logs).toContain('실행 자동 시작 (EXE-001, 규칙 2건, 규범 변경 기록 5)');
   }, 60_000);
 
   it('하루 한도가 비어 있으면 자동 시작을 생략하고 그 사실이 규칙 작성 상태(상태 줄)에 실린다. 사람의 [실행]은 그대로 실행을 만든다', async () => {
@@ -244,7 +246,7 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
       (await h.client.call('normChange.list', { projectId: h.projectId })).entries.map(
         (entry) => entry.kind,
       ),
-    ).toEqual(['created', 'created']);
+    ).toEqual(['created', 'judgment', 'created', 'judgment']);
     expect(h.read((store) => store.autoStartSkips.get(status.attemptId))).toMatchObject({
       reason: 'project_daily_budget_unset',
     });
@@ -264,7 +266,7 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
       (await h.client.call('normChange.list', { projectId: h.projectId })).entries.map(
         (entry) => entry.kind,
       ),
-    ).toEqual(['created', 'created']);
+    ).toEqual(['created', 'judgment', 'created', 'judgment']);
   }, 60_000);
 
   it('자동 시작 실행도 프로젝트당 진행 중 1개 · 실행 대기를 따른다: 앞 실행이 도는 동안 생긴 자동 시작 실행은 실행 대기, 앞 실행이 끝나면 생성 순으로 시작한다', async () => {
@@ -307,8 +309,8 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
         .filter((entry) => entry.kind === 'auto_start')
         .map((entry) => [entry.seq, entry.detail.causeSeqs]),
     ).toEqual([
-      [3, [1, 2]],
-      [6, [4, 5]],
+      [5, [1, 3]],
+      [10, [6, 8]],
     ]);
     expect((await h.client.call('approvalLog.list', { projectId: h.projectId })).entries).toEqual(
       [],
@@ -356,6 +358,12 @@ const makeRule = (h: StoreHarness, sessionId: string, title: string): NormChange
           rationale: '시험 근거',
           author: { kind: 'agent', role: 'rule-writer' },
           sessionId,
+          contradiction: { verdict: 'none' },
+          normInput: {
+            requirements: { total: 1, included: 1, omitted: 0 },
+            rules: { total: 0, included: 0, omitted: 0 },
+            truncated: false,
+          },
         },
         clock,
       ).normChange,
@@ -553,7 +561,7 @@ describe('AutoStarter: 세션 종료 알림 → 자동 시작 → 엔진 (ADR-10
       'duplicate',
     );
     expect(created).toHaveLength(1);
-    expect(logs).toEqual([`실행 자동 시작 (EXE-001, 규칙 1건, 규범 변경 기록 2)`]);
+    expect(logs).toEqual([`실행 자동 시작 (EXE-001, 규칙 1건, 규범 변경 기록 3)`]);
   });
 
   it('저장소를 열 수 없거나 저장이 실패하면 로그만 남기고 던지지 않는다 (규칙 작성 세션 기록 · 알림을 막지 않음)', () => {

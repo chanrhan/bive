@@ -14,6 +14,9 @@
 // - 중복이 아닌 시도마다 시도 기록(`rule_writer_requests`, 세션 ID와 같은 ID)을 남기고, 세션을 열지 않으면 생략 사유를
 //   거기에 채운다. 화면 · `ruleWriter.status`는 이 기록과 세션 기록에서만 상태를 만든다 (M3-26, ADR-099)
 // - 시도 기록이 바뀌면(대기 · 시작 · 끝 · 생략) `onChanged`로 알린다 (`event.ruleWriter.changed`)
+// - 규범 입력(M7-07 #219, ADR-100 K1 · A15, ADR-106): 세션을 열기 직전에 효력 있는 요구사항 · 규칙을 읽어 작업 지시에 읽기 전용
+//   자료로 싣는다(도구가 아니라 프롬프트로만). 받은 수 · 잘린 사실은 세션 기록(`normInput`)과 로그에 남긴다. 규칙 생성마다 받는
+//   모순 판단은 반영 모듈이 같은 트랜잭션에서 규범 변경 기록(판단)에 남긴다
 // - 세션 행이 있는 세션이 끝나면 종료 기록 저장 뒤 `onSessionEnded`를 부른다. 오케스트레이터가 이것으로 실행을 자동 시작한다
 //   (M7-05 #217, ADR-107). 세션 안에서는 실행을 만들 수 없다(규칙 작성 역할의 도구는 규칙 생성 하나)
 // - 다시 시도(`retry`): 사람이 요구사항을 직접 편집해 저장했을 때, 가장 최근 시도가 생략 · 실패(`success` 아닌 종료)이고
@@ -46,7 +49,13 @@ import { runGuardedSession } from '../agent/guarded-session.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import type { TaskTracker } from '../lifecycle.js';
-import { createAgentRule } from '../norms/agent-rule.js';
+import { createAgentRule, NormJudgmentInputError } from '../norms/agent-rule.js';
+import {
+  collectNormInput,
+  type NormInput,
+  type NormInputSummary,
+  normInputSummaryText,
+} from '../norms/norm-input.js';
 import {
   dailyBudgetReached,
   type DailyBudgetState,
@@ -109,6 +118,8 @@ export interface RuleWriterSessionRecord {
   toolCalls: ToolCallRecord[];
   /** 이 세션이 바로 반영한 규칙 ID (만든 순서) */
   ruleIds: string[];
+  /** 작업 지시에 실은 규범 입력 (세션을 열기 직전에 읽음, 열지 않았으면 `null`, M7-07) */
+  normInput: RuleWriterNormInputRecord | null;
   /** 결과 메시지 (없으면 `null`) */
   result: SessionResultEvent | null;
   /** 종료 사유 (`ended`일 때) */
@@ -118,6 +129,13 @@ export interface RuleWriterSessionRecord {
   readonly createdAt: string;
   startedAt: string | null;
   endedAt: string | null;
+}
+
+/** 세션이 받은 규범 입력의 기록: 수 · 잘린 사실과 실은 항목의 표시 ID (ADR-100 A15). */
+export interface RuleWriterNormInputRecord {
+  readonly summary: NormInputSummary;
+  readonly requirementDisplayIds: readonly string[];
+  readonly ruleDisplayIds: readonly string[];
 }
 
 export interface RuleWriterStartInput {
@@ -382,6 +400,7 @@ export class RuleWriterService implements RuleWriterLauncher {
       sdkSessionId: null,
       toolCalls: [],
       ruleIds: [],
+      normInput: null,
       result: null,
       endReason: null,
       error: null,
@@ -560,13 +579,16 @@ export class RuleWriterService implements RuleWriterLauncher {
     try {
       // rule-writer는 파일 도구가 없으므로 작업 폴더는 비어 있다 (ADR-024 허용 목록 방식)
       mkdirSync(workDir, { recursive: true, mode: 0o700 });
+      // 효력 있는 규범은 작업 지시로만 준다 (도구 목록은 그대로, ADR-100 K1 · D4). 읽지 못하면 세션을 열지 않는다
+      const norms = this.#readNormInput(record, requirement);
+      const prompt = ruleWriterTaskPrompt(requirement, norms);
       const tools = createRoleTools({
         role: RULE_WRITER_ROLE,
         sessionRoot: workDir,
         biveHome: this.#biveHome,
         now: () => new Date(this.#now()),
         hooks: {
-          proposeRule: (input) => this.#propose(record, input),
+          proposeRule: (input) => this.#propose(record, norms.summary, input),
           onToolCall: (call) => {
             record.toolCalls.push(call);
             this.#persistToolCall(record, call);
@@ -604,7 +626,7 @@ export class RuleWriterService implements RuleWriterLauncher {
         spec: {
           role: RULE_WRITER_ROLE,
           systemPrompt: RULE_WRITER_SYSTEM_PROMPT,
-          prompt: ruleWriterTaskPrompt(requirement),
+          prompt,
           workDir,
           tools,
           budget,
@@ -698,6 +720,29 @@ export class RuleWriterService implements RuleWriterLauncher {
     return null;
   }
 
+  /**
+   * 작업 지시에 실을 효력 있는 규범을 읽고(초점 = 작업 대상 요구사항) 받은 수 · 잘린 사실을 세션 기록과 로그에 남긴다.
+   * @throws 저장소를 읽지 못함 (세션을 열지 않는다)
+   */
+  #readNormInput(
+    record: RuleWriterSessionRecord,
+    requirement: RuleWriterStartInput['requirement'],
+  ): NormInput {
+    const norms = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+      collectNormInput(store, { requirementIds: [requirement.id], ruleIds: [] }),
+    );
+    record.normInput = {
+      summary: norms.summary,
+      requirementDisplayIds: norms.requirements.map((entry) => entry.displayId),
+      ruleDisplayIds: norms.rules.map((entry) => entry.displayId),
+    };
+    const truncated = norms.summary.truncated ? ' 잘림' : '';
+    this.#log(
+      `규칙 작성 규범 입력${truncated} (${record.requirementDisplayId}, ${normInputSummaryText(norms.summary)})`,
+    );
+    return norms;
+  }
+
   /** 세션 기록을 프로젝트 저장소에 남긴다 (실패는 로그만). 세션 행을 만든 기록은 `#persisted`에 둔다. */
   #persist(record: RuleWriterSessionRecord, fn: (store: ProjectStore) => unknown): void {
     try {
@@ -789,31 +834,51 @@ export class RuleWriterService implements RuleWriterLauncher {
    * 입력 형식(제목 · EARS 진술 · 검사 종류 등)은 실행기가 이미 검사했다.
    * - 부모가 이 세션의 요구사항이 아니면 `denied`(`invalid_args`)
    * - 부모 요구사항 · 프로젝트가 없으면 `error`(`not_found`), 부모가 삭제됐으면 `error`(`state_conflict`)
+   * - 모순 대상이 지금 효력 있는 규칙이 아니면 `denied`(`invalid_args`, 사유를 돌려줘 모델이 고쳐 다시 부르게 한다)
    */
-  async #propose(record: RuleWriterSessionRecord, input: ProposeRuleInput): Promise<ToolResult> {
+  async #propose(
+    record: RuleWriterSessionRecord,
+    normInput: NormInputSummary,
+    input: ProposeRuleInput,
+  ): Promise<ToolResult> {
     if (input.parentRequirementId !== record.requirementId) {
       return denied(
         'invalid_args',
         `propose_rule 인자 오류: parentRequirementId는 이 세션의 요구사항 ${record.requirementId}만 쓸 수 있음`,
       );
     }
-    const { rationale, ...payload } = input;
+    const { rationale, contradiction, ...payload } = input;
     try {
-      const { rule } = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
-        createAgentRule(
-          store,
-          {
-            payload,
-            rationale,
-            author: { kind: 'agent', role: RULE_WRITER_ROLE },
-            sessionId: record.id,
-          },
-          { now: this.#now, newId: this.#newId },
-        ),
+      const { rule, judgment } = withRegisteredProjectStore(
+        this.#biveHome,
+        record.projectId,
+        (store) =>
+          createAgentRule(
+            store,
+            {
+              payload,
+              rationale,
+              author: { kind: 'agent', role: RULE_WRITER_ROLE },
+              sessionId: record.id,
+              contradiction,
+              normInput,
+            },
+            { now: this.#now, newId: this.#newId },
+          ),
       );
       record.ruleIds.push(rule.id);
-      return ok(`규칙 ${rule.displayId} 반영 (바로 효력, 사람은 나중에 봄)`);
+      const targets = judgment.detail.judgment?.contradicts.map((ref) => ref.displayId) ?? [];
+      const judged = targets.length === 0 ? '모순 없음' : `모순 (${targets.join(', ')})`;
+      return ok(
+        `규칙 ${rule.displayId} 반영 (바로 효력, 사람은 나중에 봄). 판단 기록: ${judged}, 기존 규칙은 그대로 효력`,
+      );
     } catch (error) {
+      if (error instanceof NormJudgmentInputError) {
+        return denied(
+          'invalid_args',
+          `propose_rule 인자 오류: contradiction.ruleIds ${error.message} (작업 지시의 효력 있는 규칙 표시 ID를 쓴다)`,
+        );
+      }
       if (error instanceof ConflictError) {
         return failed('state_conflict', `부모 요구사항이 삭제됨: ${input.parentRequirementId}`);
       }

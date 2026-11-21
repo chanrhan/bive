@@ -607,6 +607,38 @@ describe('시작 근거 대조: 사람 run_start 1건 또는 자동 시작 항�
       counts: [0, 1],
     },
     {
+      name: '오케스트레이터: 원인 순번이 그 규칙의 모순 판단 기록 (신규 기록이 아님, M7-07)',
+      build: (store, rule) => {
+        const createdSeq = created(store, rule);
+        const judgment = store.normChanges.append({
+          at: at(),
+          kind: 'judgment',
+          actor: { kind: 'agent', role: 'rule-writer' },
+          targetRef: { entity: 'Rule', id: rule },
+          sessionId: newId(),
+          runId: null,
+          reason: '시험 판단',
+          detail: {
+            judgment: {
+              subject: 'new_rule',
+              verdict: 'no_contradiction',
+              contradicts: [],
+              createdSeq,
+              input: {
+                requirements: { total: 1, included: 1 },
+                rules: { total: 0, included: 0 },
+              },
+            },
+          },
+        }).seq;
+        const id = forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: [judgment] });
+        autoStart(store, id, [judgment], [rule]);
+        return id;
+      },
+      mismatch: 'cause_mismatch',
+      counts: [0, 1],
+    },
+    {
       name: '오케스트레이터: 원인 순번이 없는 기록',
       build: (store, rule) => {
         const id = forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: [9999] });

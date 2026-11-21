@@ -1,0 +1,63 @@
+# 모순 판단 기록 (roadmap M7-07 #219, ADR-100 D5 · K1, ADR-106).
+# 형식: src/agent/scenario.ts. 규칙 작성 세션만 있다(실행 없음): 요구사항 2개를 차례로 저장하면 세션 vars의
+# requirementDisplayId로 세션을 고른다. 첫 요구사항은 RULE-001(서버 시각 포함)을 모순 없음으로 만들고, 둘째 요구사항은
+# 작업 지시의 규범 자료에서 RULE-001을 보고 정면으로 모순되는 RULE-002(서버 시각 제거)를 모순 판단과 함께 만든다.
+# 모순이어도 RULE-002는 반영되고 RULE-001은 그대로 효력을 갖는다(폐기 · 대체는 M7-09의 contradiction 시나리오).
+name: contradiction-noted
+description: 규칙 작성이 둘째 요구사항에서 기존 RULE-001과의 모순을 판단해 기록하고 새 규칙을 만든다 (폐기 · 대체 없음)
+roles:
+  rule-writer:
+    sessions:
+      - description: REQ-001 - 서버 시각 포함 (기존 규칙 없음)
+        when:
+          requirementDisplayId: REQ-001
+        turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답의 서버 시각
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 time 필드에 응답 시점의 서버 시각을 ISO 8601 UTC 문자열로 담는다
+              kind: business
+              checkKinds: [test]
+              rationale: 요구사항의 '서버 시각 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+              contradiction: { verdict: none }
+          - message: 규칙 1건을 반영했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.012
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 1200
+              outputTokens: 300
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 4000
+              costUSD: 0.012
+      - description: REQ-002 - 서버 시각 제거 (RULE-001과 모순)
+        when:
+          requirementDisplayId: REQ-002
+        turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답에서 서버 시각 제거
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON에 time 필드를 담지 않는다
+              kind: business
+              checkKinds: [test]
+              rationale: 요구사항의 '서버 시각 제거'를 응답 본문의 time 필드 부재로 옮김
+              contradiction:
+                verdict: contradicts
+                ruleIds: [RULE-001]
+                grounds: RULE-001 진술 "응답 JSON의 time 필드에 응답 시점의 서버 시각을 ISO 8601 UTC 문자열로 담는다"와 새 규칙의 "time 필드를 담지 않는다"는 동시에 만족될 수 없다
+          - message: 규칙 1건을 반영했고 RULE-001과의 모순을 기록했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.014
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 1500
+              outputTokens: 350
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 4000
+              costUSD: 0.014

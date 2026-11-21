@@ -112,13 +112,22 @@ describe('happy-path: 요구사항 저장부터 merged까지 (승인 · 실행 �
     // 에이전트의 규칙 반영과 오케스트레이터의 자동 시작은 규범 변경 기록에만 있다
     const changes = await e.client.call('normChange.list', { projectId: e.projectId });
     expect(changes.chain.valid).toBe(true);
+    // 규칙마다 신규 · 모순 판단(모순 없음) 1쌍(M7-07, ADR-106), 그 뒤 오케스트레이터의 자동 시작 1건. 원인은 신규 기록의
+    // 순번이다(판단 기록이 아니다, ADR-107)
     expect(
-      changes.entries.map((entry) => [entry.seq, entry.kind, entry.actor.kind, entry.targetRef.id]),
+      changes.entries.map((entry) => [
+        entry.seq,
+        entry.kind,
+        entry.actor.kind,
+        entry.targetRef.id,
+        entry.detail.judgment?.verdict,
+      ]),
     ).toEqual([
-      [1, 'created', 'agent', rule.id],
-      [2, 'auto_start', 'orchestrator', done.run.id],
+      [1, 'created', 'agent', rule.id, undefined],
+      [2, 'judgment', 'agent', rule.id, 'no_contradiction'],
+      [3, 'auto_start', 'orchestrator', done.run.id, undefined],
     ]);
-    expect(changes.entries[1]).toMatchObject({
+    expect(changes.entries[2]).toMatchObject({
       runId: done.run.id,
       detail: { causeSeqs: [1], ruleIds: [rule.id] },
     });

@@ -185,6 +185,7 @@ describe('propose_rule', () => {
     kind: 'business',
     checkKinds: ['test'],
     rationale: '검사 가능한 형태',
+    contradiction: { verdict: 'none' },
   };
 
   it('검증한 입력을 콜백으로 넘기고 콜백 본문을 돌려준다', async () => {
