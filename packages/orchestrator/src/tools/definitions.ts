@@ -1,6 +1,7 @@
 // 역할별 고정 도구 목록과 도구 정의 (NFR-02 · ADR-024 · ADR-052).
 // 정의(이름 · 설명 · 입력 스키마)는 한 곳에만 두고, 실행기(FixedToolExecutor)의 인자 검증과
-// SDK MCP 서버 노출(M1-26)이 같은 스키마를 쓴다. 승인 · 잠정 승인 · 규범 쓰기 · 셸 도구는 없다(NFR-01 · NFR-02).
+// SDK MCP 서버 노출(M1-26)이 같은 스키마를 쓴다. 승인 · 잠정 승인 · 확인 표시 · 셸 도구는 없다(NFR-01 · NFR-02).
+// 규범을 쓰는 도구는 규칙 작성 역할의 규칙 생성 도구(`propose_rule`) 하나뿐이다(M7-02, ADR-100 D1 · D4, ADR-103).
 import { type AgentRole, CheckKind, RuleKind } from '@bive/shared';
 import { z } from 'zod';
 
@@ -18,17 +19,21 @@ export const COMMAND_TOOL_NAMES = [
   'prisma_migrate',
   'install_package',
 ] as const;
-/** 제안 도구. 제안 등록은 주입된 콜백이 한다(상태 `pending` 고정, NFR-01). */
-export const PROPOSAL_TOOL_NAMES = ['propose_rule'] as const;
+/**
+ * 규범 도구 (규범을 쓰는 에이전트 도구). 규칙 작성 역할에만 둔다(ADR-100 D4: 테스트 작성 · 구현 역할에는 없다).
+ * `propose_rule`은 규칙 생성 도구다: 호출하면 주입된 콜백이 규칙을 바로 반영하고 규범 변경 기록을 남긴다(M7-02).
+ * 이름은 이 변경 전부터 쓰던 것을 그대로 둔다(시나리오 · 실제 SDK 세션 · 로드맵 M3 행이 이 이름을 쓴다, ADR-103).
+ */
+export const NORM_TOOL_NAMES = ['propose_rule'] as const;
 
 export type FileToolName = (typeof FILE_TOOL_NAMES)[number];
 export type CommandToolName = (typeof COMMAND_TOOL_NAMES)[number];
-export type ProposalToolName = (typeof PROPOSAL_TOOL_NAMES)[number];
-export type FixedToolName = FileToolName | CommandToolName | ProposalToolName;
+export type NormToolName = (typeof NORM_TOOL_NAMES)[number];
+export type FixedToolName = FileToolName | CommandToolName | NormToolName;
 
 /**
  * 역할별 허용 도구. 세션 init의 도구 목록은 이것과 정확히 같아야 한다(session-guard.ts).
- * planner · chat은 M1에서 도구가 없다(제안 도구는 해당 마일스톤에서 추가, ADR-052).
+ * planner · chat은 M1에서 도구가 없다(해당 마일스톤에서 추가, ADR-052). 규범 도구는 규칙 작성 역할에만 있다(ADR-100 D4).
  */
 export const ROLE_TOOL_NAMES = {
   'rule-writer': ['propose_rule'],
@@ -101,7 +106,7 @@ const NonBlank = (schema: z.ZodString) =>
   schema.refine((value) => value.trim().length > 0, '비어 있음');
 
 /**
- * 규칙 제안 입력 (NRM-02, ADR-062). 제목(한 줄) · EARS 진술 · 종류 · 검사 종류(1개 이상, 중복 없음) ·
+ * 규칙 생성 입력 (NRM-02, ADR-062, M7-02). 제목(한 줄) · EARS 진술 · 종류 · 검사 종류(1개 이상, 중복 없음) ·
  * 부모 요구사항 · 근거. 부모 요구사항이 세션의 요구사항인지 · 살아 있는지는 등록 콜백이 확인한다.
  */
 export const ProposeRuleInput = z.strictObject({
@@ -183,7 +188,7 @@ const DEFINITIONS: Record<FixedToolName, ToolDefinition> = {
   },
   propose_rule: {
     name: 'propose_rule',
-    description: `요구사항에서 도출한 규칙을 제안으로 등록한다. 제안은 사람이 승인해야 규칙이 된다. 진술은 ${EARS_FORMAT} 형식 한 줄.`,
+    description: `요구사항에서 도출한 규칙을 만든다. 만든 규칙은 바로 효력을 갖고 근거와 함께 규범 변경 기록에 남으며, 사람은 나중에 확인한다. 진술은 ${EARS_FORMAT} 형식 한 줄.`,
     inputSchema: ProposeRuleInput,
   },
 };

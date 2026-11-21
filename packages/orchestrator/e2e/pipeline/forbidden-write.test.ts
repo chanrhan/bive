@@ -8,12 +8,10 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  approveRule,
   attempts,
   cleanupPipeline,
   git,
   gitBlob,
-  human,
   mainTip,
   mergeCount,
   readStore,
@@ -33,16 +31,10 @@ describe('forbidden-write: 금지 경로 쓰기는 거부 · 기록되고 인수
     const base = mainTip(e);
     const planted = path.join(e.biveHome, 'projects', 'forbidden-write.txt');
 
-    const { proposals } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 2);
-    const [first, second] = proposals;
-    if (first === undefined || second === undefined) throw new Error('제안 2개 아님');
-    const rule = await approveRule(e, first);
-    await e.client.call('proposal.reject', {
-      projectId: e.projectId,
-      id: second.id,
-      author: human,
-      reason: '중복',
-    });
+    const { rules } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 2);
+    // 규칙 2개가 사람의 승인 없이 바로 효력을 갖는다(M7-02, ADR-100 D1). 실행은 사람의 [실행]으로 첫째 규칙만
+    const [rule] = rules;
+    if (rule === undefined) throw new Error('규칙 없음');
 
     const done = await runToEnd(e, [rule.id], 300_000);
     expect(done.run).toMatchObject({

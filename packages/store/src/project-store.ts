@@ -12,6 +12,7 @@ import { CodeOpenRepository } from './repositories/code-open-repository.js';
 import { ConfirmationRepository } from './repositories/confirmation-repository.js';
 import { DisplayIdSequences } from './repositories/display-id-sequences.js';
 import { JudgmentRepository } from './repositories/judgment-repository.js';
+import { NormChangeRepository } from './repositories/norm-change-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { ProposalRepository } from './repositories/proposal-repository.js';
 import { RequirementRepository } from './repositories/requirement-repository.js';
@@ -34,7 +35,10 @@ export class ProjectStore {
   /** 표시 ID 순번 (`REQ-001` 등). 규칙 · 제안 리포지토리도 이것을 함께 쓴다. */
   readonly sequences: DisplayIdSequences;
   readonly requirements: RequirementRepository;
-  /** 승인된 규칙 (NRM-02). 승인 전 제안은 `proposals`에만 있다 (NRM-04). */
+  /**
+   * 효력 있는 규칙 (NRM-02). 사람이 승인한 제안의 규칙과, 규칙 작성 역할이 바로 반영한 규칙(M7-02, ADR-100 D1)이다.
+   * 승인 전 제안은 `proposals`에만 있다.
+   */
   readonly rules: RuleRepository;
   readonly proposals: ProposalRepository;
   /** 추가 전용 승인 기록 · 해시 체인 (NFR-01, ADR-027). */
@@ -53,6 +57,11 @@ export class ProjectStore {
   readonly ruleWriterRequests: RuleWriterRequestRepository;
   /** 요구사항 · 규칙의 확인 상태 (ADR-100 D2, ADR-101). 확인됨은 사람만 쓴다(주체 인자 `HumanAuthor`). */
   readonly confirmations: ConfirmationRepository;
+  /**
+   * 추가 전용 규범 변경 기록 · 해시 체인 (NRM-07, ADR-100 C2 · A2, ADR-103). 에이전트 · 오케스트레이터 행동만 담는다
+   * (사람 행동은 `approvalLog`).
+   */
+  readonly normChanges: NormChangeRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -73,6 +82,7 @@ export class ProjectStore {
     this.codeOpens = new CodeOpenRepository(db, projectId);
     this.ruleWriterRequests = new RuleWriterRequestRepository(db);
     this.confirmations = new ConfirmationRepository(db);
+    this.normChanges = new NormChangeRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

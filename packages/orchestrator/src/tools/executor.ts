@@ -41,7 +41,7 @@ export interface ToolCallRecord {
   durationMs: number;
 }
 
-/** 규칙 제안 등록 콜백의 문맥. */
+/** 규칙 생성 콜백의 문맥. */
 export interface ProposalContext {
   role: AgentRole;
   sessionId: string | null;
@@ -49,8 +49,8 @@ export interface ProposalContext {
 
 export interface RoleToolsHooks {
   /**
-   * `propose_rule` 등록. 제안은 항상 `pending`으로 만든다(NFR-01). 돌려준 문자열은 모델에게 보여 줄 본문(`ok`)이고,
-   * 등록을 거부하거나 실패를 알릴 때는 `ToolResult`(`denied` · `error` + 사유 코드, ADR-052 · ADR-062)를 돌려준다.
+   * `propose_rule`(규칙 생성, M7-02): 규칙을 바로 반영하고 규범 변경 기록을 남긴다. 돌려준 문자열은 모델에게 보여 줄
+   * 본문(`ok`)이고, 반영을 거부하거나 실패를 알릴 때는 `ToolResult`(`denied` · `error` + 사유 코드, ADR-052 · ADR-062)를 돌려준다.
    * 주입하지 않으면 호출이 `error`(`not_configured`)로 끝난다.
    */
   proposeRule?: (
@@ -231,7 +231,7 @@ export class FixedToolExecutor implements ToolExecutor {
     const parsed = ProposeRuleInput.safeParse(args);
     if (!parsed.success) return invalidArgs('propose_rule', parsed.error);
     const register = this.hooks.proposeRule;
-    if (register === undefined) return failed('not_configured', '제안 등록 경로가 연결되지 않음');
+    if (register === undefined) return failed('not_configured', '규칙 반영 경로가 연결되지 않음');
     try {
       const outcome = await register(parsed.data, { role: this.role, sessionId: this.sessionId });
       return typeof outcome === 'string' ? ok(outcome) : outcome;

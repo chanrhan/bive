@@ -4,12 +4,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  approveRule,
   attempts,
   branchExists,
   cleanupPipeline,
   git,
-  human,
   mainTip,
   mergeCount,
   readStore,
@@ -26,16 +24,10 @@ describe('extra-mcp: 허용 밖 MCP 서버가 보고된 세션은 실행 실패'
     const e = await startPipeline('extra-mcp');
     const base = mainTip(e);
 
-    const { proposals } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 2);
-    const [first, second] = proposals;
-    if (first === undefined || second === undefined) throw new Error('제안 2개 아님');
-    const rule = await approveRule(e, first);
-    await e.client.call('proposal.reject', {
-      projectId: e.projectId,
-      id: second.id,
-      author: human,
-      reason: '중복',
-    });
+    const { rules } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 2);
+    // 규칙 2개가 사람의 승인 없이 바로 효력을 갖는다(M7-02, ADR-100 D1). 실행은 사람의 [실행]으로 첫째 규칙만
+    const [rule] = rules;
+    if (rule === undefined) throw new Error('규칙 없음');
 
     const done = await runToEnd(e, [rule.id], 180_000);
     expect(done.run).toMatchObject({

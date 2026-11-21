@@ -6,7 +6,7 @@
 import { existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
 
-import { isTerminalRunStatus, type Proposal, type RunGetResult } from '@bive/shared';
+import { isTerminalRunStatus, type Rule, type RunGetResult } from '@bive/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { isProcessAlive, readPidFile } from '../../src/lock.js';
@@ -81,23 +81,21 @@ describe('app-exit: 앱이 끝나도 오케스트레이터와 실행이 계속�
       text: '헬스 체크 응답에 서버 시각 포함',
       author: human,
     });
-    let proposals: Proposal[] = [];
-    const proposalDeadline = Date.now() + 30_000;
-    while (proposals.length < 2) {
-      if (Date.now() > proposalDeadline) throw new Error('시간 초과: rule-writer 제안 2개');
+    // 규칙 작성 결과는 승인 없이 바로 반영된다 (M7-02): 세션이 끝나 규칙 2개가 생길 때까지 기다린다
+    const ruleDeadline = Date.now() + 30_000;
+    for (;;) {
+      if (Date.now() > ruleDeadline) throw new Error('시간 초과: rule-writer 규칙 2개');
       await sleep(250);
-      proposals = (await app1.call('proposal.list', { projectId, state: 'pending' })).proposals;
+      const { entries } = await app1.call('ruleWriter.status', { projectId });
+      if (entries[0]?.state === 'ended') break;
     }
-    const [first, second] = proposals;
-    if (first === undefined || second === undefined) throw new Error('제안 2개 아님');
-    const { applied } = await app1.call('proposal.approve', {
-      projectId,
-      id: first.id,
-      author: human,
-    });
-    if (applied.entity !== 'Rule') throw new Error(`규칙 제안이 아님: ${applied.entity}`);
-    const rule = applied.rule;
-    await app1.call('proposal.reject', { projectId, id: second.id, author: human, reason: '중복' });
+    const rules: Rule[] = (await app1.call('rule.list', { projectId })).rules.map(
+      (entry) => entry.rule,
+    );
+    expect(rules).toHaveLength(2);
+    expect((await app1.call('proposal.list', { projectId })).proposals).toEqual([]);
+    const [rule] = rules;
+    if (rule === undefined) throw new Error('규칙 없음');
     const { run } = await app1.call('run.create', { projectId, ruleIds: [rule.id], author: human });
     expect(existsSync(pause)).toBe(false);
 

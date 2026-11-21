@@ -1,6 +1,7 @@
 // `proposal.*` · `approvalLog.list` 처리기 (NRM-04, TODO-01, NFR-01, M1-09, ADR-050).
 // - 이 처리기는 토큰 인증된 파이프 연결에서만 불린다. 인증 전 연결의 요청은 파이프 서버가 -32020으로 거부한다
-// - 승인 · 거절은 사람 주체만 받는다(에이전트 주체 -32020). 제안 등록은 RPC가 없다(`ProposalService.submit`)
+// - 승인 · 거절은 사람 주체만 받는다(에이전트 주체 -32020). 제안 등록은 RPC가 없다(`ProposalService.submit`).
+//   사후 확인 전환(M7-02) 뒤로 새 제안은 생기지 않고, 이 변경 전부터 대기 중이던 제안만 여기서 처리된다(승인 = 확인됨)
 // - 승인된 규칙 · 계약을 직접 고치는 RPC는 없다 (NRM-04: 변경은 지시 → 제안 → 승인)
 // - 처리가 저장되면(저장소를 닫은 뒤) `event.proposal.changed`를 보낸다(M1-36, ADR-076). 기다리지 않는다
 import { createUlidGenerator, ErrorCode, type Proposal, ProposalKind } from '@bive/shared';

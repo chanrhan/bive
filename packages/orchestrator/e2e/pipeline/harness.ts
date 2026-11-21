@@ -2,7 +2,8 @@
 // 시험마다 새 픽스처 복사본(`scripts/reset-fixture.sh`: 추적 파일 복사 · 설치 · git 커밋)과 새 BIVE_HOME을 만들고,
 // 제품 CLI(`src/cli.ts`)를 `BIVE_AGENT=scripted` · `BIVE_SCENARIO=<이름>`으로 띄운다. 단계 실행기 · 의존성 설치 ·
 // 판정 러너(next build · next start · vitest) · git은 제품 기본값 그대로이고 주입하지 않는다. 시험은 앱과 같은 파이프
-// 경로로만 조작한다: project.open → settings.update → requirement.create → rule-writer 제안 승인 → run.create → run.get.
+// 경로로만 조작한다: project.open → settings.update → requirement.create → (rule-writer가 규칙을 바로 반영, M7-02) →
+// run.create(사람의 [실행]) → run.get.
 // 단언용 읽기(판정 기록 · 세션 기록)만 실행이 끝난 뒤 저장소를 직접 연다.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -12,7 +13,6 @@ import path from 'node:path';
 
 import {
   isTerminalRunStatus,
-  type Proposal,
   type Requirement,
   type Rule,
   type Run,
@@ -49,8 +49,8 @@ export const RUN_BRANCH = 'bive/run-EXE-001';
 
 /** 오케스트레이터 기동 대기 */
 const START_TIMEOUT_MS = 30_000;
-/** rule-writer 제안 등록 대기 */
-const PROPOSAL_TIMEOUT_MS = 30_000;
+/** rule-writer 세션 종료(규칙 반영) 대기 */
+const RULE_WRITER_TIMEOUT_MS = 30_000;
 /** 정리: SIGTERM 뒤 오케스트레이터가 진행 중 실행(판정 포함)을 멈추고 끝나기를 기다리는 시간 */
 const TERMINATE_TIMEOUT_MS = 30_000;
 /** 정리: SIGKILL 뒤 남은 프로세스가 사라지기를 기다리는 시간 */
@@ -193,42 +193,43 @@ export const restartOrchestrator = async (e: PipelineE2e): Promise<void> => {
   e.client = client;
 };
 
-/** 요구사항을 저장하고 rule-writer 세션이 제안을 `count`개 등록할 때까지 기다린다. */
+/**
+ * 요구사항을 저장하고 rule-writer 세션이 끝나 그 요구사항의 규칙 `count`개가 바로 반영될 때까지 기다린다. 사람의 승인 단계는
+ * 없다(M7-02, ADR-100 D1): 규칙은 효력 상태 · 미확인으로 생기고 승인 대기 제안은 생기지 않는다. 세션이 끝난 뒤에 돌려주므로
+ * 이어지는 실행과 규칙 작성 세션의 쓰기가 겹치지 않는다.
+ */
 export const saveRequirement = async (
   e: PipelineE2e,
   text: string,
   count: number,
-): Promise<{ requirement: Requirement; proposals: Proposal[] }> => {
+): Promise<{ requirement: Requirement; rules: Rule[] }> => {
   const { requirement } = await e.client.call('requirement.create', {
     projectId: e.projectId,
     text,
     author: human,
   });
-  let proposals: Proposal[] = [];
+  let rules: Rule[] = [];
   await waitWithOutput(
     e,
     async () => {
-      proposals = (
-        await e.client.call('proposal.list', { projectId: e.projectId, state: 'pending' })
-      ).proposals;
-      return proposals.length >= count;
+      const { entries } = await e.client.call('ruleWriter.status', {
+        projectId: e.projectId,
+        requirementId: requirement.id,
+      });
+      if (entries[0]?.state !== 'ended') return false;
+      rules = (await e.client.call('rule.list', { projectId: e.projectId })).rules
+        .map((entry) => entry.rule)
+        .filter((rule) => rule.parentRequirementId === requirement.id);
+      return true;
     },
-    PROPOSAL_TIMEOUT_MS,
-    `rule-writer 제안 ${String(count)}개`,
+    RULE_WRITER_TIMEOUT_MS,
+    `rule-writer 세션 종료 (규칙 ${String(count)}개)`,
   );
-  expect(proposals).toHaveLength(count);
-  return { requirement, proposals };
-};
-
-/** 제안을 사람이 승인해 규칙을 만든다. */
-export const approveRule = async (e: PipelineE2e, proposal: Proposal): Promise<Rule> => {
-  const { applied } = await e.client.call('proposal.approve', {
-    projectId: e.projectId,
-    id: proposal.id,
-    author: human,
-  });
-  if (applied.entity !== 'Rule') throw new Error(`규칙 제안이 아님: ${applied.entity}`);
-  return applied.rule;
+  expect(rules).toHaveLength(count);
+  // 승인 대기 제안은 생기지 않는다
+  const { proposals } = await e.client.call('proposal.list', { projectId: e.projectId });
+  expect(proposals).toEqual([]);
+  return { requirement, rules };
 };
 
 /** 실행을 만든다 (사람). */

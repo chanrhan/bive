@@ -12,6 +12,7 @@ import {
   ConfirmationState,
   JudgeRunner,
   JudgmentStatus,
+  NormChangeKind,
   NormState,
   ProposalKind,
   ProposalSource,
@@ -62,7 +63,6 @@ export const RESERVED_ENTITY_NAMES = [
   'Contract',
   'Block',
   'Adr',
-  'NormChange',
   'CodeChange',
   'MutationResult',
   'ReviewItem',
@@ -715,6 +715,98 @@ export const ApprovalLogEntry = z
     }
   });
 export type ApprovalLogEntry = z.infer<typeof ApprovalLogEntry>;
+
+// ── 규범 변경 기록 (ADR-100 C2 · A2, NRM-07, M7-02 #214, ADR-103) ─────
+
+/** 오케스트레이터 주체 (모델이 아닌 일반 프로그램의 행동: 확인 풀림 · 자동 시작 등, 뒤 이슈가 쓴다). */
+export const OrchestratorActor = z.strictObject({ kind: z.literal('orchestrator') });
+export type OrchestratorActor = z.infer<typeof OrchestratorActor>;
+
+/** 규범 변경 기록의 주체: 에이전트 역할 또는 오케스트레이터. 사람은 받지 않는다(사람 행동은 승인 기록, C2). */
+export const NormChangeActor = z.discriminatedUnion('kind', [AgentAuthor, OrchestratorActor]);
+export type NormChangeActor = z.infer<typeof NormChangeActor>;
+
+/** 첫 규범 변경 기록의 `prevHash` (승인 기록과 같은 0 64자, 체인은 접두로 구분한다). */
+export const NORM_CHANGE_GENESIS_HASH = APPROVAL_LOG_GENESIS_HASH;
+
+/**
+ * 규범 변경 기록 검증 실패 이유. 뜻은 승인 기록의 같은 이름과 같다(`ApprovalLogBreakReason`). 처리된 제안과의 대조
+ * (`decision_without_log`)는 없다.
+ */
+export const NormChangeBreakReason = z.enum([
+  'seq_gap',
+  'prev_hash_mismatch',
+  'hash_mismatch',
+  'malformed',
+]);
+export type NormChangeBreakReason = z.infer<typeof NormChangeBreakReason>;
+
+/**
+ * 종류별 상세. 신규는 `after`(만든 규범의 내용)만, 그 밖의 종류가 쓰는 칸은 그 이슈가 더한다.
+ * 값은 에이전트가 쓴 글을 담을 수 있어 화면 · 응답에는 표시 값으로만 내보낸다(ADR-089).
+ */
+export const NormChangeDetail = z.strictObject({
+  before: z.unknown().optional(),
+  after: z.unknown().optional(),
+});
+export type NormChangeDetail = z.infer<typeof NormChangeDetail>;
+
+/**
+ * 규범 변경 기록 1건 (추가 전용). `hash` = SHA-256("bive-norm-change-v1\n" + 정규 JSON(`hash`를 뺀 나머지 필드)),
+ * `prevHash` = 바로 앞 기록의 `hash`(첫 기록은 {@link NORM_CHANGE_GENESIS_HASH}). 계산 · 검증은 `@bive/store`.
+ * - `sessionId`: 그 행동을 한 에이전트 세션(BIVE 세션 기록 ID). 에이전트 주체면 필수
+ * - `runId`: 연결된 실행 (NRM-07 "연결 실행"). 없으면 `null`
+ * - `reason`: 사유 · 근거. 에이전트 주체면 필수 (ADR-100 명세 변경 NRM-07 "에이전트 변경마다 사유 · 근거 필수")
+ */
+export const NormChangeEntry = z
+  .strictObject({
+    seq: z.int().positive(),
+    at: Timestamp,
+    kind: NormChangeKind,
+    actor: NormChangeActor,
+    targetRef: EntityRef,
+    sessionId: Ulid.nullable(),
+    runId: Ulid.nullable(),
+    reason: NonBlankText.nullable(),
+    detail: NormChangeDetail,
+    prevHash: Sha256Hex,
+    hash: Sha256Hex,
+  })
+  .superRefine((entry, ctx) => {
+    if (entry.actor.kind === 'agent') {
+      if (entry.sessionId === null) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '에이전트의 규범 변경에는 세션 ID가 필요합니다',
+          path: ['sessionId'],
+        });
+      }
+      if (entry.reason === null) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '에이전트의 규범 변경에는 사유가 필요합니다 (NRM-07, ADR-100)',
+          path: ['reason'],
+        });
+      }
+    }
+    if (entry.kind === 'created') {
+      if (entry.detail.after === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '신규에는 만든 내용(after)이 필요합니다',
+          path: ['detail', 'after'],
+        });
+      }
+      if (entry.detail.before !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '신규에는 이전 내용(before)이 없습니다',
+          path: ['detail', 'before'],
+        });
+      }
+    }
+  });
+export type NormChangeEntry = z.infer<typeof NormChangeEntry>;
 
 // ── 실행 ─────────────────────────────────────────────────
 

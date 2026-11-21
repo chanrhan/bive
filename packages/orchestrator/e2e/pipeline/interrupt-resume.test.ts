@@ -13,7 +13,6 @@ import { isProcessAlive, readPidFile } from '../../src/lock.js';
 import { runPaths } from '../../src/run-paths.js';
 import { leftoverProcesses, waitFor } from '../../test/helpers/process.js';
 import {
-  approveRule,
   attempts,
   cleanupPipeline,
   createRun,
@@ -41,16 +40,10 @@ describe('interrupt-resume: 강제 종료 뒤 재기동하면 interrupted, 재�
     const base = mainTip(e);
     const pidFile = runPaths(e.biveHome).pid;
 
-    const { proposals } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 2);
-    const [first, second] = proposals;
-    if (first === undefined || second === undefined) throw new Error('제안 2개 아님');
-    const rule = await approveRule(e, first);
-    await e.client.call('proposal.reject', {
-      projectId: e.projectId,
-      id: second.id,
-      author: human,
-      reason: '중복',
-    });
+    const { rules } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 2);
+    // 규칙 2개가 사람의 승인 없이 바로 효력을 갖는다(M7-02, ADR-100 D1). 실행은 사람의 [실행]으로 첫째 규칙만
+    const [rule] = rules;
+    if (rule === undefined) throw new Error('규칙 없음');
 
     // 1. 실행 → 테스트 작성 → Red 확인(실제 판정) → 첫 구현 세션 대기
     const run = await createRun(e, [rule.id]);

@@ -23,7 +23,12 @@ import type { ProjectStore } from './project-store.js';
 
 /** 장부 대조 결과 한 건. */
 export interface NormMismatch {
-  readonly kind: 'untrusted_change' | 'approval_chain_broken' | 'future_judgment' | 'unreadable';
+  readonly kind:
+    | 'untrusted_change'
+    | 'approval_chain_broken'
+    | 'norm_change_chain_broken'
+    | 'future_judgment'
+    | 'unreadable';
   readonly detail: string;
 }
 
@@ -137,7 +142,8 @@ export const beginNormWatch = (store: ProjectStore): NormWatch => {
 };
 
 /**
- * 감시 시작 뒤(와 그 전에 보고되지 않은) 오케스트레이터 밖의 변경 · 깨진 승인 기록 체인 · 미래 시각 판정 기록을 돌려준다.
+ * 감시 시작 뒤(와 그 전에 보고되지 않은) 오케스트레이터 밖의 변경 · 깨진 승인 기록 체인 · 깨진 규범 변경 기록 체인(M7-02) ·
+ * 미래 시각 판정 기록을 돌려준다.
  * 빈 목록이면 믿는 상태 그대로다.
  */
 export const verifyNormWatch = (
@@ -164,6 +170,13 @@ export const verifyNormWatch = (
     mismatches.push({
       kind: 'approval_chain_broken',
       detail: `승인 기록 해시 체인이 깨졌습니다: ${chain.reason}${chain.brokenAtSeq === null ? '' : ` (순번 ${String(chain.brokenAtSeq)})`}`,
+    });
+  }
+  const normChain = store.normChanges.verify();
+  if (!normChain.valid) {
+    mismatches.push({
+      kind: 'norm_change_chain_broken',
+      detail: `규범 변경 기록 해시 체인이 깨졌습니다: ${normChain.reason} (순번 ${String(normChain.brokenAtSeq)})`,
     });
   }
   const limit = new Date(now + FUTURE_JUDGMENT_SKEW_MS).toISOString();

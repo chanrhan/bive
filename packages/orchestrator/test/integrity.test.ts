@@ -21,13 +21,7 @@ import os from 'node:os';
 import path from 'node:path';
 import tls from 'node:tls';
 
-import {
-  AgentRole,
-  createUlidGenerator,
-  type EntityRef,
-  METHOD_NAMES,
-  type RoleSettings,
-} from '@bive/shared';
+import { AgentRole, createUlidGenerator, METHOD_NAMES, type RoleSettings } from '@bive/shared';
 import { bivePaths } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -42,7 +36,7 @@ import {
   BIVE_MCP_SERVER,
   COMMAND_TOOL_NAMES,
   FILE_TOOL_NAMES,
-  PROPOSAL_TOOL_NAMES,
+  NORM_TOOL_NAMES,
   roleToolNames,
 } from '../src/tools/definitions.js';
 import { FixedToolExecutor } from '../src/tools/executor.js';
@@ -120,7 +114,7 @@ const EXPECTED_ROLE_TOOLS: Readonly<Record<string, readonly string[]>> = {
   chat: [],
 };
 
-/** 고정 도구 전체 (리터럴 고정). 제품의 파일 · 명령 · 제안 도구 정의를 합친 목록과 정확히 같아야 한다 */
+/** 고정 도구 전체 (리터럴 고정). 제품의 파일 · 명령 · 규범 도구 정의를 합친 목록과 정확히 같아야 한다 */
 const FIXED_TOOLS: readonly string[] = [
   'read_file',
   'write_file',
@@ -154,6 +148,13 @@ const OTHER_ROLE_TOOL_ARGS: Readonly<Record<string, Record<string, unknown>>> = 
   },
 };
 
+/**
+ * 규범을 쓰는 에이전트 도구 (리터럴 고정, M7-02 #214 · ADR-100 D1 · D4). 규칙 생성 도구는 호출하면 규칙을 바로 반영한다.
+ * 규칙 작성 역할에만 있어야 하고 테스트 작성 · 구현 역할(자기 채점 기준을 고치면 안 되는 역할, ADR-100 I2)에는 없어야 한다.
+ * 규범 도구가 늘면(M7-09 폐기 · 대체 등) 이 표와 아래 시험을 같이 고친다
+ */
+const NORM_WRITE_TOOLS: readonly string[] = ['propose_rule'];
+
 /** 규범 엔터티 낱말 (순서와 상관없이 쓰기 동사와 함께 나오면 규범 쓰기) */
 const NORM_ENTITY =
   '(rule|requirement|contract|norm|block|adr|approval|proposal|judg|verdict|baseline)';
@@ -166,7 +167,8 @@ const WRITE_VERB =
  * - 승인 · 잠정 승인 낱말: approv · accept · confirm · grant · ratify · provisional
  * - 셸 · 실행 낱말: bash · shell · exec · spawn · terminal · command
  * - 규범 쓰기: 규범 엔터티 낱말과 쓰기 동사가 순서와 상관없이 함께 있음 (`update_rule` · `rule_update` 모두)
- * 규칙 제안(`propose_rule`)은 제안만 만든다(상태 `pending`)이라 걸리지 않아야 한다.
+ * 규칙 생성 도구(`propose_rule`)는 규범 쓰기지만 이름 판별에 걸리지 않는다. 역할 제한은 위 리터럴 허용 목록과 규범 도구 표
+ * (`NORM_WRITE_TOOLS`)가 맡는다 (M7-02).
  */
 const FORBIDDEN_TOOL = new RegExp(
   [
@@ -252,9 +254,7 @@ describe('모든 역할 세션의 도구 목록에 승인 · 잠정 승인 · �
   });
 
   it('리터럴 허용 목록: 고정 도구 전체와 역할 표가 제품 정의와 정확히 같고, 표에 없는 역할이 없다', () => {
-    expect([...FILE_TOOL_NAMES, ...COMMAND_TOOL_NAMES, ...PROPOSAL_TOOL_NAMES]).toEqual(
-      FIXED_TOOLS,
-    );
+    expect([...FILE_TOOL_NAMES, ...COMMAND_TOOL_NAMES, ...NORM_TOOL_NAMES]).toEqual(FIXED_TOOLS);
     // 원본 역할 목록과 표의 역할이 같다 (역할이 늘면 표를 고쳐야 통과)
     expect([...ROLES].sort()).toEqual(Object.keys(EXPECTED_ROLE_TOOLS).sort());
     for (const role of ROLES) {
@@ -266,6 +266,46 @@ describe('모든 역할 세션의 도구 목록에 승인 · 잠정 승인 · �
     }
     // 파이프의 승인 · 처리 RPC가 판별에 들어 있다 (이름을 시험에 복사하지 않고 레지스트리에서 확인)
     expect(METHOD_NAMES.filter((name) => /approve|amend|reject/.test(name))).not.toEqual([]);
+  });
+
+  it('규범을 쓰는 에이전트 도구는 규칙 작성 역할에만 있고 테스트 작성 · 구현 역할의 도구 목록 · 실행기에는 없다 (M7-02, ADR-100 D4 · I2)', async () => {
+    // 제품의 규범 도구 정의가 리터럴 표와 같다
+    expect([...NORM_TOOL_NAMES]).toEqual(NORM_WRITE_TOOLS);
+    for (const role of ROLES) {
+      const listed = [...roleToolNames(role)];
+      const normTools = listed.filter((name) => NORM_WRITE_TOOLS.includes(name));
+      expect(normTools, role).toEqual(role === 'rule-writer' ? NORM_WRITE_TOOLS : []);
+      expect(
+        biveMcpToolList(role)
+          .map((tool) => tool.name)
+          .filter((name) => NORM_WRITE_TOOLS.includes(name)),
+        role,
+      ).toEqual(normTools);
+    }
+    // 테스트 작성 · 구현 역할의 실행기는 올바른 인자의 규범 도구 호출도 이름만 보고 거부한다
+    for (const role of ['test-writer', 'implementer'] as const) {
+      expect(roleToolNames(role).filter((name) => NORM_WRITE_TOOLS.includes(name))).toEqual([]);
+      const root = tempDir();
+      let reached = false;
+      const executor = new FixedToolExecutor({
+        role,
+        sessionRoot: root,
+        biveHome: tempDir(),
+        hooks: {
+          proposeRule: () => {
+            reached = true;
+            return '반영';
+          },
+        },
+      });
+      for (const name of NORM_WRITE_TOOLS) {
+        await expect(
+          executor.execute(name, OTHER_ROLE_TOOL_ARGS[name] ?? {}),
+          `${role} ${name}`,
+        ).resolves.toMatchObject({ status: 'denied', reason: 'unknown_tool' });
+      }
+      expect(reached, role).toBe(false);
+    }
   });
 
   it.each(ROLES)(
@@ -520,10 +560,8 @@ const startRuleWriter = async (): Promise<RuleWriterHarness> => {
   return { ...h, service, reports };
 };
 
-const proposalRef = (id: string): EntityRef => ({ entity: 'Proposal', id });
-
 describe('agent-approve: 세션의 승인 호출 거부 (수용 기준 2, NFR-01 · ADR-027)', () => {
-  it('rule-writer 세션의 proposal.approve는 denied(unknown_tool)이고 제안은 pending, 그 제안의 승인 기록 0건', async () => {
+  it('rule-writer 세션의 proposal.approve는 denied(unknown_tool)이고 바로 반영된 규칙은 미확인, 승인 기록 0건 (M7-02: 제안 없음)', async () => {
     const h = await startRuleWriter();
     await h.client.call('settings.update', {
       projectId: h.project.id,
@@ -548,22 +586,24 @@ describe('agent-approve: 세션의 승인 호출 거부 (수용 기준 2, NFR-01
       ['propose_rule', 'ok', null],
       [APPROVE_METHOD, 'denied', 'unknown_tool'],
     ]);
-    expect(record.proposalIds).toHaveLength(2);
-    // 시나리오 인자는 제안 ID가 아니라 요구사항 ID라, 아래 "pending 유지 · 승인 기록 0건"만으로는 승인 경로가 막혔는지
+    expect(record.ruleIds).toHaveLength(2);
+    // 시나리오 인자는 제안 ID가 아니라 요구사항 ID라, 아래 "승인 기록 0건"만으로는 승인 경로가 막혔는지
     // 가릴 수 없다. 위의 `denied`(`unknown_tool`) 단언이 그 구멍을 막는다(이름만 보고 거부, 인자를 보기 전).
 
     h.read((store) => {
-      // 제안은 승인 대기 그대로, 규칙은 생기지 않았다
-      for (const id of record.proposalIds) {
-        expect(store.proposals.get(id)?.state).toBe('pending');
-        expect(store.approvalLog.list(proposalRef(id))).toEqual([]);
+      // 규칙 작성 결과는 제안 없이 바로 반영된다(M7-02). 승인 호출은 아무것도 바꾸지 못했다: 규칙은 미확인, 승인 기록 0건
+      expect(store.proposals.list()).toEqual([]);
+      expect(store.rules.list().map((rule) => rule.id)).toEqual(record.ruleIds);
+      for (const id of record.ruleIds) {
+        expect(store.confirmations.get({ entity: 'Rule', id })).toEqual({ state: 'unconfirmed' });
+        expect(store.approvalLog.list({ entity: 'Rule', id })).toEqual([]);
       }
-      expect(store.proposals.list().map((proposal) => proposal.state)).toEqual([
-        'pending',
-        'pending',
-      ]);
       expect(store.approvalLog.list()).toEqual([]);
-      expect(store.rules.list()).toEqual([]);
+      // 에이전트 행동은 규범 변경 기록에만 남는다 (ADR-100 C2)
+      expect(store.normChanges.list().map((entry) => [entry.kind, entry.actor])).toEqual([
+        ['created', { kind: 'agent', role: 'rule-writer' }],
+        ['created', { kind: 'agent', role: 'rule-writer' }],
+      ]);
       // 거부된 호출도 세션 도구 호출 기록으로 남는다 (NFR-02)
       expect(
         store.sessions
@@ -705,6 +745,38 @@ describe('확인됨을 쓰는 경로는 사람 RPC · 사람의 제안 승인뿐
         expect(/confirm/i.test(text), rel).toBe(false);
       }
     }
+  });
+});
+
+describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경로 (M7-02 #214, ADR-100 C2 · A1, 코드 구조)', () => {
+  it('규칙 생성은 규칙 바로 반영 모듈과 옛 제안 승인뿐이고, 규범 변경 기록 추가는 바로 반영 모듈뿐이며, 제품 경로에서 제안을 등록하지 않는다', () => {
+    const files = sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+    const using = (pattern: RegExp) =>
+      files
+        .filter((f) => pattern.test(f.text))
+        .map((f) => f.rel)
+        .sort();
+    // 저장소의 규칙 생성
+    expect(using(/\.rules\.create\(/)).toEqual([
+      'norms/agent-rule.ts',
+      'proposals/proposal-service.ts',
+    ]);
+    // 규범 변경 기록 쓰기 (읽기는 조회 처리기)
+    expect(using(/\.normChanges\.append\(/)).toEqual(['norms/agent-rule.ts']);
+    expect(using(/\.normChanges\./)).toEqual([
+      'ipc/norm-change-handlers.ts',
+      'norms/agent-rule.ts',
+    ]);
+    // 바로 반영 모듈을 가져오는 곳 = 규칙 작성 서비스뿐 (에이전트 세션 중 규칙 작성 역할만)
+    expect(using(/from '[./]+\/?norms\/agent-rule\.js'/)).toEqual([
+      'rule-writer/rule-writer-service.ts',
+    ]);
+    // 제안 등록(submit)을 부르는 제품 코드가 없다: 새 제안은 생기지 않는다 (ADR-100 A1)
+    expect(using(/\bsubmitProposal\(|\.submit\(/)).toEqual(['proposals/proposal-service.ts']);
+    expect(using(/new ProposalService\(/)).toEqual([]);
   });
 });
 

@@ -1,5 +1,5 @@
 // 파이프라인 e2e: 다규칙 (M2-04 · #170, JDG-01 · JDG-02 · RUN-04 · RUN-08, ADR-071 · ADR-083 · ADR-092).
-// 한 프로젝트에서 요구사항 1개 → 규칙 제안 2개 → 둘 다 승인(RULE-001 time · RULE-002 version) → 실행 1(RULE-001) 병합 →
+// 한 프로젝트에서 요구사항 1개 → 규칙 2개 바로 반영(RULE-001 time · RULE-002 version, 승인 없음, M7-02) → 실행 1(RULE-001) 병합 →
 // 실행 2(RULE-002). 실행 2의 검사 단계가 이미 병합된 RULE-001의 인수 테스트까지 실제 판정 러너로 다시 돌리는지 본다.
 // - multi-rule: 실행 2의 구현이 time을 유지하고 version을 더해 두 규칙 모두 통과, 병합
 // - multi-rule-regress: 실행 2의 구현이 time을 지운다. 구현 단계(대상 규칙만 판정)는 통과하고 검사 단계가 RULE-001 실패를
@@ -8,7 +8,6 @@ import type { JudgmentResult, Rule, RunGetResult, Step } from '@bive/shared';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  approveRule,
   attempts,
   branchExists,
   cleanupPipeline,
@@ -55,26 +54,25 @@ interface Prepared {
 }
 
 /**
- * 요구사항 저장 → 제안 2개 → time · version 순서로 승인(RULE-001 · RULE-002) → 실행 1(RULE-001)을 병합까지.
+ * 요구사항 저장 → 규칙 2개 바로 반영(RULE-001 time · RULE-002 version) → 실행 1(RULE-001)을 병합까지.
  * 두 시나리오가 같은 앞부분이다.
  */
 const prepare = async (scenario: string): Promise<Prepared> => {
   const e = await startPipeline(scenario);
   const base = mainTip(e);
-  const { requirement, proposals } = await saveRequirement(
+  const { requirement, rules } = await saveRequirement(
     e,
     '헬스 체크 응답에 서버 시각과 버전 포함',
     2,
   );
+  // 규칙 2개가 승인 없이 만든 순서대로 바로 효력을 갖는다 (M7-02): time = RULE-001, version = RULE-002
   const byTitle = (title: string) => {
-    const found = proposals.find(
-      (p) => (p.payload as { title?: unknown } | undefined)?.title === title,
-    );
-    if (found === undefined) throw new Error(`제안 없음: ${title}`);
+    const found = rules.find((rule) => rule.title === title);
+    if (found === undefined) throw new Error(`규칙 없음: ${title}`);
     return found;
   };
-  const timeRule = await approveRule(e, byTitle(TIME_TITLE));
-  const versionRule = await approveRule(e, byTitle(VERSION_TITLE));
+  const timeRule = byTitle(TIME_TITLE);
+  const versionRule = byTitle(VERSION_TITLE);
   expect([timeRule.displayId, versionRule.displayId]).toEqual(['RULE-001', 'RULE-002']);
   for (const rule of [timeRule, versionRule]) {
     expect(rule).toMatchObject({ parentRequirementId: requirement.id, normState: 'approved' });
