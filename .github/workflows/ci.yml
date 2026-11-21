@@ -141,6 +141,7 @@ jobs:
       PIPELINE_E2E_GROUP1: >-
         multi-rule.test.ts
         fail-check.test.ts
+        network.test.ts
         budget-exceeded.test.ts
         extra-mcp.test.ts
     steps:
@@ -214,10 +215,13 @@ jobs:
           pattern: pipeline-e2e-report-*
           path: ${{ runner.temp }}/pipeline-e2e-reports
 
-      # 새 파일이 어느 묶음에서도 빠지거나 두 묶음에서 겹쳐 돌지 않았는지 본다 (자체 시험: scripts/test_check_pipeline_groups.py)
+      # 새 파일이 어느 묶음에서도 빠지거나 두 묶음에서 겹쳐 돌지 않았는지 본다 (자체 시험: scripts/test_check_pipeline_groups.py).
+      # 받은 보고서가 하나뿐이면 download-artifact가 하위 폴더 없이 풀므로 위치를 가정하지 않고 찾는다
       - name: 묶음 대조
         if: ${{ always() }}
-        run: python3 scripts/check-pipeline-groups.py --dir packages/orchestrator/e2e/pipeline "$RUNNER_TEMP"/pipeline-e2e-reports/*/pipeline-e2e-report.json
+        run: |
+          mapfile -t reports < <(find "$RUNNER_TEMP/pipeline-e2e-reports" -name pipeline-e2e-report.json 2>/dev/null | sort)
+          python3 scripts/check-pipeline-groups.py --dir packages/orchestrator/e2e/pipeline "${reports[@]}"
 
       - name: 묶음 결과 확인
         if: ${{ always() }}
