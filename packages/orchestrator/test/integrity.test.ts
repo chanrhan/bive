@@ -783,6 +783,48 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
   });
 });
 
+describe('규칙 작성 역할의 기존 규범 입력: 도구 목록 불변 (M7-07 #219 수용 기준 4, ADR-100 K1 · D4 · NFR-02)', () => {
+  it('규칙 작성 역할의 도구 목록 · MCP 목록 · 실행기에 파일 · 명령 도구가 없고, 기존 규범은 도구가 아니라 작업 지시로만 들어온다', async () => {
+    const fileAndCommand: readonly string[] = [...FILE_TOOL_NAMES, ...COMMAND_TOOL_NAMES];
+    // 리터럴: 규칙 작성 역할의 도구는 규칙 생성 도구 하나뿐 (규범 입력이 도구로 늘지 않았다)
+    expect([...roleToolNames('rule-writer')]).toEqual(['propose_rule']);
+    expect(EXPECTED_ROLE_TOOLS['rule-writer']).toEqual(['propose_rule']);
+    expect(roleToolNames('rule-writer').filter((name) => fileAndCommand.includes(name))).toEqual(
+      [],
+    );
+    expect(
+      biveMcpToolList('rule-writer')
+        .map((tool) => tool.name)
+        .filter((name) => fileAndCommand.includes(name)),
+    ).toEqual([]);
+    // 실행기는 올바른 인자의 파일 · 명령 도구 호출도 이름만 보고 거부한다
+    const executor = new FixedToolExecutor({
+      role: 'rule-writer',
+      sessionRoot: tempDir(),
+      biveHome: tempDir(),
+    });
+    for (const name of fileAndCommand) {
+      await expect(
+        executor.execute(name, OTHER_ROLE_TOOL_ARGS[name] ?? {}),
+        name,
+      ).resolves.toMatchObject({ status: 'denied', reason: 'unknown_tool' });
+    }
+    // 코드 구조: 규범 입력 모듈을 가져오는 곳은 규칙 작성 역할의 작업 지시 · 서비스와 반영 모듈(모순 대상 확인)뿐이고,
+    // 도구 정의 · 실행기(tools/)는 가져오지 않는다 (M7-08이 테스트 작성 · 구현 역할을 더할 때 이 목록을 고친다)
+    const importers = sourceFiles(SRC_DIR)
+      .filter((file) =>
+        /from '[./]*(?:norms\/)?norm-input\.js'/.test(fs.readFileSync(file, 'utf8')),
+      )
+      .map((file) => path.relative(SRC_DIR, file).split(path.sep).join('/'))
+      .sort();
+    expect(importers).toEqual([
+      'norms/agent-rule.ts',
+      'rule-writer/prompts.ts',
+      'rule-writer/rule-writer-service.ts',
+    ]);
+  });
+});
+
 // ── 네트워크 감시 자체 점검 ─────────────────────────────────
 
 describe('네트워크 감시 도구 자체 (수용 기준 4의 대조군, 실제 단언은 e2e/pipeline/network.test.ts)', () => {
