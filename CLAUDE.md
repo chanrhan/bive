@@ -5,6 +5,7 @@
 ## 1. 문서 우선순위와 ID
 
 - 원본: `docs/spec/prd.md`(요구사항) · `docs/spec/screens.md`(화면) · `docs/spec/plan.md`(용어 · 동작). 내용이 다르면 **PRD > 화면 정의서 > 기획서** 순으로 따른다 (PRD v0.9가 가장 최신, ADR-002).
+- 사람이 정한 방향 전환은 `docs/decisions.md`에 상태 `사람 결정`인 ADR로 남기고, `docs/spec/*`가 고쳐지기 전까지 그 ADR이 명세의 해당 문장보다 우선한다(그 ADR의 명세 변경 목록에 든 항목에서만. 지금은 ADR-100).
 - 요구사항은 PRD ID(`PRJ-01` `NRM-02` `RUN-08` `JDG-01` `DSN-07` `TODO-01` `COST-01` `MET-01` `COL-01` `NFR-01`)로, 화면은 `SCR-01`~`SCR-21`로 부른다. 매핑은 `docs/spec/screens.md` 1.3.
 - 결정은 `docs/decisions.md`에 ADR로만 남긴다. 원본 `docs/spec/*`는 사람만 고친다.
 - 로드맵은 `docs/roadmap.md`, 형식은 `docs/roadmap-format.md`. 이슈 키(`M1-03`)와 GitHub 이슈 번호를 함께 쓴다.
