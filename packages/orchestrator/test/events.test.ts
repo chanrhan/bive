@@ -457,52 +457,35 @@ describe('제안 생성 · 처리마다 event.proposal.changed (M1-36, TODO-01 �
       return { s, watcher, caller };
     });
 
-  it('요구사항 저장 뒤 rule-writer가 제안 2개를 만들면 제안마다 알림이 가고, 받은 순간 proposal.count가 그 수다', async () => {
+  it('요구사항 저장 뒤 rule-writer가 규칙을 바로 반영하면 제안이 생기지 않아 제안 알림이 가지 않는다 (M7-02, ADR-100 A1)', async () => {
     const { s, watcher, caller } = await startWithRuleWriter();
-    const anonymous = await TestClient.open(s.orchestrator.paths.pipe);
-    clients.push(anonymous);
-    // 알림을 받은 순간 할 일 배지가 다시 세는 값 (렌더러의 proposal.count 재조회와 같다)
-    const counts: Promise<number>[] = [];
-    const received = collect(watcher, (notice) => {
-      if (notice.method !== 'event.proposal.changed') return;
-      counts.push(
-        caller.call('proposal.count', { projectId: s.project.id }).then(({ pending }) => pending),
-      );
-    });
-    expect((await caller.call('proposal.count', { projectId: s.project.id })).pending).toBe(0);
-
+    const received = collect(watcher);
     const { requirement } = await caller.call('requirement.create', {
       projectId: s.project.id,
       text: '헬스 체크 응답에 서버 시각 포함',
       author: human,
     });
-    await waitFor(() => counts.length === 2, 30_000, '제안 알림 2건');
-    // 알림은 저장 뒤에 나가므로 받은 순간 다시 세면 그 제안까지 들어 있다(두 제안은 연달아 생겨 첫 재조회에 둘 다
-    // 보일 수 있다). 마지막 알림 뒤의 재조회는 마지막 상태(2)다
-    const seen = await Promise.all(counts);
-    expect(seen[0]).toBeGreaterThanOrEqual(1);
-    expect(seen[1]).toBe(2);
-
-    const { proposals } = await caller.call('proposal.list', { projectId: s.project.id });
-    expect(proposals.map((p) => p.targetRef)).toEqual([
-      { entity: 'Requirement', id: requirement.id },
-      { entity: 'Requirement', id: requirement.id },
-    ]);
-    // 알림은 식별자 · 상태만 싣는다 (본문 · 근거는 다시 조회)
-    expect(received.filter((n) => n.method === 'event.proposal.changed')).toEqual(
-      proposals.map((p) => ({
-        method: 'event.proposal.changed',
-        params: {
-          projectId: s.project.id,
-          proposalId: p.id,
-          displayId: p.displayId,
-          kind: 'rule_new',
-          state: 'pending',
-        },
-      })),
+    await s.orchestrator.ruleWriter.whenSettled(s.project.id, requirement.id);
+    // 세션이 끝난 뒤의 규칙 작성 알림까지 받은 다음 본다
+    await waitFor(
+      () =>
+        received.some(
+          (n) =>
+            n.method === 'event.ruleWriter.changed' &&
+            withProject(s.biveHome, s.project.id, (store) =>
+              store.ruleWriterRequests.latest(requirement.id),
+            )?.state === 'ended',
+        ),
+      30_000,
+      '규칙 작성 종료 알림',
     );
-    // 인증 전 연결은 받지 않는다
-    expect(anonymous.unmatched).toEqual([]);
+    await caller.call('ping');
+    expect(received.filter((n) => n.method === 'event.proposal.changed')).toEqual([]);
+    expect((await caller.call('proposal.count', { projectId: s.project.id })).pending).toBe(0);
+    const { rules } = await caller.call('rule.list', { projectId: s.project.id });
+    expect(rules.filter((entry) => entry.rule.parentRequirementId === requirement.id)).toHaveLength(
+      2,
+    );
   }, 60_000);
 
   it('승인 · 수정 후 승인 · 거절이 저장되면 그 제안의 처리 상태로 알림이 가고, 받은 순간 proposal.count가 줄어 있다', async () => {
@@ -519,29 +502,43 @@ describe('제안 생성 · 처리마다 event.proposal.changed (M1-36, TODO-01 �
           ),
       );
     });
-    const { requirement } = await caller.call('requirement.create', {
-      projectId: s.project.id,
-      text: '헬스 체크 응답에 서버 시각 포함',
-      author: human,
-    });
-    await s.orchestrator.ruleWriter.whenSettled(s.project.id, requirement.id);
-    // 세 번째 제안은 저장소에 바로 넣는다(준비 단계, 알림 대상 아님): 승인 · 수정 후 승인 · 거절을 하나씩 하려고
-    const first = await caller.call('proposal.list', { projectId: s.project.id });
-    const template = first.proposals[1];
-    if (template === undefined) throw new Error('제안 부족');
-    withProject(s.biveHome, s.project.id, (store) =>
-      submitProposal(
-        store,
-        {
-          kind: 'rule_new',
-          payload: { ...(template.payload as object), title: '헬스 체크 응답 형식 (별안)' },
-          rationale: template.rationale,
-          author: { kind: 'agent', role: 'rule-writer' },
-          source: 'rule_generation',
-        },
-        { now: Date.now, newId },
-      ),
+    // 이 변경 전부터 대기 중이던 제안 3개를 저장소에 바로 넣는다(준비 단계, 알림 대상 아님): 새 제안은 생기지 않으므로
+    // (M7-02) 승인 · 수정 후 승인 · 거절을 하나씩 하려면 옛 데이터를 흉내 내야 한다
+    const requirement = withProject(s.biveHome, s.project.id, (store) =>
+      store.requirements.create({
+        id: newId(),
+        text: '헬스 체크 응답에 서버 시각 포함',
+        author: human,
+        normState: 'approved',
+        createdAt: new Date().toISOString(),
+      }),
     );
+    for (const title of [
+      '헬스 체크 응답의 서버 시각',
+      '헬스 체크 응답 형식 유지',
+      '헬스 체크 응답 형식 (별안)',
+    ]) {
+      withProject(s.biveHome, s.project.id, (store) =>
+        submitProposal(
+          store,
+          {
+            kind: 'rule_new',
+            payload: {
+              parentRequirementId: requirement.id,
+              title,
+              statement:
+                'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON에 서버 시각을 담는다',
+              kind: 'business',
+              checkKinds: ['test'],
+            },
+            rationale: '이 변경 전의 제안',
+            author: { kind: 'agent', role: 'rule-writer' },
+            source: 'rule_generation',
+          },
+          { now: Date.now, newId },
+        ),
+      );
+    }
     const { proposals } = await caller.call('proposal.list', {
       projectId: s.project.id,
       state: 'pending',

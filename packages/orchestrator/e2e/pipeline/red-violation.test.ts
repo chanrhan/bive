@@ -7,7 +7,6 @@ import fs from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  approveRule,
   attempts,
   branchExists,
   cleanupPipeline,
@@ -27,10 +26,9 @@ describe('red-violation: 테스트 작성 미종료 뒤 failed', () => {
     const e = await startPipeline('red-violation');
     const base = mainTip(e);
 
-    const { proposals } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 1);
-    const [proposal] = proposals;
-    if (proposal === undefined) throw new Error('제안 없음');
-    const rule = await approveRule(e, proposal);
+    const { rules } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 1);
+    const [rule] = rules;
+    if (rule === undefined) throw new Error('규칙 없음');
 
     const done = await runToEnd(e, [rule.id], 480_000);
     expect(done.run).toMatchObject({

@@ -7,14 +7,12 @@ import fs from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  approveRule,
   attempts,
   branchExists,
   cleanupPipeline,
   commitAsUser,
   createRun,
   git,
-  human,
   mainTip,
   mergeCount,
   pauseFile,
@@ -47,16 +45,10 @@ describe('merge-conflict: 병합 직전 기준 브랜치 충돌 커밋이면 fai
     const e = await startPipeline('merge-conflict');
     const base = mainTip(e);
 
-    const { proposals } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 2);
-    const [first, second] = proposals;
-    if (first === undefined || second === undefined) throw new Error('제안 2개 아님');
-    const rule = await approveRule(e, first);
-    await e.client.call('proposal.reject', {
-      projectId: e.projectId,
-      id: second.id,
-      author: human,
-      reason: '중복',
-    });
+    const { rules } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 2);
+    // 규칙 2개가 사람의 승인 없이 바로 효력을 갖는다(M7-02, ADR-100 D1). 실행은 사람의 [실행]으로 첫째 규칙만
+    const [rule] = rules;
+    if (rule === undefined) throw new Error('규칙 없음');
 
     const run = await createRun(e, [rule.id]);
     // 구현 세션이 라우트를 고친 뒤 대기하는 동안 사람이 main에 충돌 커밋을 올린다
