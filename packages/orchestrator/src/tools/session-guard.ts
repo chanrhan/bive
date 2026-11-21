@@ -28,7 +28,10 @@ export interface SessionGuardViolation {
   missingTools: string[];
   unexpectedMcpServers: string[];
   missingMcpServers: string[];
-  /** init에 보고된 플러그인 (하나라도 있으면 위반) */
+  /**
+   * init에 보고된 플러그인 (하나라도 있으면 위반). CLI 내장 플러그인도 허용 목록을 두지 않는다: 실제 SDK 어댑터가
+   * 세션 옵션으로 끄고, 끄지 못한 것이 보고되면 그대로 거부한다 (ADR-098)
+   */
   unexpectedPlugins: string[];
   /** 기대와 다른 권한 모드 (같거나 보고가 없으면 `null`, 빈 문자열은 형식이 틀린 보고) */
   unexpectedPermissionMode: string | null;
