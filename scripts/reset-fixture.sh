@@ -39,8 +39,42 @@ fixture_rel='fixtures/sample-next-app'
   exit 1
 }
 
-target="$(realpath -m -- "$dir")"
-home="$(realpath -m -- "${HOME:-/}")"
+# 절대 경로로 정규화한다 (GNU `realpath -m` 대체, macOS BSD realpath · bash 3.2에서도 동작).
+# 존재하는 디렉터리 구성 요소는 심볼릭 링크를 따라가 물리 경로로 바꾸고,
+# 존재하지 않는 구성 요소와 그 뒤의 `..`는 글자 그대로 처리한다.
+canonicalize() {
+  local path="$1" cur rest comp next
+  if [[ "$path" == /* ]]; then
+    cur='/'
+    rest="${path#/}"
+  else
+    cur="$(pwd -P)"
+    rest="$path"
+  fi
+  while [[ -n "$rest" ]]; do
+    comp="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then rest="${rest#*/}"; else rest=''; fi
+    case "$comp" in
+      '' | .) ;;
+      ..)
+        cur="${cur%/*}"
+        [[ -n "$cur" ]] || cur='/'
+        ;;
+      *)
+        if [[ "$cur" == / ]]; then next="/$comp"; else next="$cur/$comp"; fi
+        if [[ -d "$next" ]]; then
+          cur="$(CDPATH='' cd -P -- "$next" && pwd -P)"
+        else
+          cur="$next"
+        fi
+        ;;
+    esac
+  done
+  printf '%s\n' "$cur"
+}
+
+target="$(canonicalize "$dir")"
+home="$(canonicalize "${HOME:-/}")"
 
 # 지우면 안 되는 경로: 루트, 홈, 저장소 루트와 그 아래 전부
 case "$target" in
