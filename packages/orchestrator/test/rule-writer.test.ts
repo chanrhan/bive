@@ -33,6 +33,7 @@ import type { PipeServer } from '../src/ipc/server.js';
 import { startOrchestrator, type Orchestrator } from '../src/orchestrator.js';
 import { NO_CONTRADICTION_REASON } from '../src/norms/agent-rule.js';
 import {
+  byRecentChange,
   collectNormInput,
   NORM_INPUT_BEGIN,
   NORM_INPUT_END,
@@ -2102,5 +2103,196 @@ describe('규칙 작성 세션의 기존 규범 입력 · 모순 판단 기록 (
         `  최근 판정의 인수 테스트 케이스: ${String(NORM_INPUT_LIMITS.casesPerRule + 2)}건`,
       );
     });
+  });
+});
+
+describe('규범 입력 · 모순 판단 보강 (M7-07 #219 검토 1회차)', () => {
+  const seedId = createUlidGenerator();
+  const seedRequirement = (store: ProjectStore, text: string, at: number): Requirement =>
+    store.requirements.create({
+      id: seedId(),
+      text,
+      author: human,
+      normState: 'approved',
+      createdAt: iso(at),
+    });
+  const seedRule = (
+    store: ProjectStore,
+    parent: Requirement,
+    title: string,
+    statement: string,
+    at: number,
+  ): Rule =>
+    store.rules.create({
+      id: seedId(),
+      title,
+      statement,
+      kind: 'business',
+      checkKinds: ['test'],
+      parentRequirementId: parent.id,
+      builtin: false,
+      targetBlockIds: [],
+      risk: null,
+      contractId: null,
+      author: { kind: 'agent', role: 'rule-writer' },
+      normState: 'approved',
+      createdAt: iso(at),
+    });
+
+  it('판단 기록 추가만 실패해도(신규 기록은 성공) 규칙 · 신규 기록 · 판단 기록이 모두 남지 않는다 (트랜잭션 1개)', async () => {
+    const h = await startHarness({
+      scenario: ruleWriterScenario([{ tool: 'propose_rule', args: validArgs() }]),
+    });
+    await saveSettings(h);
+    const before = h.read((store) => ({
+      rules: store.rules.list(),
+      changes: store.normChanges.list(),
+    }));
+    // 판단 기록만 거부하는 저장소 (신규 기록 INSERT는 통과한다)
+    h.read((store) =>
+      store.db.exec(`CREATE TRIGGER norm_changes_judgment_fail BEFORE INSERT ON norm_changes
+        WHEN NEW.kind = 'judgment'
+        BEGIN SELECT RAISE(ABORT, '시험: 판단 기록 실패'); END;`),
+    );
+    const requirement = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
+    await h.service.whenSettled(h.project.id, requirement.id);
+    const record = onlyRecord(h, requirement.id);
+    expect(record.toolCalls.map((call) => [call.status, call.reason])).toEqual([
+      ['error', 'tool_failed'],
+    ]);
+    expect(record.ruleIds).toEqual([]);
+    h.read((store) => {
+      expect(store.rules.list()).toEqual(before.rules);
+      expect(store.normChanges.list()).toEqual(before.changes);
+      expect(store.rules.listByParent(requirement.id)).toEqual([]);
+    });
+  });
+
+  it('표시 ID와 ID로 같은 규칙을 두 번 가리키면 invalid_args로 거부하고 규칙도 기록도 남기지 않는다', async () => {
+    const h = await startHarness();
+    const existing = h.read((store) =>
+      seedRule(
+        store,
+        seedRequirement(store, '헬스 체크 응답에 서버 시각 포함', T0),
+        '헬스 체크 응답의 서버 시각',
+        'WHEN 요청이 오면 THE SYSTEM SHALL time을 담는다',
+        T0,
+      ),
+    );
+    h.useScenario(
+      ruleWriterScenario([
+        {
+          tool: 'propose_rule',
+          args: validArgs({
+            contradiction: {
+              verdict: 'contradicts',
+              ruleIds: ['RULE-001', existing.id],
+              grounds: '진술이 부딪힘',
+            },
+          }),
+        },
+      ]),
+    );
+    await saveSettings(h);
+    const before = h.read((store) => store.normChanges.list());
+    const requirement = await createRequirement(h, '헬스 체크 응답에서 서버 시각 제거');
+    await h.service.whenSettled(h.project.id, requirement.id);
+    const record = onlyRecord(h, requirement.id);
+    expect(record.toolCalls.map((call) => [call.status, call.reason])).toEqual([
+      ['denied', 'invalid_args'],
+    ]);
+    const results = h.events.flatMap((event) =>
+      event.type === 'tool_result' ? [event.result.content] : [],
+    );
+    expect(results[0]).toContain('같은 규칙을 두 번 가리킴: RULE-001');
+    expect(record.ruleIds).toEqual([]);
+    h.read((store) => {
+      expect(store.rules.listByParent(requirement.id)).toEqual([]);
+      expect(store.normChanges.list()).toEqual(before);
+    });
+  });
+
+  it('요구사항 본문 상한 경계: 1000자는 그대로, 1001자는 1000자로 잘리고 끝이 …다', async () => {
+    const h = await startHarness();
+    expect(NORM_INPUT_LIMITS.requirementText).toBe(1000);
+    const exact = 'a'.repeat(1000);
+    const over = 'b'.repeat(1001);
+    h.read((store) => {
+      const a = seedRequirement(store, exact, T0);
+      const b = seedRequirement(store, over, T0 + 1);
+      const input = collectNormInput(store, { requirementIds: [], ruleIds: [] });
+      expect(input.requirements.find((entry) => entry.id === a.id)?.text).toBe(exact);
+      const cut = input.requirements.find((entry) => entry.id === b.id)?.text ?? '';
+      expect(cut).toHaveLength(1000);
+      expect(cut).toBe(`${'b'.repeat(999)}…`);
+    });
+  });
+
+  it('본문 · 제목 · 진술 · 케이스 이름의 CR · 줄 구분(U+2028) · NEL(U+0085) · 태그 글자(U+E0041)도 표기로 바뀐다', async () => {
+    const h = await startHarness();
+    const LS = String.fromCodePoint(0x2028);
+    const hidden = `x\ry${LS}z\u0085w\u{E0041}v`;
+    const shown = 'x\\ry\\u2028z\\u0085w\\udb40\\udc41v';
+    h.read((store) => {
+      const parent = seedRequirement(store, `본문 ${hidden}`, T0);
+      const rule = seedRule(store, parent, `제목 ${hidden}`, `진술 ${hidden}`, T0);
+      store.judgments.record([
+        {
+          id: seedId(),
+          ruleId: rule.id,
+          runId: null,
+          stepId: null,
+          commit: 'a'.repeat(40),
+          judgedAt: iso(T0 + 1),
+          status: 'pass',
+          runner: 'vitest',
+          exitCode: 0,
+          reporterPath: null,
+          cases: [
+            {
+              name: `케이스 ${hidden}`,
+              file: 'bive-acceptance/RULE-001/a.acc.ts',
+              line: 1,
+              status: 'passed',
+              message: null,
+            },
+          ],
+          quarantineReason: null,
+        },
+      ]);
+      const input = collectNormInput(store, { requirementIds: [], ruleIds: [] });
+      expect(input.requirements[0]?.text).toBe(`본문 ${shown}`);
+      expect(input.rules[0]).toMatchObject({
+        title: `제목 ${shown}`,
+        statement: `진술 ${shown}`,
+        cases: [`케이스 ${shown}`],
+      });
+      const rendered = renderNormInput(input, '대상');
+      for (const raw of ['\r', LS, '\u0085', '\u{E0041}']) {
+        expect(rendered.includes(raw)).toBe(false);
+      }
+    });
+  });
+
+  it('같은 변경 시각이면 표시 ID가 큰 것이 먼저다: 저장소 정렬처럼 길이 먼저 비교 (RULE-1000 > RULE-999)', () => {
+    const at = iso(T0);
+    const items = ['RULE-999', 'RULE-1000', 'RULE-998'].map((displayId) => ({
+      displayId,
+      updatedAt: at,
+    }));
+    expect([...items].sort(byRecentChange).map((item) => item.displayId)).toEqual([
+      'RULE-1000',
+      'RULE-999',
+      'RULE-998',
+    ]);
+    // 시각이 다르면 시각이 먼저다
+    expect(
+      [
+        { displayId: 'RULE-1000', updatedAt: iso(T0) },
+        { displayId: 'RULE-002', updatedAt: iso(T0 + 1) },
+      ]
+        .sort(byRecentChange)
+        .map((item) => item.displayId),
+    ).toEqual(['RULE-002', 'RULE-1000']);
   });
 });

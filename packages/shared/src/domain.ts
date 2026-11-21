@@ -751,10 +751,6 @@ export const NormChangeBreakReason = z.enum([
 export type NormChangeBreakReason = z.infer<typeof NormChangeBreakReason>;
 
 /**
- * 종류별 상세. 신규는 `after`(만든 규범의 내용)만, 그 밖의 종류가 쓰는 칸은 그 이슈가 더한다.
- * 값은 에이전트가 쓴 글을 담을 수 있어 화면 · 응답에는 표시 값으로만 내보낸다(ADR-089).
- */
-/**
  * 판단의 주제 (M7-07 #219, ADR-106). `new_rule` = 규칙 작성 역할이 새 규칙을 만들며 효력 있는 기존 규칙과의 모순을
  * 판단함. 이의(M7-11) · 검사 단계의 기존 규칙 실패(M7-12)는 그 이슈가 값을 더한다(넓히기만).
  */
@@ -812,6 +808,10 @@ export const NormJudgmentDetail = z
   });
 export type NormJudgmentDetail = z.infer<typeof NormJudgmentDetail>;
 
+/**
+ * 종류별 상세. 신규는 `after`(만든 규범의 내용)만, 그 밖의 종류가 쓰는 칸은 그 이슈가 더한다.
+ * 값은 에이전트가 쓴 글을 담을 수 있어 화면 · 응답에는 표시 값으로만 내보낸다(ADR-089).
+ */
 export const NormChangeDetail = z.strictObject({
   before: z.unknown().optional(),
   after: z.unknown().optional(),

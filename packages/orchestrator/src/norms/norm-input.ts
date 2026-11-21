@@ -4,7 +4,9 @@
 //   효력인 것(부모가 해제된 규칙 · 내장 규칙 포함). 검사 단계가 판정하는 규칙(`steps/check.ts`의 `approvedRules`)과 같다
 // - 값(요구사항 본문, 규칙 제목 · 진술, 최근 판정의 인수 테스트 케이스 이름)은 사람 · 에이전트가 쓴 글이라 표시 값
 //   (숨은 글자 표기 · 길이 상한, ADR-089 `displayText`)으로만 싣는다. 표시 값에는 줄바꿈이 남지 않고 값은 언제나 항목 머리말
-//   뒤에 오므로, 줄 첫머리에 홀로 있는 끝 표시 줄은 이 모듈만 쓸 수 있다(자료가 틀을 닫지 못한다)
+//   뒤에 오므로, 자료 블록 안의 글은 줄 첫머리에 홀로 있는 끝 표시 줄을 만들 수 없다(자료가 블록 안에서 틀을 닫지 못한다).
+//   블록 밖은 이 모듈이 정하지 않는다: 규칙 작성 작업 지시 머리의 대상 요구사항 본문은 원문이라 틀보다 앞에 표시 줄 모양의
+//   줄을 둘 수 있다(ADR-106 결과, 머리 본문의 표시 값 변환 여부는 M7-08이 정한다)
 // - 수가 상한을 넘으면 A15대로 줄인다: 초점(대상 규칙, 대상 · 그 부모 요구사항)과 같은 부모 요구사항의 규칙을 먼저 넣고,
 //   나머지를 최근 변경 순으로 상한까지 넣는다. 잘린 사실과 빠진 수는 자료 머리말과 요약(`summary`)에 남는다
 // - 저장소를 읽기만 한다. 계약(M3-04)과 대상 블록으로 고르기(M3-29)는 뒤 이슈가 더한다
@@ -118,10 +120,17 @@ export const effectiveRequirements = (store: ProjectStore): Requirement[] =>
 export const effectiveRules = (store: ProjectStore): Rule[] =>
   store.rules.list().filter((rule) => rule.deletedAt === null && rule.normState === 'approved');
 
+/** 표시 ID 비교: 저장소 정렬과 같이 길이 먼저, 그다음 문자열 (`RULE-999` < `RULE-1000`). */
+export const compareDisplayId = (a: string, b: string): number =>
+  a.length === b.length ? (a < b ? -1 : a > b ? 1 : 0) : a.length - b.length;
+
 /** 최근 변경 순 (같으면 표시 ID가 큰 것 = 나중에 만든 것 먼저). */
-const byRecentChange = <T extends { updatedAt: string; displayId: string }>(a: T, b: T): number =>
+export const byRecentChange = <T extends { updatedAt: string; displayId: string }>(
+  a: T,
+  b: T,
+): number =>
   a.updatedAt === b.updatedAt
-    ? b.displayId.localeCompare(a.displayId)
+    ? compareDisplayId(b.displayId, a.displayId)
     : b.updatedAt.localeCompare(a.updatedAt);
 
 /** 우선 항목을 앞에, 나머지를 최근 변경 순으로 이어 상한까지 고른 ID. */
