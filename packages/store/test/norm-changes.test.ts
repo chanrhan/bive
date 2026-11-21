@@ -201,6 +201,61 @@ describe('norm_changes 리포지토리', () => {
     });
   });
 
+  it.each([
+    ['actor', '{}'],
+    ['actor', '{"kind":null}'],
+    ['actor', '{"Kind":"human"}'],
+    ['actor', '"human"'],
+    ['actor', '[{"kind":"agent"}]'],
+    ['actor', '{"kind":"agent"}'],
+    ['actor', '{"kind":"agent","role":null}'],
+    ['actor', '{"kind":"agent","role":""}'],
+    ['actor', '{"kind":1}'],
+    ['target_ref', '{}'],
+    ['target_ref', '"Rule"'],
+    ['target_ref', '[]'],
+    ['target_ref', '{"entity":null,"id":"x"}'],
+    ['target_ref', '{"entity":"Rule"}'],
+    ['target_ref', '{"entity":"Rule","id":""}'],
+    ['target_ref', '{"entity":"Rule","id":1}'],
+    ['detail', '"after"'],
+    ['detail', '[]'],
+    ['detail', 'null'],
+  ])(
+    'DB CHECK: JSON 칸의 NULL · 모양 구멍이 없다 (%s = %s, 스키마를 거치지 않는 삽입)',
+    (column, value) => {
+      withStore((store) => {
+        // 대조군: 기본 행은 들어간다
+        rawInsert(store, {});
+        expect(() => rawInsert(store, { seq: 2, hash: 'b'.repeat(64), [column]: value })).toThrow(
+          /CHECK/,
+        );
+        expect(store.db.prepare('SELECT count(*) AS n FROM norm_changes').get()).toEqual({ n: 1 });
+      });
+    },
+  );
+
+  it('DB CHECK: kind가 null인 주체는 세션 ID · 사유 없이도 에이전트 조건을 건너뛰지 못한다', () => {
+    withStore((store) => {
+      expect(() =>
+        rawInsert(store, {
+          actor: '{"kind":null,"role":"implementer"}',
+          session_id: null,
+          reason: null,
+        }),
+      ).toThrow(/CHECK/);
+      // 오케스트레이터 주체는 세션 · 사유 없이 들어간다 (대조군)
+      rawInsert(store, {
+        kind: 'auto_start',
+        actor: '{"kind":"orchestrator"}',
+        session_id: null,
+        reason: null,
+        detail: '{}',
+      });
+      expect(store.db.prepare('SELECT count(*) AS n FROM norm_changes').get()).toEqual({ n: 1 });
+    });
+  });
+
   it('추가 전용: UPDATE · DELETE는 DB 트리거가 막는다', () => {
     withStore((store) => {
       const entry = store.normChanges.append(created());

@@ -3,7 +3,9 @@ import type { Migration } from '../../migrate.js';
 /**
  * 규범 변경 기록 (NRM-07, NFR-01, ADR-100 C2 · A2, M7-02 #214, ADR-103).
  * - `norm_changes`: 에이전트 · 오케스트레이터 행동 1건마다 1행인 추가 전용 기록. 사람 행동은 승인 기록(`approval_log`)에
- *   남으므로 주체는 에이전트 · 오케스트레이터만 받는다(CHECK). 에이전트 주체는 세션 ID와 사유가 필수다
+ *   남으므로 주체는 `kind`가 에이전트 · 오케스트레이터인 JSON 객체만 받는다(CHECK). 에이전트 주체는 역할 문자열 · 세션 ID ·
+ *   사유가 필수다. JSON 칸의 CHECK는 `json_extract`가 NULL을 돌려도(키 없음 · null 값 · 객체 아님) 통과하지 않게
+ *   `json_type` · `coalesce`로 감싼다(대상은 엔터티 · ID 문자열을 가진 객체, 상세는 객체)
  * - 종류(`kind`)는 뒤 이슈가 쓸 값까지 한 번에 연다(신규 · 수정 · 폐기 · 대체 · 판단 · 이의 · 확인 풀림 · 자동 시작 ·
  *   테스트 변경). SQLite는 CHECK를 바꾸는 ALTER가 없어 값을 늘리려면 표를 다시 만들어야 하므로 0012의 승인 기록 행동과
  *   같은 방식으로 미리 둔다. M7-02가 쓰는 값은 신규뿐이다
@@ -26,17 +28,29 @@ CREATE TABLE norm_changes (
     'unconfirmed', 'auto_start', 'test_changed'
   )),
   actor TEXT NOT NULL CHECK (
-    json_valid(actor) AND json_extract(actor, '$.kind') IN ('agent', 'orchestrator')
+    json_valid(actor) AND json_type(actor) = 'object'
+    AND coalesce(json_extract(actor, '$.kind'), '') IN ('agent', 'orchestrator')
+    AND (
+      coalesce(json_extract(actor, '$.kind'), '') <> 'agent'
+      OR (coalesce(json_type(actor, '$.role'), '') = 'text' AND length(json_extract(actor, '$.role')) > 0)
+    )
   ),
-  target_ref TEXT NOT NULL CHECK (json_valid(target_ref)),
+  target_ref TEXT NOT NULL CHECK (
+    json_valid(target_ref) AND json_type(target_ref) = 'object'
+    AND coalesce(json_type(target_ref, '$.entity'), '') = 'text'
+    AND length(json_extract(target_ref, '$.entity')) > 0
+    AND coalesce(json_type(target_ref, '$.id'), '') = 'text'
+    AND length(json_extract(target_ref, '$.id')) > 0
+  ),
   session_id TEXT CHECK (session_id IS NULL OR length(session_id) = 26),
   run_id TEXT CHECK (run_id IS NULL OR length(run_id) = 26),
   reason TEXT CHECK (reason IS NULL OR length(reason) > 0),
-  detail TEXT NOT NULL CHECK (json_valid(detail)),
+  detail TEXT NOT NULL CHECK (json_valid(detail) AND json_type(detail) = 'object'),
   prev_hash TEXT NOT NULL CHECK (length(prev_hash) = 64),
   hash TEXT NOT NULL UNIQUE CHECK (length(hash) = 64),
   CHECK (
-    json_extract(actor, '$.kind') <> 'agent' OR (session_id IS NOT NULL AND reason IS NOT NULL)
+    coalesce(json_extract(actor, '$.kind'), '') <> 'agent'
+    OR (session_id IS NOT NULL AND reason IS NOT NULL)
   )
 ) STRICT;
 
