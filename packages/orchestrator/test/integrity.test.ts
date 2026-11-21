@@ -3,6 +3,9 @@
 //   실제 세션의 init 기록에 승인 · 잠정 승인 · 규범 쓰기 · 셸 도구가 없음을 단언한다
 // - 승인 호출: `agent-approve` 시나리오의 모든 역할 세션이 `proposal.approve`를 부르고 `denied`(`unknown_tool`)로 거부된다.
 //   제안은 `pending` 그대로, 그 제안 대상 승인 기록 0건
+// - 확인 표시 (M7-01 #213, ADR-100 I1): 모든 역할 세션의 도구 목록에 확인 상태를 바꾸는 도구가 없고, `agent-confirm`
+//   시나리오의 test-writer가 부른 `confirmation.set`은 `denied`(`unknown_tool`), 규칙은 미확인 그대로다. 확인됨을 쓰는
+//   경로(확인 서비스)는 사람 RPC 처리기 · 사람의 제안 승인에서만 가져온다(코드 구조)
 // - 작업 디렉터리: 세션이 도는 동안(결과 직전) 작업 디렉터리 실경로가 `$BIVE_HOME/projects` · `$BIVE_HOME/run` 밖이고
 //   그 안에 그쪽을 가리키는 심볼릭 링크가 없다
 // - 네트워크 감시 도구의 자체 점검 (실제 happy-path 실행 동안의 단언은 `e2e/pipeline/network.test.ts`, ADR-075)
@@ -18,7 +21,13 @@ import os from 'node:os';
 import path from 'node:path';
 import tls from 'node:tls';
 
-import { AgentRole, type EntityRef, METHOD_NAMES, type RoleSettings } from '@bive/shared';
+import {
+  AgentRole,
+  createUlidGenerator,
+  type EntityRef,
+  METHOD_NAMES,
+  type RoleSettings,
+} from '@bive/shared';
 import { bivePaths } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -60,6 +69,9 @@ import { type ProjectHarness, startProjectHarness } from './helpers/project-harn
 
 const SCENARIO = 'agent-approve';
 const APPROVE_METHOD = 'proposal.approve';
+const CONFIRM_SCENARIO = 'agent-confirm';
+const CONFIRM_METHOD = 'confirmation.set';
+const newUlid = createUlidGenerator();
 /** 역할 목록의 원본. 역할이 늘면 시험이 따라간다 */
 const ROLES = AgentRole.options;
 
@@ -325,6 +337,55 @@ describe('모든 역할 세션의 도구 목록에 승인 · 잠정 승인 · �
       expect(fs.readdirSync(root)).toEqual([]);
     },
   );
+
+  it.each(ROLES)(
+    '%s: 도구 목록 · MCP tools/list · SDK 허용 목록에 확인 상태를 바꾸는 도구가 없고, 확인 RPC 이름은 실행기 · canUseTool이 거부한다 (M7-01, ADR-100 I1)',
+    async (role) => {
+      // 확인 RPC는 파이프 레지스트리에 있다 (이름을 시험에 복사하지 않고 레지스트리에서 찾는다)
+      const confirmMethods = METHOD_NAMES.filter((name) => name.startsWith('confirmation.'));
+      expect(confirmMethods).toContain(CONFIRM_METHOD);
+      const isConfirmTool = (name: string): boolean =>
+        /confirm/i.test(name) || (confirmMethods as readonly string[]).includes(name);
+
+      const root = tempDir();
+      const executor = new FixedToolExecutor({ role, sessionRoot: root, biveHome: tempDir() });
+      const options = buildQueryOptions(specFor(role, executor, root), {
+        env: {},
+        configDir: path.join(root, 'agent'),
+        abortController: new AbortController(),
+      });
+      for (const names of [
+        [...roleToolNames(role)],
+        [...executor.toolNames],
+        biveMcpToolList(role).map((tool) => tool.name),
+        (options.allowedTools ?? []).map(normalizeToolName),
+      ]) {
+        expect(names.filter(isConfirmTool), role).toEqual([]);
+      }
+      const canUseTool = options.canUseTool;
+      if (canUseTool === undefined) throw new Error('canUseTool 없음');
+      for (const name of confirmMethods) {
+        for (const asked of [name, `mcp__${BIVE_MCP_SERVER}__${name}`]) {
+          await expect(
+            canUseTool(asked, {}, { signal: new AbortController().signal } as Parameters<
+              typeof canUseTool
+            >[2]),
+            asked,
+          ).resolves.toMatchObject({ behavior: 'deny' });
+        }
+        // 인자가 확인 RPC의 파라미터 모양이어도 이름만 보고 거부한다
+        await expect(
+          executor.execute(name, {
+            projectId: newUlid(),
+            target: { entity: 'Rule', id: newUlid() },
+            author: { kind: 'human' },
+          }),
+          name,
+        ).resolves.toMatchObject({ status: 'denied', reason: 'unknown_tool' });
+      }
+      expect(fs.readdirSync(root)).toEqual([]);
+    },
+  );
 });
 
 // ── 작업 디렉터리 검사 ─────────────────────────────────────
@@ -565,6 +626,86 @@ describe('agent-approve: 세션의 승인 호출 거부 (수용 기준 2, NFR-01
       done.run.worktreePath,
     );
   }, 60_000);
+});
+
+// ── agent-confirm: 확인 표시 위조 불가 (M7-01 #213) ─────────
+
+describe('agent-confirm: 세션의 확인 호출 거부 (M7-01 수용 기준 3, NFR-01 · ADR-100 I1)', () => {
+  it('test-writer 세션의 confirmation.set은 denied(unknown_tool)로 기록되고 규칙은 미확인 그대로, 승인 기록이 늘지 않으며 실행은 완주한다', async () => {
+    const h: PipelineHarness = setupPipeline({ scenario: CONFIRM_SCENARIO, temps, engines });
+    const target = { entity: 'Rule', id: h.rule.id } as const;
+    const before = withProject(h.biveHome, h.project.id, (store) => ({
+      log: store.approvalLog.list(),
+      confirmation: store.confirmations.get(target),
+    }));
+    expect(before.confirmation).toEqual({ state: 'unconfirmed' });
+
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({ status: 'merged', failureReason: null });
+
+    const confirmCalls = toolCallsOf(h)
+      .filter((call) => call.name === CONFIRM_METHOD)
+      .map((call) => [call.role, call.status, call.reason]);
+    expect(confirmCalls).toEqual([['test-writer', 'denied', 'unknown_tool']]);
+    withProject(h.biveHome, h.project.id, (store) => {
+      // 확인 상태 그대로 (확인 행 없음), 승인 기록 그대로 (확인 항목 없음)
+      expect(store.confirmations.get(target)).toEqual({ state: 'unconfirmed' });
+      expect(store.rules.get(h.rule.id)?.confirmation).toEqual({ state: 'unconfirmed' });
+      expect(
+        store.db.prepare("SELECT count(*) AS n FROM confirmations WHERE entity = 'Rule'").get(),
+      ).toEqual({ n: 0 });
+      expect(store.approvalLog.list()).toEqual(before.log);
+      expect(store.approvalLog.list().filter((entry) => entry.action === 'confirm')).toEqual([]);
+      // 실제 세션의 init 도구 목록에도 확인 도구가 없다
+      for (const session of store.sessions.listByRun(h.runId)) {
+        expectSafeTools(session.role, session.tools);
+      }
+    });
+  }, 60_000);
+});
+
+// ── 확인됨을 쓰는 경로의 코드 구조 (M7-01 #213, ADR-100 I1) ─────
+
+const SRC_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../src');
+
+const sourceFiles = (dir: string): string[] =>
+  fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return sourceFiles(full);
+    return entry.name.endsWith('.ts') ? [full] : [];
+  });
+
+describe('확인됨을 쓰는 경로는 사람 RPC · 사람의 제안 승인뿐 (M7-01 수용 기준 3, 코드 구조)', () => {
+  it('저장소의 확인 쓰기(confirmations.confirm)는 확인 서비스에만 있고, 확인 서비스는 사람 RPC 처리기 · 제안 승인만 가져온다', () => {
+    const files = sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+    expect(files.length).toBeGreaterThan(20);
+    // 저장소의 확인 상태 저장소에 닿는 파일 (읽기 포함)
+    expect(files.filter((f) => /\.confirmations\b/.test(f.text)).map((f) => f.rel)).toEqual([
+      'confirmations/confirmation-service.ts',
+    ]);
+    // 확인 서비스를 가져오는 파일 = 확인 RPC · 요구사항 RPC(사람의 작성 · 편집) · 제안 승인
+    expect(
+      files
+        .filter((f) => /from '[./]+\/?confirmations\/confirmation-service\.js'/.test(f.text))
+        .map((f) => f.rel)
+        .sort(),
+    ).toEqual([
+      'ipc/confirmation-handlers.ts',
+      'ipc/requirement-handlers.ts',
+      'proposals/proposal-service.ts',
+    ]);
+    // 오케스트레이터 내부(엔진 · 단계 실행기 · 역할 세션 · 도구 · 규칙 작성)와 에이전트 도구에는 확인 경로가 없다
+    for (const { rel, text } of files) {
+      if (
+        /^(engine|steps|agent|tools|rule-writer|test-writer|implementer|judge|runs)\//.test(rel)
+      ) {
+        expect(/confirm/i.test(text), rel).toBe(false);
+      }
+    }
+  });
 });
 
 // ── 네트워크 감시 자체 점검 ─────────────────────────────────

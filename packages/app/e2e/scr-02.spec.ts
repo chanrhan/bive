@@ -38,6 +38,7 @@ const NEW_REQUIREMENT = {
   updatedAt: '2026-10-16T04:00:00.000Z',
   updatedBy: { kind: 'human' },
   deletedAt: null,
+  confirmation: { state: 'unconfirmed' },
 } as const;
 const LIVE = REQUIREMENTS.filter((r) => r.deletedAt === null);
 

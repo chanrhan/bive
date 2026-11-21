@@ -27,6 +27,7 @@ const req = (patch: Partial<Requirement> & Pick<Requirement, 'id' | 'displayId'>
   updatedAt: T0,
   updatedBy: { kind: 'human' },
   deletedAt: null,
+  confirmation: { state: 'unconfirmed' },
   ...patch,
 });
 

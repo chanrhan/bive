@@ -22,6 +22,7 @@ const base = {
   createdAt: '2026-10-15T01:00:00.000Z',
   updatedAt: '2026-10-15T01:00:00.000Z',
   deletedAt: null,
+  confirmation: { state: 'unconfirmed' },
 } as const satisfies Partial<Rule>;
 
 const rule = (

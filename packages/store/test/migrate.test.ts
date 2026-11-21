@@ -17,6 +17,7 @@ import { REGISTRY_MIGRATIONS } from '../src/migrations/registry/index.js';
 import { bivePaths } from '../src/paths.js';
 import { openProjectStore } from '../src/project-store.js';
 import { openRegistry } from '../src/registry.js';
+import { ApprovalLogRepository } from '../src/repositories/approval-log-repository.js';
 import { newId, useTempHome } from './support/temp-home.js';
 
 const home = useTempHome();
@@ -302,6 +303,306 @@ describe('0010 tool_call_empty_name: 빈 도구 이름 기록 (M2-11 #190, ADR-0
           )
           .run(newId(), SESSION),
       ).toThrow(/NOT NULL/);
+    });
+  });
+});
+
+describe('0012 confirmations: 확인 상태 · 승인 기록 행동 넓히기 · 기존 데이터 이행 (M7-01 #213, ADR-100 A1 · A2, ADR-101)', () => {
+  const T = (minute: number) => `2026-11-01T00:${String(minute).padStart(2, '0')}:00.000Z`;
+  const human = '{"kind":"human"}';
+  const ruleWriter = '{"kind":"agent","role":"rule-writer"}';
+  const chat = '{"kind":"agent","role":"chat"}';
+
+  /** 0011까지 적용한 DB에 요구사항을 바로 넣는다 (그때의 스키마 그대로). */
+  const insertRequirement = (
+    db: SqliteDatabase,
+    row: { id: string; seq: number; author: string; updatedBy: string; deletedAt?: string },
+  ) =>
+    db
+      .prepare(
+        `INSERT INTO requirements (id, display_id, text, author, norm_state, unrulable_reason, created_at,
+         updated_at, updated_by, deleted_at) VALUES (?, ?, '본문', ?, 'approved', NULL, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        `REQ-${String(row.seq).padStart(3, '0')}`,
+        row.author,
+        T(row.seq),
+        T(row.seq + 30),
+        row.updatedBy,
+        row.deletedAt ?? null,
+      );
+  const insertRule = (db: SqliteDatabase, id: string, seq: number, parent: string) =>
+    db
+      .prepare(
+        `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
+         parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
+         updated_at, deleted_at) VALUES (?, ?, '제목', '진술', 'business', '["test"]', ?, NULL, 0, '[]',
+         NULL, NULL, ?, 'approved', ?, ?, NULL)`,
+      )
+      .run(id, `RULE-${String(seq).padStart(3, '0')}`, parent, ruleWriter, T(seq), T(seq));
+
+  const logSql = (db: SqliteDatabase) =>
+    db
+      .prepare(
+        "SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'approval_log' AND type = 'trigger' ORDER BY name",
+      )
+      .all();
+  const confirmationRows = (db: SqliteDatabase) =>
+    db
+      .prepare(
+        'SELECT entity, target_id, state, confirmed_at, confirmed_by, basis FROM confirmations ORDER BY rowid',
+      )
+      .all();
+
+  it('0011까지의 DB(규칙 · 요구사항 · 승인 기록 있음): 승인 기록은 값 · 해시 체인 그대로 옮기고, 사람이 OK한 것만 확인됨(근거 남김)으로 이행하며 승인 기록에 새 항목을 만들지 않는다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 11), { now: fixedNow });
+      const humanReq = newId(); // 사람이 씀
+      const editedReq = newId(); // 에이전트가 쓰고(제안 승인 없이) 사람이 고침
+      const agentReq = newId(); // 에이전트가 쓰고 아무도 보지 않음
+      const approvedReq = newId(); // 요구사항 신규 제안을 사람이 승인
+      const deletedAgentReq = newId(); // 에이전트가 쓴 것을 사람이 지움
+      insertRequirement(db, { id: humanReq, seq: 1, author: human, updatedBy: human });
+      insertRequirement(db, { id: editedReq, seq: 2, author: chat, updatedBy: human });
+      insertRequirement(db, { id: agentReq, seq: 3, author: chat, updatedBy: chat });
+      insertRequirement(db, { id: approvedReq, seq: 4, author: chat, updatedBy: chat });
+      insertRequirement(db, {
+        id: deletedAgentReq,
+        seq: 5,
+        author: chat,
+        updatedBy: human,
+        deletedAt: T(35),
+      });
+      const approvedRule = newId();
+      const amendedRule = newId();
+      const agentRule = newId(); // 제안 승인 없이 생긴 규칙
+      insertRule(db, approvedRule, 1, humanReq);
+      insertRule(db, amendedRule, 2, humanReq);
+      insertRule(db, agentRule, 3, humanReq);
+      // 0011 때의 승인 기록 (리포지토리가 순번 · 해시 체인을 만든다)
+      const log = new ApprovalLogRepository(db);
+      const proposal = () => ({ entity: 'Proposal' as const, id: newId() });
+      log.append({
+        at: T(40),
+        action: 'approve',
+        actor: { kind: 'human' },
+        targetRef: proposal(),
+        clientId: 'pipe-1',
+        detail: { appliedRef: { entity: 'Rule', id: approvedRule } },
+      });
+      log.append({
+        at: T(41),
+        action: 'approve_edited',
+        actor: { kind: 'human' },
+        targetRef: proposal(),
+        clientId: 'pipe-1',
+        detail: {
+          diff: { before: { title: '제목' }, after: { title: '고친 제목' } },
+          appliedRef: { entity: 'Rule', id: amendedRule },
+        },
+      });
+      log.append({
+        at: T(42),
+        action: 'reject',
+        actor: { kind: 'human' },
+        targetRef: proposal(),
+        clientId: null,
+        detail: { reason: '중복' },
+      });
+      log.append({
+        at: T(43),
+        action: 'approve',
+        actor: { kind: 'human' },
+        targetRef: proposal(),
+        clientId: null,
+        detail: { appliedRef: { entity: 'Requirement', id: approvedReq } },
+      });
+      log.append({
+        at: T(44),
+        action: 'run_start',
+        actor: { kind: 'human' },
+        targetRef: { entity: 'Run', id: newId() },
+        clientId: null,
+        detail: { ruleIds: [agentRule] },
+      });
+      // 0011까지는 확인 행동을 DB CHECK가 막는다
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO approval_log (seq, at, action, actor, target_ref, client_id, detail, prev_hash, hash)
+             VALUES (99, ?, 'confirm', ?, '{}', NULL, '{}', ?, ?)`,
+          )
+          .run(T(50), human, '0'.repeat(64), 'f'.repeat(64)),
+      ).toThrow(/CHECK/);
+      const rowsBefore = db.prepare('SELECT * FROM approval_log ORDER BY seq').all();
+      const entriesBefore = log.list();
+      expect(entriesBefore).toHaveLength(5);
+      const triggersBefore = logSql(db);
+      expect(triggersBefore).toHaveLength(3);
+
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 12), { now: fixedNow }).applied).toEqual([12]);
+
+      // 승인 기록: 행 · 순서 · 값 그대로, 새 항목 없음, 해시 체인 검증 통과, 트리거 SQL은 0003과 글자까지 같다
+      expect(db.prepare('SELECT * FROM approval_log ORDER BY seq').all()).toEqual(rowsBefore);
+      const migratedLog = new ApprovalLogRepository(db);
+      expect(migratedLog.list()).toEqual(entriesBefore);
+      expect(migratedLog.verify()).toEqual({ valid: true, brokenAtSeq: null, reason: null });
+      expect(logSql(db)).toEqual(triggersBefore);
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'approval_log_v12%'").all(),
+      ).toEqual([]);
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+
+      // 이행: 사람이 쓰거나 고친 요구사항(근거 = 작성 · 수정 기록) · 사람이 승인한 규범(근거 = 승인 기록 순번)만 확인됨
+      const requirementRecord = (at: string) => JSON.stringify({ kind: 'requirement_record', at });
+      const approvalSeq = (seq: number) => JSON.stringify({ kind: 'approval_log', seq });
+      expect(confirmationRows(db)).toEqual([
+        {
+          entity: 'Requirement',
+          target_id: humanReq,
+          state: 'confirmed',
+          confirmed_at: T(31),
+          confirmed_by: human,
+          basis: requirementRecord(T(31)),
+        },
+        {
+          entity: 'Requirement',
+          target_id: editedReq,
+          state: 'confirmed',
+          confirmed_at: T(32),
+          confirmed_by: human,
+          basis: requirementRecord(T(32)),
+        },
+        {
+          entity: 'Rule',
+          target_id: approvedRule,
+          state: 'confirmed',
+          confirmed_at: T(40),
+          confirmed_by: human,
+          basis: approvalSeq(1),
+        },
+        {
+          entity: 'Rule',
+          target_id: amendedRule,
+          state: 'confirmed',
+          confirmed_at: T(41),
+          confirmed_by: human,
+          basis: approvalSeq(2),
+        },
+        {
+          entity: 'Requirement',
+          target_id: approvedReq,
+          state: 'confirmed',
+          confirmed_at: T(43),
+          confirmed_by: human,
+          basis: approvalSeq(4),
+        },
+      ]);
+      // 에이전트가 만든(제안 승인 없이 생긴) 항목은 미확인으로 남는다 (행 없음 = 기본 미확인)
+      for (const id of [agentReq, deletedAgentReq, agentRule]) {
+        expect(
+          db.prepare('SELECT count(*) AS n FROM confirmations WHERE target_id = ?').get(id),
+        ).toEqual({ n: 0 });
+      }
+    });
+  });
+
+  it('이행 뒤: 승인 기록이 확인 행동을 받고 체인이 이어지며, 저장소 조회에 확인 상태가 실린다', () => {
+    const id = newId();
+    const db = openDatabase(bivePaths(home()).projectDb(id));
+    const humanReq = newId();
+    const agentRule = newId();
+    try {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 11), { now: fixedNow });
+      insertRequirement(db, { id: humanReq, seq: 1, author: human, updatedBy: human });
+      insertRule(db, agentRule, 1, humanReq);
+      new ApprovalLogRepository(db).append({
+        at: T(40),
+        action: 'run_start',
+        actor: { kind: 'human' },
+        targetRef: { entity: 'Run', id: newId() },
+        clientId: null,
+        detail: { ruleIds: [agentRule] },
+      });
+    } finally {
+      db.close();
+    }
+    const store = openProjectStore(id, { home: home(), now: fixedNow });
+    try {
+      expect(store.requirements.get(humanReq)?.confirmation).toEqual({
+        state: 'confirmed',
+        at: T(31),
+        by: { kind: 'human' },
+        basis: { kind: 'requirement_record', at: T(31) },
+      });
+      expect(store.rules.get(agentRule)?.confirmation).toEqual({ state: 'unconfirmed' });
+      const entry = store.approvalLog.append({
+        at: T(50),
+        action: 'confirm',
+        actor: { kind: 'human' },
+        targetRef: { entity: 'Rule', id: agentRule },
+        clientId: null,
+        detail: {},
+      });
+      expect(entry.seq).toBe(2);
+      expect(entry.prevHash).toBe(store.approvalLog.list()[0]?.hash);
+      expect(store.approvalLog.verify()).toEqual({ valid: true, brokenAtSeq: null, reason: null });
+    } finally {
+      store.close();
+    }
+  });
+
+  it('0011까지의 빈 DB(규칙 · 요구사항 · 승인 기록 없음)에도 적용되고 확인 상태 행이 생기지 않는다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 11), { now: fixedNow });
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([12]);
+      expect(confirmationRows(db)).toEqual([]);
+      expect(db.prepare('SELECT count(*) AS n FROM approval_log').get()).toEqual({ n: 0 });
+      expect(new ApprovalLogRepository(db).verify()).toEqual({
+        valid: true,
+        brokenAtSeq: null,
+        reason: null,
+      });
+      expect(logSql(db)).toHaveLength(3);
+    });
+  });
+
+  it('confirmations 표: 확인한 주체는 사람만, 없는 대상 · 덮어쓰기 · 대상 변경 · 삭제는 DB가 거부한다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      const req = newId();
+      insertRequirement(db, { id: req, seq: 1, author: chat, updatedBy: chat });
+      const insert = (target: string, by: string | null, state = 'confirmed') =>
+        db
+          .prepare(
+            `INSERT INTO confirmations (entity, target_id, state, confirmed_at, confirmed_by, basis)
+             VALUES ('Requirement', ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            target,
+            state,
+            state === 'confirmed' ? T(1) : null,
+            by,
+            state === 'confirmed' ? '{"kind":"approval_log","seq":1}' : null,
+          );
+      // 에이전트 주체의 확인됨 · 주체 없는 확인됨 · 근거 없는 미확인 외 값은 CHECK가 막는다
+      expect(() => insert(req, ruleWriter)).toThrow(/CHECK/);
+      expect(() => insert(req, null)).toThrow(/CHECK/);
+      expect(() => insert(req, human, 'maybe')).toThrow(/CHECK/);
+      // 없는 대상
+      expect(() => insert(newId(), human)).toThrow(/없는 요구사항/);
+      insert(req, human);
+      expect(() => insert(req, human)).toThrow(/덮어쓰기 금지/);
+      expect(() => db.prepare('UPDATE confirmations SET target_id = ?').run(newId())).toThrow(
+        /대상은 바꿀 수 없/,
+      );
+      expect(() => db.prepare('DELETE FROM confirmations').run()).toThrow(/지울 수 없/);
+      // 상태 값 변경(확인 풀림, M7-13)은 막지 않는다
+      db.prepare(
+        "UPDATE confirmations SET state = 'unconfirmed', confirmed_at = NULL, confirmed_by = NULL, basis = NULL",
+      ).run();
+      expect(confirmationRows(db)).toMatchObject([{ state: 'unconfirmed' }]);
     });
   });
 });

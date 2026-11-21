@@ -44,6 +44,7 @@ const rule = (patch: Partial<Rule> & Pick<Rule, 'id' | 'displayId'>): Rule => ({
   createdAt: T0,
   updatedAt: T0,
   deletedAt: null,
+  confirmation: { state: 'unconfirmed' },
   ...patch,
 });
 

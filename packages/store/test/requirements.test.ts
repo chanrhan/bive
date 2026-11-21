@@ -43,6 +43,8 @@ describe('requirements 테이블 · 리포지토리', () => {
         updatedAt: T0,
         updatedBy: human,
         deletedAt: null,
+        // 리포지토리는 확인 상태를 쓰지 않는다: 새 요구사항은 작성 주체와 무관하게 미확인 (확인됨은 오케스트레이터, ADR-101)
+        confirmation: { state: 'unconfirmed' },
       });
       expect(store.requirements.get(first.id)).toEqual(created);
       expect(store.requirements.create(input()).displayId).toBe('REQ-002');

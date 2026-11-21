@@ -9,6 +9,7 @@ import {
   AuthorKind,
   CheckKind,
   CodeOpenReason,
+  ConfirmationState,
   JudgeRunner,
   JudgmentStatus,
   NormState,
@@ -106,6 +107,46 @@ export type Author = z.infer<typeof Author>;
 /** 다른 엔터티를 가리키는 참조. */
 export const EntityRef = z.strictObject({ entity: EntityName, id: NonEmptyString });
 export type EntityRef = z.infer<typeof EntityRef>;
+
+// ── 확인 상태 (ADR-100 D2 · C1 · A1, M7-01) ─────────────────
+
+/** 확인 상태를 두는 엔터티. 계약 · 블록 선언 · ADR은 그 이슈가 더한다 (M3-04 · M3-05 · M4-01 · M4-13). */
+export const ConfirmationEntity = z.enum(['Requirement', 'Rule']);
+export type ConfirmationEntity = z.infer<typeof ConfirmationEntity>;
+
+/** 확인 대상: 엔터티 참조(`EntityRef`)를 확인 상태를 두는 엔터티와 ULID로 좁힌 것. */
+export const ConfirmationTarget = EntityRef.extend({ entity: ConfirmationEntity, id: Ulid });
+export type ConfirmationTarget = z.infer<typeof ConfirmationTarget>;
+
+/**
+ * 확인됨의 근거 (ADR-100 A1).
+ * - `approval_log`: 승인 기록의 사람 행동 1건(`seq`). 확인(`confirm`), 제안 승인(`approve` · `approve_edited`)
+ * - `requirement_record`: 요구사항 자체의 작성 · 수정 주체(사람)와 그 시각(`createdAt` 또는 `updatedAt`, NRM-01).
+ *   사람이 쓰거나 고친 요구사항이고, 승인 기록에는 항목이 없다
+ */
+export const ConfirmationBasis = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('approval_log'), seq: z.int().positive() }),
+  z.strictObject({ kind: z.literal('requirement_record'), at: Timestamp }),
+]);
+export type ConfirmationBasis = z.infer<typeof ConfirmationBasis>;
+
+/**
+ * 규범 항목의 확인 상태 (ADR-100 D2). 기본은 미확인이고, 확인됨은 확인한 사람 · 시각 · 근거를 함께 갖는다.
+ * 사람만 확인됨으로 바꾼다(I1). 아무것도 막지 않는다(실행 · 판정 · 병합의 조건이 아님).
+ */
+export const Confirmation = z.discriminatedUnion('state', [
+  z.strictObject({ state: z.literal(ConfirmationState.enum.unconfirmed) }),
+  z.strictObject({
+    state: z.literal(ConfirmationState.enum.confirmed),
+    at: Timestamp,
+    by: HumanAuthor,
+    basis: ConfirmationBasis,
+  }),
+]);
+export type Confirmation = z.infer<typeof Confirmation>;
+
+/** 기본 확인 상태 (확인 기록이 없는 항목). */
+export const UNCONFIRMED = { state: 'unconfirmed' } as const satisfies Confirmation;
 
 // ── 프로젝트 · 설정 ──────────────────────────────────────
 
@@ -397,6 +438,8 @@ export const Requirement = z.strictObject({
   updatedAt: Timestamp,
   updatedBy: Author,
   deletedAt: Timestamp.nullable(),
+  /** 확인 상태 (ADR-100 D2, M7-01). 저장 필드가 아니라 확인 기록(`confirmations`)에서 읽는다 */
+  confirmation: Confirmation,
 });
 export type Requirement = z.infer<typeof Requirement>;
 
@@ -430,6 +473,8 @@ export const Rule = z
     createdAt: Timestamp,
     updatedAt: Timestamp,
     deletedAt: Timestamp.nullable(),
+    /** 확인 상태 (ADR-100 D2, M7-01). 저장 필드가 아니라 확인 기록(`confirmations`)에서 읽는다 */
+    confirmation: Confirmation,
   })
   .refine(
     (rule) => rule.builtin || rule.parentRequirementId !== null || rule.parentDetachedAt !== null,
@@ -601,6 +646,9 @@ export const ApprovalLogDetail = z.strictObject({
 });
 export type ApprovalLogDetail = z.infer<typeof ApprovalLogDetail>;
 
+/** 수정 diff를 남기는 행동: 수정 후 승인과 사람의 직접 편집 (ADR-100 A2 · A8). */
+const EDIT_ACTIONS: readonly ApprovalAction[] = ['approve_edited', 'rule_edit', 'contract_edit'];
+
 /**
  * 승인 기록 1건 (추가 전용). `hash` = SHA-256(정규 JSON(`hash`를 뺀 나머지 필드)),
  * `prevHash` = 바로 앞 기록의 `hash`(첫 기록은 `APPROVAL_LOG_GENESIS_HASH`). 계산 · 검증은 `@bive/store`.
@@ -620,19 +668,36 @@ export const ApprovalLogEntry = z
   })
   .superRefine((entry, ctx) => {
     const { action, detail } = entry;
-    if (action === 'approve_edited' && detail.diff === undefined) {
+    const edits = EDIT_ACTIONS.includes(action);
+    if (edits && detail.diff === undefined) {
       ctx.addIssue({
         code: 'custom',
-        message: '수정 후 승인에는 수정 diff가 필요합니다 (NRM-04)',
+        message: '수정 후 승인 · 직접 편집에는 수정 diff가 필요합니다 (NRM-04, ADR-100 A2)',
         path: ['detail', 'diff'],
       });
     }
-    if (action !== 'approve_edited' && detail.diff !== undefined) {
+    if (!edits && detail.diff !== undefined) {
       ctx.addIssue({
         code: 'custom',
-        message: '수정 후 승인이 아니면 수정 diff를 둘 수 없습니다',
+        message: '수정 후 승인 · 직접 편집이 아니면 수정 diff를 둘 수 없습니다',
         path: ['detail', 'diff'],
       });
+    }
+    if (action === 'confirm') {
+      if (!ConfirmationTarget.safeParse(entry.targetRef).success) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '확인 대상은 확인 상태를 두는 엔터티(요구사항 · 규칙)여야 합니다 (ADR-100 D2)',
+          path: ['targetRef'],
+        });
+      }
+      if (detail.appliedRef !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '확인에는 반영 규범이 없습니다',
+          path: ['detail', 'appliedRef'],
+        });
+      }
     }
     if ((action === 'reject') !== (detail.reason !== undefined)) {
       ctx.addIssue({

@@ -18,6 +18,7 @@ import {
   CHECK_KIND_LABELS,
   CheckKind,
   CodeOpenReason,
+  ConfirmationState,
   ContractKind,
   JudgeRunner,
   JUDGMENT_STATUS_LABELS,
@@ -276,7 +277,11 @@ describe('판정 실행기 · P1 이후 열거형', () => {
       'reject',
       'run_start',
       'provisional_grant',
+      'confirm',
+      'rule_edit',
+      'contract_edit',
     ]);
+    expectEnum(ConfirmationState, ['unconfirmed', 'confirmed']);
     expectEnum(CodeOpenReason, ['screen_error', 'info_lacking', 'debugging']);
   });
 });

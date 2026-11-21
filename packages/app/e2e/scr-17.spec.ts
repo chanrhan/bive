@@ -154,6 +154,7 @@ const REQUIREMENT: Requirement = {
   updatedAt: '2026-10-15T00:00:00.000Z',
   updatedBy: HUMAN,
   deletedAt: null,
+  confirmation: { state: 'unconfirmed' },
 };
 
 const RULE: Rule = {
@@ -174,6 +175,7 @@ const RULE: Rule = {
   createdAt: '2026-10-16T05:00:00.000Z',
   updatedAt: '2026-10-16T05:00:00.000Z',
   deletedAt: null,
+  confirmation: { state: 'unconfirmed' },
 };
 
 const hash = (c: string): string => c.repeat(64);

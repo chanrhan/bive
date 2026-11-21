@@ -11,6 +11,8 @@ import {
   CodeLine,
   CodeOpenRecord,
   CommitSha,
+  Confirmation,
+  ConfirmationTarget,
   EntityRef,
   IdeSetting,
   JudgmentResult,
@@ -406,6 +408,26 @@ export const ApprovalLogListResult = z.strictObject({
   }),
 });
 export type ApprovalLogListResult = z.infer<typeof ApprovalLogListResult>;
+
+// ── 확인 상태 (ADR-100 D2 · C1 · C2 · A2, NFR-01, M7-01) ─────
+// - `confirmation.set`: 사람이 규범 항목(요구사항 · 규칙)을 보고 OK했다는 표시. 사람 주체만 받는다(에이전트 -32020).
+//   없는 대상 -32004, 삭제된 대상 · 이미 확인됨 -32009. 확인은 승인 기록에 행동 `confirm`으로 남고(사람 행동만, C2)
+//   확인 상태의 근거는 그 승인 기록 순번이다. 승인 기록 추가와 확인 상태 저장은 트랜잭션 1개다
+// - 확인을 푸는 RPC는 없다(확인 풀림은 에이전트 변경에 따라 오케스트레이터가 남긴다, M7-13). 역할 세션 도구에도 없다
+// - 확인 상태는 요구사항 · 규칙 응답(`requirement.*` · `rule.*`)의 `confirmation`으로도 보인다
+
+export const ConfirmationSetParams = z.strictObject({
+  projectId: Ulid,
+  target: ConfirmationTarget,
+  author: Author,
+});
+export type ConfirmationSetParams = z.infer<typeof ConfirmationSetParams>;
+export const ConfirmationSetResult = z.strictObject({
+  target: ConfirmationTarget,
+  confirmation: Confirmation,
+  approvalLog: ApprovalLogEntry,
+});
+export type ConfirmationSetResult = z.infer<typeof ConfirmationSetResult>;
 
 // ── 프로젝트 (PRJ-01, M1-01, ADR-025 · ADR-036 · ADR-040 · ADR-054) ─────────
 // - `project.open`: 폴더를 연다. 루트 `.bive.json`이 없으면 새 프로젝트 ID로 등록하고 파일을 만든다
@@ -856,6 +878,7 @@ export const METHODS = {
   'proposal.amend': { params: ProposalAmendParams, result: ProposalApproveResult },
   'proposal.reject': { params: ProposalRejectParams, result: ProposalRejectResult },
   'approvalLog.list': { params: ApprovalLogListParams, result: ApprovalLogListResult },
+  'confirmation.set': { params: ConfirmationSetParams, result: ConfirmationSetResult },
   'project.open': { params: ProjectOpenParams, result: ProjectOpenResult },
   'project.current': { params: ProjectCurrentParams, result: ProjectCurrentResult },
   'project.list': { params: ProjectListParams, result: ProjectListResult },

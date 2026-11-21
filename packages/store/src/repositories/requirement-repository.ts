@@ -2,10 +2,16 @@
 // - 표시 ID(`REQ-NNN`)는 생성 트랜잭션 안에서 순번 테이블로 정한다
 // - 삭제는 `deletedAt`을 채우는 소프트 삭제다. 목록은 삭제된 것을 빼고, ID 조회는 삭제된 것도 돌려준다
 // - 누가 바꿀 수 있는지(사람 · 에이전트)는 호출한 쪽(오케스트레이터)이 정한다. 여기서는 주체를 기록만 한다
-import { Author, Requirement, Timestamp } from '@bive/shared';
+// - 확인 상태(`confirmation`)는 저장 칸이 아니라 `confirmations`에서 함께 읽는다. 이 리포지토리는 쓰지 않는다 (ADR-100 D2)
+import { Author, Requirement, Timestamp, UNCONFIRMED } from '@bive/shared';
 
 import { withTransaction, type SqliteDatabase } from '../database.js';
 import { ConflictError, NotFoundError, isUniqueViolation } from '../errors.js';
+import {
+  type ConfirmationColumns,
+  confirmationJoin,
+  toConfirmation,
+} from './confirmation-repository.js';
 import { DisplayIdSequences } from './display-id-sequences.js';
 
 /** 새 요구사항. 표시 ID · 수정 기록 · 삭제 시각은 리포지토리가 채운다. 모르는 필드는 거부한다. */
@@ -58,7 +64,15 @@ interface RequirementRow {
 const COLUMNS =
   'id, display_id, text, author, norm_state, unrulable_reason, created_at, updated_at, updated_by, deleted_at';
 
-const toRequirement = (row: RequirementRow): Requirement =>
+/** 조회: 요구사항 칸 + 확인 상태 칸 (확인 상태는 `confirmations`에서 읽는다, ADR-100 D2). */
+const CONFIRMATION = confirmationJoin('Requirement', 'r');
+const SELECT = `SELECT ${COLUMNS.split(', ')
+  .map((column) => `r.${column}`)
+  .join(', ')}, ${CONFIRMATION.columns} FROM requirements r ${CONFIRMATION.join}`;
+
+type RequirementReadRow = RequirementRow & ConfirmationColumns;
+
+const toRequirement = (row: RequirementReadRow): Requirement =>
   Requirement.parse({
     id: row.id,
     displayId: row.display_id,
@@ -70,6 +84,7 @@ const toRequirement = (row: RequirementRow): Requirement =>
     updatedAt: row.updated_at,
     updatedBy: JSON.parse(row.updated_by) as unknown,
     deletedAt: row.deleted_at,
+    confirmation: toConfirmation(row),
   });
 
 const toRow = (requirement: Requirement): RequirementRow => ({
@@ -100,13 +115,11 @@ export class RequirementRepository {
       `INSERT INTO requirements (${COLUMNS}) VALUES (@id, @display_id, @text, @author, @norm_state,
        @unrulable_reason, @created_at, @updated_at, @updated_by, @deleted_at)`,
     );
-    this.#select = db.prepare<[string], RequirementRow>(
-      `SELECT ${COLUMNS} FROM requirements WHERE id = ?`,
-    );
+    this.#select = db.prepare<[string], RequirementReadRow>(`${SELECT} WHERE r.id = ?`);
     // 표시 ID는 접두가 같고 순번에 앞자리 0이 없으므로(정규 형식) 길이 → 사전식 순서가 순번 순서다
-    this.#selectLive = db.prepare<[], RequirementRow>(
-      `SELECT ${COLUMNS} FROM requirements WHERE deleted_at IS NULL
-       ORDER BY length(display_id), display_id`,
+    this.#selectLive = db.prepare<[], RequirementReadRow>(
+      `${SELECT} WHERE r.deleted_at IS NULL
+       ORDER BY length(r.display_id), r.display_id`,
     );
     this.#update = db.prepare<[RequirementRow]>(
       `UPDATE requirements SET text = @text, norm_state = @norm_state,
@@ -134,6 +147,8 @@ export class RequirementRepository {
         updatedAt: createdAt,
         updatedBy: author,
         deletedAt: null,
+        // 새 행에는 확인 기록이 없다. 사람의 저장이면 오케스트레이터가 같은 트랜잭션에서 확인됨으로 둔다 (ADR-100 B①)
+        confirmation: UNCONFIRMED,
       });
       try {
         this.#insert.run(toRow(requirement));

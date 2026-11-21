@@ -23,6 +23,7 @@ const base = {
   unrulable: null,
   updatedBy: { kind: 'human' },
   deletedAt: null,
+  confirmation: { state: 'unconfirmed' },
 } as const satisfies Partial<Requirement>;
 
 /** `requirement.list` 가짜 응답 (테스트 전용 데이터, NFR-03). 삭제된 REQ-004는 화면에 보이면 안 된다. */

@@ -9,6 +9,7 @@ import { PROJECT_MIGRATIONS } from './migrations/project/index.js';
 import { bivePaths, assertProjectId } from './paths.js';
 import { ApprovalLogRepository } from './repositories/approval-log-repository.js';
 import { CodeOpenRepository } from './repositories/code-open-repository.js';
+import { ConfirmationRepository } from './repositories/confirmation-repository.js';
 import { DisplayIdSequences } from './repositories/display-id-sequences.js';
 import { JudgmentRepository } from './repositories/judgment-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
@@ -50,6 +51,8 @@ export class ProjectStore {
   readonly codeOpens: CodeOpenRepository;
   /** 규칙 작성 시도 기록 (NRM-02, ADR-099). 세션을 연 시도의 결과는 `sessions`에 있다. */
   readonly ruleWriterRequests: RuleWriterRequestRepository;
+  /** 요구사항 · 규칙의 확인 상태 (ADR-100 D2, ADR-101). 확인됨은 사람만 쓴다(주체 인자 `HumanAuthor`). */
+  readonly confirmations: ConfirmationRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -69,6 +72,7 @@ export class ProjectStore {
     this.judgments = new JudgmentRepository(db);
     this.codeOpens = new CodeOpenRepository(db, projectId);
     this.ruleWriterRequests = new RuleWriterRequestRepository(db);
+    this.confirmations = new ConfirmationRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

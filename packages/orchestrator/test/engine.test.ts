@@ -270,6 +270,46 @@ describe('유형 A 단계 순서 · 전이 (수용 기준 1)', () => {
     ]);
   }, 60_000);
 
+  it('확인 상태가 미확인인 규칙으로도 실행이 생성 · 단계 진행 · 판정 · 병합을 거쳐 merged가 되고 확인 상태는 그대로다 (M7-01, ADR-100 D2 · D8)', async () => {
+    const h = setup();
+    const target = { entity: 'Rule', id: h.rule.id } as const;
+    const confirmationOf = () =>
+      withProject(h.biveHome, h.project.id, (store) => ({
+        rule: store.rules.get(h.rule.id)?.confirmation,
+        stored: store.confirmations.get(target),
+      }));
+    // 대상 규칙은 제안 승인 없이 생긴 에이전트 규칙이라 미확인이고, 실행은 이미 생성됐다 (waiting_approval)
+    expect(confirmationOf()).toEqual({
+      rule: { state: 'unconfirmed' },
+      stored: { state: 'unconfirmed' },
+    });
+    expect(detailOf(h).run).toMatchObject({ status: 'waiting_approval' });
+
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({ status: 'merged', failureReason: null });
+    expect(attempts(done)).toEqual([
+      'approval#1:passed',
+      'test_writing#1:passed',
+      'red_check#1:passed',
+      'implementation#1:passed',
+      'check#1:passed',
+      'mutation#1:skipped',
+      'merge#1:passed',
+      'screen_update#1:passed',
+    ]);
+    expect(done.run.mergeCommit).toBe(mainTip(h));
+    // 실행은 확인 상태를 바꾸지 않고 승인 기록에 확인 항목을 만들지 않는다
+    expect(confirmationOf()).toEqual({
+      rule: { state: 'unconfirmed' },
+      stored: { state: 'unconfirmed' },
+    });
+    expect(
+      withProject(h.biveHome, h.project.id, (store) =>
+        store.approvalLog.list().map((entry) => entry.action),
+      ),
+    ).toEqual(['run_start']);
+  }, 60_000);
+
   it('승인 단계: 대상 규칙이 승인 상태가 아니면 다음으로 가지 않고 아무것도 저장하지 않는다', async () => {
     const h = setup({ normState: 'provisional' });
     const before = detailOf(h);

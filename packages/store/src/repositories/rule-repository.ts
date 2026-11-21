@@ -3,10 +3,16 @@
 // - 표시 ID(`RULE-NNN`)는 생성 트랜잭션 안에서 순번 테이블로 정한다
 // - 부모 요구사항이 삭제되면 규칙은 남기고 부모만 해제한다(`parentRequirementId = null`, `parentDetachedAt`)
 // - 승인된 규칙을 직접 고치는 함수는 두지 않는다. 변경은 지시 → 제안 → 승인 경로로만 (NRM-04, DSN-07)
-import { Rule, Timestamp, type Requirement } from '@bive/shared';
+// - 확인 상태(`confirmation`)는 저장 칸이 아니라 `confirmations`에서 함께 읽는다. 이 리포지토리는 쓰지 않는다 (ADR-100 D2)
+import { Rule, Timestamp, UNCONFIRMED, type Requirement } from '@bive/shared';
 
 import { withTransaction, type SqliteDatabase } from '../database.js';
 import { ConflictError, NotFoundError, isUniqueViolation } from '../errors.js';
+import {
+  type ConfirmationColumns,
+  confirmationJoin,
+  toConfirmation,
+} from './confirmation-repository.js';
 import { DisplayIdSequences } from './display-id-sequences.js';
 
 /** 새 규칙. 표시 ID · 수정 시각 · 부모 해제 시각 · 삭제 시각은 리포지토리가 채운다. */
@@ -53,7 +59,15 @@ const COLUMNS = `id, display_id, title, statement, kind, check_kinds, parent_req
   parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
   updated_at, deleted_at`;
 
-const toRule = (row: RuleRow): Rule =>
+/** 조회: 규칙 칸 + 확인 상태 칸 (확인 상태는 `confirmations`에서 읽는다, ADR-100 D2). */
+const CONFIRMATION = confirmationJoin('Rule', 'r');
+const SELECT = `SELECT ${COLUMNS.split(',')
+  .map((column) => `r.${column.trim()}`)
+  .join(', ')}, ${CONFIRMATION.columns} FROM rules r ${CONFIRMATION.join}`;
+
+type RuleReadRow = RuleRow & ConfirmationColumns;
+
+const toRule = (row: RuleReadRow): Rule =>
   Rule.parse({
     id: row.id,
     displayId: row.display_id,
@@ -72,6 +86,7 @@ const toRule = (row: RuleRow): Rule =>
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
+    confirmation: toConfirmation(row),
   });
 
 const toRow = (rule: Rule): RuleRow => ({
@@ -95,7 +110,7 @@ const toRow = (rule: Rule): RuleRow => ({
 });
 
 /** 표시 ID는 접두가 같고 순번에 앞자리 0이 없으므로 길이 → 사전식 순서가 순번 순서다. */
-const ORDER = 'ORDER BY length(display_id), display_id';
+const ORDER = 'ORDER BY length(r.display_id), r.display_id';
 
 export class RuleRepository {
   readonly #db: SqliteDatabase;
@@ -115,12 +130,10 @@ export class RuleRepository {
        @check_kinds, @parent_requirement_id, @parent_detached_at, @builtin, @target_block_ids, @risk,
        @contract_id, @author, @norm_state, @created_at, @updated_at, @deleted_at)`,
     );
-    this.#select = db.prepare<[string], RuleRow>(`SELECT ${COLUMNS} FROM rules WHERE id = ?`);
-    this.#selectLive = db.prepare<[], RuleRow>(
-      `SELECT ${COLUMNS} FROM rules WHERE deleted_at IS NULL ${ORDER}`,
-    );
-    this.#selectByParent = db.prepare<[string], RuleRow>(
-      `SELECT ${COLUMNS} FROM rules WHERE parent_requirement_id = ? AND deleted_at IS NULL ${ORDER}`,
+    this.#select = db.prepare<[string], RuleReadRow>(`${SELECT} WHERE r.id = ?`);
+    this.#selectLive = db.prepare<[], RuleReadRow>(`${SELECT} WHERE r.deleted_at IS NULL ${ORDER}`);
+    this.#selectByParent = db.prepare<[string], RuleReadRow>(
+      `${SELECT} WHERE r.parent_requirement_id = ? AND r.deleted_at IS NULL ${ORDER}`,
     );
     this.#requirementState = db.prepare<[string], Pick<Requirement, 'deletedAt'>>(
       'SELECT deleted_at AS deletedAt FROM requirements WHERE id = ?',
@@ -141,7 +154,13 @@ export class RuleRepository {
     return withTransaction(this.#db, () => {
       const draft = { ...input, displayId: 'RULE-001' };
       // 순번을 쓰기 전에 형식부터 검증한다
-      Rule.parse({ ...draft, parentDetachedAt: null, updatedAt: input.createdAt, deletedAt: null });
+      Rule.parse({
+        ...draft,
+        parentDetachedAt: null,
+        updatedAt: input.createdAt,
+        deletedAt: null,
+        confirmation: UNCONFIRMED,
+      });
       if (input.parentRequirementId !== null) this.#assertLiveParent(input.parentRequirementId);
       const rule = Rule.parse({
         id: input.id,
@@ -161,6 +180,8 @@ export class RuleRepository {
         createdAt: input.createdAt,
         updatedAt: input.createdAt,
         deletedAt: null,
+        // 새 규칙에는 확인 기록이 없다(미확인). 사람이 승인한 제안이면 오케스트레이터가 같은 트랜잭션에서 확인됨으로 둔다
+        confirmation: UNCONFIRMED,
       });
       try {
         this.#insert.run(toRow(rule));
