@@ -35,3 +35,9 @@ const escapePiece = (piece: string): string => {
 
 /** 화면 표기: 숨은 글자를 눈에 보이는 표기로 바꾼 글. 결과에는 숨은 글자가 남지 않는다. */
 export const visibleText = (text: string): string => Array.from(text, escapePiece).join('');
+
+/**
+ * 여러 줄 글의 화면 표기 (실행기의 실패 메시지 등): 줄바꿈(`\n`)은 줄로 남기고 그 밖의 숨은 글자는 {@link visibleText}와 같은
+ * 표기로 바꾼다. 결과에는 줄바꿈 말고 숨은 글자가 남지 않는다.
+ */
+export const visibleLines = (text: string): string => text.split('\n').map(visibleText).join('\n');

@@ -17,7 +17,8 @@
 //   속성 줄에 폐기 시각. [편집] · [확인]은 없고 놓는 화면도 [실행]을 두지 않는다. 변경 이력을 처음부터 펼친다
 // - 변경 이력(normChange.list): 시각 · 종류 · 주체 · 판단 대상 · 사유 또는 근거. 기본 접힘(1.4), 폐기된 규칙은 펼침. 판단 · 대체
 //   기록의 규칙은 `onOpenRule`이 있으면 링크다(새 규칙에서 대체된 옛 규칙으로, 옛 규칙에서 새 규칙으로)
-// - 제목 · 진술은 숨은 글자를 보이는 표기로 그린다(visibleText). 편집 입력에는 원문을 넣는다
+// - 제목 · 진술 · 테스트 케이스 이름은 숨은 글자를 보이는 표기로 그린다(visibleText). 실패 메시지는 줄을 살리고 숨은 글자만
+//   표기한다(visibleLines). 편집 입력에는 원문을 넣는다. 편집 중에는 [확인]이 없다. 변경 기록 검증이 깨졌으면 변경 이력을 펼친다
 // - 요구사항 상세가 자식 규칙으로 펼칠 때는 부모(`parent`)를 넘겨 requirement.get을 다시 부르지 않는다 (ADR-078)
 // - 값은 rule.list 항목 · judgment.list · requirement.get 결과에서만 (NFR-03)
 import './RuleDetail.css';
@@ -37,7 +38,7 @@ import { CodeLink } from '../../components/CodeLink/CodeLink.js';
 import { linkableLine } from '../../components/CodeLink/codeLinkView.js';
 import { CollapsibleDetail } from '../../components/CollapsibleDetail/CollapsibleDetail.js';
 import { StatusBadge } from '../../components/StatusBadge/StatusBadge.js';
-import { visibleText } from '../../components/VisibleText/visibleText.js';
+import { visibleLines, visibleText } from '../../components/VisibleText/visibleText.js';
 import { NORM_CHANGE_TEXT, normChangeRow } from './normChangeView.js';
 import {
   CASE_STATUS_LABELS,
@@ -207,7 +208,8 @@ export const RuleDetail = ({
   };
   const autoStartText = saved === null ? null : ruleEditAutoStartText(saved.autoStart);
   const editable = onEdited !== undefined && canEditRule(rule, retired);
-  const confirmable = onEdited !== undefined && canConfirmRule(rule, retired);
+  // 편집 중에는 [확인]을 숨긴다 (저장되지 않은 입력을 둔 채 저장된 글을 확인하지 않게)
+  const confirmable = onEdited !== undefined && !editing && canConfirmRule(rule, retired);
   const changes = useRuleNormChanges(
     projectId,
     rule.id,
@@ -449,7 +451,10 @@ export const RuleDetail = ({
       </Section>
 
       <div className="rule-changes" data-testid="rule-changes">
-        <CollapsibleDetail title={NORM_CHANGE_TEXT.history} forceOpen={retired}>
+        <CollapsibleDetail
+          title={NORM_CHANGE_TEXT.history}
+          forceOpen={retired || (changes.state === 'ready' && !changes.chainValid)}
+        >
           <NormChanges load={changes} onOpenRule={onOpenRule} />
         </CollapsibleDetail>
       </div>
@@ -628,14 +633,14 @@ const TestOutput = ({
                     {CASE_STATUS_LABELS[item.status]}
                   </span>
                   <span className="rule-case-name" data-testid="failure-case-name">
-                    {item.name}
+                    {visibleText(item.name)}
                   </span>
                 </div>
                 <span className="rule-mono rule-case-location" data-testid="failure-case-location">
                   <CaseLocation item={item} link={link} />
                 </span>
                 <pre className="rule-case-message" data-testid="failure-case-message">
-                  {item.message ?? TEXT.noMessage}
+                  {item.message === null ? TEXT.noMessage : visibleLines(item.message)}
                 </pre>
               </li>
             ))}
@@ -655,7 +660,7 @@ const TestOutput = ({
               <span className="rule-case-status" data-status={item.status}>
                 {CASE_STATUS_LABELS[item.status]}
               </span>
-              <span className="rule-case-name">{item.name}</span>
+              <span className="rule-case-name">{visibleText(item.name)}</span>
               <span className="rule-mono rule-case-location">{caseLocation(item)}</span>
             </li>
           ))}

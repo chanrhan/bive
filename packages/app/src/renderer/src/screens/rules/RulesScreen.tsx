@@ -60,10 +60,11 @@ const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => 
   const [created, setCreated] = useState<{ ruleId: string; run: CreatedRun } | null>(null);
 
   const items = load.state === 'ready' ? load.items : [];
-  // 목록에서 사라진 항목은 고른 것으로 보지 않는다
-  const selected = items.find((item) => item.rule.id === selectedId) ?? null;
+  const [filter, setFilter] = useListFilter(RULES_LIST_ID);
+  // 목록에서 사라진 항목은 고른 것으로 보지 않는다. [폐기 포함]이 꺼져 카드가 숨은 폐기 규칙도 같다
+  const found = items.find((item) => item.rule.id === selectedId) ?? null;
+  const selected = found !== null && isRetiredRule(found) && !filter.includeHidden ? null : found;
   const select = useCallback((item: RuleWithJudgment) => setSelectedId(item.rule.id), []);
-  const [, setFilter] = useListFilter(RULES_LIST_ID);
   const openRule = useCallback(
     (ruleId: string) => {
       const target = items.find((item) => item.rule.id === ruleId);

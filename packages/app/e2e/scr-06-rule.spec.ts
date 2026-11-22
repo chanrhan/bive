@@ -598,7 +598,8 @@ test.describe('규칙 직접 편집 (#215 수용 기준 3, ADR-100 B② · ADR-1
     // 입력은 그대로 남고 상세 머리 · 확인 상태는 바뀌지 않는다
     await expect(statementInput(page)).toHaveValue('주문 취소를 거절한다');
     await expect(page.getByTestId('rule-detail-title')).toHaveText(FAILING_RULE.title);
-    await expect(page.getByTestId('rule-field-confirmation')).toHaveText('확인미확인확인');
+    // 편집 입력이 열려 있는 동안은 [확인]이 없다 (검토 1회차 N4)
+    await expect(page.getByTestId('rule-field-confirmation')).toHaveText('확인미확인');
     expect(await callsOf(bive, 'rule.update')).toHaveLength(1);
     await statementInput(page).fill(NEW_STATEMENT);
     await expect(error).toHaveCount(0);
@@ -957,7 +958,12 @@ test.describe('확인 상태 · 폐기 · 변경 이력 (#227 수용 기준 3, A
       },
     });
     await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
-    await page.getByRole('button', { name: '변경 이력' }).click();
+    // 검증 실패는 펼치지 않아도 보인다 (효력 있는 규칙이어도 변경 이력이 처음부터 펼쳐진다, 검토 1회차 N1)
+    await expect(page.getByTestId('rule-changes').getByTestId('collapsible')).toHaveAttribute(
+      'data-open',
+      'true',
+    );
+    await expect(page.getByTestId('rule-changes-broken')).toBeVisible();
     await expect(page.getByTestId('rule-changes-broken')).toHaveText('변경 기록 검증 실패');
     await expect(page.getByTestId('change-truncated')).toHaveText('일부 생략');
     // 날 사유 값(hash_mismatch 등)은 화면에 없다
@@ -965,16 +971,31 @@ test.describe('확인 상태 · 폐기 · 변경 이력 (#227 수용 기준 3, A
     await expect(page.getByText('hash_mismatch')).toHaveCount(0);
   });
 
-  test('제목 · 진술의 방향 제어 · 영폭 글자는 보이는 표기로 그리고(카드 제목 포함), 편집 입력에는 원문을 넣는다', async ({
+  test('제목 · 진술 · 케이스 이름 · 실패 메시지 · [실행] 대화의 대상 줄의 방향 제어 · 영폭 글자는 보이는 표기로 그리고(카드 제목 포함), 편집 입력에는 원문을 넣는다. 편집 중에는 [확인]이 없다', async ({
     page,
   }) => {
     // 테스트 전용 데이터: U+202E(오른쪽에서 왼쪽 덮어쓰기)로 "거절"이 "절거"처럼 뒤집혀 보이게 만든 글
     const title = '주문 취소 \u202e절거\u202c';
     const statement =
       'WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면 THE SYSTEM SHALL \u202e다한락허\u202c\u200b 요청을';
+    // 실패 케이스 이름 · 메시지도 에이전트 · 실행기의 글이다 (메시지는 여러 줄)
+    const caseName = '취소 요청 \u202e다준려돌\u202c';
+    const message = 'AssertionError: expected 200\u200b\nto be 409';
     const rules = RULES.map((item) =>
-      item.rule.id === FAILING_RULE.id
-        ? { ...item, rule: { ...item.rule, title, statement } }
+      item.rule.id === FAILING_RULE.id && item.judgment.latest !== null
+        ? {
+            ...item,
+            rule: { ...item.rule, title, statement },
+            judgment: {
+              ...item.judgment,
+              latest: {
+                ...item.judgment.latest,
+                cases: item.judgment.latest.cases.map((c) =>
+                  c.status === 'failed' ? { ...c, name: caseName, message } : c,
+                ),
+              },
+            },
+          }
         : item,
     );
     const bive = await openRules(page, { 'rule.list': { result: { rules } } });
@@ -989,9 +1010,45 @@ test.describe('확인 상태 · 폐기 · 변경 이력 (#227 수용 기준 3, A
     // 그린 글에는 방향 제어 글자가 남지 않는다
     const drawn = await page.getByTestId('rule-detail-statement').textContent();
     expect(drawn?.includes('\u202e')).toBe(false);
+    // 실패 원인 · 전체 케이스의 이름은 표기, 메시지는 줄을 살리고 숨은 글자만 표기
+    await expect(page.getByTestId('failure-case-name')).toHaveText(
+      '취소 요청 \\u202e다준려돌\\u202c',
+    );
+    const drawnMessage = await page.getByTestId('failure-case-message').textContent();
+    expect(drawnMessage).toBe('AssertionError: expected 200\\u200b\nto be 409');
+    expect((await page.getByTestId('rule-cases').textContent())?.includes('\u202e')).toBe(false);
+    // [실행] 확인 대화의 대상 줄도 표기 (사람이 실행할 규칙을 마지막으로 확인하는 자리, 검토 1회차 B1)
+    await page.getByTestId('run-start').click();
+    const target = page.getByTestId('run-start-target');
+    await expect(target).toHaveText('RULE-002 · 주문 취소 \\u202e절거\\u202c');
+    expect((await target.textContent())?.includes('\u202e')).toBe(false);
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('run-start-dialog')).toHaveCount(0);
+    await expect(page.getByTestId('rule-confirm')).toBeVisible();
     await page.getByTestId('rule-edit').click();
     await expect(page.getByTestId('rule-edit-title')).toHaveValue(title);
     await expect(page.getByTestId('rule-edit-statement')).toHaveValue(statement);
+    // 편집 중에는 [확인]을 숨긴다 (저장되지 않은 입력을 둔 채 확인하지 않게, 검토 1회차 N4). 닫으면 다시 보인다
+    await expect(page.getByTestId('rule-confirm')).toHaveCount(0);
+    await page.getByTestId('rule-edit-cancel').click();
+    await expect(page.getByTestId('rule-confirm')).toBeVisible();
+  });
+
+  test('폐기된 규칙을 고른 뒤 [폐기 포함]을 끄면 카드와 함께 상세도 빈 상태로 돌아간다 (검토 1회차 N5)', async ({
+    page,
+  }) => {
+    const bive = await openRules(page, {
+      'rule.list': { result: { rules: WITH_RETIRED } },
+      'normChange.list': { result: RETIRED_CHANGES },
+    });
+    await page.getByTestId('hidden-toggle').click();
+    await selectRule(page, bive, 'RULE-009', RETIRED_RULE.id);
+    await expect(page.getByTestId('rule-detail-retired')).toHaveText('폐기');
+    await page.getByTestId('hidden-toggle').click();
+    await expect(card(page, 'RULE-009')).toHaveCount(0);
+    await expect(page.getByTestId('rule-detail')).toHaveAttribute('data-selected-id', '');
+    await expect(page.getByTestId('rule-detail').getByText('선택 항목 없음')).toBeVisible();
+    await expect(page.getByTestId('rule-detail-body')).toHaveCount(0);
   });
 
   for (const width of [820, 1280] as const) {
