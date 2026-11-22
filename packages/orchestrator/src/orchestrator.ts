@@ -21,6 +21,7 @@ import { assertSocketPathLength } from './pipe-path.js';
 import { RuleWriterService } from './rule-writer/rule-writer-service.js';
 import { type RunPaths, runPaths } from './run-paths.js';
 import { AutoStarter } from './runs/auto-start.js';
+import { RuleEditAutoStarter } from './runs/rule-edit-start.js';
 import { writeTokenFile } from './token.js';
 import { ORCHESTRATOR_VERSION } from './version.js';
 
@@ -216,6 +217,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         autoStarter.afterRuleWriterSession(projectId, sessionId, endReason);
       },
     });
+    // 사람이 규칙 진술을 고치면 편집이 저장된 뒤 그 규칙의 인수 테스트를 다시 쓰는 실행을 자동 시작한다 (M7-03 #215, ADR-109)
+    const ruleEditStarter = new RuleEditAutoStarter({ biveHome: options.biveHome, engine, log });
     // 잠금을 잡은 뒤 · 연결을 받기 전: 비정상 종료로 남은 running 실행은 interrupted (PRD 5.1, 자동 재개 없음)
     const interruptedRuns = engine.recoverInterruptedRuns();
     server = new PipeServer({
@@ -238,6 +241,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         ruleWriter,
         engine,
         onProposalChanged: proposalEvents.changed,
+        ruleEditStarter,
       }),
       ...(options.helloTimeoutMs === undefined ? {} : { helloTimeoutMs: options.helloTimeoutMs }),
       ...(options.notifyTimeoutMs === undefined

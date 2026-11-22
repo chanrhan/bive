@@ -3,7 +3,11 @@
 // 2) 테스트 출력은 기본 접힘이고 최신 판정이 실패면 자동으로 펼쳐짐
 // 3) 실패 원인에 실행기 출력(실패 케이스 이름, 메시지, file:line)이 보임
 // 4) 실패 원인의 file:line에 코드 열기 링크(CodeLink)가 붙음 (#43 수용 기준 3, 모달 동작은 code-link.spec.ts)
-// 규칙 화면(SCR-03)에서 카드를 눌러 들어온다. 데이터는 가짜 브리지의 rule.list · judgment.list · requirement.get 응답뿐이다.
+// 5) 규칙 상세의 [편집]이 제목 · 진술 입력을 열고 [저장]하면 rule.update를 1회 부르며 바뀐 제목 · 진술 · 확인됨이 보임
+//    (#215 수용 기준 3, ADR-109). 형식 거부 · 오류 응답 표시, 저장 중 중복 호출 방지, 취소, 목록 카드의 제목 갱신,
+//    820 · 1280px 창의 머리줄 배치
+// 규칙 화면(SCR-03)에서 카드를 눌러 들어온다. 데이터는 가짜 브리지의 rule.list · judgment.list · requirement.get ·
+// rule.update 응답뿐이다.
 import { expect, type Page, test } from '@playwright/test';
 
 import {
@@ -18,7 +22,7 @@ import {
   RULES,
   UNJUDGED_RULE,
 } from './checklists/scr-06.js';
-import type { RuleWithJudgment } from '@bive/shared';
+import type { ApprovalLogEntry, RuleUpdateResult, RuleWithJudgment } from '@bive/shared';
 
 import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
 import {
@@ -36,6 +40,7 @@ import {
   listPaneOverflow,
   NARROW_WIDTHS,
   paneWidths,
+  sameRow,
   textClipping,
   WIDE_WIDTH,
 } from './support/overflow.js';
@@ -375,5 +380,354 @@ test.describe('화면 문구', () => {
     expect(findForbiddenText(texts)).toEqual([]);
     const stage = texts.filter(({ text }) => /\bM\d\b|준비 중|로딩|Loading/i.test(text));
     expect(stage).toEqual([]);
+  });
+});
+
+test.describe('규칙 직접 편집 (#215 수용 기준 3, ADR-100 B② · ADR-109)', () => {
+  const NEW_TITLE = '결제 24시간 뒤 주문 취소 거절 (409)';
+  const NEW_STATEMENT =
+    'WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면 THE SYSTEM SHALL 409 상태 코드로 요청을 거절한다';
+  const EDITED_AT = '2026-10-16T09:30:00.000Z';
+  const HUMAN = { kind: 'human' } as const;
+
+  /** rule.update 가짜 응답 (테스트 전용 데이터): 바뀐 제목 · 진술, 확인됨(근거 = 승인 기록 7번). */
+  const updated = (
+    change: { title?: string; statement?: string },
+    autoStart: RuleUpdateResult['autoStart'],
+  ): RuleUpdateResult => {
+    const failing = RULES.find((item) => item.rule.id === FAILING_RULE.id);
+    if (failing === undefined) throw new Error('실패 규칙 없음');
+    const after = {
+      title: change.title ?? FAILING_RULE.title,
+      statement: change.statement ?? FAILING_RULE.statement,
+    };
+    const approvalLog: ApprovalLogEntry = {
+      seq: 7,
+      at: EDITED_AT,
+      action: 'rule_edit',
+      actor: HUMAN,
+      targetRef: { entity: 'Rule', id: FAILING_RULE.id },
+      clientId: 'pipe-1',
+      detail: {
+        diff: { before: { title: FAILING_RULE.title, statement: FAILING_RULE.statement }, after },
+      },
+      prevHash: '0'.repeat(64),
+      hash: 'a'.repeat(64),
+    };
+    return {
+      rule: {
+        ...FAILING_RULE,
+        ...after,
+        updatedAt: EDITED_AT,
+        confirmation: {
+          state: 'confirmed',
+          at: EDITED_AT,
+          by: HUMAN,
+          basis: { kind: 'approval_log', seq: 7 },
+        },
+      },
+      judgment: failing.judgment,
+      approvalLog,
+      autoStart,
+    };
+  };
+  const STARTED = {
+    state: 'started',
+    runId: '01JE0000000000000000000003',
+    runDisplayId: 'EXE-003',
+  } as const;
+
+  const openFailing = async (page: Page, responses: MockResponses = {}): Promise<BiveMock> => {
+    const bive = await openRules(page, responses);
+    await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+    return bive;
+  };
+  const detail = (page: Page) => page.getByTestId('rule-detail');
+  const titleInput = (page: Page) => page.getByTestId('rule-edit-title');
+  const statementInput = (page: Page) => page.getByTestId('rule-edit-statement');
+  const saveButton = (page: Page) => page.getByTestId('rule-edit-save');
+
+  test('[편집]은 지금 제목 · 진술이 든 입력을 열고, [저장]은 rule.update를 1회(바뀐 칸 · 본 수정 시각 · 사람 주체) 부른다. 상세 · 목록 카드에 새 제목 · 진술 · 확인됨이 보인다', async ({
+    page,
+  }) => {
+    const bive = await openFailing(page, {
+      'rule.update': {
+        result: updated({ title: NEW_TITLE, statement: NEW_STATEMENT }, STARTED),
+      },
+    });
+    await expect(page.getByTestId('rule-field-confirmation')).toHaveText('확인미확인');
+    await page.getByTestId('rule-edit').click();
+    // 입력이 열리고 [편집]은 사라진다. 제목 입력에 초점, 값은 지금 값
+    await expect(page.getByTestId('rule-editor')).toBeVisible();
+    await expect(page.getByTestId('rule-edit')).toHaveCount(0);
+    await expect(titleInput(page)).toBeFocused();
+    await expect(titleInput(page)).toHaveValue(FAILING_RULE.title);
+    await expect(statementInput(page)).toHaveValue(FAILING_RULE.statement);
+    await expect(page.getByTestId('rule-field-title')).toContainText('제목');
+    // 바뀐 것이 없으면 저장할 수 없다
+    await expect(saveButton(page)).toBeDisabled();
+    await titleInput(page).fill(NEW_TITLE);
+    await statementInput(page).fill(NEW_STATEMENT);
+    await expect(saveButton(page)).toBeEnabled();
+    const listCalls = (await callsOf(bive, 'rule.list')).length;
+    await saveButton(page).click();
+
+    await expect(page.getByTestId('rule-editor')).toHaveCount(0);
+    expect(await callsOf(bive, 'rule.update')).toEqual([
+      {
+        method: 'rule.update',
+        params: {
+          projectId: PROJECT.id,
+          id: FAILING_RULE.id,
+          author: HUMAN,
+          title: NEW_TITLE,
+          statement: NEW_STATEMENT,
+          expectedUpdatedAt: FAILING_RULE.updatedAt,
+        },
+      },
+    ]);
+    // 상세: 머리 제목 · 진술 · 확인됨, 자동 시작 결과 한 줄. [편집]이 다시 보인다
+    await expect(page.getByTestId('rule-detail-title')).toHaveText(NEW_TITLE);
+    await expect(page.getByTestId('rule-field-statement')).toHaveText(`진술${NEW_STATEMENT}`);
+    await expect(page.getByTestId('rule-field-confirmation')).toHaveText('확인확인됨');
+    await expect(page.getByTestId('rule-edit-result')).toHaveText('실행 자동 시작 · EXE-003');
+    await expect(page.getByTestId('rule-edit')).toBeVisible();
+    await expect(detail(page)).toHaveAttribute('data-selected-id', FAILING_RULE.id);
+    // 목록 카드도 새 제목이다 (옛 제목이 남지 않는다). 다른 카드는 그대로
+    const card = page.getByTestId('card').filter({ hasText: 'RULE-002' });
+    await expect(card).toContainText(NEW_TITLE);
+    await expect(page.getByTestId('card')).toHaveCount(RULES.length);
+    await expect(page.getByTestId('card').filter({ hasText: PASSING_RULE.title })).toHaveCount(1);
+    // 목록을 다시 읽지 않았다 (응답의 규칙으로 바꿈)
+    expect(await callsOf(bive, 'rule.list')).toHaveLength(listCalls);
+    await page.screenshot({ path: `${SCREENSHOT_DIR}SCR-06/규칙-편집-저장.png`, fullPage: true });
+  });
+
+  test('제목만 바꾸면 rule.update에 진술이 없고 자동 시작 결과 줄이 없다. 생략이면 사유가 보인다', async ({
+    page,
+  }) => {
+    const bive = await openFailing(page, {
+      'rule.update': { result: updated({ title: NEW_TITLE }, null) },
+    });
+    await page.getByTestId('rule-edit').click();
+    await titleInput(page).fill(NEW_TITLE);
+    await titleInput(page).press('Control+Enter');
+    await expect(page.getByTestId('rule-detail-title')).toHaveText(NEW_TITLE);
+    const [call] = await callsOf(bive, 'rule.update');
+    expect(call?.params).toEqual({
+      projectId: PROJECT.id,
+      id: FAILING_RULE.id,
+      author: HUMAN,
+      title: NEW_TITLE,
+      expectedUpdatedAt: FAILING_RULE.updatedAt,
+    });
+    await expect(page.getByTestId('rule-edit-result')).toHaveCount(0);
+
+    await bive.setResponse('rule.update', {
+      result: updated(
+        { title: NEW_TITLE, statement: NEW_STATEMENT },
+        { state: 'skipped', reason: 'project_daily_budget_unset', missing: [] },
+      ),
+    });
+    await page.getByTestId('rule-edit').click();
+    await statementInput(page).fill(NEW_STATEMENT);
+    await saveButton(page).click();
+    await expect(page.getByTestId('rule-edit-result')).toHaveText(
+      '실행 자동 시작 생략 · 프로젝트 하루 한도 없음',
+    );
+  });
+
+  test('저장 중에는 입력이 읽기 전용이고 [저장] · [취소]가 꺼져 두 번 눌러도 1회만 부른다', async ({
+    page,
+  }) => {
+    const bive = await openFailing(page, { 'rule.update': { pending: true } });
+    await page.getByTestId('rule-edit').click();
+    await statementInput(page).fill(NEW_STATEMENT);
+    await saveButton(page).click();
+    await expect(saveButton(page)).toBeDisabled();
+    await expect(saveButton(page)).toHaveAttribute('aria-busy', 'true');
+    await expect(page.getByTestId('rule-edit-cancel')).toBeDisabled();
+    await expect(statementInput(page)).toHaveAttribute('readonly', '');
+    await statementInput(page).press('Control+Enter');
+    await saveButton(page).click({ force: true });
+    expect(await callsOf(bive, 'rule.update')).toHaveLength(1);
+    // 아직 응답 전: 상세는 옛 값 그대로
+    await expect(page.getByTestId('rule-detail-title')).toHaveText(FAILING_RULE.title);
+  });
+
+  test('EARS 형식 거부(-32001)는 "진술 형식 오류"와 서버 사유를 보이고 입력을 남긴다. 고치면 오류 줄이 사라진다', async ({
+    page,
+  }) => {
+    const problem =
+      '진술은 대문자 WHEN와 공백 한 칸으로 시작해야 함 (WHEN <조건> THE SYSTEM SHALL <응답>)';
+    const bive = await openFailing(page, {
+      'rule.update': {
+        error: {
+          code: -32001,
+          message: '규칙 편집 형식 오류',
+          data: { reason: 'RULE_EDIT_INVALID', issues: [{ path: 'statement', message: problem }] },
+        },
+      },
+    });
+    await page.getByTestId('rule-edit').click();
+    await statementInput(page).fill('주문 취소를 거절한다');
+    await saveButton(page).click();
+    const error = page.getByTestId('rule-edit-error');
+    await expect(error).toHaveAttribute('role', 'alert');
+    await expect(page.getByTestId('rule-edit-error-label')).toHaveText('진술 형식 오류');
+    await expect(page.getByTestId('rule-edit-error-detail')).toHaveText(problem);
+    // 입력은 그대로 남고 상세 머리 · 확인 상태는 바뀌지 않는다
+    await expect(statementInput(page)).toHaveValue('주문 취소를 거절한다');
+    await expect(page.getByTestId('rule-detail-title')).toHaveText(FAILING_RULE.title);
+    await expect(page.getByTestId('rule-field-confirmation')).toHaveText('확인미확인');
+    expect(await callsOf(bive, 'rule.update')).toHaveLength(1);
+    await statementInput(page).fill(NEW_STATEMENT);
+    await expect(error).toHaveCount(0);
+  });
+
+  test('오류 응답의 사유별 문구: 제목 형식 · 다른 변경 먼저 저장됨 · 삭제된 규칙 · 권한 · 알 수 없는 오류', async ({
+    page,
+  }) => {
+    const bive = await openFailing(page);
+    const titleProblem = '제목은 한 줄이어야 함 (줄바꿈 · 제어 문자 불가)';
+    const cases = [
+      {
+        error: {
+          code: -32001,
+          message: 'x',
+          data: { reason: 'RULE_EDIT_INVALID', issues: [{ path: 'title', message: titleProblem }] },
+        },
+        label: '제목 형식 오류',
+        detail: titleProblem,
+      },
+      {
+        error: { code: -32009, message: 'x', data: { reason: 'rule_changed' } },
+        label: '규칙 저장 실패 · 다른 변경 먼저 저장됨',
+        detail: null,
+      },
+      {
+        error: { code: -32009, message: 'x', data: { reason: 'rule_deleted' } },
+        label: '규칙 저장 실패 · 삭제된 규칙',
+        detail: null,
+      },
+      {
+        error: { code: -32020, message: 'x' },
+        label: '규칙 저장 실패 · 편집 권한 없음',
+        detail: null,
+      },
+      { error: { code: -32603, message: '내부 오류' }, label: '규칙 저장 실패', detail: null },
+    ];
+    await page.getByTestId('rule-edit').click();
+    await titleInput(page).fill(NEW_TITLE);
+    for (const item of cases) {
+      await bive.setResponse('rule.update', { error: item.error });
+      await saveButton(page).click();
+      await expect(page.getByTestId('rule-edit-error-label')).toHaveText(item.label);
+      await expect(page.getByTestId('rule-edit-error-detail')).toHaveCount(
+        item.detail === null ? 0 : 1,
+      );
+      if (item.detail !== null) {
+        await expect(page.getByTestId('rule-edit-error-detail')).toHaveText(item.detail);
+      }
+    }
+    expect(await callsOf(bive, 'rule.update')).toHaveLength(cases.length);
+    await expect(titleInput(page)).toHaveValue(NEW_TITLE);
+  });
+
+  test('[취소] · Esc는 부르지 않고 입력을 닫으며 지금 값을 그대로 보인다. 다시 열면 지금 값부터다. 공백만이면 저장할 수 없다', async ({
+    page,
+  }) => {
+    const bive = await openFailing(page);
+    await page.getByTestId('rule-edit').click();
+    await titleInput(page).fill('   ');
+    await expect(saveButton(page)).toBeDisabled();
+    await page.getByTestId('rule-edit-cancel').click();
+    await expect(page.getByTestId('rule-editor')).toHaveCount(0);
+    await expect(page.getByTestId('rule-detail-title')).toHaveText(FAILING_RULE.title);
+    await page.getByTestId('rule-edit').click();
+    await expect(titleInput(page)).toHaveValue(FAILING_RULE.title);
+    await statementInput(page).fill(NEW_STATEMENT);
+    await statementInput(page).press('Escape');
+    await expect(page.getByTestId('rule-editor')).toHaveCount(0);
+    await expect(page.getByTestId('rule-field-statement')).toHaveText(
+      `진술${FAILING_RULE.statement}`,
+    );
+    // 진술 입력의 Enter는 줄바꿈을 넣지 않는다 (한 줄)
+    await page.getByTestId('rule-edit').click();
+    await statementInput(page).press('End');
+    await statementInput(page).press('Enter');
+    await expect(statementInput(page)).toHaveValue(FAILING_RULE.statement);
+    expect(await callsOf(bive, 'rule.update')).toEqual([]);
+  });
+
+  for (const width of [820, 1280] as const) {
+    test(`${width}×800: 머리줄의 [편집] · [실행]이 한 줄로 상세 안에 있고 눌리며 제목이 눌려 좁아지지 않는다. 편집 입력 · [취소] · [저장]도 상세 안에 들어온다`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      const bive = await openFailing(page);
+      const pane = detail(page);
+      expect(await sameRow(pane, ['rule-edit', 'run-start'])).toEqual([]);
+      expect(await textClipping(pane, ['rule-edit', 'run-start', 'rule-detail-id'])).toEqual([]);
+      expect(await hitProblems(pane, ['rule-edit', 'run-start'])).toEqual([]);
+      // 제목은 글자 몇 개 폭의 기둥으로 눌리지 않는다 (줄을 바꾸더라도 상세 폭의 절반 이상을 쓴다)
+      const paneBox = await pane.boundingBox();
+      const titleBox = await page.getByTestId('rule-detail-title').boundingBox();
+      const actionsBox = await page.getByTestId('rule-detail-actions').boundingBox();
+      if (paneBox === null || titleBox === null || actionsBox === null)
+        throw new Error('상자 없음');
+      expect(titleBox.width).toBeGreaterThan(paneBox.width / 2);
+      // 동작 묶음은 상세 안 오른쪽에 붙는다
+      expect(actionsBox.x + actionsBox.width).toBeLessThanOrEqual(paneBox.x + paneBox.width);
+      expect(actionsBox.x + actionsBox.width).toBeGreaterThan(paneBox.x + paneBox.width - 48);
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}SCR-06/규칙-편집-머리-${width}.png`,
+        fullPage: true,
+      });
+      await page.getByTestId('rule-edit').click();
+      // 편집 입력은 이름 아래 상세 전체 폭을 쓴다 (값 칸 폭으로 눌리지 않는다)
+      for (const id of ['rule-edit-title', 'rule-edit-statement']) {
+        const box = await page.getByTestId(id).boundingBox();
+        if (box === null) throw new Error('상자 없음');
+        expect(box.width, id).toBeGreaterThan(paneBox.width * 0.8);
+      }
+      expect(await textClipping(pane, ['rule-edit-cancel', 'rule-edit-save'])).toEqual([]);
+      expect(await sameRow(pane, ['rule-edit-cancel', 'rule-edit-save'])).toEqual([]);
+      expect(
+        await hitProblems(pane, ['rule-edit-title', 'rule-edit-statement', 'rule-edit-save']),
+      ).toEqual([]);
+      expect(await callsOf(bive, 'rule.update')).toEqual([]);
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}SCR-06/규칙-편집-입력-${width}.png`,
+        fullPage: true,
+      });
+    });
+  }
+
+  test('편집 입력 · 오류 · 결과 줄에 금지 문구(코드 표기 · 이모지)가 없다', async ({ page }) => {
+    const bive = await openFailing(page, {
+      'rule.update': {
+        error: {
+          code: -32001,
+          message: 'x',
+          data: {
+            reason: 'RULE_EDIT_INVALID',
+            issues: [{ path: 'statement', message: '진술 앞뒤에 공백을 둘 수 없음' }],
+          },
+        },
+      },
+    });
+    await page.getByTestId('rule-edit').click();
+    await statementInput(page).fill(` ${FAILING_RULE.statement}`);
+    await saveButton(page).click();
+    await expect(page.getByTestId('rule-edit-error')).toBeVisible();
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
+    await bive.setResponse('rule.update', {
+      result: updated({ statement: NEW_STATEMENT }, STARTED),
+    });
+    await statementInput(page).fill(NEW_STATEMENT);
+    await saveButton(page).click();
+    await expect(page.getByTestId('rule-edit-result')).toBeVisible();
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
   });
 });

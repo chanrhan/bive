@@ -258,7 +258,8 @@ export type RequirementListResult = z.infer<typeof RequirementListResult>;
 // - 규칙 테이블의 규범(승인 · 잠정 승인)만 돌려준다. 승인 전 제안은 규칙이 아니라 `proposal.*`로만 보인다 (NRM-04)
 // - 규칙마다 최신 판정을 함께 싣는다. 판정 기록이 없으면 `unjudged`(미판정) · `latest: null` (JDG-02, 기획서 3.4)
 // - list는 삭제되지 않은 것만 표시 ID 순으로, get은 삭제된 것도 돌려준다(`rule.deletedAt`으로 구분, ADR-047과 같음)
-// - 필터는 렌더러 목록이 한다(screens.md 1.4, ADR-048). 규칙을 바꾸는 RPC는 없다 (NRM-04: 지시 → 제안 → 승인)
+// - 필터는 렌더러 목록이 한다(screens.md 1.4, ADR-048). 규칙을 바꾸는 RPC는 사람의 직접 편집 `rule.update`뿐이다
+//   (아래 절, ADR-100 B②, ADR-109)
 
 /**
  * 규칙의 최신 판정 (파생 값, JDG-02). `latest`는 그 규칙의 가장 최근 판정 결과(커밋 · 시각 · 실행 링크 `runId`).
@@ -291,6 +292,85 @@ export type RuleGetParams = z.infer<typeof RuleGetParams>;
 export const RuleGetResult = RuleWithJudgment;
 export type RuleGetResult = RuleWithJudgment;
 
+// ── 규칙 직접 편집 (NRM-04 · NRM-07, ADR-100 B② · A2 · A8 · C2, M7-03 #215, ADR-109) ─────
+// - `rule.update`: 사람이 규칙의 제목 · 진술을 고친다. 사람 주체만 받는다(에이전트 -32020, 저장소를 열기 전에 본다)
+// - 편집 · 확인됨(근거 = 그 승인 기록 순번) · 승인 기록 `rule_edit`(before · after diff)을 트랜잭션 1개로 남긴다
+// - 오류: 없는 규칙 · 등록되지 않은 프로젝트 -32004, 제목 · 진술 형식(한 줄 · 길이 · EARS) -32001
+//   (`data.reason = RULE_EDIT_INVALID`, `data.issues`), 바뀐 것이 없음 -32001(`RULE_EDIT_NO_CHANGE`),
+//   삭제된 규칙 · 효력 없는 규칙 · 내장 구조 규칙 · 기대한 수정 시각과 다름 -32009(`data.reason` = {@link RuleEditConflictReason}),
+//   제목 · 진술이 둘 다 없음 -32602
+// - 진술이 바뀌면 오케스트레이터가 그 규칙 1개로 인수 테스트를 다시 쓰는 실행을 자동 시작한다(`autoStart`, 규범 변경 기록
+//   `auto_start`). 제목만 바뀌면 실행이 없다(`autoStart: null`)
+
+/** 규칙 제목 상한 (UTF-16 코드 단위, 규칙 작성 도구와 같다). */
+export const RULE_TITLE_MAX = 200;
+/** 규칙 진술 상한 (UTF-16 코드 단위, 규칙 작성 도구와 같다). */
+export const RULE_STATEMENT_MAX = 4000;
+
+/** `rule.update`가 -32009로 거부하는 이유 (`error.data.reason`). */
+export const RuleEditConflictReason = z.enum([
+  /** 삭제된 규칙 */
+  'rule_deleted',
+  /** 효력 없는 규칙 (`normState`가 효력 상태가 아님) */
+  'rule_not_effective',
+  /** 내장 구조 규칙: 진술이 구조 검사 코드와 짝이라 글만 고칠 수 없다 */
+  'builtin_rule',
+  /** 화면이 본 수정 시각(`expectedUpdatedAt`)과 저장된 수정 시각이 다르다 (다른 편집 · 변경이 먼저 저장됨) */
+  'rule_changed',
+]);
+export type RuleEditConflictReason = z.infer<typeof RuleEditConflictReason>;
+
+export const RuleUpdateParams = z
+  .strictObject({
+    projectId: Ulid,
+    id: Ulid,
+    author: Author,
+    /** 새 제목 (생략하면 그대로) */
+    title: z.string().optional(),
+    /** 새 진술 (생략하면 그대로) */
+    statement: z.string().optional(),
+    /** 편집을 시작할 때 본 규칙의 `updatedAt`. 주면 저장된 값과 같을 때만 고친다 (낡은 내용 위 덮어쓰기 방지) */
+    expectedUpdatedAt: Timestamp.optional(),
+  })
+  .refine((params) => params.title !== undefined || params.statement !== undefined, {
+    message: '제목 · 진술 중 하나는 있어야 합니다',
+    path: ['title'],
+  });
+export type RuleUpdateParams = z.infer<typeof RuleUpdateParams>;
+
+/**
+ * 편집 뒤 실행 자동 시작의 결과. `started` = 이 편집으로 실행을 만들었다, `pending` = 그 규칙이 대상인 시작 전 실행
+ * (승인 대기 · 실행 대기)이 이미 있어 새로 만들지 않았다(그 실행이 시작할 때 새 진술을 읽는다), `skipped` = 하루 한도 ·
+ * 설정 때문에 만들지 않았다(기록 없음, 응답에만 있음). 제목만 바뀌었거나 자동 시작이 실패하면 `null`.
+ */
+export const RuleEditAutoStart = z.discriminatedUnion('state', [
+  z.strictObject({
+    state: z.literal('started'),
+    runId: Ulid,
+    runDisplayId: displayIdSchema('EXE'),
+  }),
+  z.strictObject({
+    state: z.literal('pending'),
+    runId: Ulid,
+    runDisplayId: displayIdSchema('EXE'),
+  }),
+  z.strictObject({
+    state: z.literal('skipped'),
+    reason: AutoStartSkipReason,
+    missing: z.array(MissingSettingPath),
+  }),
+]);
+export type RuleEditAutoStart = z.infer<typeof RuleEditAutoStart>;
+
+export const RuleUpdateResult = z.strictObject({
+  rule: Rule,
+  judgment: RuleJudgment,
+  /** 이 편집의 승인 기록 (`rule_edit`) */
+  approvalLog: ApprovalLogEntry,
+  autoStart: RuleEditAutoStart.nullable(),
+});
+export type RuleUpdateResult = z.infer<typeof RuleUpdateResult>;
+
 /**
  * `judgment.list`: 규칙의 판정 이력(규칙 상세의 실행 이력, M1-28 · ADR-073). 판정 기록 테이블의 기록만
  * 최신부터 50건까지(같은 시각이면 ID가 큰 것 먼저). 실행 안의 판정이면 그 실행의 표시 ID(`EXE-NNN`)를 함께 싣고,
@@ -313,7 +393,7 @@ export type JudgmentListResult = z.infer<typeof JudgmentListResult>;
 // - 이미 처리된(대기 아님) 제안의 처리는 -32009, 거절 사유가 비면 -32001(`data.reason = REJECT_REASON_REQUIRED`)
 // - 수정 본문이 제안 종류의 본문 스키마와 맞지 않으면 -32001(`data.reason = EDITED_PAYLOAD_INVALID`)
 // - 승인하면 같은 트랜잭션에서 규범(요구사항 · 규칙)을 만들고 승인 기록을 1건 추가한다
-// - 승인된 규칙 · 계약을 직접 고치는 RPC(`rule.update` · `contract.update` 등)는 두지 않는다 (NRM-04: 지시로만)
+// - 사람이 규칙을 직접 고치는 RPC는 `rule.update`다(ADR-100 B②, ADR-109. 계약 `contract.update`는 M3-10)
 
 /** 도메인 검증 실패(-32001)의 `error.data.reason` 값. */
 export const DomainErrorReason = {
@@ -321,6 +401,10 @@ export const DomainErrorReason = {
   RejectReasonRequired: 'REJECT_REASON_REQUIRED',
   /** 수정 본문이 제안 종류와 맞지 않는다 */
   EditedPayloadInvalid: 'EDITED_PAYLOAD_INVALID',
+  /** 규칙 직접 편집의 제목 · 진술 형식 오류 (한 줄 · 길이 · EARS, `data.issues`) */
+  RuleEditInvalid: 'RULE_EDIT_INVALID',
+  /** 규칙 직접 편집에 바뀐 것이 없다 */
+  RuleEditNoChange: 'RULE_EDIT_NO_CHANGE',
 } as const;
 export type DomainErrorReason = (typeof DomainErrorReason)[keyof typeof DomainErrorReason];
 
@@ -969,6 +1053,7 @@ export const METHODS = {
   'requirement.list': { params: RequirementListParams, result: RequirementListResult },
   'rule.list': { params: RuleListParams, result: RuleListResult },
   'rule.get': { params: RuleGetParams, result: RuleGetResult },
+  'rule.update': { params: RuleUpdateParams, result: RuleUpdateResult },
   'judgment.list': { params: JudgmentListParams, result: JudgmentListResult },
   'proposal.list': { params: ProposalListParams, result: ProposalListResult },
   'proposal.count': { params: ProposalCountParams, result: ProposalCountResult },

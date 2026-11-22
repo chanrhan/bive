@@ -5,6 +5,7 @@
 // - [실행](RunStart): 고른 규칙의 상세 머리에 있다. 누르면 실행 시작 확인 대화 → [시작]이면 run.create (ADR-076).
 //   고른 항목이 없으면 없다
 // - 실행 알림(event.run.updated · event.step.updated)을 받으면 목록을 다시 읽는다(useRules, ADR-076)
+// - 상세의 [편집]으로 저장하면 응답의 규칙으로 목록 항목을 바꾼다(카드의 옛 제목을 남기지 않음, M7-03 · ADR-109)
 // - 상태(ADR-060, ADR-053과 같음): 프로젝트 조회 중 = 비움 · 프로젝트 없음 = "프로젝트 없음" ·
 //   로딩 = 목록 자리 비움(문구 · 스켈레톤 없음) · 불러오기 실패 = "규칙 불러오기 실패" · 0건 = "규칙 없음"(ADR-029)
 import './RulesScreen.css';
@@ -47,7 +48,7 @@ export const RulesScreen = (): React.JSX.Element => {
 };
 
 const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => {
-  const load = useRules(projectId);
+  const { load, replace } = useRules(projectId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // [실행]으로 만든 마지막 실행과 그 대상 규칙 (그 규칙의 상세에서만 보인다, ADR-105)
   const [created, setCreated] = useState<{ ruleId: string; run: CreatedRun } | null>(null);
@@ -98,6 +99,7 @@ const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => 
             projectId={projectId}
             item={selected}
             sourceScreen="SCR-03"
+            onEdited={replace}
             actions={
               <RunStart
                 projectId={projectId}

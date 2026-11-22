@@ -120,7 +120,8 @@ export type ConfirmationTarget = z.infer<typeof ConfirmationTarget>;
 
 /**
  * 확인됨의 근거 (ADR-100 A1).
- * - `approval_log`: 승인 기록의 사람 행동 1건(`seq`). 확인(`confirm`), 제안 승인(`approve` · `approve_edited`)
+ * - `approval_log`: 승인 기록의 사람 행동 1건(`seq`). 확인(`confirm`), 제안 승인(`approve` · `approve_edited`),
+ *   규칙 직접 편집(`rule_edit`, M7-03)
  * - `requirement_record`: 요구사항 자체의 작성 · 수정 주체(사람)와 그 시각(`createdAt` 또는 `updatedAt`, NRM-01).
  *   사람이 쓰거나 고친 요구사항이고, 승인 기록에는 항목이 없다
  */
@@ -669,6 +670,17 @@ export const ApprovalLogDetail = z.strictObject({
 });
 export type ApprovalLogDetail = z.infer<typeof ApprovalLogDetail>;
 
+/** 규칙 직접 편집 diff의 한쪽: 사람이 고칠 수 있는 칸 전부 (M7-03 #215, ADR-109). */
+export const RuleEditSnapshot = z.strictObject({
+  title: NonEmptyString,
+  statement: NonEmptyString,
+});
+export type RuleEditSnapshot = z.infer<typeof RuleEditSnapshot>;
+
+/** 승인 기록 `rule_edit`의 diff: 편집 전 · 뒤의 제목 · 진술. */
+export const RuleEditDiff = z.strictObject({ before: RuleEditSnapshot, after: RuleEditSnapshot });
+export type RuleEditDiff = z.infer<typeof RuleEditDiff>;
+
 /** 수정 diff를 남기는 행동: 수정 후 승인과 사람의 직접 편집 (ADR-100 A2 · A8). */
 const EDIT_ACTIONS: readonly ApprovalAction[] = ['approve_edited', 'rule_edit', 'contract_edit'];
 
@@ -722,6 +734,30 @@ export const ApprovalLogEntry = z
         });
       }
     }
+    // 사람의 규칙 직접 편집은 규칙을 대상으로 하고 diff는 제목 · 진술의 전후다 (M7-03, ADR-109). 반영 규범 칸은 제안 승인에만 있다
+    if (action === 'rule_edit') {
+      if (detail.diff !== undefined && !RuleEditDiff.safeParse(detail.diff).success) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '규칙 직접 편집의 diff는 제목 · 진술의 전후입니다',
+          path: ['detail', 'diff'],
+        });
+      }
+      if (entry.targetRef.entity !== 'Rule') {
+        ctx.addIssue({
+          code: 'custom',
+          message: '규칙 직접 편집의 대상은 규칙이어야 합니다',
+          path: ['targetRef'],
+        });
+      }
+      if (detail.appliedRef !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '규칙 직접 편집에는 반영 규범이 없습니다',
+          path: ['detail', 'appliedRef'],
+        });
+      }
+    }
     if ((action === 'reject') !== (detail.reason !== undefined)) {
       ctx.addIssue({
         code: 'custom',
@@ -738,6 +774,21 @@ export const ApprovalLogEntry = z
     }
   });
 export type ApprovalLogEntry = z.infer<typeof ApprovalLogEntry>;
+
+/** 사람의 규칙 진술 편집: 승인 기록 `rule_edit` 가운데 진술이 바뀐 것 (실행 자동 시작의 원인, ADR-109). */
+export interface RuleStatementEdit {
+  readonly seq: number;
+  readonly ruleId: string;
+  readonly diff: RuleEditDiff;
+}
+
+/** 승인 기록이 진술을 바꾼 규칙 편집이면 그 내용, 아니면(다른 행동 · 제목만 바뀜) `null`. */
+export const ruleStatementEditOf = (entry: ApprovalLogEntry): RuleStatementEdit | null => {
+  if (entry.action !== 'rule_edit' || entry.targetRef.entity !== 'Rule') return null;
+  const diff = RuleEditDiff.safeParse(entry.detail.diff);
+  if (!diff.success || diff.data.before.statement === diff.data.after.statement) return null;
+  return { seq: entry.seq, ruleId: entry.targetRef.id, diff: diff.data };
+};
 
 // ── 규범 변경 기록 (ADR-100 C2 · A2, NRM-07, M7-02 #214, ADR-103) ─────
 
@@ -854,14 +905,18 @@ export const NormRetirementDetail = z.strictObject({
 export type NormRetirementDetail = z.infer<typeof NormRetirementDetail>;
 
 /**
- * 종류별 상세. 신규는 `after`(만든 규범의 내용)만, 자동 시작은 `causeSeqs`(원인 = 대상 규칙의 신규 기록 순번, 대상 규칙
- * 순서)와 `ruleIds`(대상 규칙, 같은 순서)다(M7-05 #217, ADR-107). 그 밖의 종류가 쓰는 칸은 그 이슈가 더한다(넓히기만 한다).
+ * 종류별 상세. 신규는 `after`(만든 규범의 내용)만, 자동 시작은 원인 하나와 `ruleIds`(대상 규칙, 같은 순서)다. 원인은
+ * `causeSeqs`(대상 규칙의 신규 기록 순번, M7-05 #217 · ADR-107) 또는 `ruleEditSeqs`(사람의 규칙 진술 편집 = 승인 기록
+ * `rule_edit`의 순번, M7-03 #215 · ADR-109) 가운데 정확히 하나다. 두 순번은 다른 기록의 번호라 칸을 나눴다(같은 수가 서로를
+ * 가리키지 않게). 그 밖의 종류가 쓰는 칸은 그 이슈가 더한다(넓히기만 한다).
  * 값은 에이전트가 쓴 글을 담을 수 있어 화면 · 응답에는 표시 값으로만 내보낸다(ADR-089).
  */
 export const NormChangeDetail = z.strictObject({
   before: z.unknown().optional(),
   after: z.unknown().optional(),
   causeSeqs: NormChangeSeqList.optional(),
+  /** 원인 승인 기록(사람의 규칙 진술 편집 `rule_edit`)의 순번 (종류 `auto_start`에만, M7-03) */
+  ruleEditSeqs: NormChangeSeqList.optional(),
   ruleIds: z
     .array(Ulid)
     .min(1)
@@ -944,14 +999,32 @@ export const NormChangeEntry = z
           path: ['targetRef'],
         });
       }
-      const { causeSeqs, ruleIds } = entry.detail;
-      if (causeSeqs === undefined || ruleIds === undefined || causeSeqs.length !== ruleIds.length) {
+      const { causeSeqs, ruleEditSeqs, ruleIds } = entry.detail;
+      // 원인은 신규 기록 순번 또는 규칙 편집 승인 기록 순번 가운데 하나만 (M7-03, ADR-109)
+      const causes = causeSeqs ?? ruleEditSeqs;
+      if (causeSeqs !== undefined && ruleEditSeqs !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '자동 시작의 원인은 신규 기록 순번과 규칙 편집 순번 가운데 하나만 둡니다',
+          path: ['detail', 'ruleEditSeqs'],
+        });
+      } else if (
+        causes === undefined ||
+        ruleIds === undefined ||
+        causes.length !== ruleIds.length
+      ) {
         ctx.addIssue({
           code: 'custom',
           message: '자동 시작에는 원인 기록 순번과 대상 규칙이 같은 수만큼 필요합니다',
           path: ['detail', 'causeSeqs'],
         });
       }
+    } else if (entry.detail.ruleEditSeqs !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '규칙 편집 순번은 자동 시작에만 있습니다',
+        path: ['detail', 'ruleEditSeqs'],
+      });
     }
     // 판단 상세는 판단 기록에만, 판단 기록에는 판단 상세만 (M7-07)
     if ((entry.kind === 'judgment') !== (entry.detail.judgment !== undefined)) {
@@ -1104,13 +1177,22 @@ export const ToolManifestEntry = z.strictObject({
 export type ToolManifestEntry = z.infer<typeof ToolManifestEntry>;
 
 /**
- * 실행 자동 시작의 시작 주체 (M7-05 #217, ADR-100 A2 · C2, ADR-107): 오케스트레이터. 원인 규범 변경 기록(대상 규칙을 만든
- * 신규 기록)의 순번이 1개 이상 있어야 한다. 엔진은 시작마다 이 순번이 규범 변경 기록의 자동 시작 항목 1건과 같은지 본다.
+ * 실행 자동 시작의 시작 주체 (M7-05 #217, ADR-100 A2 · C2, ADR-107): 오케스트레이터. 원인 기록의 순번이 1개 이상 있어야 한다.
+ * - `causeLog` 없음: 원인은 규범 변경 기록(대상 규칙을 만든 신규 기록)의 순번
+ * - `causeLog: 'approval_log'`: 원인은 승인 기록(사람의 규칙 진술 편집 `rule_edit`)의 순번 1개 (M7-03 #215, ADR-109).
+ *   `runs.started_by`의 DB CHECK(0016)가 `causeSeqs`를 요구하므로 표를 다시 만들지 않고 어느 기록의 순번인지만 더했다
+ * 엔진은 시작마다 이 순번이 규범 변경 기록의 자동 시작 항목 1건(`causeSeqs` 또는 `ruleEditSeqs`)과 같은지 본다.
  */
-export const AutoStartRunStarter = z.strictObject({
-  kind: z.literal('orchestrator'),
-  causeSeqs: NormChangeSeqList,
-});
+export const AutoStartRunStarter = z
+  .strictObject({
+    kind: z.literal('orchestrator'),
+    causeSeqs: NormChangeSeqList,
+    causeLog: z.literal('approval_log').optional(),
+  })
+  .refine((starter) => starter.causeLog === undefined || starter.causeSeqs.length === 1, {
+    message: '규칙 편집으로 시작한 실행의 원인은 승인 기록 1건입니다',
+    path: ['causeSeqs'],
+  });
 export type AutoStartRunStarter = z.infer<typeof AutoStartRunStarter>;
 
 /** 실행의 시작 주체: 사람(실행 시작 확인, 승인 기록 `run_start`) 또는 오케스트레이터(자동 시작, 규범 변경 기록 `auto_start`). */

@@ -130,6 +130,47 @@ describe('rules 테이블 · 리포지토리', () => {
   });
 });
 
+describe('rules.update: 사람의 직접 편집 (M7-03, ADR-109)', () => {
+  it('제목 · 진술과 수정 시각만 바꾸고 나머지 칸 · 확인 상태는 그대로다. 생략한 칸은 그대로', () => {
+    withStore((store) => {
+      const req = seedRequirement(store);
+      const rule = store.rules.create(ruleInput(req.id));
+      const titled = store.rules.update(rule.id, { title: '새 제목' }, T2);
+      expect(titled).toEqual({ ...rule, title: '새 제목', updatedAt: T2 });
+      expect(store.rules.get(rule.id)).toEqual(titled);
+      const both = store.rules.update(
+        rule.id,
+        { title: '둘 다', statement: 'WHEN 가입하면 THE SYSTEM SHALL 메일을 보낸다' },
+        T2,
+      );
+      expect(both).toMatchObject({
+        title: '둘 다',
+        statement: 'WHEN 가입하면 THE SYSTEM SHALL 메일을 보낸다',
+        createdAt: T1,
+        author: ruleWriter,
+        confirmation: { state: 'unconfirmed' },
+      });
+      expect(store.rules.get(rule.id)).toEqual(both);
+    });
+  });
+
+  it('없는 규칙 → NotFound, 삭제된 규칙 → Conflict, 빈 제목 · 진술 · 잘못된 시각 → 스키마 오류이고 행은 그대로다', () => {
+    withStore((store) => {
+      const req = seedRequirement(store);
+      const rule = store.rules.create(ruleInput(req.id));
+      expect(() => store.rules.update(newId(), { title: 'x' }, T2)).toThrow(NotFoundError);
+      expect(() => store.rules.update(rule.id, { title: '' }, T2)).toThrow();
+      expect(() => store.rules.update(rule.id, { statement: '' }, T2)).toThrow();
+      expect(() => store.rules.update(rule.id, { title: 'x' }, '어제')).toThrow();
+      expect(store.rules.get(rule.id)).toEqual(rule);
+      store.db.prepare('UPDATE rules SET deleted_at = ? WHERE id = ?').run(T2, rule.id);
+      const deleted = store.rules.get(rule.id);
+      expect(() => store.rules.update(rule.id, { title: 'x' }, T2)).toThrow(ConflictError);
+      expect(store.rules.get(rule.id)).toEqual(deleted);
+    });
+  });
+});
+
 describe('proposals 테이블 · 리포지토리', () => {
   it('생성: 항상 승인 대기(pending), 표시 ID PRP-001부터, 처리 기록 · 읽은 시각 없음', () => {
     withStore((store) => {

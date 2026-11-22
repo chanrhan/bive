@@ -638,3 +638,75 @@ test.describe('화면 문구', () => {
     expect(stage).toEqual([]);
   });
 });
+
+test.describe('펼친 자식 규칙의 직접 편집 (#215 수용 기준 3, ADR-109)', () => {
+  test('자식 규칙 상세의 [편집] 저장은 rule.update 1회이고, 자식 규칙 줄 · 펼친 상세에 새 제목 · 확인됨이 보인다 (자식 규칙 목록을 다시 읽지 않아도 옛 제목이 남지 않음)', async ({
+    page,
+  }) => {
+    const newTitle = '결제 취소 기한 초과 거절';
+    const failing = RULES.find((item) => item.rule.id === FAILING_RULE.id);
+    if (failing === undefined) throw new Error('실패 규칙 없음');
+    const at = '2026-10-17T01:00:00.000Z';
+    const bive = await openRequirement(page, {
+      'rule.update': {
+        result: {
+          rule: {
+            ...FAILING_RULE,
+            title: newTitle,
+            updatedAt: at,
+            confirmation: {
+              state: 'confirmed',
+              at,
+              by: { kind: 'human' },
+              basis: { kind: 'approval_log', seq: 3 },
+            },
+          },
+          judgment: failing.judgment,
+          approvalLog: {
+            seq: 3,
+            at,
+            action: 'rule_edit',
+            actor: { kind: 'human' },
+            targetRef: { entity: 'Rule', id: FAILING_RULE.id },
+            clientId: 'pipe-1',
+            detail: {
+              diff: {
+                before: { title: FAILING_RULE.title, statement: FAILING_RULE.statement },
+                after: { title: newTitle, statement: FAILING_RULE.statement },
+              },
+            },
+            prevHash: '0'.repeat(64),
+            hash: 'b'.repeat(64),
+          },
+          autoStart: null,
+        },
+      },
+    });
+    const row = childRule(page, FAILING_RULE.displayId);
+    await row.getByTestId('child-rule-toggle').click();
+    const opened = row.getByTestId('child-rule-detail');
+    await opened.getByTestId('rule-edit').click();
+    await opened.getByTestId('rule-edit-title').fill(newTitle);
+    const listCalls = (await callsOf(bive, 'rule.list')).length;
+    await opened.getByTestId('rule-edit-save').click();
+    await expect(opened.getByTestId('rule-editor')).toHaveCount(0);
+    expect((await callsOf(bive, 'rule.update')).map((call) => call.params)).toEqual([
+      {
+        projectId: PROJECT.id,
+        id: FAILING_RULE.id,
+        author: { kind: 'human' },
+        title: newTitle,
+        expectedUpdatedAt: FAILING_RULE.updatedAt,
+      },
+    ]);
+    // 자식 규칙 줄의 제목이 새 제목이고 옛 제목은 어디에도 없다
+    await expect(row.getByTestId('child-rule-toggle')).toContainText(newTitle);
+    await expect(page.getByTestId('requirement-rules')).not.toContainText(FAILING_RULE.title);
+    await expect(opened.getByTestId('rule-detail-title')).toHaveText(newTitle);
+    await expect(opened.getByTestId('rule-field-confirmation')).toHaveText('확인확인됨');
+    // 펼침 상태는 그대로이고 다른 자식 규칙 줄은 바뀌지 않는다
+    await expect(row.getByTestId('child-rule-toggle')).toHaveAttribute('aria-expanded', 'true');
+    await expect(childRule(page, PASSING_RULE.displayId)).toContainText(PASSING_RULE.title);
+    expect(await callsOf(bive, 'rule.list')).toHaveLength(listCalls);
+  });
+});

@@ -8,7 +8,7 @@ import { createNormChangeHandlers } from './norm-change-handlers.js';
 import { createProjectHandlers } from './project-handlers.js';
 import { createProposalHandlers } from './proposal-handlers.js';
 import { createRequirementHandlers } from './requirement-handlers.js';
-import { createRuleHandlers } from './rule-handlers.js';
+import { createRuleHandlers, type RuleEditStarter } from './rule-handlers.js';
 import { createRuleWriterHandlers } from './rule-writer-handlers.js';
 import { createRunHandlers } from './run-handlers.js';
 import type { MethodHandlers } from './server.js';
@@ -39,6 +39,8 @@ export interface HandlerDeps {
   engine?: RunEngineHooks;
   /** 제안 처리가 저장된 뒤 부른다 (제안 알림 `event.proposal.changed`, M1-36, ADR-076). 생략하면 알리지 않는다 */
   onProposalChanged?: ProposalChangeListener;
+  /** 사람이 규칙 진술을 고친 뒤 실행 자동 시작 (M7-03, ADR-109). 생략하면 실행을 만들지 않는다 */
+  ruleEditStarter?: RuleEditStarter;
 }
 
 export const createHandlers = ({
@@ -49,6 +51,7 @@ export const createHandlers = ({
   ruleWriter,
   engine,
   onProposalChanged,
+  ruleEditStarter,
 }: HandlerDeps): MethodHandlers => ({
   ping: () => ({ pong: true, version: orchestratorVersion }),
   'system.status': () => ({
@@ -64,7 +67,11 @@ export const createHandlers = ({
     now,
     ...(ruleWriter === undefined ? {} : { ruleWriter }),
   }),
-  ...createRuleHandlers({ biveHome }),
+  ...createRuleHandlers({
+    biveHome,
+    now,
+    ...(ruleEditStarter === undefined ? {} : { ruleEditStarter }),
+  }),
   ...createRuleWriterHandlers({ biveHome }),
   ...createProposalHandlers({
     biveHome,

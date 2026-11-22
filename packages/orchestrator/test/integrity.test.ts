@@ -743,7 +743,7 @@ describe('확인됨을 쓰는 경로는 사람 RPC · 사람의 제안 승인뿐
     expect(files.filter((f) => /\.confirmations\b/.test(f.text)).map((f) => f.rel)).toEqual([
       'confirmations/confirmation-service.ts',
     ]);
-    // 확인 서비스를 가져오는 파일 = 확인 RPC · 요구사항 RPC(사람의 작성 · 편집) · 제안 승인
+    // 확인 서비스를 가져오는 파일 = 확인 RPC · 요구사항 RPC(사람의 작성 · 편집) · 규칙 RPC(사람의 직접 편집, M7-03) · 제안 승인
     expect(
       files
         .filter((f) => /from '[./]+\/?confirmations\/confirmation-service\.js'/.test(f.text))
@@ -752,6 +752,7 @@ describe('확인됨을 쓰는 경로는 사람 RPC · 사람의 제안 승인뿐
     ).toEqual([
       'ipc/confirmation-handlers.ts',
       'ipc/requirement-handlers.ts',
+      'ipc/rule-handlers.ts',
       'proposals/proposal-service.ts',
     ]);
     // 오케스트레이터 내부(엔진 · 단계 실행기 · 역할 세션 · 도구 · 규칙 작성)와 에이전트 도구에는 확인 경로가 없다
@@ -760,6 +761,39 @@ describe('확인됨을 쓰는 경로는 사람 RPC · 사람의 제안 승인뿐
         /^(engine|steps|agent|tools|rule-writer|test-writer|implementer|judge|runs)\//.test(rel)
       ) {
         expect(/confirm/i.test(text), rel).toBe(false);
+      }
+    }
+  });
+});
+
+describe('규칙을 제자리에서 고치는 경로는 사람의 rule.update 처리기뿐 (M7-03 #215, ADR-100 B② · C2, ADR-109, 코드 구조)', () => {
+  it('저장소의 규칙 편집(rules.update)은 규칙 RPC 처리기 하나만 부르고, 에이전트 세션이 닿는 코드(도구 · 세션 · 역할 · 엔진 · 단계 · 실행)는 그 처리기도 규칙 편집도 모른다', () => {
+    const files = sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+    const using = (pattern: RegExp) =>
+      files
+        .filter((f) => pattern.test(f.text))
+        .map((f) => f.rel)
+        .sort();
+    expect(using(/\.rules\.update\(/)).toEqual(['ipc/rule-handlers.ts']);
+    // 규칙 RPC 처리기를 가져오는 곳 = 처리기 묶음과 패키지 공개 목록뿐 (오케스트레이터 배선은 처리기 묶음을 쓴다)
+    expect(using(/from '[./]+\/?(?:ipc\/)?rule-handlers\.js'/)).toEqual([
+      'index.ts',
+      'ipc/handlers.ts',
+    ]);
+    // 승인 기록에 규칙 편집 행동을 쓰는 곳도 그 처리기뿐
+    expect(using(/action: 'rule_edit'/)).toEqual(['ipc/rule-handlers.ts']);
+    for (const { rel, text } of files) {
+      if (
+        /^(tools|agent|rule-writer|test-writer|implementer|engine|steps|runs|judge)\//.test(rel)
+      ) {
+        // 편집 기록을 읽는 것(엔진의 시작 근거 대조 · 편집 뒤 자동 시작)은 되지만 쓰거나 편집을 부르는 길은 없다
+        expect(
+          /'rule\.update'|\.rules\.update\(|rule-handlers|action: 'rule_edit'/.test(text),
+          rel,
+        ).toBe(false);
       }
     }
   });
@@ -783,13 +817,19 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
     ]);
     // 규범 변경 기록 쓰기 = 바로 반영 모듈(신규)과 실행 자동 시작 모듈(자동 시작, M7-05). 읽기는 조회 처리기 · 규칙 작성 상태 ·
     // 엔진의 시작 근거 대조
-    expect(using(/\.normChanges\.append\(/)).toEqual(['norms/agent-rule.ts', 'runs/auto-start.ts']);
+    // 사람의 규칙 진술 편집 뒤 자동 시작 모듈(M7-03, ADR-109)도 자동 시작 항목을 쓴다
+    expect(using(/\.normChanges\.append\(/)).toEqual([
+      'norms/agent-rule.ts',
+      'runs/auto-start.ts',
+      'runs/rule-edit-start.ts',
+    ]);
     expect(using(/\.normChanges\./)).toEqual([
       'engine/start-basis.ts',
       'ipc/norm-change-handlers.ts',
       'ipc/rule-writer-handlers.ts',
       'norms/agent-rule.ts',
       'runs/auto-start.ts',
+      'runs/rule-edit-start.ts',
     ]);
     // 바로 반영 모듈을 가져오는 곳 = 규칙 작성 서비스뿐 (에이전트 세션 중 규칙 작성 역할만)
     expect(using(/from '[./]+\/?norms\/agent-rule\.js'/)).toEqual([
@@ -815,17 +855,25 @@ describe('실행 자동 시작의 코드 경로 (M7-05 #217, ADR-100 C2 · D4, A
 
   it('자동 시작 항목은 오케스트레이터의 자동 시작 모듈만 쓰고, 그 모듈은 오케스트레이터 배선만 가져온다: 에이전트 도구 · 세션 · 엔진 · 단계에서 자동 시작 항목을 만들 길이 없다', () => {
     // 규범 변경 기록에 종류 auto_start를 적는 곳 (쓰기는 위의 append 허용 목록과 함께 본다). 읽기는 엔진 대조 · 상태 조회
-    expect(using(/kind: 'auto_start'/)).toEqual(['runs/auto-start.ts']);
+    // 사람의 규칙 진술 편집 뒤 자동 시작 모듈(M7-03, ADR-109)도 같은 종류를 쓴다
+    expect(using(/kind: 'auto_start'/)).toEqual(['runs/auto-start.ts', 'runs/rule-edit-start.ts']);
     expect(using(/'auto_start'/)).toEqual([
       'engine/start-basis.ts',
       'ipc/rule-writer-handlers.ts',
       'runs/auto-start.ts',
+      'runs/rule-edit-start.ts',
     ]);
-    // 자동 시작 모듈을 가져오는 곳 = 오케스트레이터 배선뿐 (규칙 작성 서비스 · 도구 · 엔진 · IPC 처리기는 가져오지 않는다)
+    // 자동 시작 모듈을 가져오는 곳 = 오케스트레이터 배선뿐 (규칙 작성 서비스 · 도구 · 엔진 · IPC 처리기는 가져오지 않는다).
+    // 규칙 RPC 처리기는 편집 뒤 자동 시작을 배선이 넘긴 창구로만 부른다(가져오지 않는다)
     expect(using(/from '[./]+\/?runs\/auto-start\.js'/)).toEqual(['orchestrator.ts']);
-    // 실행 저장은 실행 서비스 한 곳, 그것을 부르는 곳은 사람의 [실행]과 자동 시작 둘뿐
+    expect(using(/from '[./]+\/?runs\/rule-edit-start\.js'/)).toEqual(['orchestrator.ts']);
+    // 실행 저장은 실행 서비스 한 곳, 그것을 부르는 곳은 사람의 [실행]과 자동 시작 둘(규칙 작성 뒤 · 규칙 편집 뒤)뿐
     expect(using(/\.runs\.create\(/)).toEqual(['runs/run-service.ts']);
-    expect(using(/\bsaveNewRun\(/)).toEqual(['runs/auto-start.ts', 'runs/run-service.ts']);
+    expect(using(/\bsaveNewRun\(/)).toEqual([
+      'runs/auto-start.ts',
+      'runs/rule-edit-start.ts',
+      'runs/run-service.ts',
+    ]);
     expect(using(/\bcreateRun\(/)).toEqual(['ipc/run-handlers.ts']);
     // 에이전트 세션이 닿는 코드(도구 · 세션 · 역할)는 실행 서비스 · 자동 시작 · 엔진을 가져오지 않는다
     for (const { rel, text } of files()) {
