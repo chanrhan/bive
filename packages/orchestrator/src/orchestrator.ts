@@ -17,7 +17,7 @@ import { PipeServer } from './ipc/server.js';
 import { NetPipeTransport, type PipeTransport } from './ipc/transport.js';
 import { DEFAULT_IDLE_SHUTDOWN_MS, Lifecycle, type RunTracker } from './lifecycle.js';
 import { acquirePidLock } from './lock.js';
-import { TestChangeNotifier } from './norms/test-change.js';
+import { observeThenPublish, TestChangeNotifier } from './norms/test-change.js';
 import { assertSocketPathLength } from './pipe-path.js';
 import { RuleWriterService } from './rule-writer/rule-writer-service.js';
 import { type RunPaths, runPaths } from './run-paths.js';
@@ -207,10 +207,13 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       agent: agent.adapter,
       runs: lifecycle,
       log,
-      onEvent: (event) => {
-        testChanges.observe(event);
-        return runEvents.publish(event);
-      },
+      onEvent: observeThenPublish(
+        (event) => {
+          testChanges.observe(event);
+        },
+        (event) => runEvents.publish(event),
+        log,
+      ),
       ...(options.executors === undefined ? {} : { executors: options.executors }),
     });
     // 규칙 작성 세션이 규칙을 만들고 정상 종료하면 세션 밖에서 실행을 자동 시작한다 (M7-05 #217, ADR-100 D1 · B⑤ · C2, ADR-107)

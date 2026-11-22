@@ -188,7 +188,8 @@ describe('confirmation.set: 사람 전용 확인 RPC (수용 기준 1, NFR-01 ·
       actor: human,
       targetRef: { entity: 'Rule', id: rule.id },
       clientId: expect.stringMatching(/^pipe-\d+$/) as unknown as string,
-      detail: {},
+      // 확인 순간의 규범 변경 기록 마지막 순번 (기록이 없으면 0, M7-13 · ADR-113)
+      detail: { seenNormChangeSeq: 0 },
       prevHash: APPROVAL_LOG_GENESIS_HASH,
       hash: computeApprovalLogHash(result.approvalLog),
     });
@@ -972,5 +973,109 @@ describe('confirmation.list: 확인할 것 목록 (M7-13 수용 기준 3, ADR-10
     await expect(h.client.call('confirmation.list', { projectId: newId() })).rejects.toMatchObject({
       code: ErrorCode.NotFound,
     });
+  });
+});
+
+describe('항목이 내려가는 것은 사람의 [확인]뿐 (검토 1회차 B1, ADR-113): 확인이 남긴 본 순번으로 판단하고 시각 · 편집은 보지 않는다', () => {
+  const notice = (ruleId: string, at: number) => {
+    const [entry] = h.read((store) =>
+      recordTestChanges(store, {
+        run: { id: newId() },
+        baseCommit: 'a'.repeat(40),
+        headCommit: 'b'.repeat(40),
+        sessionId: null,
+        at: iso(at),
+        changes: [
+          {
+            ruleId,
+            files: [{ path: 'bive-acceptance/RULE-003/done.acc.ts', change: 'modified' }],
+          },
+        ],
+      }),
+    );
+    if (entry === undefined) throw new Error('알림이 남지 않음');
+    return entry;
+  };
+  const testItems = async () =>
+    (await listOf()).items.flatMap((item) =>
+      item.kind === 'test_changed' ? [[item.rule.displayId, item.seq]] : [],
+    );
+  const edit = async (id: string, at: number, change: { title?: string; statement?: string }) => {
+    h.clock.now = at;
+    return h.client.call('rule.update', { projectId: h.project.id, id, author: human, ...change });
+  };
+
+  it('확인 → 알림 → 제목 편집 · 진술 편집 뒤에도 알림이 남고, 편집 뒤에도 다시 확인을 받으며, 그 [확인]으로 내려간다', async () => {
+    const norms = seedNorms();
+    await confirmRule(norms.c.id, T0 + 1_000);
+    const entry = notice(norms.c.id, T0 + 2_000);
+    await edit(norms.c.id, T0 + 3_000, { title: '가입 완료 안내 화면' });
+    expect(await testItems()).toEqual([['RULE-003', entry.seq]]);
+    await edit(norms.c.id, T0 + 4_000, {
+      statement: 'WHEN 가입이 끝나면 THE SYSTEM SHALL 안내 화면을 바로 보인다',
+    });
+    expect(await testItems()).toEqual([['RULE-003', entry.seq]]);
+    // 편집이 확인 행을 새 시각으로 다시 썼어도 알림이 남아 있어 다시 확인을 받는다 (-32009가 아니다)
+    const confirmed = await confirmRule(norms.c.id, T0 + 5_000);
+    expect(confirmed.approvalLog.detail).toEqual({ seenNormChangeSeq: entry.seq });
+    expect(await testItems()).toEqual([]);
+    await expect(confirmRule(norms.c.id, T0 + 6_000)).rejects.toMatchObject({
+      code: ErrorCode.StateConflict,
+    });
+    // 편집 · 요구사항 저장의 승인 기록에는 본 순번이 없다 (그 행동은 알림을 내리지 않는다)
+    expect(logOf().map((item) => [item.action, item.detail.seenNormChangeSeq])).toEqual([
+      ['confirm', 0],
+      ['rule_edit', undefined],
+      ['rule_edit', undefined],
+      ['confirm', entry.seq],
+    ]);
+  });
+
+  it('시계가 뒤로 가 확인 시각보다 앞선 시각으로 기록된 알림도 [확인] 전에는 남고, 확인 시각이 알림보다 앞이어도 [확인] 뒤에는 내려간다', async () => {
+    const norms = seedNorms();
+    await confirmRule(norms.c.id, T0 + 10_000);
+    const entry = notice(norms.c.id, T0 + 5_000);
+    expect(await testItems()).toEqual([['RULE-003', entry.seq]]);
+    await confirmRule(norms.c.id, T0 + 1);
+    expect(await testItems()).toEqual([]);
+  });
+
+  it('확인 행의 확인 시각을 저장소 밖에서 뒤로 미뤄도 알림은 남는다 (승인 기록의 본 순번만 본다)', async () => {
+    const norms = seedNorms();
+    await confirmRule(norms.c.id, T0 + 1_000);
+    const entry = notice(norms.c.id, T0 + 2_000);
+    h.read((store) =>
+      store.db
+        .prepare(
+          "UPDATE confirmations SET confirmed_at = '2099-01-01T00:00:00.000Z' WHERE target_id = ?",
+        )
+        .run(norms.c.id),
+    );
+    expect(await testItems()).toEqual([['RULE-003', entry.seq]]);
+  });
+
+  it('폐기된 규칙의 테스트 변경 알림은 폐기 항목이 남아 있을 때만 그 항목이 대신하고, 사람이 폐기를 본 뒤의 알림은 다시 올라온다 (검토 1회차 N4)', async () => {
+    const norms = seedNorms();
+    await confirmRule(norms.c.id, T0 + 1_000);
+    retireAt('RULE-003', GROUNDS_C, T0 + 2_000);
+    // 사람이 폐기를 확인(본 순번 = 풀림 기록까지)한 뒤에 생긴 알림
+    await confirmRule(norms.c.id, T0 + 2_500);
+    const after = notice(norms.c.id, T0 + 3_000);
+    const kinds = async () =>
+      (await listOf()).items.flatMap((item) =>
+        item.kind === 'unconfirmed_norm' ? [] : [[item.kind, item.rule.displayId]],
+      );
+    expect(await kinds()).toEqual([['test_changed', 'RULE-003']]);
+    expect(await testItems()).toEqual([['RULE-003', after.seq]]);
+  });
+
+  it('폐기 항목이 아직 남아 있으면 같은 규칙의 테스트 변경 알림은 따로 나오지 않는다', async () => {
+    const norms = seedNorms();
+    await confirmRule(norms.b.id, T0 + 1_000);
+    // 폐기 전 알림 · 폐기(풀림) · 다시 확인 전
+    notice(norms.b.id, T0 + 1_500);
+    retireAt('RULE-002', GROUNDS_B, T0 + 2_000);
+    const items = (await listOf()).items.filter((item) => item.kind !== 'unconfirmed_norm');
+    expect(items.map((item) => item.kind)).toEqual(['retired']);
   });
 });

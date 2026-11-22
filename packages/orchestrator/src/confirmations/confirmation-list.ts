@@ -4,12 +4,14 @@
 //   ① · ②는 기록 시각 최신순(같으면 순번 큰 것 먼저), ③은 마지막 수정 시각 최신순(같으면 표시 ID 순). 확인 풀림은 그 원인인
 //   폐기 · 대체 항목의 `released`로 싣는다(같은 폐기가 두 항목으로 나오지 않는다. 지금 확인 풀림의 원인은 폐기 · 대체뿐이고
 //   0019 트리거가 그 밖의 원인을 거부한다)
-// - 내려가는 조건: 사람이 대상을 [확인](`confirmation.set`)하면 빠진다. ① · ②는 대상 규칙의 확인 시각이 그 기록 시각보다 뒤일
-//   때, ③은 확인됨일 때. 삭제된 대상은 빠진다. 폐기된 규칙은 ③에 오지 않는다(①에만)
+// - 내려가는 조건: 사람이 대상을 [확인](`confirmation.set`)했을 때만 빠진다. ① · ②는 그 규칙의 승인 기록 `confirm` 가운데
+//   `detail.seenNormChangeSeq`(확인 순간의 규범 변경 기록 마지막 순번)가 그 기록의 순번 이상인 것이 있을 때, ③은 확인됨일 때.
+//   사람의 편집(`rule.update`) · 확인 행의 시각은 보지 않는다(편집은 "알림을 봤다"가 아니다). 시각을 비교하지 않으므로 시계가
+//   뒤로 가거나 같은 밀리초여도 결과가 같다. 삭제된 대상은 빠진다. 폐기된 규칙은 ③에 오지 않는다(①에만). 폐기된 규칙의 테스트
+//   변경 알림은 그 폐기 항목이 아직 내려가지 않았을 때만 그 항목이 대신한다(사람이 폐기를 본 뒤의 알림은 ②에 나온다)
 // - 에이전트가 쓴 글은 표시 값(ADR-089)으로만 내보낸다. 저장된 기록은 바꾸지 않는다
 import {
   CONFIRMATION_LIST_MAX_ITEMS,
-  type Confirmation,
   type ConfirmationItem,
   type ConfirmationListResult,
   type ConfirmationNormItem,
@@ -45,11 +47,17 @@ const ruleText = (value: unknown, truncated: { value: boolean }): ConfirmationRu
 };
 
 /**
- * 사람이 그 기록 뒤에 대상 규칙을 확인했는지 (항목이 내려가는 조건). 확인 시각이 기록 시각보다 뒤인 확인됨이면 참이다.
- * 확인 풀림이 같은 트랜잭션에서 일어나므로 새 폐기 · 대체는 사람이 다시 확인하기 전까지 참이 아니다.
+ * 사람이 규칙의 규범 변경 기록을 어디까지 봤는지: 그 규칙의 승인 기록 `confirm`의 `seenNormChangeSeq` 가운데 가장 큰 값
+ * (없으면 0, 그 칸이 없는 옛 확인도 0). 이 값 이하 순번의 폐기 · 대체 · 테스트 변경 기록은 본 것이다 (ADR-113).
  */
-export const seenAfter = (confirmation: Confirmation, at: string): boolean =>
-  confirmation.state === 'confirmed' && Date.parse(confirmation.at) > Date.parse(at);
+export const seenNormChangeSeqOf = (store: ProjectStore, ruleId: string): number =>
+  store.approvalLog
+    .list({ entity: 'Rule', id: ruleId })
+    .reduce(
+      (seen, entry) =>
+        entry.action === 'confirm' ? Math.max(seen, entry.detail.seenNormChangeSeq ?? 0) : seen,
+      0,
+    );
 
 /** 폐기 · 대체 기록 (원인이 될 수 있는 종류). */
 const isRetirement = (entry: NormChangeEntry): boolean =>
@@ -60,24 +68,31 @@ const pendingNotices = (
   store: ProjectStore,
   entries: readonly NormChangeEntry[],
 ): { entry: NormChangeEntry; rule: Rule }[] => {
-  const retired = retiredRuleSet(store);
-  const rules = new Map<string, Rule | null>();
-  const ruleOf = (id: string): Rule | null => {
-    if (!rules.has(id)) rules.set(id, store.rules.get(id));
-    return rules.get(id) ?? null;
+  const rules = new Map<string, { rule: Rule | null; seen: number }>();
+  const ruleOf = (id: string) => {
+    let found = rules.get(id);
+    if (found === undefined) {
+      found = { rule: store.rules.get(id), seen: seenNormChangeSeqOf(store, id) };
+      rules.set(id, found);
+    }
+    return found;
   };
   const pending: { entry: NormChangeEntry; rule: Rule }[] = [];
   for (const entry of entries) {
     const notice = isRetirement(entry) || entry.kind === 'test_changed';
     if (!notice || entry.targetRef.entity !== 'Rule') continue;
-    const rule = ruleOf(entry.targetRef.id);
+    const { rule, seen } = ruleOf(entry.targetRef.id);
     if (rule === null || rule.deletedAt !== null) continue;
-    // 폐기된 규칙의 테스트 변경 알림은 그 폐기 항목이 대신한다
-    if (entry.kind === 'test_changed' && retired.has(rule.id)) continue;
-    if (seenAfter(rule.confirmation, entry.at)) continue;
+    if (entry.seq <= seen) continue;
     pending.push({ entry, rule });
   }
-  return pending;
+  // 폐기된 규칙의 테스트 변경 알림은 그 폐기 항목이 아직 남아 있을 때만 그 항목이 대신한다
+  const retiring = new Set(
+    pending.filter(({ entry }) => isRetirement(entry)).map(({ rule }) => rule.id),
+  );
+  return pending.filter(
+    ({ entry, rule }) => !(entry.kind === 'test_changed' && retiring.has(rule.id)),
+  );
 };
 
 /**

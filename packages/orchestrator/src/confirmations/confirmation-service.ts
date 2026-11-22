@@ -85,7 +85,8 @@ export const confirmByHuman = (
       actor: by,
       targetRef: { entity: target.entity, id: target.id },
       clientId: context.clientId,
-      detail: {},
+      // 사람이 여기까지 봤다: 확인할 것 목록의 폐기 · 대체 · 테스트 변경 항목은 이 순번 이하면 내려간다 (ADR-113)
+      detail: { seenNormChangeSeq: store.normChanges.lastSeq() },
     });
     const confirmation = store.confirmations.confirm(target, {
       by,

@@ -19,6 +19,7 @@ import type { GitRunner } from '../src/git/git-exec.js';
 import { createGitRunner } from '../src/git/git-exec.js';
 import {
   changedAcceptanceFiles,
+  observeThenPublish,
   recordTestChanges,
   TestChangeNotifier,
   testWriterSessionOf,
@@ -69,6 +70,8 @@ describe('바뀜의 기준: 기준 커밋에 있던 대상 규칙 폴더 파일�
     write(repo, 'bive-acceptance/RULE-001/b.acc.ts', 'b1');
     write(repo, 'bive-acceptance/RULE-001/c.acc.ts', 'c1');
     write(repo, 'bive-acceptance/RULE-001/same.acc.ts', 'same');
+    write(repo, 'bive-acceptance/RULE-001/mode.acc.ts', 'm1');
+    write(repo, 'bive-acceptance/RULE-001/both.acc.ts', 'p1');
     write(repo, 'bive-acceptance/RULE-0010/x.acc.ts', 'x1');
     write(repo, 'bive-acceptance/RULE-002/y.acc.ts', 'y1');
     write(repo, 'src/app.ts', 'app1');
@@ -81,6 +84,10 @@ describe('바뀜의 기준: 기준 커밋에 있던 대상 규칙 폴더 파일�
     );
     write(repo, 'bive-acceptance/RULE-001/same.acc.ts', 'same');
     write(repo, 'bive-acceptance/RULE-001/new.acc.ts', 'n1');
+    // 파일 모드만 바뀜(내용 같음)은 넣지 않고, 모드와 내용이 함께 바뀌면 넣는다 (검토 1회차 N6)
+    fs.chmodSync(path.join(repo, 'bive-acceptance/RULE-001/mode.acc.ts'), 0o755);
+    write(repo, 'bive-acceptance/RULE-001/both.acc.ts', 'p2');
+    fs.chmodSync(path.join(repo, 'bive-acceptance/RULE-001/both.acc.ts'), 0o755);
     write(repo, 'bive-acceptance/RULE-0010/x.acc.ts', 'x2');
     write(repo, 'bive-acceptance/RULE-002/y.acc.ts', 'y2');
     write(repo, 'src/app.ts', 'app2');
@@ -91,8 +98,13 @@ describe('바뀜의 기준: 기준 커밋에 있던 대상 규칙 폴더 파일�
     ).resolves.toEqual([
       { path: 'bive-acceptance/RULE-001/a.acc.ts', change: 'modified' },
       { path: 'bive-acceptance/RULE-001/b.acc.ts', change: 'removed' },
+      { path: 'bive-acceptance/RULE-001/both.acc.ts', change: 'modified' },
       { path: 'bive-acceptance/RULE-001/c.acc.ts', change: 'removed' },
     ]);
+    // 모드 바뀜이 실제로 커밋에 들어갔다 (대조군)
+    expect(userGit(repo, 'diff', '--name-only', baseCommit, headCommit)).toContain(
+      'bive-acceptance/RULE-001/mode.acc.ts',
+    );
     // 바뀐 것이 없는 규칙 · 새 파일만 있는 규칙
     await expect(
       changedAcceptanceFiles(git, repo, { baseCommit, headCommit: baseCommit }, 'RULE-001'),
@@ -314,6 +326,25 @@ describe('TestChangeNotifier: 병합으로 끝난 실행만, 실행마다 한 �
     expect(calls).toHaveLength(1);
     expect(calls[0]?.at(-1)).toBe(':(literal)bive-acceptance/RULE-001/');
     expect(logs).toEqual([]);
+  });
+
+  it('관찰자가 동기 예외를 던져도 실행 알림 발행은 그대로 일어나고 로그 한 줄만 남는다 (검토 1회차 N7)', async () => {
+    const published: unknown[] = [];
+    const logs: string[] = [];
+    const onEvent = observeThenPublish(
+      () => {
+        throw new Error('관찰 실패');
+      },
+      (item) => {
+        published.push(item);
+        return Promise.resolve();
+      },
+      (line) => logs.push(line),
+    );
+    const item = { type: 'notify' as const, projectId: newId(), runId: newId(), topic: 'x' };
+    await onEvent(item);
+    expect(published).toEqual([item]);
+    expect(logs).toEqual(['테스트 변경 알림 관찰 실패: 관찰 실패']);
   });
 
   it('git이 실패하면 로그 한 줄만 남기고 기록하지 않는다 (실행 상태와 무관)', async () => {

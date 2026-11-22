@@ -4,7 +4,8 @@
 // - 쓰는 시점: 실행이 병합으로 끝났을 때(`run.saved`에서 상태 `merged`를 처음 본 때). 비교는 실행 시작 때 기준 브랜치 커밋
 //   (`baseCommit`)과 병합한 실행 브랜치 끝(`headCommit`)의 대상 규칙 폴더(`bive-acceptance/<규칙 표시 ID>/`)다. 실행 브랜치에서
 //   그 폴더를 쓰는 것은 테스트 작성 단계뿐이다(구현 역할은 인수 테스트 쓰기 거부). 바뀜 = 기준 커밋에 있던 파일의 내용이 달라짐
-//   (`M` · `T`) · 지움(`D`). 새 파일(`A`)은 처음 쓰는 것이라 넣지 않고, 이름 바꿈은 지움 + 새 파일로 본다(`--no-renames`)
+//   (`M` · `T`, 내용 해시가 같은 파일 모드만의 바뀜은 뺀다) · 지움(`D`). 새 파일(`A`)은 처음 쓰는 것이라 넣지 않고, 이름 바꿈은
+//   지움 + 새 파일로 본다(`--no-renames`)
 //   병합되지 않은 실행(실패 · 예산 초과)의 테스트는 기준 브랜치에 들어가지 않으므로 알림이 없다. 재시도마다 다시 쓴 테스트도
 //   병합된 최종 내용 한 번만 본다
 // - 실행 1개 · 규칙 1개에 기록 1건이다(같은 실행 · 규칙의 기록이 있으면 남기지 않는다). 기록할 때 규칙이 확인됨이 아니면 남기지
@@ -39,7 +40,8 @@ const CHANGE_OF: Readonly<Record<string, NormTestChangeFile['change']>> = {
 };
 
 /**
- * 두 커밋 사이에 규칙 폴더 안에서 바뀌거나 지워진 파일 (`git diff --name-status -z --no-renames`). 새 파일은 넣지 않는다.
+ * 두 커밋 사이에 규칙 폴더 안에서 바뀌거나 지워진 파일 (`git diff --raw -z --no-renames`). 새 파일 · 모드만 바뀐 파일(전후 내용
+ * 해시가 같음)은 넣지 않는다.
  * @throws {GitCommandError} 커밋이 없음 등
  */
 export const changedAcceptanceFiles = async (
@@ -55,7 +57,8 @@ export const changedAcceptanceFiles = async (
       '--no-renames',
       '--no-ext-diff',
       '--no-textconv',
-      '--name-status',
+      '--raw',
+      '--no-abbrev',
       '-z',
       range.baseCommit,
       range.headCommit,
@@ -67,9 +70,13 @@ export const changedAcceptanceFiles = async (
   const parts = result.stdout.split('\0');
   const files: NormTestChangeFile[] = [];
   for (let i = 0; i + 1 < parts.length; i += 2) {
-    const change = CHANGE_OF[parts[i] ?? ''];
+    // `:<옛 모드> <새 모드> <옛 해시> <새 해시> <상태>` 다음 칸이 경로
+    const [, , before, after, status] = (parts[i] ?? '').split(' ');
+    const change = CHANGE_OF[status ?? ''];
     const file = parts[i + 1] ?? '';
-    if (change !== undefined && file !== '') files.push({ path: file, change });
+    if (change === undefined || file === '') continue;
+    if (change === 'modified' && before === after) continue;
+    files.push({ path: file, change });
   }
   return files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 };
@@ -143,6 +150,25 @@ export interface TestChangeNotifierOptions {
   /** git 실행 함수 (기본 셸 없는 `execFile`) */
   git?: GitRunner;
 }
+
+/**
+ * 엔진 이벤트 하나를 관찰자에게 넘기고 실행 알림을 발행한다. 관찰자가 동기 예외를 던져도 로그만 남기고 발행은 그대로 한다
+ * (테스트 변경 알림은 실행 알림 · 상태에 영향을 주지 않는다).
+ */
+export const observeThenPublish = (
+  observe: (event: EngineEvent) => void,
+  publish: (event: EngineEvent) => Promise<void>,
+  log: (line: string) => void,
+): ((event: EngineEvent) => Promise<void>) => {
+  return (event) => {
+    try {
+      observe(event);
+    } catch (error) {
+      log(`테스트 변경 알림 관찰 실패: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return publish(event);
+  };
+};
 
 /**
  * 엔진의 저장 이벤트를 받아 병합으로 끝난 실행마다 한 번 테스트 변경 알림을 남긴다. 엔진은 기다리지 않고, 실패는 로그만 남긴다

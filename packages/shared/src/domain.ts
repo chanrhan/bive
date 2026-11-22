@@ -661,12 +661,15 @@ export const APPROVAL_LOG_GENESIS_HASH = '0'.repeat(64);
 /**
  * 승인 기록의 행동별 상세. 수정 후 승인은 `diff`, 거절은 `reason`, 승인은 `appliedRef`,
  * 실행 시작은 `ruleIds`(사람이 확인한 대상 규칙, 요청 순서 그대로, ADR-061).
+ * 확인(`confirm`)은 `seenNormChangeSeq`(그 확인 순간의 규범 변경 기록 마지막 순번 = 사람이 여기까지 봤다, M7-13 · ADR-113).
+ * 이 칸이 없는 옛 확인은 규범 변경 기록을 본 적 없음(0)으로 읽는다.
  */
 export const ApprovalLogDetail = z.strictObject({
   diff: z.strictObject({ before: z.unknown(), after: z.unknown() }).optional(),
   reason: NonEmptyString.optional(),
   appliedRef: EntityRef.optional(),
   ruleIds: z.array(Ulid).min(1).optional(),
+  seenNormChangeSeq: z.int().nonnegative().optional(),
 });
 export type ApprovalLogDetail = z.infer<typeof ApprovalLogDetail>;
 
@@ -757,6 +760,13 @@ export const ApprovalLogEntry = z
           path: ['detail', 'appliedRef'],
         });
       }
+    }
+    if (action !== 'confirm' && detail.seenNormChangeSeq !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '본 규범 변경 기록 순번은 확인에만 있습니다 (ADR-113)',
+        path: ['detail', 'seenNormChangeSeq'],
+      });
     }
     if ((action === 'reject') !== (detail.reason !== undefined)) {
       ctx.addIssue({

@@ -1528,7 +1528,14 @@ describe('0019 confirmation_release: 확인 풀림 · 테스트 변경 알림의
          basis = NULL WHERE target_id = ?`,
       )
       .run(id);
-  const unconfirm = (causeSeq: unknown) => ({ unconfirm: { causeSeq, previous: {} } });
+  /** 풀림 기록 상세. `previous`는 `confirm()`이 넣는 확인(시각 T(0), 근거 승인 기록 1)과 같다 */
+  const PREVIOUS = {
+    state: 'confirmed',
+    at: T(0),
+    by: { kind: 'human' },
+    basis: { kind: 'approval_log', seq: 1 },
+  };
+  const unconfirm = (causeSeq: unknown) => ({ unconfirm: { causeSeq, previous: PREVIOUS } });
 
   it('0018까지의 스키마 객체는 그대로이고 트리거 3개만 더해지며, 다시 실행해도 같다', () => {
     withDb((db) => {
@@ -1627,6 +1634,18 @@ describe('0019 confirmation_release: 확인 풀림 · 테스트 변경 알림의
       // 마지막 기록이 다른 규칙의 확인 풀림
       expect(() => release(db, b)).toThrow(/확인 풀림 기록 없이/);
       release(db, a);
+      // 사람이 다시 확인한 뒤: 마지막 기록이 그 규칙의 풀림이어도 앞선 확인(T(0) · 근거 1)의 풀림이라 짝이 맞지 않는다
+      db.prepare(
+        `UPDATE confirmations SET state = 'confirmed', confirmed_at = ?, confirmed_by = ?,
+         basis = '{"kind":"approval_log","seq":2}' WHERE target_id = ?`,
+      ).run(T(7), human, a);
+      expect(() => release(db, a)).toThrow(/확인 풀림 기록 없이/);
+      // 시각만 같고 근거가 다른 확인도 짝이 아니다
+      db.prepare(
+        `UPDATE confirmations SET confirmed_at = ?, basis = '{"kind":"approval_log","seq":3}'
+         WHERE target_id = ?`,
+      ).run(T(0), a);
+      expect(() => release(db, a)).toThrow(/확인 풀림 기록 없이/);
       // 확인 풀림 뒤 다른 기록이 끼면 그 기록으로는 풀 수 없다
       const retiredB = change(db, { kind: 'retired', target: b });
       change(db, {

@@ -805,6 +805,20 @@ describe('확인됨을 만드는 경로는 사람 RPC뿐, 확인 풀림은 폐�
       'norms/agent-rule.ts': ['releaseConfirmation'],
       'proposals/proposal-service.ts': ['confirmApprovedNorm'],
     });
+    // 이름 단위 고정을 돌아가는 가져오기가 없다: 네임스페이스 가져오기 · 다시 내보내기 · 동적 가져오기 · 큰따옴표 경로 (검토 1회차 N2)
+    expect(
+      using(
+        /import\s*\*\s*as\s+\w+\s+from\s*['"][^'"]*confirmation-service|export\s*\*[^;]*confirmation-service|export\s*\{[^}]*\}\s*from\s*['"][^'"]*confirmation-service|import\s*\(\s*['"`][^'"`]*confirmation-service|from\s*"[^"]*confirmation-service/,
+      ),
+    ).toEqual([]);
+    // 확인 서비스 모듈 이름이 나오는 파일 = 위의 가져오는 다섯 파일뿐 (다른 길로 가져오는 파일이 없다)
+    expect(using(/confirmation-service/)).toEqual([
+      'ipc/confirmation-handlers.ts',
+      'ipc/requirement-handlers.ts',
+      'ipc/rule-handlers.ts',
+      'norms/agent-rule.ts',
+      'proposals/proposal-service.ts',
+    ]);
     // 확인됨을 만드는 함수의 호출은 확인 서비스와 사람 경로에만 있다 (오케스트레이터 · 에이전트 경로에는 없다)
     expect(
       using(
@@ -935,8 +949,10 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
       'runs/auto-start.ts',
       'runs/rule-edit-start.ts',
     ]);
+    // 확인 서비스는 사람의 확인이 "여기까지 봤다"로 남기는 마지막 순번만 읽는다 (M7-13 검토 1회차, ADR-113)
     expect(using(/\.normChanges\./)).toEqual([
       'confirmations/confirmation-list.ts',
+      'confirmations/confirmation-service.ts',
       'engine/start-basis.ts',
       'ipc/norm-change-handlers.ts',
       'ipc/rule-writer-handlers.ts',

@@ -10,7 +10,8 @@ import type { Migration } from '../../migrate.js';
  * - `norm_changes_test_changed`: 테스트 변경 알림(`test_changed`)은 주체가 오케스트레이터이고 대상이 규칙이며 연결 실행이
  *   있을 때만 받는다
  * - `confirmations_release_recorded`: 확인됨 → 미확인(확인 풀림)은 바로 앞에 남긴 마지막 규범 변경 기록이 그 대상의 확인 풀림
- *   기록일 때만 받는다(기록 없이 풀 수 없다). 미확인 → 확인됨은 0012의 CHECK가 확인한 주체를 사람으로만 받는다
+ *   기록이고 그 기록의 `detail.unconfirm.previous`(풀리기 전 확인)가 지금 풀려는 행의 확인 시각 · 근거와 같을 때만 받는다(기록
+ *   없이 풀 수 없다. 사람이 다시 확인한 뒤에는 앞선 풀림 기록으로 풀 수 없다). 미확인 → 확인됨은 0012의 CHECK가 확인한 주체를 사람으로만 받는다
  * `json_extract`가 NULL을 돌려 조건이 NULL이 되면 트리거가 건너뛰므로 조건 전체를 `coalesce(…, 0)`로 감싼다.
  */
 export const migration: Migration = {
@@ -63,6 +64,10 @@ WHEN OLD.state = 'confirmed' AND NEW.state = 'unconfirmed' AND NOT coalesce((
   SELECT last.kind = 'unconfirmed'
     AND json_extract(last.target_ref, '$.entity') = OLD.entity
     AND json_extract(last.target_ref, '$.id') = OLD.target_id
+    AND json_extract(last.detail, '$.unconfirm.previous.at') = OLD.confirmed_at
+    AND json_extract(last.detail, '$.unconfirm.previous.basis.kind') = json_extract(OLD.basis, '$.kind')
+    AND json_extract(last.detail, '$.unconfirm.previous.basis.seq') IS json_extract(OLD.basis, '$.seq')
+    AND json_extract(last.detail, '$.unconfirm.previous.basis.at') IS json_extract(OLD.basis, '$.at')
   FROM norm_changes AS last
   ORDER BY last.seq DESC
   LIMIT 1
