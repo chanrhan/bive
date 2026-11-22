@@ -1,18 +1,30 @@
-// 규칙 화면의 표시 규칙 (screens.md SCR-03 카드 · 필터, 1.4, ADR-060). DOM · React에 의존하지 않는다
-// (test/rules-view.test.ts).
-// - 카드: 1줄 제목 · 생성 주체 아이콘(판정이 통과면 앞에 흐린 점), 2줄 표시 ID · WHEN 조건 · 예외
-// - 예외: 판정 상태의 예외(실패 · 미판정 · 격리 · 재검증 필요, 1.4 상태 배지) + 잠정. 변이 생존은 변이 데이터가
-//   생기면(P1) 더한다. 값은 rule.list 결과(규칙 필드 · 최신 판정)에서만 도출한다(NFR-03)
-// - 필터: 판정 · 변이 · 준수 집계 · 블록 · 위험도 · 종류. 변이 · 블록 · 위험도는 지금 값이 없어 0건 비활성 (ADR-035)
-import type { AuthorKind, JudgmentStatus, Risk, RuleKind, RuleWithJudgment } from '@bive/shared';
+// 규칙 화면의 표시 규칙 (screens.md SCR-03 카드 · 필터, 1.4, ADR-060, ADR-100 I3 · D7, M7-15 #227 · ADR-114). DOM · React에
+// 의존하지 않는다 (test/rules-view.test.ts).
+// - 카드: 1줄 제목 · 생성 주체 아이콘(판정이 통과면 앞에 흐린 점), 2줄 표시 ID · WHEN 조건 · 예외. 제목 · WHEN 조건은 숨은 글자를
+//   보이는 표기로 바꿔 그린다(visibleText)
+// - 예외: 판정 상태의 예외(실패 · 미판정 · 격리 · 재검증 필요, 1.4 상태 배지) 다음에 규범 예외(폐기 · 미확인). 미확인은 옛 '잠정'
+//   자리다(ADR-100 명세 변경 목록 SCR-03). 폐기된 규칙은 더 판정하지 않으므로(ADR-112) 판정 예외 없이 폐기 · 미확인만 보인다.
+//   변이 생존은 변이 데이터가 생기면(P1) 더한다. 값은 rule.list 결과(규칙 필드 · 최신 판정 · 폐기 사실)에서만 도출한다(NFR-03)
+// - 필터: 판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류. 변이 · 블록 · 위험도는 지금 값이 없어 0건 비활성 (ADR-035).
+//   폐기된 규칙은 기본 목록에서 빠지고 [폐기 포함]을 켜야 보인다(ListView `hidden`)
+import type {
+  AuthorKind,
+  ConfirmationState,
+  JudgmentStatus,
+  Risk,
+  RuleKind,
+  RuleWithJudgment,
+} from '@bive/shared';
 
 import type { FilterCriterion } from '../../components/ListView/filter.js';
 import {
   type BadgeStatus,
+  CONFIRMATION_LABELS,
   type ExceptionMark,
   JUDGMENT_LABELS,
   MUTATION_LABELS,
 } from '../../components/StatusBadge/status.js';
+import { visibleText } from '../../components/VisibleText/visibleText.js';
 
 /** 목록 ID = 경로 ID (ADR-048). 필터 상태가 이 ID로 유지된다. */
 export const RULES_LIST_ID = 'rules';
@@ -40,24 +52,48 @@ export const RISK_LABELS = {
   high: '높음',
 } as const satisfies Record<Risk, string>;
 
-/** 준수 집계 묶음 (SCR-03 필터 "판정 가능 = 분모 · 잠정 · 격리", JDG-03). 규칙 하나는 한 묶음에만 든다. */
-export type ComplianceGroup = 'judgeable' | 'provisional' | 'quarantined';
+/**
+ * 준수 집계 값 (SCR-03 필터 "판정 가능 = 분모 · 격리", JDG-03, ADR-100 명세 변경 목록 SCR-03 "잠정 → 사람 확인" · D7).
+ * - 판정 가능: 지금 준수 분모(효력 있고 격리 아님, `verification.summary`와 같은 정의)
+ * - 사람 확인: 판정 가능 가운데 확인됨인 규칙 = 사람 확인 기준 준수의 분모(D7). 판정 가능의 부분 집합이라 두 값을 함께 가진다
+ * - 격리: 최신 판정이 격리(판정에서 일시 제외)
+ * 폐기된 규칙 · 효력 상태가 아닌 규칙은 어느 값도 갖지 않는다(두 분모에서 빠진다, ADR-112).
+ */
+export type ComplianceGroup = 'judgeable' | 'human_confirmed' | 'quarantined';
 
 export const COMPLIANCE_LABELS = {
   judgeable: '판정 가능',
-  provisional: '잠정',
+  human_confirmed: '사람 확인',
   quarantined: '격리',
 } as const satisfies Record<ComplianceGroup, string>;
 
+/** 폐기된 규칙인지 (응답에 실린 폐기 사실 `retirement`만 본다, ADR-114). */
+export const isRetiredRule = (item: Pick<RuleWithJudgment, 'retirement'>): boolean =>
+  item.retirement !== undefined;
+
 /**
- * 준수 집계 묶음 (ADR-060). 잠정 승인 규칙은 분모에서 분리(JDG-03), 최신 판정이 격리면 판정에서 일시 제외
- * (기획서 3.4), 나머지 승인된 규칙이 판정 가능(분모)이다. 규칙은 검사 종류가 1개 이상이라(NRM-02) 모두 검사가 붙어 있다.
+ * 준수 집계 묶음 (ADR-060 · ADR-114): 분모(판정 가능) 또는 격리. 폐기 · 효력 상태 아님이면 `null`(분모에 들지 않음).
+ * 규칙은 검사 종류가 1개 이상이라(NRM-02) 모두 검사가 붙어 있다.
  */
-export const complianceGroup = ({ rule, judgment }: RuleWithJudgment): ComplianceGroup => {
-  if (rule.normState === 'provisional') return 'provisional';
-  if (judgment.status === 'quarantined') return 'quarantined';
-  return 'judgeable';
+export const complianceGroup = (item: RuleWithJudgment): 'judgeable' | 'quarantined' | null => {
+  if (isRetiredRule(item) || item.rule.normState !== 'approved') return null;
+  return item.judgment.status === 'quarantined' ? 'quarantined' : 'judgeable';
 };
+
+/** 준수 집계 칩의 값들: 묶음 + (판정 가능이고 확인됨이면) 사람 확인. */
+export const complianceValues = (item: RuleWithJudgment): ComplianceGroup[] => {
+  const group = complianceGroup(item);
+  if (group === null) return [];
+  return group === 'judgeable' && item.rule.confirmation.state === 'confirmed'
+    ? ['judgeable', 'human_confirmed']
+    : [group];
+};
+
+/** 기본 목록에서 숨기는 항목: 폐기된 규칙 ([폐기 포함]을 켜야 보인다, ADR-100 명세 변경 목록 SCR-03). */
+export const RETIRED_HIDDEN = {
+  label: '폐기 포함',
+  isHidden: isRetiredRule,
+} as const;
 
 /** 낱말 키워드: 앞이 문장 처음이나 공백이고 뒤가 공백(또는 끝)인 것만. 괄호 주석 `(WHEN)` 등은 키워드가 아니다. */
 const SHALL = /(?:^|\s)(shall)(?=\s|$)/i;
@@ -101,7 +137,13 @@ export const whenCondition = (statement: string): string | null => {
   return condition.length > (when[1] ?? '').length ? condition : null;
 };
 
-const PROVISIONAL_MARK: ExceptionMark = { key: 'provisional', label: '잠정', tone: 'info' };
+/** 카드의 규범 예외 (판정 예외 다음, 이 순서로). */
+export const RETIRED_MARK: ExceptionMark = { key: 'retired', label: '폐기', tone: 'warning' };
+export const UNCONFIRMED_MARK: ExceptionMark = {
+  key: 'unconfirmed',
+  label: CONFIRMATION_LABELS.unconfirmed,
+  tone: 'info',
+};
 
 /**
  * 카드 값 (Card2Line `CardData`와 같은 모양. 이 파일은 단위 테스트가 JSX 없이 읽도록 .tsx를 가져오지 않는다).
@@ -116,15 +158,21 @@ export interface RuleCardData {
   author: AuthorKind;
 }
 
-export const ruleCard = ({ rule, judgment }: RuleWithJudgment): RuleCardData => {
-  const statuses: BadgeStatus[] = [{ kind: 'judgment', status: judgment.status }];
+export const ruleCard = (item: RuleWithJudgment): RuleCardData => {
+  const { rule, judgment } = item;
+  const retired = isRetiredRule(item);
+  // 폐기된 규칙의 판정은 폐기 전 기록이다(폐기 뒤 판정하지 않음): 카드에는 지금의 예외(폐기)만
+  const statuses: BadgeStatus[] = retired ? [] : [{ kind: 'judgment', status: judgment.status }];
   const note = whenCondition(rule.statement);
+  const exceptions: ExceptionMark[] = [];
+  if (retired) exceptions.push(RETIRED_MARK);
+  if (rule.confirmation.state === 'unconfirmed') exceptions.push(UNCONFIRMED_MARK);
   return {
-    title: rule.title,
+    title: visibleText(rule.title),
     id: rule.displayId,
-    ...(note !== null && { note }),
+    ...(note !== null && { note: visibleText(note) }),
     statuses,
-    exceptions: rule.normState === 'provisional' ? [PROVISIONAL_MARK] : [],
+    exceptions,
     author: rule.author.kind,
   };
 };
@@ -132,8 +180,12 @@ export const ruleCard = ({ rule, judgment }: RuleWithJudgment): RuleCardData => 
 export const ruleKey = ({ rule }: RuleWithJudgment): string => rule.id;
 
 /** 검색 대상: 카드에 보이는 제목 · 표시 ID · WHEN 조건 (ADR-048 기본 + 화면 2줄 문구). */
-export const ruleSearchText = ({ rule }: RuleWithJudgment): string =>
-  [rule.title, rule.displayId, whenCondition(rule.statement) ?? ''].join(' ');
+export const ruleSearchText = ({ rule }: RuleWithJudgment): string => {
+  const note = whenCondition(rule.statement);
+  return [visibleText(rule.title), rule.displayId, note === null ? '' : visibleText(note)].join(
+    ' ',
+  );
+};
 
 /** 항목 하나를 같은 ID의 새 값으로 바꾼다(직접 편집 저장 뒤, M7-03). 없으면 그대로. */
 export const replaceRuleItem = (
@@ -149,13 +201,14 @@ export const visibleRules = (rules: readonly RuleWithJudgment[]): RuleWithJudgme
 const options = <K extends string>(labels: Record<K, string>) =>
   (Object.keys(labels) as K[]).map((value) => ({ value, label: labels[value] }));
 
-/** 필터 기준 6종 (SCR-03 필터: 판정 · 변이 · 준수 집계 · 블록 · 위험도 · 종류). 순서가 칩 순서다. */
+/** 필터 기준 7종 (SCR-03 필터: 판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류, 확인은 ADR-100 I3). 순서가 칩 순서다. */
 export const RULE_CRITERIA: readonly FilterCriterion<RuleWithJudgment>[] = [
   {
     id: 'judgment',
     label: '판정',
     options: options<JudgmentStatus>(JUDGMENT_LABELS),
-    values: ({ judgment }) => [judgment.status],
+    // 폐기된 규칙은 더 판정하지 않는다: 지금 판정 값이 없다(카드에도 판정 예외가 없다, ADR-114)
+    values: (item) => (isRetiredRule(item) ? [] : [item.judgment.status]),
   },
   {
     id: 'mutation',
@@ -168,7 +221,13 @@ export const RULE_CRITERIA: readonly FilterCriterion<RuleWithJudgment>[] = [
     id: 'compliance',
     label: '준수 집계',
     options: options(COMPLIANCE_LABELS),
-    values: (item) => [complianceGroup(item)],
+    values: complianceValues,
+  },
+  {
+    id: 'confirmation',
+    label: '확인',
+    options: options<ConfirmationState>(CONFIRMATION_LABELS),
+    values: ({ rule }) => [rule.confirmation.state],
   },
   {
     id: 'block',

@@ -1,5 +1,6 @@
 // 공통 목록 (screens.md 1.4 목록 · 카드, ADR-029 · ADR-034 · ADR-048).
-// 검색(`/` 키로 이동) · 기준별 필터 칩 · [문제만] 토글(기본 꺼짐) · 필터 사용 중 결과 줄("n개 중 m개 · 초기화") ·
+// 검색(`/` 키로 이동) · 기준별 필터 칩 · [문제만] 토글(기본 꺼짐) · 기본 숨김 항목 토글(화면이 줄 때만, 예: 규칙의 [폐기 포함],
+// 기본 꺼짐, ADR-114) · 필터 사용 중 결과 줄("n개 중 m개 · 초기화") ·
 // 문제 항목 우선 정렬 · 2줄 카드 · 빈 상태("<대상> 없음"). 화면 동작(새 항목 버튼 · 입력 줄)은 actions · leading으로 넣는다.
 // 데이터와 필터 기준은 화면이 props로 넘긴다(파서 · 실행 결과만, NFR-03). 필터 상태는 목록 ID별로
 // 앱 실행 동안 유지된다 (filterStore.ts).
@@ -53,6 +54,11 @@ export interface ListViewProps<T> {
   actions?: ReactNode;
   /** 목록 맨 위(카드 · 빈 상태 앞)에 두는 요소 (예: 새 항목 입력 줄) */
   leading?: ReactNode;
+  /**
+   * 기본 숨김 항목 (예: 폐기된 규칙). 주면 [문제만] 옆에 토글(`label`)이 생기고, 켜기 전에는 `isHidden` 항목이 카드 · 칩 개수 ·
+   * 결과 줄 · 빈 상태 계산에서 빠진다
+   */
+  hidden?: { label: string; isHidden: (item: T) => boolean };
 }
 
 const NO_CRITERIA: readonly never[] = [];
@@ -78,6 +84,7 @@ export const ListView = <T,>({
   onSelect,
   actions,
   leading,
+  hidden,
 }: ListViewProps<T>): React.JSX.Element => {
   const [stored, setFilter] = useListFilter(listId);
   // 지금 기준 · 값 목록에 없는 선택은 보이지 않으므로 쓰지 않고, 저장소에서도 지운다
@@ -99,9 +106,19 @@ export const ListView = <T,>({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  // 숨김 토글이 꺼져 있으면 숨김 항목은 목록에 없는 것과 같다
+  const isHidden = hidden?.isHidden;
+  const listed = useMemo(
+    () =>
+      isHidden === undefined || filter.includeHidden
+        ? items
+        : items.filter((item) => !isHidden(item)),
+    [items, isHidden, filter.includeHidden],
+  );
+
   const prepared = useMemo(
     () =>
-      items.map((item, index) => {
+      listed.map((item, index) => {
         const data = card(item);
         const entry: ListEntry<T> = {
           item,
@@ -113,7 +130,7 @@ export const ListView = <T,>({
         };
         return { entry, data };
       }),
-    [items, card, itemKey, searchText],
+    [listed, card, itemKey, searchText],
   );
   const entries = useMemo(() => prepared.map((p) => p.entry), [prepared]);
   const cards = useMemo(() => new Map(prepared.map((p) => [p.entry.key, p.data])), [prepared]);
@@ -166,14 +183,25 @@ export const ListView = <T,>({
           >
             문제만
           </button>
+          {hidden !== undefined && (
+            <button
+              type="button"
+              className="list-toggle"
+              data-testid="hidden-toggle"
+              aria-pressed={filter.includeHidden}
+              onClick={() => setFilter((prev) => ({ ...prev, includeHidden: !prev.includeHidden }))}
+            >
+              {hidden.label}
+            </button>
+          )}
         </div>
       </div>
 
       {/* 항목이 0건이면 결과 줄 없이 빈 상태만 (ADR-029) */}
-      {active && items.length > 0 && (
+      {active && listed.length > 0 && (
         <p className="list-result" data-testid="list-result">
           <span data-testid="list-result-count">
-            {items.length}개 중 {visible.length}개
+            {listed.length}개 중 {visible.length}개
           </span>
           <span aria-hidden="true"> · </span>
           <button
@@ -189,7 +217,7 @@ export const ListView = <T,>({
 
       {leading}
 
-      {items.length === 0 ? (
+      {listed.length === 0 ? (
         <EmptyState text={emptyText} />
       ) : (
         <ul className="list-items" data-testid="list-items" aria-label={label}>

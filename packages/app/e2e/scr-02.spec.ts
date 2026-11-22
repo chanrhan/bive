@@ -1,7 +1,9 @@
 // SCR-02 요구사항 (이슈 #17 수용 기준 1~3, screens.md SCR-02 · 1.4, ADR-029 · ADR-035 · ADR-053).
 // 1) checklists/scr-02.ts의 기본(카드 1줄 문장, 2줄 ID · 예외 · 시각, 생성 주체 아이콘) · 빈("요구사항 없음") 상태
 // 2) [+ 새 요구사항] → 목록 맨 위 입력 줄, Ctrl+Enter(⌘↵) → requirement.create 1회, Esc → 호출 없이 닫힘
-// 3) 필터 칩 4종(상태 · 작성 · 승인 · 블록), 블록은 값이 없어 0건 비활성
+// 3) 필터 칩 4종(상태 · 작성 · 확인 · 블록), 블록은 값이 없어 0건 비활성
+// 이슈 #227(M7-15) 수용 기준 2: 요구사항 카드 2줄째에 미확인이면 예외 "미확인"(사람이 쓴 요구사항은 확인됨이라 예외 없음),
+// 필터 칩 "승인"이 "확인"(미확인 · 확인됨)으로 바뀜 (ADR-100 I3 · B① · 명세 변경 목록 SCR-02, ADR-114)
 // 데이터는 가짜 브리지의 project.current · requirement.list · requirement.create 응답과
 // project.opened 알림(PROJECT_OPENED_EVENT)으로만 만든다.
 import { expect, type Locator, type Page, test } from '@playwright/test';
@@ -38,7 +40,12 @@ const NEW_REQUIREMENT = {
   updatedAt: '2026-10-16T04:00:00.000Z',
   updatedBy: { kind: 'human' },
   deletedAt: null,
-  confirmation: { state: 'unconfirmed' },
+  confirmation: {
+    state: 'confirmed',
+    at: '2026-10-16T04:00:00.000Z',
+    by: { kind: 'human' },
+    basis: { kind: 'requirement_record', at: '2026-10-16T04:00:00.000Z' },
+  },
 } as const;
 const LIVE = REQUIREMENTS.filter((r) => r.deletedAt === null);
 
@@ -137,8 +144,12 @@ test.describe('목록', () => {
     for (const call of listCalls) expect(call.params).toEqual({ projectId: PROJECT.id });
 
     const lines = page.getByTestId('card-line-2');
-    await expect(lines.nth(0)).toHaveText('REQ-002잠정2026-10-15 12:20');
+    // 에이전트가 쓴 미확인 요구사항: 2줄째 예외 자리(ID와 시각 사이)에 "미확인"
+    await expect(lines.nth(0)).toHaveText('REQ-002미확인2026-10-15 12:20');
+    await expect(lines.nth(0).getByTestId('card-exception')).toHaveText(['미확인']);
+    // 사람이 쓴 요구사항은 확인됨: 미확인 예외 없음 (규칙화 불가만)
     await expect(lines.nth(1)).toHaveText('REQ-003규칙화 불가2026-10-14 14:05');
+    await expect(lines.nth(1).getByTestId('card-exception')).toHaveText(['규칙화 불가']);
     // 정상 항목은 2줄째 예외가 비어 있다 (1.4 카드)
     await expect(lines.nth(2)).toHaveText('REQ-0012026-10-15 10:00');
     await expect(lines.nth(2).getByTestId('card-exception')).toHaveCount(0);
@@ -328,12 +339,16 @@ test.describe('새 요구사항 입력 줄 (수용 기준 2)', () => {
 });
 
 test.describe('필터 칩 (수용 기준 3)', () => {
-  test('칩 4종(상태 · 작성 · 승인 · 블록)이 있고 블록은 값이 없어 0건 비활성', async ({ page }) => {
+  test('칩 4종(상태 · 작성 · 확인 · 블록)이 있고 블록은 값이 없어 0건 비활성, 옛 "승인" 칩은 없다', async ({
+    page,
+  }) => {
     await openScreen(page);
     const chips = page.getByTestId('list-view').getByTestId('filter-chip-button');
+    await expect(chips).toHaveText(['상태', '작성', '확인', '블록']);
     await expect(chips).toHaveText(CHIPS.map((chip) => chip.label));
+    await expect(page.getByTestId('filter-chip-approval')).toHaveCount(0);
     await expect(chipButton(page, 'block')).toBeDisabled();
-    for (const id of ['status', 'author', 'approval']) {
+    for (const id of ['status', 'author', 'confirmation']) {
       await expect(chipButton(page, id)).toBeEnabled();
     }
     // 비활성 칩은 눌러도 메뉴가 열리지 않는다
@@ -350,7 +365,7 @@ test.describe('필터 칩 (수용 기준 3)', () => {
       ['정상', '1', false],
       ['추적성 결함', '0', true],
       ['규칙화 불가', '1', false],
-      ['잠정', '1', false],
+      ['미확인', '1', false],
       ['실패', '0', true],
     ]);
     await page.keyboard.press('Escape');
@@ -362,12 +377,21 @@ test.describe('필터 칩 (수용 기준 3)', () => {
     ]);
     await page.keyboard.press('Escape');
 
-    await chipButton(page, 'approval').click();
+    // 확인: 미확인 1(에이전트가 쓴 REQ-002) · 확인됨 2(사람이 쓴 REQ-001 · 003)
+    await chipButton(page, 'confirmation').click();
     expect(await menuOptions(page)).toEqual([
-      ['승인', '2', false],
-      ['대기', '0', true],
-      ['잠정', '1', false],
+      ['미확인', '1', false],
+      ['확인됨', '2', false],
     ]);
+    await page.keyboard.press('Escape');
+
+    // 확인됨을 고르면 사람이 쓴 요구사항만 남는다
+    await chipButton(page, 'confirmation').click();
+    await page.getByTestId('filter-option').filter({ hasText: '확인됨' }).click();
+    await page.keyboard.press('Escape');
+    await expect(chipButton(page, 'confirmation')).toHaveText('확인: 확인됨');
+    expect(await cardIds(page)).toEqual(['REQ-003', 'REQ-001']);
+    await expect(page.getByTestId('list-result')).toHaveText('3개 중 2개 · 초기화');
   });
 
   test('값을 고르면 칩에 값이 보이고 결과 줄이 생기며, 다른 화면에 갔다 와도 유지된다', async ({

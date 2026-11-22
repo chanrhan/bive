@@ -261,7 +261,7 @@ test.describe('실행 알림 → 다시 조회 (수용 기준 3, 렌더러 쪽)'
     await bive.emit('event.step.updated', stepUpdated());
     await expect.poll(async () => (await callsOf(bive, 'rule.list')).length).toBe(base + 2);
     for (const call of await callsOf(bive, 'rule.list')) {
-      expect(call.params).toEqual({ projectId: PROJECT.id });
+      expect(call.params).toEqual({ projectId: PROJECT.id, includeRetired: true });
     }
   });
 
@@ -298,7 +298,8 @@ test.describe('실행 알림 → 다시 조회 (수용 기준 3, 렌더러 쪽)'
         .getByTestId('card')
         .filter({ hasText: FAILING_RULE.displayId })
         .getByTestId('card-exception'),
-    ).toHaveCount(0);
+      // 판정 예외(실패)는 사라지고 규범 예외(미확인, 에이전트가 만든 규칙)만 남는다 (M7-15)
+    ).toHaveText(['미확인']);
     await page.waitForTimeout(500);
     expect(await callsOf(bive, 'rule.list')).toHaveLength(base + 2);
 

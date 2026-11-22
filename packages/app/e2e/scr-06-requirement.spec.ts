@@ -453,14 +453,14 @@ test.describe('1280×800 창의 버튼 문구 (#175)', () => {
 test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
   const listPane = (page: Page) => page.getByTestId('requirements-list-pane');
   const detailPane = (page: Page) => page.getByTestId('requirement-detail');
-  // 2줄째가 가장 긴 요구사항 카드 (테스트 전용 데이터): 4자리 ID · 예외 2개(규칙화 불가 · 잠정) · 시각
+  // 2줄째가 가장 긴 요구사항 카드 (테스트 전용 데이터): 4자리 ID · 예외 2개(규칙화 불가 · 미확인) · 시각
   const MANY: Requirement = {
     ...PARENT,
     id: '01JB0000000000000000001234',
     displayId: 'REQ-1234',
     text: '모든 화면은 사용자가 체감하기에 빠르게 전환될 것',
     unrulable: { reason: '측정 기준 없음' },
-    normState: 'provisional',
+    confirmation: { state: 'unconfirmed' },
   };
 
   /** 상세에 가로 스크롤이 없고, 받은 버튼이 한 줄 · 잘림 없음 · 상세 안이며, 가운데를 누르면 그 버튼에 닿는다. */
@@ -486,7 +486,7 @@ test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
       });
       await expect(
         page.locator('[data-testid="card"][data-id="REQ-1234"] [data-testid="card-exception"]'),
-      ).toHaveText(['규칙화 불가', '잠정']);
+      ).toHaveText(['규칙화 불가', '미확인']);
 
       const widths = await paneWidths(listPane(page), detailPane(page));
       expect(widths.list).toBeGreaterThanOrEqual(LIST_PANE_MIN);

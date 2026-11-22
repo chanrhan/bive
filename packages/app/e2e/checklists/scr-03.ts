@@ -1,6 +1,7 @@
-// SCR-03 규칙 (screens.md SCR-03 · 1.4, ADR-029 · ADR-035 · ADR-060).
-// - 기본: 목록 + 상세 2단. 카드 1줄 제목 · 생성 주체 아이콘(판정이 통과면 앞에 흐린 점), 2줄 ID · WHEN 조건 · 예외.
-//   검색 · 필터 칩 6종(판정 · 변이 · 준수 집계 · 블록 · 위험도 · 종류) · [문제만]. 상세 자리는 "선택 항목 없음".
+// SCR-03 규칙 (screens.md SCR-03 · 1.4, ADR-029 · ADR-035 · ADR-060, ADR-100 I3 · 명세 변경 목록 SCR-03 · ADR-114).
+// - 기본: 목록 + 상세 2단. 카드 1줄 제목 · 생성 주체 아이콘(판정이 통과면 앞에 흐린 점), 2줄 ID · WHEN 조건 · 예외
+//   (판정 예외 다음 폐기 · 미확인). 검색 · 필터 칩 7종(판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류) · [문제만] ·
+//   [폐기 포함](기본 꺼짐, 폐기된 규칙은 기본 목록에 없음). 상세 자리는 "선택 항목 없음".
 //   [실행]은 고른 규칙의 상세 머리에만 있어 고른 항목이 없으면 없다 (실행 시작 확인, ADR-076)
 // - 실행 시작 확인 대화 문구(RUN_START): 화면 정의서에 없어 1.1 원칙으로 정함, 설정 미비는 설정 화면과 같은 문구 (ADR-076)
 // - 빈: "규칙 없음"(ADR-029)
@@ -22,8 +23,16 @@ const base = {
   createdAt: '2026-10-15T01:00:00.000Z',
   updatedAt: '2026-10-15T01:00:00.000Z',
   deletedAt: null,
-  confirmation: { state: 'unconfirmed' },
+  // 기본은 사람이 확인한 규칙. 미확인은 아래에서 규칙마다 준다
+  confirmation: {
+    state: 'confirmed',
+    at: '2026-10-15T02:00:00.000Z',
+    by: { kind: 'human' },
+    basis: { kind: 'approval_log', seq: 1 },
+  },
 } as const satisfies Partial<Rule>;
+
+const UNCONFIRMED = { state: 'unconfirmed' } as const;
 
 const rule = (
   patch: Pick<Rule, 'id' | 'displayId' | 'title' | 'statement' | 'kind'> & Partial<Rule>,
@@ -53,7 +62,10 @@ const unjudged = (item: Rule): RuleWithJudgment => ({
   judgment: { status: 'unjudged', latest: null },
 });
 
-/** `rule.list` 가짜 응답 (테스트 전용 데이터, NFR-03). 삭제된 RULE-004는 화면에 보이면 안 된다. */
+/**
+ * `rule.list` 가짜 응답 (테스트 전용 데이터, NFR-03). 삭제된 RULE-004는 화면에 보이면 안 된다. 미확인은 RULE-002(실패와 겹침) ·
+ * RULE-006. 폐기된 RULE-007(RULE-006이 대체)은 [폐기 포함]을 켜야 보인다.
+ */
 export const RULES: RuleWithJudgment[] = [
   judged(
     rule({
@@ -74,6 +86,7 @@ export const RULES: RuleWithJudgment[] = [
       statement:
         'WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면 THE SYSTEM SHALL 요청을 거절한다',
       kind: 'business',
+      confirmation: UNCONFIRMED,
     }),
     'fail',
   ),
@@ -113,13 +126,34 @@ export const RULES: RuleWithJudgment[] = [
       title: '비밀번호 재설정 링크 30분 만료',
       statement: 'WHEN 재설정 링크가 발급 후 30분을 넘기면 THE SYSTEM SHALL 링크를 거부한다',
       kind: 'business',
-      normState: 'provisional',
+      confirmation: UNCONFIRMED,
     }),
     'pass',
   ),
+  {
+    ...judged(
+      rule({
+        id: '01JC0000000000000000000007',
+        displayId: 'RULE-007',
+        title: '비밀번호 재설정 링크 1시간 만료',
+        statement: 'WHEN 재설정 링크가 발급 후 1시간을 넘기면 THE SYSTEM SHALL 링크를 거부한다',
+        kind: 'business',
+        confirmation: UNCONFIRMED,
+      }),
+      'fail',
+    ),
+    retirement: {
+      retiredAt: '2026-10-16T03:00:00.000Z',
+      supersededBy: { id: '01JC0000000000000000000006', displayId: 'RULE-006' },
+      normChangeSeq: 5,
+    },
+  },
 ];
 
-/** 화면에 보이는 순서: 문제 항목(실패 · 미판정 · 재검증 필요 · 잠정) 먼저 받은 순서, 그다음 정상 (ADR-034 · ADR-060). */
+/** 폐기된 규칙 (기본 목록에 없음, [폐기 포함]에서만). */
+export const RETIRED_RULE = RULES[RULES.length - 1] as RuleWithJudgment;
+
+/** 화면에 보이는 순서: 문제 항목(실패 · 미판정 · 재검증 필요 · 미확인) 먼저 받은 순서, 그다음 정상 (ADR-034 · ADR-060). */
 export const VISIBLE_ORDER = ['RULE-002', 'RULE-003', 'RULE-005', 'RULE-006', 'RULE-001'] as const;
 
 /**
@@ -136,11 +170,12 @@ export const RUN_START = {
   failed: '실행 시작 실패',
 } as const;
 
-/** 필터 칩 6종 (SCR-03 필터). 변이 · 블록 · 위험도는 값이 없어 0건 비활성 (ADR-035). */
+/** 필터 칩 7종 (SCR-03 필터 + 확인, ADR-100 I3). 변이 · 블록 · 위험도는 값이 없어 0건 비활성 (ADR-035). */
 export const CHIPS = [
   { id: 'judgment', label: '판정', enabled: true },
   { id: 'mutation', label: '변이', enabled: false },
   { id: 'compliance', label: '준수 집계', enabled: true },
+  { id: 'confirmation', label: '확인', enabled: true },
   { id: 'block', label: '블록', enabled: false },
   { id: 'risk', label: '위험도', enabled: false },
   { id: 'kind', label: '종류', enabled: true },
@@ -168,6 +203,13 @@ const toolbar: ElementCheck[] = [
     text: chip.label,
   })),
   { label: '문제만 토글', testId: 'problem-toggle', role: 'button', name: '문제만' },
+  {
+    label: '폐기 포함 토글 (꺼짐)',
+    testId: 'hidden-toggle',
+    role: 'button',
+    name: '폐기 포함',
+    attributes: { 'aria-pressed': 'false' },
+  },
   { label: '결과 줄 (필터 없음)', testId: 'list-result', absent: true },
 ];
 
@@ -188,10 +230,17 @@ export const rulesChecklist = {
           count: 4,
           text: 'WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면',
         },
-        { label: '카드 2줄 예외', testId: 'card-exception', count: 4, text: '실패' },
+        { label: '카드 2줄 예외', testId: 'card-exception', count: 5, text: '실패' },
         { label: '예외 미판정', text: '미판정' },
         { label: '예외 재검증 필요', text: '재검증 필요' },
-        { label: '예외 잠정', text: '잠정' },
+        { label: '예외 미확인 (RULE-002 · RULE-006)', text: '미확인', count: 2 },
+        { label: '잠정 표시 없음', text: '잠정', absent: true },
+        {
+          label: '폐기된 규칙 미표시 (폐기 포함 꺼짐)',
+          text: '비밀번호 재설정 링크 1시간 만료',
+          absent: true,
+        },
+        { label: '예외 폐기 없음', text: '폐기', absent: true },
         {
           label: '정상 판정(통과)은 흐린 점',
           testId: 'status-badge',

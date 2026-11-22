@@ -40,6 +40,10 @@ export const RULE_DETAIL_TEXT = {
   noHistory: '실행 이력 없음',
   historyFailed: '실행 이력 불러오기 실패',
   none: '없음',
+  retired: '폐기',
+  retiredAt: '폐기 시각',
+  successor: '대체 규칙',
+  unknown: '알 수 없음',
 } as const;
 
 /**

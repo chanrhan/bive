@@ -24,6 +24,8 @@
   margin: 0;
   font-size: var(--font-size-4);
   font-weight: 600;
+  /* 긴 한글 제목이 낱말 가운데서 줄을 바꾸지 않게 (M7-15: 폐기 규칙의 긴 제목). 한 낱말이 폭보다 길면 그때만 아무 곳에서 */
+  word-break: keep-all;
   overflow-wrap: anywhere;
 }
 
@@ -309,4 +311,104 @@
     row-gap: 0;
     padding-bottom: var(--space-1);
   }
+}
+
+/* 폐기된 규칙의 머리: "폐기"(판정 배지 자리) · 대체 규칙 링크. 좁은 상세에서는 제목 다음 줄로 함께 넘어간다 (M7-15, ADR-114) */
+.rule-detail-retired {
+  flex: none;
+  color: var(--color-warning);
+  font-size: var(--font-size-2);
+  font-weight: 600;
+}
+
+.rule-detail-successor {
+  flex: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+  white-space: nowrap;
+}
+
+/* 다른 규칙으로 가는 링크 (대체 규칙 · 판단 대상). 공통 버튼 모양을 풀고 글자 링크로 */
+.rule-ref-link {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-accent);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+/* 확인 상태 값 + [확인] (속성 줄 안에서 한 줄, 좁으면 줄바꿈) */
+.rule-confirmation {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.rule-changes {
+  min-width: 0;
+}
+
+.rule-change-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.rule-change-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rule-change-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  font-size: var(--font-size-2);
+}
+
+.rule-change-head,
+.rule-change-subject {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+.rule-change-head time,
+.rule-change-actor {
+  color: var(--color-text-muted);
+}
+
+.rule-change-kind {
+  font-weight: 600;
+}
+
+.rule-change-text {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.rule-change-label,
+.rule-change-truncated {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.rule-change-text > span:nth-child(2) {
+  min-width: 0;
+  flex: 1 1 12em;
 }

@@ -103,9 +103,10 @@ export const stages = (upTo: StepKind, current: StepStatus) =>
     return { kind, status: 'pending' as const, attempt: 1 };
   });
 
-const LIVE = RULES.filter(({ rule }) => rule.deletedAt === null);
+/** 검증 화면의 규칙 목록 = 효력 있는 규칙: 삭제 · 폐기(RULE-007) 제외 (ADR-112). */
+const LIVE = RULES.filter(({ rule, retirement }) => rule.deletedAt === null && !retirement);
 
-/** 판정 가능(분모) = 승인된 · 격리 아닌 규칙: RULE-001 · 002 · 003 · 005. 잠정 RULE-006은 분리. */
+/** 판정 가능(분모) = 효력 있고 격리 아닌 규칙: RULE-001 · 002 · 003 · 005 · 006 (미확인 RULE-006도 전체 기준 분모). */
 const DENOMINATOR = LIVE.filter(({ rule }) => rule.normState === 'approved').map(
   ({ rule }) => rule.id,
 );
@@ -127,7 +128,7 @@ const rows = (items: readonly RuleWithJudgment[]): VerificationSummaryResult['ru
 /** `verification.summary` 가짜 응답: 기본 (테스트 전용 데이터, NFR-03). */
 export const SUMMARY: VerificationSummaryResult = {
   basis: { branch: 'main', commit: BASIS_COMMIT, runId: RUN_1 },
-  compliance: { passed: 1, judgeable: DENOMINATOR.length },
+  compliance: { passed: 2, judgeable: DENOMINATOR.length },
   denominator: DENOMINATOR,
   costPerRunUsd: 0.2,
   rules: rows(LIVE),
@@ -276,7 +277,7 @@ export const verificationChecklist = {
       title: 'BIVE',
       elements: [
         { label: '머리줄', testId: 'verification-basis', text: '판정 기준 main@a1f26b1' },
-        ...metrics('1 / 4', '$0.20'),
+        ...metrics('2 / 5', '$0.20'),
         { label: '코드 열람 영역', testId: 'code-open', role: 'region', name: '코드 열람' },
         { label: '코드 열람 사유 3종', testId: 'code-open-label', count: 3 },
         { label: '화면 오류 건수', text: '화면 오류 2' },

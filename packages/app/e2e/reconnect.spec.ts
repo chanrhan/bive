@@ -124,7 +124,7 @@ test.describe('재접속 → 다시 조회 (수용 기준 2)', () => {
     await expect(page.getByTestId('card')).toHaveCount(1);
     expect(await countCalls(bive, 'rule.list')).toBe(rules + 1);
     for (const call of (await bive.calls()).filter((c) => c.method === 'rule.list')) {
-      expect(call.params).toEqual({ projectId: PROJECT.id });
+      expect(call.params).toEqual({ projectId: PROJECT.id, includeRetired: true });
     }
   });
 

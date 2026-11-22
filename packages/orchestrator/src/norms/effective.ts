@@ -6,8 +6,9 @@
 // - 효력 있는 요구사항 = 삭제되지 않고 규범 상태가 효력(`approved`)인 것
 // - 효력 있는 규칙 = 삭제되지 않고 규범 상태가 효력이며 폐기되지 않은 것(폐기 기록 `rule_retirements`가 없음). 부모가 해제된
 //   규칙 · 내장 규칙도 넣는다. 잠정(`provisional`) · 삭제 · 폐기된 규칙은 효력이 없다
+// - 규칙 화면의 폐기 표시(`rule.list`의 폐기 포함 · 항목의 `retirement`, M7-15 #227 · ADR-114)도 폐기 기록을 여기서 읽는다
 // - 저장소를 읽기만 한다
-import type { Requirement, Rule } from '@bive/shared';
+import type { Requirement, Rule, RuleRetirementView } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
 /** 폐기된 규칙 ID (폐기 기록을 읽는 곳은 이 모듈과 폐기 · 대체 모듈뿐이다). */
@@ -36,6 +37,41 @@ export const effectiveRules = (store: ProjectStore): Rule[] => {
 export const unretiredRules = (store: ProjectStore): Rule[] => {
   const retired = retiredRuleSet(store);
   return store.rules.list().filter((rule) => !retired.has(rule.id));
+};
+
+/**
+ * 규칙 목록 조회의 대상 (표시 ID 순, 삭제 제외). 기본은 폐기되지 않은 규칙({@link unretiredRules}), `includeRetired`면 폐기된
+ * 규칙도 넣는다(규칙 화면의 [폐기 포함], ADR-114).
+ */
+export const listedRules = (store: ProjectStore, includeRetired: boolean): Rule[] =>
+  includeRetired ? store.rules.list() : unretiredRules(store);
+
+/** 폐기 기록 행이 있으나 형식이 깨져 읽을 수 없을 때의 폐기 표시 (폐기로 본다: 효력을 잃은 쪽으로 닫음). */
+const UNREADABLE_RETIREMENT: RuleRetirementView = Object.freeze({
+  retiredAt: null,
+  supersededBy: null,
+  normChangeSeq: null,
+});
+
+/**
+ * 규칙의 폐기 표시 (화면 응답용, ADR-114). 폐기되지 않았으면 `null`. 대체한 규칙은 ID와 표시 ID를 함께 싣는다(대체한 규칙
+ * 행은 외래 키로 늘 있다. 없으면 대체 정보를 싣지 않는다). `retired` = {@link retiredRuleSet}.
+ */
+export const ruleRetirementView = (
+  store: ProjectStore,
+  ruleId: string,
+  retired: ReadonlySet<string>,
+): RuleRetirementView | null => {
+  if (!retired.has(ruleId)) return null;
+  const record = store.ruleRetirements.get(ruleId);
+  if (record === null) return UNREADABLE_RETIREMENT;
+  const replacement = record.supersededBy === null ? null : store.rules.get(record.supersededBy);
+  return {
+    retiredAt: record.retiredAt,
+    supersededBy:
+      replacement === null ? null : { id: replacement.id, displayId: replacement.displayId },
+    normChangeSeq: record.normChangeSeq,
+  };
 };
 
 /** 대상 규칙 중 효력이 없는 것 (없음 · 삭제됨 · 효력 아님 · 폐기됨), 주어진 순서. */
