@@ -6,6 +6,9 @@
 //   받는다. 오케스트레이터 내부(엔진 · 단계 실행기 · 규칙 작성 서비스)와 에이전트 도구에는 이 모듈을 부르는 경로가 없다
 //   (`integrity.test.ts`가 가져오는 파일을 단언한다)
 // - 확인은 아무것도 막지 않는다: 실행 생성 · 단계 진행 · 판정 · 병합은 확인 상태를 읽지 않는다
+// - 확인 풀림(M7-13 #225, ADR-100 D3, ADR-113): 미확인으로 되돌리는 함수는 {@link releaseConfirmation} 하나이고, 부르는 곳은
+//   에이전트의 폐기 · 대체를 반영하는 모듈(`norms/agent-rule.ts`)뿐이다. 그 모듈은 이 모듈에서 이 함수만 가져온다(확인됨을 만드는
+//   함수는 가져오지 않는다, `integrity.test.ts`가 가져오는 이름을 단언한다). 에이전트 도구에는 풀기 · 확인 도구가 없다
 import {
   type ApprovalLogEntry,
   type Author,
@@ -13,12 +16,14 @@ import {
   type ConfirmationTarget,
   ErrorCode,
   type HumanAuthor,
+  type NormChangeEntry,
   type Requirement,
   type Rule,
 } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
 import { RpcError } from '../ipc/server.js';
+import { hasPendingNotice } from './confirmation-list.js';
 
 /** 확인 요청이 들어온 연결 (승인 기록 `clientId`). */
 export interface ConfirmContext {
@@ -69,7 +74,9 @@ export const confirmByHuman = (
     if (found.deletedAt !== null) {
       throw new RpcError(ErrorCode.StateConflict, `삭제된 항목입니다 (${found.deletedAt})`);
     }
-    if (found.confirmation.state === 'confirmed') {
+    // 이미 확인됨이어도 사람이 아직 보지 않은 폐기 · 대체 · 테스트 변경 기록이 있으면 다시 확인한다("이 알림을 봤다", ADR-113).
+    // 폐기된 규칙의 확인도 같은 뜻이다(폐기는 그대로, 확인은 아무것도 막거나 되돌리지 않는다)
+    if (found.confirmation.state === 'confirmed' && !hasPendingNotice(store, target)) {
       throw new RpcError(ErrorCode.StateConflict, '이미 확인됨입니다');
     }
     const approvalLog = store.approvalLog.append({
@@ -78,7 +85,8 @@ export const confirmByHuman = (
       actor: by,
       targetRef: { entity: target.entity, id: target.id },
       clientId: context.clientId,
-      detail: {},
+      // 사람이 여기까지 봤다: 확인할 것 목록의 폐기 · 대체 · 테스트 변경 항목은 이 순번 이하면 내려간다 (ADR-113)
+      detail: { seenNormChangeSeq: store.normChanges.lastSeq() },
     });
     const confirmation = store.confirmations.confirm(target, {
       by,
@@ -156,4 +164,23 @@ export const confirmHumanRuleEdit = (
     { entity: 'Rule', id: approvalLog.targetRef.id },
     { by, at: approvalLog.at, basis: { kind: 'approval_log', seq: approvalLog.seq } },
   );
+};
+
+/**
+ * 확인 풀림 (ADR-100 D3, M7-13 · ADR-113): 사람이 확인한 규칙을 에이전트가 폐기 · 대체한 트랜잭션 안에서, 오케스트레이터가 남긴
+ * 확인 풀림 기록(종류 `unconfirmed`) 바로 뒤에 부른다. 확인 상태를 미확인으로 되돌린다(행은 남고 시각 · 주체 · 근거가 비며, 앞선
+ * 확인은 기록의 `detail.unconfirm.previous`에 남는다). 승인 기록에는 쓰지 않는다(C2: 오케스트레이터 행동).
+ * @returns 풀리기 전의 확인
+ * @throws {Error} 기록이 오케스트레이터의 규칙 확인 풀림이 아님 · 대상이 확인됨이 아님
+ */
+export const releaseConfirmation = (store: ProjectStore, record: NormChangeEntry): Confirmation => {
+  if (
+    record.kind !== 'unconfirmed' ||
+    record.actor.kind !== 'orchestrator' ||
+    record.targetRef.entity !== 'Rule' ||
+    record.detail.unconfirm === undefined
+  ) {
+    throw new Error(`확인 풀림 기록이 아닙니다: ${record.kind}`);
+  }
+  return store.confirmations.release({ entity: 'Rule', id: record.targetRef.id });
 };

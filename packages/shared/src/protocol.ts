@@ -22,6 +22,7 @@ import {
   NormChangeBreakReason,
   NormChangeDetail,
   NormJudgmentRuleRef,
+  NormTestChangeFile,
   Project,
   Proposal,
   ProposalPayload,
@@ -43,6 +44,7 @@ import {
 import {
   AgentRole,
   AutoStartSkipReason,
+  ConfirmationItemKind,
   CodeOpenReason,
   JudgmentStatus,
   NormChangeKind,
@@ -576,7 +578,8 @@ export type NormChangeListResult = z.infer<typeof NormChangeListResult>;
 // ── 확인 상태 (ADR-100 D2 · C1 · C2 · A2, NFR-01, M7-01) ─────
 // - `confirmation.set`: 사람이 규범 항목(요구사항 · 규칙)을 보고 OK했다는 표시. 사람 주체만 받는다(에이전트 -32020).
 //   없는 대상 -32004, 삭제된 대상 · 이미 확인됨 -32009. 확인은 승인 기록에 행동 `confirm`으로 남고(사람 행동만, C2)
-//   확인 상태의 근거는 그 승인 기록 순번이다. 승인 기록 추가와 확인 상태 저장은 트랜잭션 1개다
+//   확인 상태의 근거는 그 승인 기록 순번이다. 승인 기록 추가와 확인 상태 저장은 트랜잭션 1개다. 이미 확인됨이어도 사람이
+//   아직 보지 않은 폐기 · 대체 · 테스트 변경 기록이 있는 규칙은 다시 확인한다("이 알림을 봤다", 폐기된 규칙도, M7-13 · ADR-113)
 // - 확인을 푸는 RPC는 없다(확인 풀림은 에이전트 변경에 따라 오케스트레이터가 남긴다, M7-13). 역할 세션 도구에도 없다
 // - 확인 상태는 요구사항 · 규칙 응답(`requirement.*` · `rule.*`)의 `confirmation`으로도 보인다
 
@@ -592,6 +595,103 @@ export const ConfirmationSetResult = z.strictObject({
   approvalLog: ApprovalLogEntry,
 });
 export type ConfirmationSetResult = z.infer<typeof ConfirmationSetResult>;
+
+// ── 확인할 것 목록 (ADR-100 D3 · B⑦ · G · A7, NRM-07, M7-13 #225, ADR-113) ─────
+// - `confirmation.list`: 사람이 볼 항목을 세 묶음 순서로 돌려준다. ① 에이전트의 폐기 · 대체(확인 여부와 무관, 확인 풀림은 그
+//   항목의 `released`) ② 확인됨 규칙의 테스트 변경 알림 ③ 미확인 요구사항 · 규칙. ① · ②는 각각 시각 최신순(같으면 기록 순번
+//   큰 것 먼저), ③은 마지막 수정 시각 최신순(같으면 표시 ID 순)
+// - 항목은 사람이 그 대상을 [확인](`confirmation.set`)했을 때만 내려간다: ① · ②는 그 규칙의 승인 기록 `confirm` 가운데
+//   `detail.seenNormChangeSeq`(확인 순간의 규범 변경 기록 마지막 순번)가 그 기록의 순번 이상인 것이 있으면, ③은 확인됨이면
+//   빠진다. 사람의 편집 · 확인 행의 시각으로는 내려가지 않는다. 삭제된 대상은 빠진다. 폐기된 규칙은 ③에 오지 않는다(①에만)
+// - 에이전트가 쓴 글(근거 · 사유 · 규칙 제목 · 진술 · 파일 경로)은 표시 값(ADR-089, 문자열마다 상한
+//   {@link NORM_CHANGE_TEXT_DISPLAY_MAX})이고, 항목 수는 {@link CONFIRMATION_LIST_MAX_ITEMS}까지다(넘으면 `truncated`).
+//   `total`은 자르기 전 항목 수이고 확인할 것 배지의 수다(항목마다 사람의 확인 1건을 기다린다)
+
+/** `confirmation.list`가 돌려주는 항목 수 상한. */
+export const CONFIRMATION_LIST_MAX_ITEMS = 200;
+
+export const ConfirmationListParams = z.strictObject({ projectId: Ulid });
+export type ConfirmationListParams = z.infer<typeof ConfirmationListParams>;
+
+/** 항목이 가리키는 규칙 (지금의 ID · 표시 ID). */
+const ConfirmationRuleRef = z.strictObject({ id: Ulid, displayId: displayIdSchema('RULE') });
+
+/** 규칙 내용의 표시 값 (제목 · 진술). */
+export const ConfirmationRuleText = z.strictObject({
+  title: z.string().max(NORM_CHANGE_TEXT_DISPLAY_MAX),
+  statement: z.string().max(NORM_CHANGE_TEXT_DISPLAY_MAX),
+});
+export type ConfirmationRuleText = z.infer<typeof ConfirmationRuleText>;
+
+/**
+ * 에이전트의 폐기 · 대체 1건 (규범 변경 기록 `retired` · `superseded` 1건).
+ * - `before`: 폐기 직전 규칙 내용, `after`: 대체한 새 규칙(폐기만이면 `null`). 기록의 모양이 깨졌으면 `null`
+ * - `grounds`: 근거(폐기 · 대체 기록의 사유), `rationale`: 새 규칙의 사유(대체의 신규 기록 사유, 폐기만이면 `null`)
+ * - `released`: 사람이 확인한 규칙이었으면 같은 트랜잭션의 확인 풀림 기록(순번 · 시각), 아니면 `null`
+ */
+export const ConfirmationRetirementItem = z.strictObject({
+  kind: ConfirmationItemKind.extract(['retired', 'superseded']),
+  seq: z.int().positive(),
+  at: Timestamp,
+  actor: NormChangeActor,
+  sessionId: Ulid.nullable(),
+  rule: ConfirmationRuleRef,
+  before: ConfirmationRuleText.nullable(),
+  after: ConfirmationRuleText.extend({ rule: ConfirmationRuleRef }).nullable(),
+  grounds: z.string().max(NORM_CHANGE_TEXT_DISPLAY_MAX).nullable(),
+  rationale: z.string().max(NORM_CHANGE_TEXT_DISPLAY_MAX).nullable(),
+  released: z.strictObject({ seq: z.int().positive(), at: Timestamp }).nullable(),
+  textTruncated: z.boolean(),
+});
+export type ConfirmationRetirementItem = z.infer<typeof ConfirmationRetirementItem>;
+
+/** 테스트 변경 알림 1건 (규범 변경 기록 `test_changed` 1건). 파일 경로는 표시 값이다. */
+export const ConfirmationTestChangeItem = z.strictObject({
+  kind: z.literal(ConfirmationItemKind.enum.test_changed),
+  seq: z.int().positive(),
+  at: Timestamp,
+  rule: ConfirmationRuleRef,
+  title: z.string().max(NORM_CHANGE_TEXT_DISPLAY_MAX),
+  runId: Ulid,
+  runDisplayId: displayIdSchema('EXE').nullable(),
+  sessionId: Ulid.nullable(),
+  files: z.array(
+    z.strictObject({
+      path: z.string().max(NORM_CHANGE_TEXT_DISPLAY_MAX),
+      change: NormTestChangeFile.shape.change,
+    }),
+  ),
+  fileCount: z.int().positive(),
+  textTruncated: z.boolean(),
+});
+export type ConfirmationTestChangeItem = z.infer<typeof ConfirmationTestChangeItem>;
+
+/** 미확인 요구사항 · 규칙 1건. `text`는 요구사항 본문 · 규칙 제목의 표시 값, `at`은 마지막 수정 시각이다. */
+export const ConfirmationNormItem = z.strictObject({
+  kind: z.literal(ConfirmationItemKind.enum.unconfirmed_norm),
+  at: Timestamp,
+  target: ConfirmationTarget,
+  displayId: z.string().min(1),
+  text: z.string().max(NORM_CHANGE_TEXT_DISPLAY_MAX),
+  author: Author,
+  textTruncated: z.boolean(),
+});
+export type ConfirmationNormItem = z.infer<typeof ConfirmationNormItem>;
+
+export const ConfirmationItem = z.union([
+  ConfirmationRetirementItem,
+  ConfirmationTestChangeItem,
+  ConfirmationNormItem,
+]);
+export type ConfirmationItem = z.infer<typeof ConfirmationItem>;
+
+export const ConfirmationListResult = z.strictObject({
+  items: z.array(ConfirmationItem).max(CONFIRMATION_LIST_MAX_ITEMS),
+  /** 자르기 전 항목 수 (확인할 것 배지의 수) */
+  total: z.int().nonnegative(),
+  truncated: z.boolean(),
+});
+export type ConfirmationListResult = z.infer<typeof ConfirmationListResult>;
 
 // ── 프로젝트 (PRJ-01, M1-01, ADR-025 · ADR-036 · ADR-040 · ADR-054) ─────────
 // - `project.open`: 폴더를 연다. 루트 `.bive.json`이 없으면 새 프로젝트 ID로 등록하고 파일을 만든다
@@ -1092,6 +1192,7 @@ export const METHODS = {
   'proposal.reject': { params: ProposalRejectParams, result: ProposalRejectResult },
   'approvalLog.list': { params: ApprovalLogListParams, result: ApprovalLogListResult },
   'confirmation.set': { params: ConfirmationSetParams, result: ConfirmationSetResult },
+  'confirmation.list': { params: ConfirmationListParams, result: ConfirmationListResult },
   'normChange.list': { params: NormChangeListParams, result: NormChangeListResult },
   'project.open': { params: ProjectOpenParams, result: ProjectOpenResult },
   'project.current': { params: ProjectCurrentParams, result: ProjectCurrentResult },

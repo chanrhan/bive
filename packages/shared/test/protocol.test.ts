@@ -2,6 +2,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  CONFIRMATION_LIST_MAX_ITEMS,
+  ConfirmationItemKind,
+  ConfirmationListResult,
   createErrorResponse,
   createNotification,
   createRequest,
@@ -938,5 +941,45 @@ describe('그 밖의 요청 오류', () => {
       error: { code: -32020, message: '권한 없음' },
     });
     expect(parsed).toEqual({ ok: false, id: 2, error: { code: -32020, message: '권한 없음' } });
+  });
+});
+
+describe('confirmation.list 응답 (M7-13 #225, ADR-113)', () => {
+  const norm = {
+    kind: 'unconfirmed_norm',
+    at: '2026-11-22T00:00:00.000Z',
+    target: { entity: 'Rule', id: '01ARZ3NDEKTSV4RRFFQ69G5FAV' },
+    displayId: 'RULE-001',
+    text: '제목',
+    author: { kind: 'agent', role: 'rule-writer' },
+    textTruncated: false,
+  } as const;
+
+  it('메서드로 등록되어 있고, 항목 종류는 공용 enum과 같으며, 항목 수 상한을 넘는 응답 · 모르는 종류를 거부한다', () => {
+    expect(METHOD_NAMES).toContain('confirmation.list');
+    expect(METHODS['confirmation.list'].params.parse({ projectId: norm.target.id })).toEqual({
+      projectId: norm.target.id,
+    });
+    expect(ConfirmationItemKind.options).toEqual([
+      'retired',
+      'superseded',
+      'test_changed',
+      'unconfirmed_norm',
+    ]);
+    const result = (count: number) => ({
+      items: Array.from({ length: count }, () => norm),
+      total: count,
+      truncated: false,
+    });
+    expect(ConfirmationListResult.safeParse(result(CONFIRMATION_LIST_MAX_ITEMS)).success).toBe(
+      true,
+    );
+    expect(ConfirmationListResult.safeParse(result(CONFIRMATION_LIST_MAX_ITEMS + 1)).success).toBe(
+      false,
+    );
+    expect(
+      ConfirmationListResult.safeParse({ ...result(1), items: [{ ...norm, kind: 'unconfirmed' }] })
+        .success,
+    ).toBe(false);
   });
 });

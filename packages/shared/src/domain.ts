@@ -661,12 +661,15 @@ export const APPROVAL_LOG_GENESIS_HASH = '0'.repeat(64);
 /**
  * 승인 기록의 행동별 상세. 수정 후 승인은 `diff`, 거절은 `reason`, 승인은 `appliedRef`,
  * 실행 시작은 `ruleIds`(사람이 확인한 대상 규칙, 요청 순서 그대로, ADR-061).
+ * 확인(`confirm`)은 `seenNormChangeSeq`(그 확인 순간의 규범 변경 기록 마지막 순번 = 사람이 여기까지 봤다, M7-13 · ADR-113).
+ * 이 칸이 없는 옛 확인은 규범 변경 기록을 본 적 없음(0)으로 읽는다.
  */
 export const ApprovalLogDetail = z.strictObject({
   diff: z.strictObject({ before: z.unknown(), after: z.unknown() }).optional(),
   reason: NonEmptyString.optional(),
   appliedRef: EntityRef.optional(),
   ruleIds: z.array(Ulid).min(1).optional(),
+  seenNormChangeSeq: z.int().nonnegative().optional(),
 });
 export type ApprovalLogDetail = z.infer<typeof ApprovalLogDetail>;
 
@@ -757,6 +760,13 @@ export const ApprovalLogEntry = z
           path: ['detail', 'appliedRef'],
         });
       }
+    }
+    if (action !== 'confirm' && detail.seenNormChangeSeq !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '본 규범 변경 기록 순번은 확인에만 있습니다 (ADR-113)',
+        path: ['detail', 'seenNormChangeSeq'],
+      });
     }
     if ((action === 'reject') !== (detail.reason !== undefined)) {
       ctx.addIssue({
@@ -905,6 +915,48 @@ export const NormRetirementDetail = z.strictObject({
 export type NormRetirementDetail = z.infer<typeof NormRetirementDetail>;
 
 /**
+ * 확인 풀림 상세 (종류 `unconfirmed`, M7-13 #225, ADR-100 D3, ADR-113). 사람이 확인한 규칙을 에이전트가 폐기 · 대체하면
+ * 오케스트레이터가 그 변경과 같은 트랜잭션에서 확인을 풀고 이 기록을 남긴다. 풀린 시각은 기록의 `at`이다.
+ * - `causeSeq`: 원인 규범 변경 기록(`retired` · `superseded`, 같은 대상)의 순번
+ * - `previous`: 풀리기 전의 확인(누가 언제 무엇을 근거로). 확인 행은 미확인이 되어 이 값을 잃으므로 기록에 옮겨 둔다
+ */
+export const NormUnconfirmDetail = z.strictObject({
+  causeSeq: z.int().positive(),
+  previous: Confirmation.refine(
+    (confirmation) => confirmation.state === 'confirmed',
+    '풀리기 전 확인은 확인됨이어야 합니다',
+  ),
+});
+export type NormUnconfirmDetail = z.infer<typeof NormUnconfirmDetail>;
+
+/** 테스트 변경 알림의 파일 1개: 실행 시작 때 있던 인수 테스트 파일의 바뀜(내용이 달라짐) · 지움 (M7-13). */
+export const NormTestChangeFile = z.strictObject({
+  /** 저장소 기준 경로 (`bive-acceptance/<규칙 표시 ID>/…`) */
+  path: z.string().min(1).max(1024),
+  change: z.enum(['modified', 'removed']),
+});
+export type NormTestChangeFile = z.infer<typeof NormTestChangeFile>;
+
+/** 테스트 변경 알림에 싣는 파일 수 상한 (넘으면 `fileCount`만 전체 수). */
+export const NORM_TEST_CHANGE_FILES_MAX = 100;
+
+/**
+ * 테스트 변경 알림 상세 (종류 `test_changed`, M7-13 #225, ADR-100 G, ADR-113). 확인됨 규칙의 기존 인수 테스트 파일을
+ * 실행이 바꿔 병합했을 때 오케스트레이터가 남긴다. 확인 상태는 그대로다.
+ * - `files`: 바뀐 · 지운 파일 (경로 순, 최대 {@link NORM_TEST_CHANGE_FILES_MAX}), `fileCount`: 전체 수
+ * - `baseCommit` · `headCommit`: 비교한 두 커밋 (실행 시작 때 기준 브랜치 · 병합한 실행 브랜치 끝)
+ */
+export const NormTestChangeDetail = z
+  .strictObject({
+    files: z.array(NormTestChangeFile).min(1).max(NORM_TEST_CHANGE_FILES_MAX),
+    fileCount: z.int().positive(),
+    baseCommit: CommitSha,
+    headCommit: CommitSha,
+  })
+  .refine((detail) => detail.fileCount >= detail.files.length, '전체 수가 실은 수보다 작습니다');
+export type NormTestChangeDetail = z.infer<typeof NormTestChangeDetail>;
+
+/**
  * 종류별 상세. 신규는 `after`(만든 규범의 내용)만, 자동 시작은 원인 하나와 `ruleIds`(대상 규칙, 같은 순서)다. 원인은
  * `causeSeqs`(대상 규칙의 신규 기록 순번, M7-05 #217 · ADR-107) 또는 `ruleEditSeqs`(사람의 규칙 진술 편집 = 승인 기록
  * `rule_edit`의 순번, M7-03 #215 · ADR-109) 가운데 정확히 하나다. 두 순번은 다른 기록의 번호라 칸을 나눴다(같은 수가 서로를
@@ -926,6 +978,10 @@ export const NormChangeDetail = z.strictObject({
   judgment: NormJudgmentDetail.optional(),
   /** 폐기 · 대체 (종류 `retired` · `superseded`에만, M7-09) */
   retirement: NormRetirementDetail.optional(),
+  /** 확인 풀림 (종류 `unconfirmed`에만, M7-13) */
+  unconfirm: NormUnconfirmDetail.optional(),
+  /** 테스트 변경 알림 (종류 `test_changed`에만, M7-13) */
+  testChange: NormTestChangeDetail.optional(),
 });
 export type NormChangeDetail = z.infer<typeof NormChangeDetail>;
 
@@ -1089,6 +1145,49 @@ export const NormChangeEntry = z
           path: ['detail', 'retirement'],
         });
       }
+    }
+    // 확인 풀림 · 테스트 변경 알림 (M7-13, ADR-113): 상세는 그 종류에만, 그 종류에는 반드시. 주체는 오케스트레이터, 대상은 규칙
+    const notices = [
+      ['unconfirmed', entry.detail.unconfirm, 'unconfirm'],
+      ['test_changed', entry.detail.testChange, 'testChange'],
+    ] as const;
+    for (const [kind, detail, key] of notices) {
+      if ((entry.kind === kind) !== (detail !== undefined)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `${key} 상세는 ${kind} 기록에만 있고 그 기록에는 반드시 있습니다`,
+          path: ['detail', key],
+        });
+      }
+      if (entry.kind !== kind) continue;
+      if (entry.actor.kind !== 'orchestrator') {
+        ctx.addIssue({
+          code: 'custom',
+          message: '확인 풀림 · 테스트 변경 알림의 주체는 오케스트레이터입니다',
+          path: ['actor'],
+        });
+      }
+      if (entry.targetRef.entity !== 'Rule' || !Ulid.safeParse(entry.targetRef.id).success) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '확인 풀림 · 테스트 변경 알림의 대상은 규칙입니다',
+          path: ['targetRef'],
+        });
+      }
+      if (entry.detail.before !== undefined || entry.detail.after !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '확인 풀림 · 테스트 변경 알림에는 이전 · 이후 내용이 없습니다',
+          path: ['detail'],
+        });
+      }
+    }
+    if (entry.kind === 'test_changed' && entry.runId === null) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '테스트 변경 알림에는 그 테스트를 바꾼 실행이 필요합니다',
+        path: ['runId'],
+      });
     }
   });
 export type NormChangeEntry = z.infer<typeof NormChangeEntry>;

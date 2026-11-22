@@ -119,6 +119,11 @@ export class NormChangeRepository {
     });
   }
 
+  /** 마지막 기록의 순번 (기록이 없으면 0). 사람의 확인이 "여기까지 봤다"로 남기는 값이다 (M7-13, ADR-113). */
+  lastSeq(): number {
+    return this.#last.get()?.seq ?? 0;
+  }
+
   /**
    * 순번 순으로 돌려준다. `targetRef`를 주면 그 대상의 기록만.
    * 형식이 깨진 행(저장소 밖에서 고친 행)은 빼고 돌려준다. 그런 행은 `verify()`가 잡는다.

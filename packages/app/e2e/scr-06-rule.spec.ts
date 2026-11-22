@@ -949,6 +949,71 @@ test.describe('확인 상태 · 폐기 · 변경 이력 (#227 수용 기준 3, A
     await page.getByRole('button', { name: '변경 이력' }).click();
     await expect(page.getByTestId('rule-changes-error')).toHaveText('변경 이력 불러오기 실패');
 
+    // 확인 풀림 · 테스트 변경 기록(M7-13, 오케스트레이터 주체): 상세 칸(`unconfirm` · `testChange`)을 읽지 않아도 줄이 그려진다
+    const hash = (n: number) => String(n).repeat(64);
+    await bive.setResponse('normChange.list', {
+      result: {
+        entries: [
+          {
+            seq: 7,
+            at: '2026-10-16T05:00:00.000Z',
+            kind: 'unconfirmed',
+            actor: { kind: 'orchestrator' },
+            targetRef: { entity: 'Rule', id: FAILING_RULE.id },
+            sessionId: null,
+            runId: null,
+            reason: null,
+            detail: {
+              unconfirm: {
+                causeSeq: 6,
+                previous: {
+                  state: 'confirmed',
+                  at: '2026-10-16T04:00:00.000Z',
+                  by: { kind: 'human' },
+                  basis: { kind: 'approval_log', seq: 2 },
+                },
+              },
+            },
+            textTruncated: false,
+            prevHash: hash(6),
+            hash: hash(7),
+          },
+          {
+            seq: 8,
+            at: '2026-10-16T06:00:00.000Z',
+            kind: 'test_changed',
+            actor: { kind: 'orchestrator' },
+            targetRef: { entity: 'Rule', id: FAILING_RULE.id },
+            sessionId: null,
+            runId: '01JE0000000000000000000002',
+            reason: null,
+            detail: {
+              testChange: {
+                files: [{ path: 'bive-acceptance/RULE-002/cancel.acc.ts', change: 'modified' }],
+                fileCount: 1,
+                baseCommit: 'a'.repeat(40),
+                headCommit: 'b'.repeat(40),
+              },
+            },
+            textTruncated: false,
+            prevHash: hash(7),
+            hash: hash(8),
+          },
+        ],
+        chain: { valid: true, brokenAtSeq: null, reason: null },
+      },
+    });
+    await selectRule(page, bive, 'RULE-003', UNJUDGED_RULE.id);
+    await page.getByRole('button', { name: '변경 이력' }).click();
+    const kinds = page.getByTestId('rule-changes').getByTestId('change-row');
+    await expect(kinds.getByTestId('change-kind')).toHaveText(['확인 풀림', '테스트 변경']);
+    await expect(kinds.getByTestId('change-actor')).toHaveText([
+      '오케스트레이터',
+      '오케스트레이터',
+    ]);
+    await expect(kinds.getByTestId('change-subject')).toHaveCount(0);
+    await expect(kinds.getByTestId('change-text')).toHaveCount(0);
+
     const [first] = FAILING_CHANGES.entries;
     if (first === undefined) throw new Error('기록 없음');
     await bive.setResponse('normChange.list', {
