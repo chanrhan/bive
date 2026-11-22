@@ -237,7 +237,8 @@ export type SupersedeRuleInput = z.infer<typeof SupersedeRuleInput>;
 export const MAX_UPHOLD_GROUNDS = MAX_CONTRADICTION_GROUNDS;
 
 /**
- * 이의 판단의 유지 입력 (M7-11 #223, ADR-115): 판단 세션의 대상 규칙 하나와 근거. 규칙 작성 역할의 판단 세션에서만 받는다(요구사항
+ * 이의 판단 · 요구사항 변경 재판단의 유지 입력 (M7-11 #223 · ADR-115, M7-10 #222 · ADR-116): 판단 세션의 대상 규칙 하나와 근거. 규칙 작성
+ * 역할의 판단 세션(실행 안의 이의 판단 · 요구사항 변경의 재판단)에서만 받는다(새 요구사항의 규칙 작성
  * 세션에서는 거부). 규칙 · 인수 테스트는 바뀌지 않고 판단 기록만 남는다.
  */
 export const UpholdRuleInput = z.strictObject({
@@ -245,7 +246,7 @@ export const UpholdRuleInput = z.strictObject({
     '유지할 규칙의 표시 ID(RULE-001 형식) 또는 ID. 판단 대상 규칙 가운데',
   ),
   grounds: NonBlank(z.string().min(1).max(MAX_UPHOLD_GROUNDS)).describe(
-    '근거: 이의에도 불구하고 그 규칙이 요구사항에 맞고 효력을 유지해야 하는 이유 (구현 역할에게 전해진다)',
+    '근거: 이의 · 요구사항 변경에도 불구하고 그 규칙이 요구사항에 맞고 효력을 유지해야 하는 이유 (이의 판단이면 구현 역할에게 전해진다)',
   ),
 });
 export type UpholdRuleInput = z.infer<typeof UpholdRuleInput>;
@@ -343,7 +344,7 @@ const DEFINITIONS: Record<FixedToolName, ToolDefinition> = {
   uphold_rule: {
     name: 'uphold_rule',
     description:
-      '이의 판단 세션에서만 쓴다. 구현 역할이 이의를 제기한 규칙을 바꾸지 않고 유지한다고 판단해 근거와 함께 규범 변경 기록에 남긴다. 규칙과 인수 테스트는 그대로이고, 그 실행은 근거를 받아 구현을 다시 한다.',
+      '판단 세션(실행 안의 이의 판단 · 요구사항 변경의 재판단)에서만 쓴다. 판단 대상 규칙을 바꾸지 않고 유지한다고 판단해 근거와 함께 규범 변경 기록에 남긴다. 규칙과 인수 테스트는 그대로다. 이의 판단이면 그 실행은 근거를 받아 구현을 다시 한다.',
     inputSchema: UpholdRuleInput,
   },
   raise_objection: {

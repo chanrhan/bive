@@ -29,6 +29,7 @@ import {
   M1_RUN_TYPE,
   MissingSettingPath,
   NORM_CHANGE_GENESIS_HASH,
+  NORM_JUDGMENT_SUBJECT_LABELS,
   NORM_OBJECTION_RULES_MAX,
   NormChangeEntry,
   OBJECTION_VERDICTS,
@@ -1167,6 +1168,124 @@ describe('이의 · 이의 판단 기록 (M7-11 #223, ADR-100 D4 · A4, ADR-115)
         },
       }),
     ).toBe(false);
+  });
+
+  it('요구사항 변경 판단 (M7-10 #222, ADR-116): 결과는 유지 · 폐기 · 대체, 원인 요구사항 변경 필수 · 연결 실행 없음, 삭제에는 대체가 없고 대체에는 신규 기록 순번, 판단 없음은 유지 · 오케스트레이터만', () => {
+    const requirementChange = {
+      requirement: { id: RULE_B, displayId: 'REQ-001' },
+      change: 'updated',
+      at: '2026-11-22T00:00:01.000Z',
+      textHash: 'b'.repeat(64),
+    };
+    const change = {
+      subject: 'requirement_change',
+      verdict: 'upheld',
+      contradicts: [],
+      requirementChange,
+      input: judgment.input,
+    };
+    const rejudged = { ...judged, runId: null, detail: { judgment: change } };
+    expect(ok(rejudged)).toBe(true);
+    expect(ok({ ...rejudged, detail: { judgment: { ...change, verdict: 'retired' } } })).toBe(true);
+    expect(
+      ok({
+        ...rejudged,
+        detail: { judgment: { ...change, verdict: 'superseded', createdSeq: 3 } },
+      }),
+    ).toBe(true);
+    // 대체에는 새 규칙의 신규 기록 순번이 필요하고, 유지 · 폐기에는 없다
+    expect(ok({ ...rejudged, detail: { judgment: { ...change, verdict: 'superseded' } } })).toBe(
+      false,
+    );
+    expect(ok({ ...rejudged, detail: { judgment: { ...change, createdSeq: 3 } } })).toBe(false);
+    // 지운 요구사항의 자식 규칙은 대체할 수 없다
+    const deleted = { ...requirementChange, change: 'deleted' };
+    expect(
+      ok({ ...rejudged, detail: { judgment: { ...change, requirementChange: deleted } } }),
+    ).toBe(true);
+    expect(
+      ok({
+        ...rejudged,
+        detail: {
+          judgment: {
+            ...change,
+            verdict: 'superseded',
+            createdSeq: 3,
+            requirementChange: deleted,
+          },
+        },
+      }),
+    ).toBe(false);
+    for (const verdict of ['no_contradiction', 'contradiction']) {
+      expect(ok({ ...rejudged, detail: { judgment: { ...change, verdict } } }), verdict).toBe(
+        false,
+      );
+    }
+    // 원인은 요구사항 변경 하나: 없거나 · 이의 순번을 섞거나 · 다른 주제에 실으면 거부. 모양도 본다
+    expect(
+      ok({ ...rejudged, detail: { judgment: { ...change, requirementChange: undefined } } }),
+    ).toBe(false);
+    expect(ok({ ...rejudged, detail: { judgment: { ...change, causeSeq: 1 } } })).toBe(false);
+    expect(ok({ ...judged, detail: { judgment: { ...judgment, requirementChange } } })).toBe(false);
+    expect(
+      ok({
+        ...rejudged,
+        detail: {
+          judgment: { ...change, requirementChange: { ...requirementChange, textHash: 'x' } },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      ok({
+        ...rejudged,
+        detail: {
+          judgment: { ...change, requirementChange: { ...requirementChange, change: 'renamed' } },
+        },
+      }),
+    ).toBe(false);
+    // 대상은 규칙, 연결 실행 없음, 주체는 규칙 작성 역할
+    expect(ok({ ...rejudged, runId: RUN })).toBe(false);
+    expect(ok({ ...rejudged, targetRef: { entity: 'Run', id: RUN } })).toBe(false);
+    expect(ok({ ...rejudged, actor: { kind: 'agent', role: 'implementer' } })).toBe(false);
+    expect(ok({ ...rejudged, actor: { kind: 'orchestrator' } })).toBe(false);
+    // 판단 없음: 유지 · 오케스트레이터만 (판단 없음을 폐기로 보지 않는다)
+    const undecided = {
+      ...rejudged,
+      actor: { kind: 'orchestrator' },
+      sessionId: null,
+      detail: {
+        judgment: { ...change, undecided: { endReason: 'project_daily_budget_exceeded' } },
+      },
+    };
+    expect(ok(undecided)).toBe(true);
+    expect(
+      ok({ ...undecided, actor: { kind: 'agent', role: 'rule-writer' }, sessionId: SESSION }),
+    ).toBe(false);
+    expect(
+      ok({
+        ...undecided,
+        detail: {
+          judgment: { ...change, verdict: 'retired', undecided: { endReason: 'aborted' } },
+        },
+      }),
+    ).toBe(false);
+    // 판단 없음은 이의 · 요구사항 변경 판단에만
+    expect(
+      ok({
+        ...undecided,
+        detail: {
+          judgment: {
+            subject: 'new_rule',
+            verdict: 'no_contradiction',
+            contradicts: [],
+            createdSeq: 1,
+            undecided: { endReason: 'aborted' },
+            input: judgment.input,
+          },
+        },
+      }),
+    ).toBe(false);
+    expect(NORM_JUDGMENT_SUBJECT_LABELS.requirement_change).toBe('요구사항 변경 판단');
   });
 });
 

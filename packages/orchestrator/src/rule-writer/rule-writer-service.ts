@@ -32,6 +32,13 @@
 //   대기열 · 시도 기록과는 따로 돈다
 // - 다시 시도(`retry`): 사람이 요구사항을 직접 편집해 저장했을 때, 가장 최근 시도가 생략 · 실패(`success` 아닌 종료)이고
 //   그 요구사항에서 규칙 작성 역할이 만든 규칙(이 변경 전의 규칙 자동 생성 제안 포함)이 없으면 새 시도를 띄운다. 진행 중 · 대기 중이거나 성공한 요구사항은 띄우지 않는다 (ADR-099)
+// - 요구사항 변경의 재판단(`rejudge`, M7-10 #222, ADR-100 NRM-01 · NRM-02 행 · D5 · D6, ADR-116): 사람이 효력 있는 자식 규칙이 있는
+//   요구사항의 본문을 고치거나(같은 글 다시 저장은 아님) 요구사항을 지우면, 요구사항 세션과 같은 대기열 · 시도 기록 · 세션 행 ·
+//   `onSessionEnded`로 재판단 세션을 띄운다. 자식 규칙마다 유지 · 대체 · 폐기(삭제는 유지 · 폐기) 가운데 하나를 판단 기록(주제
+//   `requirement_change`)과 함께 남기고, 판단하지 못한 자식 규칙은 세션이 어떻게 끝났든(열지 못함 · 실패 · 한도 · 가드 위반 · 종료
+//   포함) 오케스트레이터의 유지(`undecided`)로 마무리한다. 판단 없음을 폐기로 보지 않는다. 같은 요구사항의 세션이 대기 · 진행 중이면
+//   새로 띄우지 않고 1건으로 접어 두었다가 그 세션이 끝난 뒤 최신 본문으로 한 번 더 띄운다(본문이 그 세션이 본 것과 같으면 띄우지 않는다)
+import { createHash } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -41,6 +48,8 @@ import {
   createUlidGenerator,
   ErrorCode,
   type MissingSetting,
+  type NormJudgmentRequirementChange,
+  type NormRequirementChangeKind,
   type Requirement,
   type RuleWriterSkipReason as StoredSkipReason,
   type SessionEndReason,
@@ -64,15 +73,18 @@ import { RpcError } from '../ipc/server.js';
 import type { TaskTracker } from '../lifecycle.js';
 import {
   type AgentObjectionJudgment,
+  type AgentRequirementChangeJudgment,
   createAgentRule,
   NormJudgmentInputError,
   NormRetirementInputError,
   retireAgentRule,
+  settleRequirementChange,
   supersedeAgentRule,
   upholdAgentRule,
 } from '../norms/agent-rule.js';
 import {
   collectNormInput,
+  effectiveRules,
   type NormInput,
   type NormInputSummary,
   normInputRecord,
@@ -92,13 +104,21 @@ import type {
   SupersedeRuleInput,
   UpholdRuleInput,
 } from '../tools/definitions.js';
-import { createRoleTools, type FixedToolExecutor, type ToolCallRecord } from '../tools/executor.js';
+import {
+  createRoleTools,
+  type FixedToolExecutor,
+  type ToolCallRecord,
+  type RoleToolsHooks,
+} from '../tools/executor.js';
 import { denied, failed, invalidArgs, type IssueList, ok } from '../tools/result.js';
 import {
   type JudgmentPromptRule,
   RULE_WRITER_JUDGMENT_SYSTEM_PROMPT,
+  RULE_WRITER_REQUIREMENT_DELETED_SYSTEM_PROMPT,
+  RULE_WRITER_REQUIREMENT_UPDATED_SYSTEM_PROMPT,
   RULE_WRITER_SYSTEM_PROMPT,
   ruleWriterJudgmentPrompt,
+  ruleWriterRejudgePrompt,
   ruleWriterTaskPrompt,
 } from './prompts.js';
 
@@ -159,6 +179,8 @@ export interface RuleWriterSessionRecord {
   endReason: SessionEndReason | null;
   /** 생략 · 실패 설명 */
   error: string | null;
+  /** 요구사항 변경의 재판단이면 그 종류와 판단 대상 자식 규칙 ID (세션 시작 때 다시 고른다, M7-10). 요구사항 세션이면 `null` */
+  rejudge: { readonly change: NormRequirementChangeKind; ruleIds: string[] } | null;
   readonly createdAt: string;
   startedAt: string | null;
   endedAt: string | null;
@@ -185,11 +207,35 @@ export type RuleWriterStartResult =
       readonly record: RuleWriterSessionRecord | null;
     };
 
-/** `requirement.create` · `requirement.update` 처리기가 쓰는 창구. 던지지 않는다. */
+/** 사람의 요구사항 수정 · 삭제 뒤 재판단 요청 (M7-10, ADR-116). */
+export type RuleWriterRejudgeInput =
+  | {
+      readonly projectId: string;
+      /** 방금 고친 요구사항 */
+      readonly requirement: Requirement;
+      readonly change: 'updated';
+      /** 고치기 전 본문 (같으면 재판단하지 않는다) */
+      readonly previousText: string;
+    }
+  | {
+      readonly projectId: string;
+      /** 방금 지운 요구사항 (삭제 시각이 찬 것) */
+      readonly requirement: Requirement;
+      readonly change: 'deleted';
+      /** 지우기 전의 자식 규칙 ID (같은 트랜잭션에서 부모가 해제됐다) */
+      readonly childRuleIds: readonly string[];
+    };
+
+/** `requirement.create` · `requirement.update` · `requirement.delete` 처리기가 쓰는 창구. 던지지 않는다. */
 export interface RuleWriterLauncher {
   start(store: ProjectStore, input: RuleWriterStartInput): RuleWriterStartResult;
   /** 가장 최근 시도가 생략 · 실패일 때만 새 시도를 띄운다. 대상이 아니면 `null` */
   retry(store: ProjectStore, input: RuleWriterStartInput): RuleWriterStartResult | null;
+  /**
+   * 효력 있는 자식 규칙이 있는 요구사항의 수정(본문이 바뀐 것) · 삭제 뒤 재판단 세션을 띄운다(같은 요구사항의 세션이 대기 · 진행
+   * 중이면 1건으로 접는다). 재판단할 것이 아니면(본문이 같음 · 효력 있는 자식 규칙 없음) `null`
+   */
+  rejudge(store: ProjectStore, input: RuleWriterRejudgeInput): RuleWriterStartResult | null;
 }
 
 export interface RuleWriterServiceOptions {
@@ -244,6 +290,75 @@ interface JudgmentSession {
   readonly objection: AgentObjectionJudgment;
   tools: FixedToolExecutor | null;
 }
+
+/** 판단 대상과 판단을 남긴 규칙 (판단 세션 · 재판단 세션 공통). */
+type JudgedTargets = Pick<JudgmentSession, 'rules' | 'decided'>;
+
+/** 재판단 시도 1개의 문맥 (M7-10, ADR-116). */
+interface RejudgeContext {
+  readonly change: NormRequirementChangeKind;
+  /** 고치기 전 본문 (수정일 때) */
+  readonly previousText: string | null;
+  /** 판단 대상 자식 규칙 (요청 때 고르고 세션 시작 때 다시 고른다) */
+  rules: JudgmentPromptRule[];
+  readonly decided: Set<string>;
+  /** 판단 기록의 원인 (세션 시작 때 다시 읽은 요구사항으로 바꾼다) */
+  cause: NormJudgmentRequirementChange;
+  /** 세션이 받은 규범 입력의 요약 (열기 전이면 `null`) */
+  normInput: NormInputSummary | null;
+  tools: FixedToolExecutor | null;
+  /** 판단 없는 자식 규칙을 마무리했는지 (한 번만) */
+  settled: boolean;
+}
+
+/** 대기 · 진행 중인 세션 뒤로 접어 둔 재판단 (요구사항마다 1건). */
+interface PendingRejudge {
+  /** 접기 시작한 때의 고치기 전 본문 (뒤 세션이 열리지 않고 끝났을 때의 비교 기준) */
+  readonly previousText: string | null;
+  /** 삭제 때의 자식 규칙 ID (접는 동안 모은 것) */
+  readonly childRuleIds: readonly string[];
+}
+
+/** 생략 사유 → 판단 없음의 사정 (`NormUndecidedReason`). 종료 중이면 중단, 요구사항이 없어졌으면 마무리하지 않는다(삭제의 재판단이 따른다). */
+const undecidedOfSkip = (reason: StoredSkipReason): string | null =>
+  reason === 'requirement_unavailable' ? null : reason === 'closed' ? 'aborted' : reason;
+
+/** 판단 기록의 원인: 요구사항 · 변경 종류 · 그 시각 · 본문의 SHA-256 (ADR-116). */
+const requirementChangeOf = (
+  requirement: Requirement,
+  change: NormRequirementChangeKind,
+): NormJudgmentRequirementChange => ({
+  requirement: { id: requirement.id, displayId: requirement.displayId },
+  change,
+  at:
+    change === 'deleted' && requirement.deletedAt !== null
+      ? requirement.deletedAt
+      : requirement.updatedAt,
+  textHash: createHash('sha256').update(requirement.text, 'utf8').digest('hex'),
+});
+
+/** 재판단 대상: 효력 있고 내장이 아닌 규칙 가운데 그 요구사항의 자식(수정) · 지우기 전 자식(삭제), 표시 ID 순. */
+const rejudgeTargets = (
+  store: ProjectStore,
+  requirementId: string,
+  childRuleIds: readonly string[] | null,
+): JudgmentPromptRule[] =>
+  effectiveRules(store)
+    .filter(
+      (rule) =>
+        !rule.builtin &&
+        (childRuleIds === null
+          ? rule.parentRequirementId === requirementId
+          : childRuleIds.includes(rule.id)),
+    )
+    .map((rule) => ({
+      id: rule.id,
+      displayId: rule.displayId,
+      title: rule.title,
+      statement: rule.statement,
+      parentRequirementId: rule.parentRequirementId,
+    }));
+
 export class RuleWriterService implements RuleWriterLauncher {
   readonly #biveHome: string;
   readonly #adapter: AgentAdapter;
@@ -262,6 +377,12 @@ export class RuleWriterService implements RuleWriterLauncher {
   readonly #launched = new Map<string, RuleWriterSessionRecord>();
   /** 기록 ID → 세션이 끝나면 풀리는 약속 */
   readonly #settled = new Map<string, Promise<void>>();
+  /** 재판단 기록 ID → 문맥 (M7-10) */
+  readonly #rejudges = new Map<string, RejudgeContext>();
+  /** 대기 · 진행 중 세션 뒤로 접어 둔 재판단 (요구사항 → 1건) */
+  readonly #pending = new Map<string, PendingRejudge>();
+  /** 기록 ID → 세션 시작 때 읽은 요구사항 본문 (접어 둔 재판단을 띄울지 비교한다) */
+  readonly #usedText = new Map<string, string>();
   readonly #controllers = new Set<AbortController>();
   /** 세션을 하나씩 돌리는 대기열 */
   #chain: Promise<void> = Promise.resolve();
@@ -330,15 +451,69 @@ export class RuleWriterService implements RuleWriterLauncher {
     return this.#begin(store, input, true);
   }
 
+  /**
+   * 사람이 요구사항을 고치거나 지운 뒤 부른다(같은 저장소 열림, 저장 트랜잭션 뒤). 본문이 바뀌지 않았거나 효력 있는 자식 규칙이 없으면
+   * `null`(수정이면 처리기가 `retry`를 부른다). 같은 요구사항의 세션이 대기 · 진행 중이면 새로 띄우지 않고 1건으로 접어 두며(그
+   * 세션이 끝난 뒤 최신 본문으로 다시 본다) 결과는 `duplicate`다. 아니면 `start`와 같은 검사(종료 중 · 설정 · 하루 한도)를 거쳐
+   * 재판단 세션을 대기열에 넣는다. 던지지 않는다.
+   */
+  rejudge(store: ProjectStore, input: RuleWriterRejudgeInput): RuleWriterStartResult | null {
+    const { projectId, requirement, change } = input;
+    let rules: JudgmentPromptRule[];
+    try {
+      if (change === 'updated' && input.previousText === requirement.text) return null;
+      rules = rejudgeTargets(
+        store,
+        requirement.id,
+        change === 'deleted' ? input.childRuleIds : null,
+      );
+    } catch (error) {
+      this.#log(`재판단 확인 실패 (${requirement.displayId}): ${errorMessage(error)}`);
+      return null;
+    }
+    if (rules.length === 0) return null;
+    const previousText = change === 'updated' ? input.previousText : null;
+    const key = keyOf(projectId, requirement.id);
+    const launched = this.#launched.get(key);
+    if (launched?.status === 'queued' || launched?.status === 'running') {
+      // 겹친 변경은 1건으로 접는다: 지금 세션이 끝난 뒤 최신 본문 · 자식 규칙으로 한 번 더 본다 (ADR-062 중복 방지, ADR-116)
+      const pending = this.#pending.get(key);
+      this.#pending.set(key, {
+        previousText: pending === undefined ? previousText : pending.previousText,
+        childRuleIds: [
+          ...new Set([...(pending?.childRuleIds ?? []), ...rules.map((rule) => rule.id)]),
+        ],
+      });
+      this.#log(
+        `재판단 접음 (${requirement.displayId}, ${change === 'deleted' ? '삭제' : '수정'}, 대기 · 진행 중인 세션 뒤에 다시 봄)`,
+      );
+      return { status: 'skipped', reason: 'duplicate', record: structuredClone(launched) };
+    }
+    this.#log(
+      `재판단 요청 (${requirement.displayId}, ${change === 'deleted' ? '삭제' : '수정'}, 자식 규칙 ${rules.map((rule) => rule.displayId).join(', ')})`,
+    );
+    return this.#begin(store, { projectId, requirement }, true, {
+      change,
+      previousText,
+      rules,
+      decided: new Set(),
+      cause: requirementChangeOf(requirement, change),
+      normInput: null,
+      tools: null,
+      settled: false,
+    });
+  }
+
   #begin(
     store: ProjectStore,
     input: RuleWriterStartInput,
     relaunch: boolean,
+    rejudge: RejudgeContext | null = null,
   ): RuleWriterStartResult {
     const { projectId, requirement } = input;
     try {
       if (this.#closed) {
-        return this.#skip(store, input, 'closed', '오케스트레이터 종료 중', []);
+        return this.#skip(store, input, 'closed', '오케스트레이터 종료 중', [], rejudge);
       }
       const launched = this.#launched.get(keyOf(projectId, requirement.id));
       // 다시 시도는 이 프로세스에서 끝난(생략 포함) 세션을 막지 않는다. 대기 · 진행 중이면 중복이다
@@ -346,7 +521,11 @@ export class RuleWriterService implements RuleWriterLauncher {
         relaunch && (launched?.status === 'ended' || launched?.status === 'skipped')
           ? undefined
           : launched;
-      if (existing !== undefined || this.#hasGeneratedNorms(store, requirement.id)) {
+      // 재판단은 자식 규칙이 있어야 뜬다: 만든 규칙 있음으로 막지 않는다 (대기 · 진행 중 겹침은 `rejudge`가 접었다)
+      if (
+        existing !== undefined ||
+        (rejudge === null && this.#hasGeneratedNorms(store, requirement.id))
+      ) {
         this.#log(
           `규칙 작성 생략 (${requirement.displayId}, 이미 세션을 띄웠거나 만든 규칙이 있음)`,
         );
@@ -367,7 +546,7 @@ export class RuleWriterService implements RuleWriterLauncher {
           RULE_WRITER_ROLE,
           daily === null ? {} : { maxBudgetUsd: daily.remaining },
         );
-        if (dailyBudgetReached(daily)) return this.#skipDaily(store, input, daily);
+        if (dailyBudgetReached(daily)) return this.#skipDaily(store, input, daily, rejudge);
       } catch (error) {
         if (error instanceof RpcError && error.code === ErrorCode.SettingsIncomplete) {
           const data = SettingsIncompleteData.safeParse(error.data);
@@ -377,11 +556,12 @@ export class RuleWriterService implements RuleWriterLauncher {
             'settings_incomplete',
             error.message,
             data.success ? data.data.missing : [],
+            rejudge,
           );
         }
         throw error;
       }
-      const record = this.#newRecord(input, 'queued');
+      const record = this.#newRecord(input, 'queued', rejudge);
       record.model = session.model;
       record.budget = { ...session.budget };
       this.#launched.set(keyOf(projectId, requirement.id), record);
@@ -396,14 +576,21 @@ export class RuleWriterService implements RuleWriterLauncher {
       this.#enqueue(record, requirement);
       return { status: 'queued', record: structuredClone(record) };
     } catch (error) {
-      return this.#skip(store, input, 'start_failed', errorMessage(error), []);
+      return this.#skip(store, input, 'start_failed', errorMessage(error), [], rejudge);
     }
   }
 
-  /** 요구사항의 세션이 끝날 때까지 기다린다 (없거나 생략이면 바로). */
+  /**
+   * 요구사항의 세션이 끝날 때까지 기다린다 (없거나 생략이면 바로). 그 세션 뒤로 접어 둔 재판단이 띄운 세션도 끝날 때까지 기다린다.
+   */
   async whenSettled(projectId: string, requirementId: string): Promise<void> {
-    const record = this.#launched.get(keyOf(projectId, requirementId));
-    if (record !== undefined) await this.#settled.get(record.id);
+    const key = keyOf(projectId, requirementId);
+    for (;;) {
+      const record = this.#launched.get(key);
+      if (record === undefined) return;
+      await this.#settled.get(record.id);
+      if (this.#launched.get(key) === record) return;
+    }
   }
 
   /** 대기열이 빌 때까지 기다린다 (기다리는 사이 들어온 세션 포함). */
@@ -437,6 +624,7 @@ export class RuleWriterService implements RuleWriterLauncher {
   #newRecord(
     input: RuleWriterStartInput,
     status: RuleWriterSessionStatus,
+    rejudge: RejudgeContext | null = null,
   ): RuleWriterSessionRecord {
     const record: RuleWriterSessionRecord = {
       id: this.#newId(),
@@ -456,11 +644,16 @@ export class RuleWriterService implements RuleWriterLauncher {
       result: null,
       endReason: null,
       error: null,
+      rejudge:
+        rejudge === null
+          ? null
+          : { change: rejudge.change, ruleIds: rejudge.rules.map((rule) => rule.id) },
       createdAt: this.#timestamp(),
       startedAt: null,
       endedAt: null,
     };
     this.#records.push(record);
+    if (rejudge !== null) this.#rejudges.set(record.id, rejudge);
     return record;
   }
 
@@ -470,8 +663,9 @@ export class RuleWriterService implements RuleWriterLauncher {
     reason: StoredSkipReason,
     detail: string,
     missing: readonly MissingSetting[],
+    rejudge: RejudgeContext | null = null,
   ): RuleWriterStartResult {
-    const record = this.#newRecord(input, 'skipped');
+    const record = this.#newRecord(input, 'skipped', rejudge);
     record.skipReason = reason;
     record.missing = [...missing];
     record.error = detail;
@@ -485,6 +679,9 @@ export class RuleWriterService implements RuleWriterLauncher {
         skip: { reason, detail, missing, at: record.createdAt },
       }),
     );
+    // 재판단을 열지 못했다: 자식 규칙은 판단 없음 → 유지로 마무리한다 (폐기로 보지 않는다, ADR-116)
+    const undecided = undecidedOfSkip(reason);
+    if (undecided !== null) this.#settleRejudge(record, undecided, store);
     return { status: 'skipped', reason, record: structuredClone(record) };
   }
 
@@ -493,6 +690,7 @@ export class RuleWriterService implements RuleWriterLauncher {
     store: ProjectStore,
     input: RuleWriterStartInput,
     daily: DailyBudgetState | null,
+    rejudge: RejudgeContext | null,
   ): RuleWriterStartResult {
     if (daily !== null) this.#logDaily(input.requirement.displayId, daily);
     return this.#skip(
@@ -501,6 +699,7 @@ export class RuleWriterService implements RuleWriterLauncher {
       'project_daily_budget_exceeded',
       PROJECT_DAILY_BUDGET_EXCEEDED_TEXT,
       [],
+      rejudge,
     );
   }
 
@@ -555,6 +754,84 @@ export class RuleWriterService implements RuleWriterLauncher {
         }),
       ),
     );
+    const undecided = undecidedOfSkip(reason);
+    if (undecided !== null) this.#settleRejudge(record, undecided);
+  }
+
+  /**
+   * 재판단에서 판단 기록이 없는 자식 규칙을 오케스트레이터의 유지(`undecided`)로 마무리한다 (한 번만, 실패는 로그만, ADR-116).
+   * 세션을 열지 못했으면 연결 세션 ID 없이 남긴다. 재판단이 아닌 기록이면 아무것도 하지 않는다.
+   */
+  #settleRejudge(record: RuleWriterSessionRecord, reason: string, store?: ProjectStore): void {
+    const context = this.#rejudges.get(record.id);
+    if (context === undefined || context.settled) return;
+    context.settled = true;
+    const ruleIds = context.rules.map((rule) => rule.id).filter((id) => !context.decided.has(id));
+    if (ruleIds.length === 0) return;
+    const write = (target: ProjectStore) =>
+      settleRequirementChange(
+        target,
+        {
+          cause: context.cause,
+          sessionId: this.#persisted.has(record.id) ? record.id : null,
+          ruleIds,
+          endReason: reason,
+          normInput: context.normInput,
+        },
+        { now: this.#now },
+      );
+    try {
+      const written =
+        store === undefined
+          ? withRegisteredProjectStore(this.#biveHome, record.projectId, write)
+          : write(store);
+      this.#log(
+        `재판단 판단 없음 → 유지 (${record.requirementDisplayId}, ${reason}, ${String(written.length)}건)`,
+      );
+    } catch (error) {
+      this.#log(
+        `재판단 판단 없음 기록 실패 (${record.requirementDisplayId}): ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  /**
+   * 세션이 끝난 뒤(대기열 안) 그 요구사항에 접어 둔 재판단이 있으면 최신 요구사항으로 한 번 더 본다: 지워졌으면 삭제의 재판단, 아니면
+   * 본문이 끝난 세션이 본 것(열지 못했으면 접기 시작한 때의 고치기 전 본문)과 다를 때만 수정의 재판단 (ADR-116).
+   */
+  #drainPending(record: RuleWriterSessionRecord): void {
+    const key = keyOf(record.projectId, record.requirementId);
+    const pending = this.#pending.get(key);
+    if (pending === undefined) return;
+    this.#pending.delete(key);
+    try {
+      withRegisteredProjectStore(this.#biveHome, record.projectId, (store) => {
+        const current = store.requirements.get(record.requirementId);
+        if (current === null) return;
+        const base = this.#usedText.get(record.id) ?? pending.previousText;
+        if (current.deletedAt !== null) {
+          this.rejudge(store, {
+            projectId: record.projectId,
+            requirement: current,
+            change: 'deleted',
+            childRuleIds: pending.childRuleIds,
+          });
+          return;
+        }
+        if (base === null || base === current.text) {
+          this.#log(`재판단 생략 (${record.requirementDisplayId}, 본 본문과 같음)`);
+          return;
+        }
+        this.rejudge(store, {
+          projectId: record.projectId,
+          requirement: current,
+          change: 'updated',
+          previousText: base,
+        });
+      });
+    } catch (error) {
+      this.#log(`접어 둔 재판단 실패 (${record.requirementDisplayId}): ${errorMessage(error)}`);
+    }
   }
 
   /**
@@ -589,6 +866,8 @@ export class RuleWriterService implements RuleWriterLauncher {
         if (record.status !== 'ended')
           this.#end(record, 'error_during_execution', errorMessage(error));
       } finally {
+        // 겹친 요구사항 변경은 이 세션이 끝난 뒤 한 번 더 본다 (대기열 뒤에 붙는다)
+        this.#drainPending(record);
         task?.end();
       }
     });
@@ -608,6 +887,10 @@ export class RuleWriterService implements RuleWriterLauncher {
     // 대기하는 사이 바뀌었을 수 있으므로 시작 직전에 다시 읽는다: 삭제됐으면 생략, 수정됐으면 최신 본문
     const requirement = this.#reloadRequirement(record, queued);
     if (requirement === null) return;
+    this.#usedText.set(record.id, requirement.text);
+    const rejudge = this.#rejudges.get(record.id) ?? null;
+    // 재판단이면 원인을 다시 읽은 요구사항으로 바꾼다 (하루 한도 생략의 판단 없음도 그 변경의 것이다)
+    if (rejudge !== null) rejudge.cause = requirementChangeOf(requirement, rejudge.change);
     const { model } = record;
     if (model === null || record.budget === null) {
       this.#end(record, 'error_during_execution', '세션 설정 없음');
@@ -617,6 +900,8 @@ export class RuleWriterService implements RuleWriterLauncher {
     const budget = this.#dailyCappedBudget(record, record.budget);
     if (budget === null) return;
     record.budget = budget;
+    // 재판단 대상은 시작 직전에 다시 고른다 (대기하는 사이 폐기 · 대체 · 새 자식 규칙이 생겼을 수 있다)
+    if (rejudge !== null && !this.#retargetRejudge(record, rejudge, requirement.id)) return;
     const controller = new AbortController();
     this.#controllers.add(controller);
     const workDir = path.join(this.#biveHome, 'work', record.projectId, 'sessions', record.id);
@@ -632,23 +917,38 @@ export class RuleWriterService implements RuleWriterLauncher {
       // rule-writer는 파일 도구가 없으므로 작업 폴더는 비어 있다 (ADR-024 허용 목록 방식)
       mkdirSync(workDir, { recursive: true, mode: 0o700 });
       // 효력 있는 규범은 작업 지시로만 준다 (도구 목록은 그대로, ADR-100 K1 · D4). 읽지 못하면 세션을 열지 않는다
-      const norms = this.#readNormInput(record, requirement);
-      const prompt = ruleWriterTaskPrompt(requirement, norms);
+      const norms = this.#readNormInput(record, requirement, rejudge);
+      const prompt =
+        rejudge === null
+          ? ruleWriterTaskPrompt(requirement, norms)
+          : ruleWriterRejudgePrompt({
+              requirement,
+              change: rejudge.change,
+              previousText: rejudge.previousText,
+              rules: rejudge.rules,
+              norms,
+            });
       const tools = createRoleTools({
         role: RULE_WRITER_ROLE,
         sessionRoot: workDir,
         biveHome: this.#biveHome,
         now: () => new Date(this.#now()),
         hooks: {
-          proposeRule: (input) => this.#propose(record, norms.summary, input),
-          retireRule: (input) => this.#retire(record, input),
-          supersedeRule: (input) => this.#supersede(record, norms.summary, input),
-          // 유지는 실행 안의 판단 세션에서만 받는다 (요구사항 세션에는 판단할 이의가 없다)
-          upholdRule: () =>
-            denied(
-              'invalid_args',
-              'uphold_rule은 실행 안의 판단 세션에서만 쓴다 (이 세션에는 판단할 이의가 없음)',
-            ),
+          ...(rejudge === null
+            ? {
+                proposeRule: (input: ProposeRuleInput) =>
+                  this.#propose(record, norms.summary, input),
+                retireRule: (input: RetireRuleInput) => this.#retire(record, input),
+                supersedeRule: (input: SupersedeRuleInput) =>
+                  this.#supersede(record, norms.summary, input),
+                // 유지는 판단 세션(실행 안의 이의 판단 · 요구사항 변경의 재판단)에서만 받는다 (새 요구사항에는 판단할 규칙이 없다)
+                upholdRule: () =>
+                  denied(
+                    'invalid_args',
+                    'uphold_rule은 판단 세션(실행 안의 이의 판단 · 요구사항 변경의 재판단)에서만 쓴다 (이 세션에는 판단할 규칙이 없음)',
+                  ),
+              }
+            : this.#rejudgeHooks(record, rejudge, norms.summary)),
           onToolCall: (call) => {
             record.toolCalls.push(call);
             this.#persistToolCall(record, call);
@@ -661,6 +961,7 @@ export class RuleWriterService implements RuleWriterLauncher {
           },
         },
       });
+      if (rejudge !== null) rejudge.tools = tools;
       this.#persist(record, (store) =>
         store.sessions.start({
           id: record.id,
@@ -686,7 +987,12 @@ export class RuleWriterService implements RuleWriterLauncher {
         controller,
         spec: {
           role: RULE_WRITER_ROLE,
-          systemPrompt: RULE_WRITER_SYSTEM_PROMPT,
+          systemPrompt:
+            rejudge === null
+              ? RULE_WRITER_SYSTEM_PROMPT
+              : rejudge.change === 'updated'
+                ? RULE_WRITER_REQUIREMENT_UPDATED_SYSTEM_PROMPT
+                : RULE_WRITER_REQUIREMENT_DELETED_SYSTEM_PROMPT,
           prompt,
           workDir,
           tools,
@@ -696,6 +1002,14 @@ export class RuleWriterService implements RuleWriterLauncher {
             projectId: record.projectId,
             requirementId: requirement.id,
             requirementDisplayId: requirement.displayId,
+            // 재판단 세션의 시나리오 자리표시자 (판단 세션과 같은 이름: 종류 · 첫 대상 규칙 · 대상 규칙)
+            ...(rejudge === null
+              ? {}
+              : {
+                  judgment: `requirement_${rejudge.change}`,
+                  ruleId: rejudge.rules[0]?.displayId ?? '',
+                  ruleIds: rejudge.rules.map((rule) => rule.displayId).join(','),
+                }),
           },
         },
         onInit: (manifest, init) => {
@@ -756,17 +1070,21 @@ export class RuleWriterService implements RuleWriterLauncher {
     return null;
   }
 
-  /** 시작 직전의 요구사항. 삭제 · 없음 · 읽기 실패면 생략 기록을 남기고 `null`. */
+  /**
+   * 시작 직전의 요구사항. 삭제 · 없음 · 읽기 실패면 생략 기록을 남기고 `null`. 삭제의 재판단은 지워진 요구사항을 그대로 받는다(수정의
+   * 재판단이 대기하는 사이 지워졌으면 생략하고, 겹친 삭제의 재판단이 뒤따른다).
+   */
   #reloadRequirement(
     record: RuleWriterSessionRecord,
     queued: RuleWriterStartInput['requirement'],
-  ): RuleWriterStartInput['requirement'] | null {
+  ): Requirement | null {
     let detail: string;
     try {
       const current = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
         store.requirements.get(queued.id),
       );
-      if (current !== null && current.deletedAt === null) return current;
+      const deletedOk = record.rejudge?.change === 'deleted';
+      if (current !== null && (current.deletedAt === null || deletedOk)) return current;
       detail = current === null ? '요구사항 없음' : `요구사항 삭제됨 (${current.deletedAt})`;
     } catch (error) {
       detail = errorMessage(error);
@@ -788,11 +1106,17 @@ export class RuleWriterService implements RuleWriterLauncher {
   #readNormInput(
     record: RuleWriterSessionRecord,
     requirement: RuleWriterStartInput['requirement'],
+    rejudge: RejudgeContext | null,
   ): NormInput {
+    // 재판단은 자식 규칙도 초점이다 (지운 요구사항은 효력이 없어 자료에 없다)
     const norms = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
-      collectNormInput(store, { requirementIds: [requirement.id], ruleIds: [] }),
+      collectNormInput(store, {
+        requirementIds: rejudge?.change === 'deleted' ? [] : [requirement.id],
+        ruleIds: rejudge?.rules.map((rule) => rule.id) ?? [],
+      }),
     );
     record.normInput = normInputRecord(norms);
+    if (rejudge !== null) rejudge.normInput = norms.summary;
     const truncated = norms.summary.truncated ? ' 잘림' : '';
     this.#log(
       `규칙 작성 규범 입력${truncated} (${record.requirementDisplayId}, ${normInputSummaryText(norms.summary)})`,
@@ -837,6 +1161,8 @@ export class RuleWriterService implements RuleWriterLauncher {
     record.endedAt = this.#timestamp();
     const endedAt = record.endedAt;
     if (this.#persisted.has(record.id)) {
+      // 재판단 세션: 판단하지 못한 자식 규칙은 종료 사유와 함께 유지로 마무리한다 (자동 시작 · 끝남 알림 전, ADR-116)
+      this.#settleRejudge(record, endReason);
       const { result } = record;
       this.#persist(record, (store) =>
         store.sessions.end(record.id, {
@@ -1047,6 +1373,213 @@ export class RuleWriterService implements RuleWriterLauncher {
     } catch (error) {
       return this.#retirementError('supersede_rule', error);
     }
+  }
+
+  // ── 요구사항 변경의 재판단 세션 (M7-10 #222, ADR-116) ─────────────────
+
+  /**
+   * 재판단 대상 자식 규칙을 시작 직전에 다시 고른다. 남은 대상이 없거나 읽지 못하면 생략 기록을 남기고 `false`(대상이 없으면 마무리할
+   * 규칙도 없다).
+   */
+  #retargetRejudge(
+    record: RuleWriterSessionRecord,
+    rejudge: RejudgeContext,
+    requirementId: string,
+  ): boolean {
+    let reason: StoredSkipReason;
+    let detail: string;
+    try {
+      const rules = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+        rejudgeTargets(
+          store,
+          requirementId,
+          rejudge.change === 'deleted' ? rejudge.rules.map((rule) => rule.id) : null,
+        ),
+      );
+      if (rules.length > 0) {
+        rejudge.rules = rules;
+        if (record.rejudge !== null) record.rejudge.ruleIds = rules.map((rule) => rule.id);
+        return true;
+      }
+      reason = 'requirement_unavailable';
+      detail = '판단할 효력 있는 자식 규칙 없음';
+    } catch (error) {
+      reason = 'start_failed';
+      detail = errorMessage(error);
+    }
+    record.status = 'skipped';
+    record.skipReason = reason;
+    record.error = detail;
+    record.endedAt = this.#timestamp();
+    this.#log(`규칙 작성 생략 (${record.requirementDisplayId}, ${detail})`);
+    this.#saveSkip(record, reason, detail);
+    return false;
+  }
+
+  /**
+   * 재판단 세션의 규범 도구 (ADR-116). 자식 규칙(판단 대상)마다 유지 · 대체 · 폐기 가운데 한 번(삭제는 유지 · 폐기), 판단 기록과
+   * 함께 남긴다. 수정: 자식이 아닌 효력 있는 규칙의 폐기 · 대체와 새 규칙(`propose_rule`)은 요구사항 세션과 같다(D5, 부모는 이
+   * 요구사항). 삭제: 대체 · 새 규칙은 거부(부모가 될 요구사항이 없다), 자식 규칙을 모두 판단하면 실행기를 닫는다.
+   */
+  #rejudgeHooks(
+    record: RuleWriterSessionRecord,
+    rejudge: RejudgeContext,
+    normInput: NormInputSummary,
+  ): Pick<RoleToolsHooks, 'proposeRule' | 'retireRule' | 'supersedeRule' | 'upholdRule'> {
+    const judgment = (): AgentRequirementChangeJudgment => ({
+      cause: rejudge.cause,
+      normInput,
+    });
+    if (rejudge.change === 'deleted') {
+      const noParent = (tool: string): ToolResult =>
+        denied(
+          'invalid_args',
+          `${tool}은 요구사항 삭제의 재판단 세션에서 쓰지 않는다 (새 규칙의 부모가 될 요구사항이 없음, 자식 규칙은 uphold_rule 또는 retire_rule)`,
+        );
+      return {
+        proposeRule: () => noParent('propose_rule'),
+        supersedeRule: () => noParent('supersede_rule'),
+        retireRule: (input) => this.#rejudgeRetire(record, rejudge, judgment(), input),
+        upholdRule: (input) => this.#rejudgeUphold(record, rejudge, judgment(), input),
+      };
+    }
+    return {
+      proposeRule: (input) => this.#propose(record, normInput, input),
+      retireRule: (input) => this.#rejudgeRetire(record, rejudge, judgment(), input),
+      supersedeRule: (input) =>
+        this.#rejudgeSupersede(record, rejudge, judgment(), normInput, input),
+      upholdRule: (input) => this.#rejudgeUphold(record, rejudge, judgment(), input),
+    };
+  }
+
+  /** 판단 대상 자식 규칙 (표시 ID 또는 ID). 없으면 `undefined`. */
+  #childOf(rejudge: RejudgeContext, given: string): JudgmentPromptRule | undefined {
+    return rejudge.rules.find((rule) => rule.id === given || rule.displayId === given);
+  }
+
+  /** 자식 규칙 하나를 판단했다. 삭제의 재판단은 모두 판단하면 실행기를 닫는다 (수정은 새 규칙이 남을 수 있어 닫지 않는다). */
+  #rejudgeDecided(rejudge: RejudgeContext, rule: JudgmentPromptRule): void {
+    rejudge.decided.add(rule.id);
+    if (rejudge.change === 'deleted' && rejudge.decided.size >= rejudge.rules.length) {
+      rejudge.tools?.close('judgment_complete');
+    }
+  }
+
+  async #rejudgeRetire(
+    record: RuleWriterSessionRecord,
+    rejudge: RejudgeContext,
+    judgment: AgentRequirementChangeJudgment,
+    input: RetireRuleInput,
+  ): Promise<ToolResult> {
+    // 수정의 재판단: 자식이 아닌 규칙의 폐기는 요구사항 세션의 폐기와 같다 (모순 해소, D5)
+    if (rejudge.change === 'updated' && this.#childOf(rejudge, input.ruleId) === undefined) {
+      return this.#retire(record, input);
+    }
+    const rule = this.#judgedRule(rejudge, 'retire_rule', input.ruleId);
+    if (!('id' in rule)) return rule;
+    try {
+      withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+        retireAgentRule(
+          store,
+          {
+            ruleId: rule.id,
+            grounds: input.grounds,
+            author: { kind: 'agent', role: RULE_WRITER_ROLE },
+            sessionId: record.id,
+            requirementChange: judgment,
+          },
+          { now: this.#now },
+        ),
+      );
+    } catch (error) {
+      return this.#retirementError('retire_rule', error);
+    }
+    this.#rejudgeDecided(rejudge, rule);
+    return ok(
+      `자식 규칙 ${rule.displayId} 폐기로 판단 (판정 · 실행의 기준에서 빠짐, 사람은 나중에 봄)`,
+    );
+  }
+
+  async #rejudgeSupersede(
+    record: RuleWriterSessionRecord,
+    rejudge: RejudgeContext,
+    judgment: AgentRequirementChangeJudgment,
+    normInput: NormInputSummary,
+    input: SupersedeRuleInput,
+  ): Promise<ToolResult> {
+    if (this.#childOf(rejudge, input.ruleId) === undefined) {
+      return this.#supersede(record, normInput, input);
+    }
+    const rule = this.#judgedRule(rejudge, 'supersede_rule', input.ruleId);
+    if (!('id' in rule)) return rule;
+    if (input.parentRequirementId !== record.requirementId) {
+      return denied(
+        'invalid_args',
+        `supersede_rule 인자 오류: parentRequirementId는 이 세션의 요구사항 ${record.requirementId}만 쓸 수 있음`,
+      );
+    }
+    const { rationale, contradiction, ruleId, grounds, ...payload } = input;
+    let created;
+    try {
+      created = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+        supersedeAgentRule(
+          store,
+          {
+            payload,
+            rationale,
+            author: { kind: 'agent', role: RULE_WRITER_ROLE },
+            sessionId: record.id,
+            contradiction,
+            normInput,
+            // 판단 대상인지는 위에서 봤다 (표시 ID 또는 ID 그대로 넘긴다)
+            ruleId,
+            grounds,
+            requirementChange: judgment,
+          },
+          { now: this.#now, newId: this.#newId },
+        ),
+      );
+    } catch (error) {
+      return this.#retirementError('supersede_rule', error);
+    }
+    record.ruleIds.push(created.rule.id);
+    this.#rejudgeDecided(rejudge, rule);
+    return ok(
+      `자식 규칙 ${rule.displayId}을 폐기하고 ${created.rule.displayId}로 대체로 판단 (새 규칙은 바로 효력, 세션이 끝나면 실행이 자동으로 시작된다)`,
+    );
+  }
+
+  async #rejudgeUphold(
+    record: RuleWriterSessionRecord,
+    rejudge: RejudgeContext,
+    judgment: AgentRequirementChangeJudgment,
+    input: UpholdRuleInput,
+  ): Promise<ToolResult> {
+    const rule = this.#judgedRule(rejudge, 'uphold_rule', input.ruleId);
+    if (!('id' in rule)) return rule;
+    try {
+      withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+        upholdAgentRule(
+          store,
+          {
+            ruleId: rule.id,
+            grounds: input.grounds,
+            author: { kind: 'agent', role: RULE_WRITER_ROLE },
+            sessionId: record.id,
+            requirementChange: judgment,
+          },
+          { now: this.#now },
+        ),
+      );
+    } catch (error) {
+      return this.#retirementError('uphold_rule', error);
+    }
+    this.#rejudgeDecided(rejudge, rule);
+    return ok(
+      rejudge.change === 'deleted'
+        ? `자식 규칙 ${rule.displayId} 유지로 판단 (부모 요구사항 없는 규칙으로 효력 유지, 사람은 나중에 봄)`
+        : `자식 규칙 ${rule.displayId} 유지로 판단 (규칙 · 인수 테스트는 그대로, 사람은 나중에 봄)`,
+    );
   }
 
   // ── 실행 안의 판단 세션 (M7-11 #223, ADR-115) ─────────────────────
@@ -1314,7 +1847,7 @@ export class RuleWriterService implements RuleWriterLauncher {
 
   /** 판단 대상 규칙 하나 (표시 ID 또는 ID). 대상 밖 · 이미 판단한 규칙이면 거부 결과. */
   #judgedRule(
-    session: JudgmentSession,
+    session: JudgedTargets,
     tool: 'retire_rule' | 'supersede_rule' | 'uphold_rule',
     given: string,
   ): JudgmentPromptRule | ToolResult {

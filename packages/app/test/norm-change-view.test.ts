@@ -181,4 +181,44 @@ describe('normChangeRow', () => {
       '알 수 없음',
     );
   });
+
+  it('요구사항 변경 판단 (M7-10, ADR-116): "요구사항 변경 판단 · 결과", 판단 없음은 사정의 표시명을 덧붙인다', () => {
+    const change = (judgment: Partial<NormJudgmentDetail>, actor = 'agent') =>
+      normChangeRow(
+        entry({
+          kind: 'judgment',
+          ...(actor === 'agent' ? {} : { actor: { kind: 'orchestrator' }, sessionId: null }),
+          reason: '근거 글',
+          detail: {
+            judgment: {
+              subject: 'requirement_change',
+              verdict: 'upheld',
+              contradicts: [],
+              requirementChange: {
+                requirement: { id: '01JR0000000000000000000002', displayId: 'REQ-001' },
+                change: 'deleted',
+                at: '2026-11-22T00:00:00.000Z',
+                textHash: 'a'.repeat(64),
+              },
+              input: { requirements: { total: 1, included: 1 }, rules: { total: 1, included: 1 } },
+              ...judgment,
+            } as NormJudgmentDetail,
+          },
+        }),
+      );
+    expect(change({}).subject).toEqual({ label: '요구사항 변경 판단 · 유지', rules: [] });
+    expect(change({ verdict: 'retired' }).subject?.label).toBe('요구사항 변경 판단 · 폐기');
+    expect(change({ verdict: 'superseded', createdSeq: 2 }).subject?.label).toBe(
+      '요구사항 변경 판단 · 대체',
+    );
+    expect(
+      change({ undecided: { endReason: 'project_daily_budget_exceeded' } }, 'orchestrator'),
+    ).toMatchObject({
+      actor: '오케스트레이터',
+      subject: { label: '요구사항 변경 판단 · 유지 · 판단 없음 (프로젝트 하루 예산 초과)' },
+    });
+    expect(change({ undecided: { endReason: 'aborted' } }, 'orchestrator').subject?.label).toBe(
+      '요구사항 변경 판단 · 유지 · 판단 없음 (중단)',
+    );
+  });
 });

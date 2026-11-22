@@ -19,6 +19,8 @@ import {
 import type { ProjectStore } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { type Scenario, ScenarioSchema } from '../src/agent/scenario.js';
+import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { selectAgent } from '../src/agent/select.js';
 import { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
@@ -102,17 +104,28 @@ interface Harness {
   read<T>(fn: (store: ProjectStore) => T): T;
 }
 
-const start = async (settings: SettingsPatch, gates: Gates | null = null): Promise<Harness> => {
+const start = async (
+  settings: SettingsPatch,
+  gates: Gates | null = null,
+  scenario: Scenario | null = null,
+): Promise<Harness> => {
   const biveHome = makeBiveHome();
   const repo = copyFixture(temps);
   const logs: string[] = [];
   const result = await startOrchestrator({
     biveHome,
     idleShutdownMs: 60_000,
-    agent: selectAgent(
-      { BIVE_AGENT: 'scripted', BIVE_SCENARIO: 'happy-path' },
-      { biveHome, pollIntervalMs: 10 },
-    ),
+    agent:
+      scenario === null
+        ? selectAgent(
+            { BIVE_AGENT: 'scripted', BIVE_SCENARIO: 'happy-path' },
+            { biveHome, pollIntervalMs: 10 },
+          )
+        : {
+            kind: 'scripted',
+            adapter: new ScriptedAdapter({ scenario, biveHome, pollIntervalMs: 10 }),
+            scenario: scenario.name,
+          },
     executors: gatedExecutors(gates),
     log: (line) => logs.push(line),
   });
@@ -319,6 +332,149 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
       ),
     ).toEqual(['created', 'judgment', 'created', 'judgment']);
   }, 60_000);
+
+  it('요구사항 수정의 재판단이 자식 규칙을 대체하면 새 규칙의 실행 1개가 자동 시작되어 병합되고, 유지만 한 재판단은 실행을 만들지 않는다 (M7-10 #222 수용 기준 3, ADR-116)', async () => {
+    const result = { subtype: 'success', total_cost_usd: 0.01, num_turns: 1, modelUsage: {} };
+    const statement = (field: string, what: string) =>
+      `WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 ${field} 필드에 ${what}을 담는다`;
+    const proposal = (title: string, field: string, what: string) => ({
+      parentRequirementId: '{{requirementId}}',
+      title,
+      statement: statement(field, what),
+      kind: 'business',
+      checkKinds: ['test'],
+      rationale: '요구사항의 그 부분',
+      contradiction: { verdict: 'none' },
+    });
+    const scenario = ScenarioSchema.parse({
+      name: 'requirement-rejudge-test',
+      description: '요구사항 수정 뒤 재판단: 대체 → 유지',
+      roles: {
+        'rule-writer': {
+          sessions: [
+            {
+              when: { requirementDisplayId: 'REQ-001' },
+              turns: [
+                {
+                  tool: 'propose_rule',
+                  args: proposal('서버 시각', 'time', '응답 시점의 서버 시각'),
+                },
+              ],
+              result,
+            },
+            {
+              when: { judgment: 'requirement_updated' },
+              turns: [
+                {
+                  tool: 'supersede_rule',
+                  args: {
+                    ...proposal('서버 시각(UTC)', 'time', 'UTC 기준 서버 시각'),
+                    ruleId: '{{ruleId}}',
+                    grounds:
+                      '고친 본문이 UTC를 요구해 "time 필드에 응답 시점의 서버 시각을"을 바꾼다',
+                  },
+                },
+              ],
+              result,
+            },
+            {
+              when: { judgment: 'requirement_updated' },
+              turns: [
+                { tool: 'uphold_rule', args: { ruleId: '{{ruleId}}', grounds: '그대로 맞음' } },
+              ],
+              result,
+            },
+          ],
+        },
+      },
+    });
+    const h = await start(DAILY, null, scenario);
+    const list = async () =>
+      (await h.client.call('run.list', { projectId: h.projectId })).runs.map((run) => ({
+        displayId: run.displayId,
+        status: run.status,
+        targetRuleIds: run.targetRuleIds,
+        startedBy: run.startedBy,
+      }));
+    const { requirement, rules } = await saveRequirement(h, '헬스 체크 응답에 서버 시각 포함');
+    const [rule1] = rules;
+    if (rule1 === undefined) throw new Error('규칙 없음');
+    await waitFor(
+      async () =>
+        (await list()).every((run) => run.status === 'merged') && (await list()).length === 1,
+      30_000,
+      'EXE-001 병합',
+    );
+
+    // 사람이 본문을 고친다 → 재판단 세션이 RULE-001을 RULE-002로 대체 → 세션 종료 뒤 RULE-002의 실행 1개 자동 시작
+    await h.client.call('requirement.update', {
+      projectId: h.projectId,
+      id: requirement.id,
+      text: '헬스 체크 응답에 UTC 기준 서버 시각 포함',
+      author: human,
+    });
+    await h.orchestrator.ruleWriter.whenSettled(h.projectId, requirement.id);
+    const listed = (await h.client.call('rule.list', { projectId: h.projectId })).rules.map(
+      (entry) => entry.rule,
+    );
+    expect(listed.map((rule) => rule.displayId)).toEqual(['RULE-002']);
+    const [rule2] = listed;
+    if (rule2 === undefined) throw new Error('새 규칙 없음');
+    expect(rule2.parentRequirementId).toBe(requirement.id);
+    await waitFor(
+      async () =>
+        (await list()).length === 2 && (await list()).every((run) => run.status === 'merged'),
+      30_000,
+      'EXE-002 병합',
+    );
+    const changes = await h.client.call('normChange.list', { projectId: h.projectId });
+    expect(changes.chain.valid).toBe(true);
+    expect(changes.entries.map((entry) => [entry.seq, entry.kind, entry.targetRef.id])).toEqual([
+      [1, 'created', rule1.id],
+      [2, 'judgment', rule1.id],
+      [3, 'auto_start', expect.any(String)],
+      [4, 'created', rule2.id],
+      [5, 'judgment', rule2.id],
+      [6, 'judgment', rule1.id],
+      [7, 'superseded', rule1.id],
+      [8, 'auto_start', expect.any(String)],
+    ]);
+    expect(changes.entries[5]?.detail.judgment).toMatchObject({
+      subject: 'requirement_change',
+      verdict: 'superseded',
+      createdSeq: 4,
+      requirementChange: { change: 'updated' },
+    });
+    const runs = await list();
+    expect(runs[1]).toEqual({
+      displayId: 'EXE-002',
+      status: 'merged',
+      targetRuleIds: [rule2.id],
+      startedBy: { kind: 'orchestrator', causeSeqs: [4] },
+    });
+
+    // 유지만 한 재판단: 새 규칙이 없으므로 실행이 생기지 않는다
+    await h.client.call('requirement.update', {
+      projectId: h.projectId,
+      id: requirement.id,
+      text: '헬스 체크 응답에 UTC 기준 서버 시각을 포함',
+      author: human,
+    });
+    await h.orchestrator.ruleWriter.whenSettled(h.projectId, requirement.id);
+    await h.orchestrator.ruleWriter.idle();
+    expect(await list()).toHaveLength(2);
+    const after = await h.client.call('normChange.list', { projectId: h.projectId });
+    expect(after.entries.slice(8).map((entry) => [entry.kind, entry.targetRef.id])).toEqual([
+      ['judgment', rule2.id],
+    ]);
+    const { entries } = await h.client.call('ruleWriter.status', {
+      projectId: h.projectId,
+      requirementId: requirement.id,
+    });
+    expect(entries).toEqual([
+      expect.objectContaining({ state: 'ended', endReason: 'success', autoStart: null }),
+    ]);
+  }, 90_000);
 
   it('자동 시작 실행도 프로젝트당 진행 중 1개 · 실행 대기를 따른다: 앞 실행이 도는 동안 생긴 자동 시작 실행들은 실행 대기, 앞 실행이 끝나면 생성 순으로 하나씩 시작한다', async () => {
     const gates = new Gates();
