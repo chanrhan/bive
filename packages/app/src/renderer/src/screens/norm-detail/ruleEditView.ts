@@ -1,10 +1,14 @@
 // 규칙 직접 편집의 표시 규칙 (screens.md SCR-06 · 1.1, ADR-100 B②, M7-03 #215 · ADR-109). DOM · React에 의존하지 않는다
 // (test/rule-edit-view.test.ts).
-// - [편집]은 효력 있고 삭제되지 않은 규칙에만 있다. 내장 구조 규칙은 서버도 거부하므로 보이지 않는다(ADR-109)
+// - [편집]은 효력 있고 삭제 · 폐기되지 않은 규칙에만 있다. 내장 구조 규칙은 서버도 거부하므로 보이지 않는다(ADR-109).
+//   폐기 여부는 응답에 실린 폐기 사실(`retirement`)로 본다(M7-15, ADR-114)
+// - [확인]: 미확인이고 삭제 · 폐기되지 않은 규칙에만 있다. 사람 주체로 confirmation.set 1회(ADR-100 D2 · I1, M7-15). 폐기된 규칙의
+//   확인을 받을지는 확인할 것 화면(M7-14)이 정한다(ADR-114)
 // - 저장은 제목 · 진술이 비지 않고 하나라도 바뀌었을 때만 한다. 바뀐 칸만 보내고, 편집을 시작할 때 본 수정 시각을 함께 보내
 //   다른 저장 위에 덮어쓰지 않는다(서버 -32009 `rule_changed`)
 // - 오류 · 자동 시작 결과는 응답(`rule.update`)에서만 만든다(NFR-03). 문구는 명사형 (1.1)
 import type {
+  ConfirmationSetParams,
   JsonRpcErrorObject,
   Rule,
   RuleEditAutoStart,
@@ -31,6 +35,8 @@ export const RULE_EDIT_TEXT = {
   autoStarted: '실행 자동 시작',
   pendingRun: '대기 실행에 반영',
   autoStartSkipped: '실행 자동 시작 생략',
+  confirm: '확인',
+  confirmFailed: '확인 실패',
 } as const;
 
 /** 서버가 -32009로 거부한 이유의 표시명 (shared `RuleEditConflictReason`과 같은 키, 시험이 대조). */
@@ -47,9 +53,43 @@ export interface RuleEditDraft {
   readonly statement: string;
 }
 
-/** 이 규칙에 [편집]을 보일지: 효력 상태 · 삭제 안 됨 · 내장 구조 규칙 아님. */
-export const canEditRule = (rule: Pick<Rule, 'builtin' | 'deletedAt' | 'normState'>): boolean =>
-  !rule.builtin && rule.deletedAt === null && rule.normState === 'approved';
+/** 이 규칙에 [편집]을 보일지: 효력 상태 · 삭제 · 폐기 안 됨 · 내장 구조 규칙 아님. `retired`는 응답의 폐기 사실. */
+export const canEditRule = (
+  rule: Pick<Rule, 'builtin' | 'deletedAt' | 'normState'>,
+  retired: boolean,
+): boolean => !retired && !rule.builtin && rule.deletedAt === null && rule.normState === 'approved';
+
+/** 이 규칙에 [확인]을 보일지: 미확인 · 삭제 · 폐기 안 됨 (이미 확인됨이면 버튼 없음). */
+export const canConfirmRule = (
+  rule: Pick<Rule, 'deletedAt' | 'confirmation'>,
+  retired: boolean,
+): boolean => !retired && rule.deletedAt === null && rule.confirmation.state === 'unconfirmed';
+
+/** `confirmation.set` 요청: 이 규칙, 주체는 사람. */
+export const confirmParams = (
+  projectId: string,
+  rule: Pick<Rule, 'id'>,
+): ConfirmationSetParams => ({
+  projectId,
+  target: { entity: 'Rule', id: rule.id },
+  author: { kind: 'human' },
+});
+
+/** `confirmation.set` 실패 → 한 줄. -32009는 이미 확인됨 · 삭제된 규칙(서버가 사유를 나누지 않는다). */
+export const confirmErrorText = (error: unknown): string => {
+  const code = isRpcError(error) ? error.code : null;
+  const reason =
+    code === -32009
+      ? '이미 확인됨 또는 삭제된 규칙'
+      : code === -32004
+        ? '규칙 없음'
+        : code === -32020
+          ? '확인 권한 없음'
+          : null;
+  return reason === null
+    ? RULE_EDIT_TEXT.confirmFailed
+    : `${RULE_EDIT_TEXT.confirmFailed} · ${reason}`;
+};
 
 /** 저장할 수 있는가: 제목 · 진술이 공백만이 아니고 하나라도 지금 값과 다를 때. */
 export const canSaveRuleEdit = (

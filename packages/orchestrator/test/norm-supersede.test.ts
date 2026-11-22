@@ -732,6 +732,34 @@ describe('규칙 작성 세션의 도구 결과 (수용 기준 2, 실제 서비�
     ]);
     const got = await h.client.call('rule.get', { projectId: h.project.id, id: seeded.old.id });
     expect(got.rule.displayId).toBe('RULE-001');
+    // 폐기된 규칙의 항목에만 폐기 사실이 실린다: 시각 · 대체한 규칙(ID · 표시 ID) · 사유가 든 규범 변경 기록 순번 (ADR-114)
+    const successor = h.read((store) => store.rules.list()[3]);
+    const supersededSeq = h.read(
+      (store) => store.normChanges.list().find((entry) => entry.kind === 'superseded')?.seq,
+    );
+    expect(got.retirement).toEqual({
+      retiredAt: h.read((store) => store.ruleRetirements.get(seeded.old.id)?.retiredAt),
+      supersededBy: { id: successor?.id, displayId: 'RULE-004' },
+      normChangeSeq: supersededSeq,
+    });
+    expect(listed.rules.map((entry) => entry.retirement)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    // 폐기 포함: 폐기된 규칙도 표시 ID 순으로 함께, 폐기 사실은 rule.get과 같다 (읽기 전용 옵션)
+    const withRetired = await h.client.call('rule.list', {
+      projectId: h.project.id,
+      includeRetired: true,
+    });
+    expect(
+      withRetired.rules.map((entry) => [entry.rule.displayId, entry.retirement ?? null]),
+    ).toEqual([
+      ['RULE-001', got.retirement],
+      ['RULE-002', null],
+      ['RULE-003', null],
+      ['RULE-004', null],
+    ]);
     // 규범 변경 기록 조회는 근거 · 상세를 표시 값으로 내보낸다 (대체 기록의 폐기 직전 내용 포함)
     const changes = await h.client.call('normChange.list', {
       projectId: h.project.id,
@@ -746,4 +774,54 @@ describe('규칙 작성 세션의 도구 결과 (수용 기준 2, 실제 서비�
       retirement: { supersededBy: { displayId: 'RULE-004' }, createdSeq: 1, judgmentSeq: 2 },
     });
   }, 30_000);
+});
+
+describe('규칙 목록 · 단건 조회의 폐기 표시 (M7-15 #227, ADR-114)', () => {
+  it('폐기만 한 규칙은 대체 규칙 없이 폐기 시각 · 기록 순번이 실리고, 폐기 기록 행을 읽을 수 없으면 세 칸이 null인 채 폐기로 남는다', async () => {
+    const h = await startProjectHarness({ servers, clients });
+    const ids = h.read((store) => {
+      const first = seedNormRequirement(store, '헬스 체크 응답에 서버 시각 포함', T0);
+      const old = seedNormRule(store, {
+        title: '서버 시각',
+        statement: OLD_STATEMENT,
+        parent: first,
+        at: T0 + 1,
+      });
+      const kept = seedNormRule(store, {
+        title: '응답 형식',
+        statement:
+          'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 상태 코드 200을 돌려준다',
+        parent: first,
+        at: T0 + 2,
+      });
+      const result = retireAgentRule(
+        store,
+        { ruleId: 'RULE-001', grounds: GROUNDS, author: AGENT, sessionId: SESSION },
+        clock(),
+      );
+      return { old: old.id, kept: kept.id, seq: result.normChange.seq };
+    });
+    const retiredAt = h.read((store) => store.ruleRetirements.get(ids.old)?.retiredAt);
+    const got = await h.client.call('rule.get', { projectId: h.project.id, id: ids.old });
+    expect(got.retirement).toEqual({ retiredAt, supersededBy: null, normChangeSeq: ids.seq });
+    const kept = await h.client.call('rule.get', { projectId: h.project.id, id: ids.kept });
+    expect(kept).not.toHaveProperty('retirement');
+    // 폐기 기록 행이 깨지면(저장소 밖 변조) 효력은 여전히 없고, 화면 응답에도 폐기로 남는다(효력 있는 규칙으로 보이지 않는다)
+    h.read((store) => {
+      store.db.exec('DROP TRIGGER rule_retirements_no_update');
+      store.db
+        .prepare("UPDATE rule_retirements SET retired_at = 'broken' WHERE rule_id = ?")
+        .run(ids.old);
+    });
+    const broken = await h.client.call('rule.list', {
+      projectId: h.project.id,
+      includeRetired: true,
+    });
+    expect(broken.rules.map((entry) => [entry.rule.displayId, entry.retirement ?? null])).toEqual([
+      ['RULE-001', { retiredAt: null, supersededBy: null, normChangeSeq: null }],
+      ['RULE-002', null],
+    ]);
+    const plain = await h.client.call('rule.list', { projectId: h.project.id });
+    expect(plain.rules.map((entry) => entry.rule.displayId)).toEqual(['RULE-002']);
+  });
 });

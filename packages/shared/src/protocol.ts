@@ -21,6 +21,7 @@ import {
   NormChangeActor,
   NormChangeBreakReason,
   NormChangeDetail,
+  NormJudgmentRuleRef,
   NormTestChangeFile,
   Project,
   Proposal,
@@ -278,12 +279,39 @@ export const RuleJudgment = z
   );
 export type RuleJudgment = z.infer<typeof RuleJudgment>;
 
-/** 규칙 1건 + 최신 판정. `rule.get` 결과이자 `rule.list` 목록의 항목이다. */
-export const RuleWithJudgment = z.strictObject({ rule: Rule, judgment: RuleJudgment });
+/**
+ * 폐기된 규칙의 폐기 사실 (M7-15 #227, ADR-112 · ADR-114). `rule.list` · `rule.get` 항목의 `retirement`로만 실린다.
+ * - `retiredAt`: 폐기 시각
+ * - `supersededBy`: 대체한 새 규칙의 ID · 표시 ID (대체), 폐기만이면 `null`
+ * - `normChangeSeq`: 사유 · 근거가 든 규범 변경 기록(`retired` · `superseded`)의 순번 (`normChange.list`로 읽는다)
+ * 폐기 기록 행이 있으나 형식이 깨져 읽을 수 없으면 세 칸이 모두 `null`이다(그래도 폐기로 본다: 효력을 잃은 쪽으로 닫음)
+ */
+export const RuleRetirementView = z.strictObject({
+  retiredAt: Timestamp.nullable(),
+  supersededBy: NormJudgmentRuleRef.nullable(),
+  normChangeSeq: z.int().positive().nullable(),
+});
+export type RuleRetirementView = z.infer<typeof RuleRetirementView>;
+
+/**
+ * 규칙 1건 + 최신 판정. `rule.get` 결과이자 `rule.list` 목록의 항목이다. 폐기된 규칙에만 `retirement`가 있다(없으면 폐기 아님,
+ * M7-15 · ADR-114). 폐기된 규칙의 최신 판정은 폐기 전의 기록이다(폐기 뒤에는 판정하지 않는다, ADR-112)
+ */
+export const RuleWithJudgment = z.strictObject({
+  rule: Rule,
+  judgment: RuleJudgment,
+  retirement: RuleRetirementView.optional(),
+});
 export type RuleWithJudgment = z.infer<typeof RuleWithJudgment>;
 
-/** `rule.list`: 삭제되지 않은 규칙 전부. */
-export const RuleListParams = z.strictObject({ projectId: Ulid });
+/**
+ * `rule.list`: 삭제되지 않고 폐기되지 않은 규칙 전부(표시 ID 순). `includeRetired: true`면 폐기된 규칙도 함께 돌려준다
+ * (규칙 화면의 [폐기 포함], M7-15 · ADR-114). 읽기 전용이다
+ */
+export const RuleListParams = z.strictObject({
+  projectId: Ulid,
+  includeRetired: z.boolean().optional(),
+});
 export type RuleListParams = z.infer<typeof RuleListParams>;
 export const RuleListResult = z.strictObject({ rules: z.array(RuleWithJudgment) });
 export type RuleListResult = z.infer<typeof RuleListResult>;

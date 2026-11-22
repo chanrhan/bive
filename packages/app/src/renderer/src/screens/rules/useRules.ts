@@ -1,4 +1,5 @@
 // 규칙 목록 불러오기 (RPC `rule.list`, ADR-060). 요구사항 화면(useRequirements.ts)과 같은 규칙이다.
+// - 폐기된 규칙도 함께 읽는다(`includeRetired: true`). 기본 목록에서 숨기는 것은 목록의 [폐기 포함]이다(M7-15, ADR-114)
 // - 프로젝트가 바뀌면 다시 불러오고, 그동안은 로딩이다(이전 프로젝트 목록을 보이지 않음)
 // - 실행 알림을 받으면 지금 목록을 둔 채 다시 불러온다 (M1-19, ADR-076, useRunEventRefresh)
 // - 늦게 온 이전 요청의 결과는 버린다(마지막으로 보낸 요청의 결과만 쓴다)
@@ -36,7 +37,7 @@ export const useRules = (projectId: string): RulesState => {
     const settle = (): void => {
       if (inFlight.current === mine) inFlight.current = 0;
     };
-    return window.bive.invoke('rule.list', { projectId }).then(
+    return window.bive.invoke('rule.list', { projectId, includeRetired: true }).then(
       ({ rules }) => {
         settle();
         if (seq.current === mine) {

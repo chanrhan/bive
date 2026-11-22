@@ -159,6 +159,7 @@ describe('칩 값별 개수', () => {
       query: '',
       selected: { status: ['fail'] },
       problemOnly: false,
+      includeHidden: false,
     };
     const counts = countOptions(entries, CRITERIA, state);
     // 상태 칩: 자기 선택(fail)과 무관하게 전체 기준
@@ -212,8 +213,10 @@ describe('필터 상태 변경', () => {
     expect(EMPTY_FILTER.selected).toEqual({});
   });
 
-  it('필터 사용 여부: 검색어 · 칩 값 · [문제만] 중 하나라도', () => {
+  it('필터 사용 여부: 검색어 · 칩 값 · [문제만] · 숨김 포함 중 하나라도', () => {
     expect(isFilterActive(EMPTY_FILTER)).toBe(false);
+    expect(EMPTY_FILTER.includeHidden).toBe(false);
+    expect(isFilterActive({ ...EMPTY_FILTER, includeHidden: true })).toBe(true);
     expect(isFilterActive({ ...EMPTY_FILTER, query: '  ' })).toBe(false);
     expect(isFilterActive({ ...EMPTY_FILTER, query: '주문' })).toBe(true);
     expect(isFilterActive({ ...EMPTY_FILTER, problemOnly: true })).toBe(true);

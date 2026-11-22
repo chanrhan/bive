@@ -4,9 +4,12 @@ import { RuleEditConflictReason, type Rule } from '@bive/shared';
 import { describe, expect, it } from 'vitest';
 
 import {
+  canConfirmRule,
   canEditRule,
   canSaveRuleEdit,
   confirmationText,
+  confirmErrorText,
+  confirmParams,
   RULE_EDIT_CONFLICT_LABELS,
   ruleEditAutoStartText,
   ruleEditErrorText,
@@ -26,11 +29,47 @@ const RULE = {
 const PROJECT_ID = '01JAAAAAAAAAAAAAAAAAAAAAAA';
 
 describe('ruleEditView', () => {
-  it('[편집]은 효력 있고 삭제되지 않은 규칙에만, 내장 구조 규칙에는 없다', () => {
-    expect(canEditRule(RULE)).toBe(true);
-    expect(canEditRule({ ...RULE, builtin: true })).toBe(false);
-    expect(canEditRule({ ...RULE, deletedAt: '2026-10-16T00:00:00.000Z' })).toBe(false);
-    expect(canEditRule({ ...RULE, normState: 'provisional' })).toBe(false);
+  it('[편집]은 효력 있고 삭제 · 폐기되지 않은 규칙에만, 내장 구조 규칙에는 없다', () => {
+    expect(canEditRule(RULE, false)).toBe(true);
+    expect(canEditRule({ ...RULE, builtin: true }, false)).toBe(false);
+    expect(canEditRule({ ...RULE, deletedAt: '2026-10-16T00:00:00.000Z' }, false)).toBe(false);
+    expect(canEditRule({ ...RULE, normState: 'provisional' }, false)).toBe(false);
+    // 폐기 여부는 응답의 폐기 사실로 본다 (M7-15, ADR-114)
+    expect(canEditRule(RULE, true)).toBe(false);
+  });
+
+  it('[확인]은 미확인이고 삭제 · 폐기되지 않은 규칙에만, 요청은 사람 주체 · 이 규칙', () => {
+    const unconfirmed = { ...RULE, confirmation: { state: 'unconfirmed' } } as const;
+    const confirmed = {
+      ...RULE,
+      confirmation: {
+        state: 'confirmed',
+        at: '2026-10-16T00:00:00.000Z',
+        by: { kind: 'human' },
+        basis: { kind: 'approval_log', seq: 3 },
+      },
+    } as const;
+    expect(canConfirmRule(unconfirmed, false)).toBe(true);
+    expect(canConfirmRule(confirmed, false)).toBe(false);
+    expect(canConfirmRule(unconfirmed, true)).toBe(false);
+    expect(canConfirmRule({ ...unconfirmed, deletedAt: '2026-10-16T00:00:00.000Z' }, false)).toBe(
+      false,
+    );
+    expect(confirmParams(PROJECT_ID, RULE)).toEqual({
+      projectId: PROJECT_ID,
+      target: { entity: 'Rule', id: RULE.id },
+      author: { kind: 'human' },
+    });
+  });
+
+  it('[확인] 실패 문구: 오류 코드별 사유 한 줄, 모르는 오류는 사유 없이', () => {
+    expect(confirmErrorText({ code: -32009, message: '이미 확인됨입니다' })).toBe(
+      '확인 실패 · 이미 확인됨 또는 삭제된 규칙',
+    );
+    expect(confirmErrorText({ code: -32004, message: 'x' })).toBe('확인 실패 · 규칙 없음');
+    expect(confirmErrorText({ code: -32020, message: 'x' })).toBe('확인 실패 · 확인 권한 없음');
+    expect(confirmErrorText({ code: -32603, message: 'x' })).toBe('확인 실패');
+    expect(confirmErrorText(new Error('끊김'))).toBe('확인 실패');
   });
 
   it('저장은 제목 · 진술이 공백만이 아니고 하나라도 바뀌었을 때만', () => {

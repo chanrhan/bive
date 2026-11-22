@@ -19,6 +19,7 @@ import { type ReactNode, useEffect, useRef, useState } from 'react';
 
 import { AuthorMark } from '../../components/AuthorMark/AuthorMark.js';
 import { StatusBadge } from '../../components/StatusBadge/StatusBadge.js';
+import { visibleText } from '../../components/VisibleText/visibleText.js';
 import { canSaveEdit, REQUIREMENT_DETAIL_TEXT as TEXT } from './requirementDetailView.js';
 import { RuleDetail } from './RuleDetail.js';
 import { ruleAuthorName } from './ruleDetailView.js';
@@ -382,7 +383,7 @@ const ChildRules = ({
             >
               <ChevronRight className="inline-icon child-rule-chevron" aria-hidden="true" />
               <span className="child-rule-id">{rule.displayId}</span>
-              <span className="child-rule-title">{rule.title}</span>
+              <span className="child-rule-title">{visibleText(rule.title)}</span>
               <StatusBadge kind="judgment" status={judgment.status} />
             </button>
             {expanded && (

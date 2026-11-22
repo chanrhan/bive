@@ -1,6 +1,9 @@
 // SCR-03 규칙 (이슈 #24 수용 기준 2 · 3, screens.md SCR-03 · 1.4, ADR-029 · ADR-035 · ADR-060).
 // 2) checklists/scr-03.ts의 기본(카드 1줄 제목, 2줄 ID · WHEN 조건 · 예외) · 빈("규칙 없음") 상태
-// 3) 필터 칩 6종(판정 · 변이 · 준수 집계 · 블록 · 위험도 · 종류), 변이 · 블록 · 위험도는 값이 없어 0건 비활성
+// 3) 필터 칩 7종(판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류), 변이 · 블록 · 위험도는 값이 없어 0건 비활성
+// 이슈 #227(M7-15) 수용 기준 1 · 4: 미확인 규칙 카드 2줄째에 예외 "미확인"(판정 예외 다음), 확인됨은 예외 없음, 필터 칩 "확인"
+// (미확인 · 확인됨)이 값 개수와 함께 활성, 준수 집계 칩에 "사람 확인". 폐기된 규칙은 기본 목록에서 빠지고 [폐기 포함]에서만
+// 보이며 그 카드의 예외는 "폐기" (ADR-100 I3 · D7 · 명세 변경 목록 SCR-03, ADR-114)
 // 이슈 #218(M7-06): [실행]으로 만든 실행이 프로젝트의 진행 중 실행 때문에 실행 대기면 [실행] 옆에 "표시 ID · 실행 대기"
 // (run.create · run.get 응답과 event.run.updated 알림으로만, ADR-105)
 // 데이터는 가짜 브리지의 project.current · rule.list 응답과 project.opened 알림(PROJECT_OPENED_EVENT)으로만 만든다.
@@ -19,7 +22,7 @@ import type {
 } from '@bive/shared';
 
 import { PROJECT_OPENED_EVENT } from '../src/common/bridge.js';
-import { CHIPS, PROJECT, RULES, VISIBLE_ORDER } from './checklists/scr-03.js';
+import { CHIPS, PROJECT, RETIRED_RULE, RULES, VISIBLE_ORDER } from './checklists/scr-03.js';
 import { run as summaryRun } from './checklists/scr-05.js';
 import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
 import {
@@ -38,7 +41,8 @@ const OTHER_PROJECT: Project = {
   baseBranch: 'main',
   createdAt: '2026-10-15T00:00:00.000Z',
 };
-const LIVE = RULES.filter(({ rule }) => rule.deletedAt === null);
+/** 기본 목록에 보이는 규칙: 삭제 · 폐기되지 않은 것 */
+const LIVE = RULES.filter(({ rule, retirement }) => rule.deletedAt === null && !retirement);
 
 const openScreen = async (
   page: Page,
@@ -123,7 +127,10 @@ test.describe('목록', () => {
     // 개발 서버의 StrictMode는 처음 그릴 때 효과를 두 번 돌리므로 횟수가 아니라 파라미터만 본다
     const listCalls = await callsOf(bive, 'rule.list');
     expect(listCalls.length).toBeGreaterThan(0);
-    for (const call of listCalls) expect(call.params).toEqual({ projectId: PROJECT.id });
+    // 폐기된 규칙도 함께 읽고(읽기 전용 옵션) 숨기는 것은 목록이다 (ADR-114)
+    for (const call of listCalls) {
+      expect(call.params).toEqual({ projectId: PROJECT.id, includeRetired: true });
+    }
   });
 
   test('2줄은 ID · WHEN 조건 · 예외이고 시각은 없다, 정상 항목은 예외가 비어 있다', async ({
@@ -131,16 +138,24 @@ test.describe('목록', () => {
   }) => {
     await openScreen(page);
     const lines = page.getByTestId('card-line-2');
+    // 예외가 겹치면 판정 예외 다음 미확인 (ADR-060 순서: 상태 예외 → 화면 예외)
     await expect(lines.nth(0)).toHaveText(
-      'RULE-002WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면실패',
+      'RULE-002WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면실패미확인',
     );
+    await expect(lines.nth(0).getByTestId('card-exception')).toHaveText(['실패', '미확인']);
     // WHEN 조건이 없는 진술은 조건 자리가 비어 있다
     await expect(lines.nth(1)).toHaveText('RULE-003미판정');
     await expect(lines.nth(1).getByTestId('card-note')).toHaveCount(0);
     await expect(lines.nth(2)).toHaveText('RULE-005WHEN API 라우트가 데이터를 읽으면재검증 필요');
-    await expect(lines.nth(3)).toHaveText('RULE-006WHEN 재설정 링크가 발급 후 30분을 넘기면잠정');
+    // 미확인(통과)은 2줄째 예외 자리에 "미확인" 하나
+    await expect(lines.nth(3)).toHaveText('RULE-006WHEN 재설정 링크가 발급 후 30분을 넘기면미확인');
+    await expect(lines.nth(3).getByTestId('card-exception')).toHaveText(['미확인']);
+    // 확인됨 · 통과는 예외 없음
     await expect(lines.nth(4)).toHaveText('RULE-001WHEN 같은 계정으로 로그인이 5회 연속 실패하면');
     await expect(lines.nth(4).getByTestId('card-exception')).toHaveCount(0);
+    // 예외는 카드 2줄째에만 있다 (모든 예외가 2줄 안: 002 둘 · 003 · 005 · 006 하나씩)
+    await expect(page.getByTestId('card-exception')).toHaveCount(5);
+    await expect(page.getByTestId('card-line-2').getByTestId('card-exception')).toHaveCount(5);
     await expect(page.getByTestId('list-items').locator('time')).toHaveCount(0);
     // 통과는 1줄 앞 흐린 점(글자 없음), 이름은 접근 가능한 이름 · 툴팁
     const normal = page
@@ -153,8 +168,59 @@ test.describe('목록', () => {
     // 말줄임 툴팁: 2줄 전체 문구
     await expect(lines.nth(0)).toHaveAttribute(
       'title',
-      'RULE-002 · WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면 · 실패',
+      'RULE-002 · WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면 · 실패 · 미확인',
     );
+  });
+
+  test('폐기된 규칙은 기본 목록에 없고 [폐기 포함]을 켜면 예외 "폐기"와 함께 보인다, 끄면 다시 빠진다 (수용 기준 4)', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    const toggle = page.getByTestId('hidden-toggle');
+    await expect(toggle).toHaveText('폐기 포함');
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    expect(await cardIds(page)).toEqual([...VISIBLE_ORDER]);
+    await expect(page.getByTestId('list-result')).toHaveCount(0);
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    // 문제 항목(받은 순서) 안에 RULE-007이 들어가고 정상 RULE-001은 맨 뒤
+    expect(await cardIds(page)).toEqual([
+      'RULE-002',
+      'RULE-003',
+      'RULE-005',
+      'RULE-006',
+      'RULE-007',
+      'RULE-001',
+    ]);
+    const retired = page.getByTestId('card').filter({ hasText: 'RULE-007' });
+    await expect(retired.getByTestId('card-title')).toHaveText('비밀번호 재설정 링크 1시간 만료');
+    // 폐기 전 판정(실패)은 카드 예외가 아니다: 폐기 · 미확인만, 2줄째에
+    await expect(retired.getByTestId('card-line-2').getByTestId('card-exception')).toHaveText([
+      '폐기',
+      '미확인',
+    ]);
+    await expect(retired.getByTestId('status-badge')).toHaveCount(0);
+    await expect(page.getByTestId('list-result')).toHaveText('6개 중 6개 · 초기화');
+
+    // 다른 화면에 갔다 와도 유지 (목록별 필터 상태)
+    await page.getByRole('button', { name: '계약', exact: true }).click();
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await expect(page.getByTestId('hidden-toggle')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByTestId('card')).toHaveCount(6);
+
+    await page.getByTestId('hidden-toggle').click();
+    expect(await cardIds(page)).toEqual([...VISIBLE_ORDER]);
+    await expect(page.getByTestId('list-result')).toHaveCount(0);
+  });
+
+  test('폐기된 규칙만 있으면 기본은 "규칙 없음", [폐기 포함]으로 그 규칙이 보인다', async ({
+    page,
+  }) => {
+    await openScreen(page, { 'rule.list': { result: { rules: [RETIRED_RULE] } } });
+    await expect(page.getByTestId('list-view').getByTestId('empty-state')).toHaveText('규칙 없음');
+    await page.getByTestId('hidden-toggle').click();
+    expect(await cardIds(page)).toEqual(['RULE-007']);
   });
 
   test('[문제만]은 예외가 있는 규칙만 보인다', async ({ page }) => {
@@ -184,7 +250,7 @@ test.describe('목록', () => {
 });
 
 test.describe('필터 칩 (수용 기준 3)', () => {
-  test('칩 6종이 있고 변이 · 블록 · 위험도는 값이 없어 0건 비활성', async ({ page }) => {
+  test('칩 7종이 있고 변이 · 블록 · 위험도는 값이 없어 0건 비활성', async ({ page }) => {
     await openScreen(page);
     const chips = page.getByTestId('list-view').getByTestId('filter-chip-button');
     await expect(chips).toHaveText(CHIPS.map((chip) => chip.label));
@@ -218,11 +284,21 @@ test.describe('필터 칩 (수용 기준 3)', () => {
     ]);
     await page.keyboard.press('Escape');
 
+    // 준수 집계: 판정 가능 = 효력 · 격리 아님 5건, 사람 확인 = 그 가운데 확인됨 3건(RULE-001 · 003 · 005, ADR-100 D7)
     await chipButton(page, 'compliance').click();
     expect(await menuOptions(page)).toEqual([
-      ['판정 가능', '4', false],
-      ['잠정', '1', false],
+      ['판정 가능', '5', false],
+      ['사람 확인', '3', false],
       ['격리', '0', true],
+    ]);
+    await page.keyboard.press('Escape');
+
+    // 확인: 미확인 2(RULE-002 · 006) · 확인됨 3, 둘 다 활성 (수용 기준 1)
+    await expect(chipButton(page, 'confirmation')).toBeEnabled();
+    await chipButton(page, 'confirmation').click();
+    expect(await menuOptions(page)).toEqual([
+      ['미확인', '2', false],
+      ['확인됨', '3', false],
     ]);
     await page.keyboard.press('Escape');
 
@@ -232,6 +308,56 @@ test.describe('필터 칩 (수용 기준 3)', () => {
       ['기술 제약', '1', false],
       ['비즈니스', '3', false],
     ]);
+    await page.keyboard.press('Escape');
+
+    // [폐기 포함]: 폐기된 RULE-007은 확인 · 종류에 더해지고 판정 · 준수 집계(두 분모)에서는 빠진다 (ADR-112 · ADR-114)
+    await page.getByTestId('hidden-toggle').click();
+    await chipButton(page, 'compliance').click();
+    expect(await menuOptions(page)).toEqual([
+      ['판정 가능', '5', false],
+      ['사람 확인', '3', false],
+      ['격리', '0', true],
+    ]);
+    await page.keyboard.press('Escape');
+    await chipButton(page, 'judgment').click();
+    expect((await menuOptions(page)).find(([label]) => label === '실패')).toEqual([
+      '실패',
+      '1',
+      false,
+    ]);
+    await page.keyboard.press('Escape');
+    await chipButton(page, 'confirmation').click();
+    expect(await menuOptions(page)).toEqual([
+      ['미확인', '3', false],
+      ['확인됨', '3', false],
+    ]);
+  });
+
+  test('확인: 미확인을 고르면 미확인 카드만 남고, 칩에 값이 보인다', async ({ page }) => {
+    await openScreen(page);
+    await chipButton(page, 'confirmation').click();
+    await page.getByTestId('filter-option').filter({ hasText: '미확인' }).click();
+    await page.keyboard.press('Escape');
+    await expect(chipButton(page, 'confirmation')).toHaveText('확인: 미확인');
+    expect(await cardIds(page)).toEqual(['RULE-002', 'RULE-006']);
+    await expect(page.getByTestId('list-result')).toHaveText('5개 중 2개 · 초기화');
+    // [폐기 포함]을 켜면 폐기된 미확인 규칙도 남는다
+    await page.getByTestId('hidden-toggle').click();
+    expect(await cardIds(page)).toEqual(['RULE-002', 'RULE-006', 'RULE-007']);
+    await expect(page.getByTestId('list-result')).toHaveText('6개 중 3개 · 초기화');
+  });
+
+  test('준수 집계: 사람 확인을 고르면 확인됨인 분모 규칙만 남는다 (폐기 포함이어도 폐기 규칙은 없음)', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    await page.getByTestId('hidden-toggle').click();
+    await chipButton(page, 'compliance').click();
+    await page.getByTestId('filter-option').filter({ hasText: '사람 확인' }).click();
+    await page.keyboard.press('Escape');
+    await expect(chipButton(page, 'compliance')).toHaveText('준수 집계: 사람 확인');
+    expect(await cardIds(page)).toEqual(['RULE-003', 'RULE-005', 'RULE-001']);
+    await expect(page.getByTestId('list-result')).toHaveText('6개 중 3개 · 초기화');
   });
 
   test('준수 집계: 판정 가능을 고르면 분모 목록만 보이고 다른 화면에 갔다 와도 유지된다', async ({
@@ -242,8 +368,14 @@ test.describe('필터 칩 (수용 기준 3)', () => {
     await page.getByTestId('filter-option').filter({ hasText: '판정 가능' }).click();
     await page.keyboard.press('Escape');
     await expect(chipButton(page, 'compliance')).toHaveText('준수 집계: 판정 가능');
-    expect(await cardIds(page)).toEqual(['RULE-002', 'RULE-003', 'RULE-005', 'RULE-001']);
-    await expect(page.getByTestId('list-result')).toHaveText('5개 중 4개 · 초기화');
+    expect(await cardIds(page)).toEqual([
+      'RULE-002',
+      'RULE-003',
+      'RULE-005',
+      'RULE-006',
+      'RULE-001',
+    ]);
+    await expect(page.getByTestId('list-result')).toHaveText('5개 중 5개 · 초기화');
 
     await page.getByRole('button', { name: '계약', exact: true }).click();
     await page.getByRole('button', { name: '규칙', exact: true }).click();
@@ -269,7 +401,7 @@ test.describe('프로젝트 전환 (ADR-034 · ADR-060)', () => {
     await expect(page.getByTestId('card')).toHaveCount(0);
     await expect(page.getByTestId('list-view').getByTestId('empty-state')).toHaveText('규칙 없음');
     const listCalls = await callsOf(bive, 'rule.list');
-    expect(listCalls.at(-1)?.params).toEqual({ projectId: OTHER_PROJECT.id });
+    expect(listCalls.at(-1)?.params).toEqual({ projectId: OTHER_PROJECT.id, includeRetired: true });
   });
 });
 

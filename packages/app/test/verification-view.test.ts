@@ -127,6 +127,7 @@ describe('값 표시', () => {
     expect(COMPLIANCE_FILTER).toEqual({
       query: '',
       selected: { compliance: ['judgeable'] },
+      includeHidden: false,
       problemOnly: false,
     });
     // 규칙 목록 필터의 값 이름과 같다 (rulesView.ts complianceGroup)

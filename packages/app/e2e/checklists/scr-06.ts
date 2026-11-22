@@ -3,14 +3,16 @@
 // 규칙 상세는 `ruleDetailChecklist`(index.ts에 등록), 요구사항 상세는 `requirementDetailChecklist`(spec이 넘김)
 // - 기본(규칙): 진술 · 종류 · 검사 · 부모 요구사항 · 생성 주체(이름), 테스트 실행 결과(판정 · 시각 · 커밋 · 실행 · 케이스),
 //   테스트 출력(최신 판정이 실패라 자동 펼침: 실패 원인 = 케이스 이름 · `file:line` · 메시지), 실행 이력(최신부터).
-//   변경 이력(P1) · 변이 상태는 미노출 (ADR-035). 규칙 화면 상세의 머리에는 [편집] · [실행] (ADR-076 · ADR-109),
-//   속성 줄에 확인 상태 (M7-03)
+//   변이 상태는 미노출 (ADR-035). 규칙 화면 상세의 머리에는 [편집] · [실행] (ADR-076 · ADR-109),
+//   속성 줄에 확인 상태와 (미확인이면) [확인], 맨 아래 변경 이력(규범 변경 기록, 기본 접힘) (M7-03 · M7-15 · ADR-114)
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-073 (실행 이력 자리만 비움 · "실행 이력 불러오기 실패", 나머지 상세는 그대로)
 // - 기본(요구사항): 표시 ID · [편집] · [삭제], 본문, 생성 주체(이름), 자식 규칙 목록(접힘). 변경 이력 · 구현 위치(P1)는
 //   미노출 (ADR-035). 로딩 · 에러는 ADR-078 (자식 규칙 자리만 비움 · "자식 규칙 불러오기 실패", 나머지 상세는 그대로)
 import type {
   JudgmentCase,
   JudgmentResult,
+  NormChangeListResult,
+  NormChangeView,
   Requirement,
   Rule,
   RuleJudgmentEntry,
@@ -168,13 +170,122 @@ export const HISTORY: Record<string, RuleJudgmentEntry[]> = {
   [unjudgedRule.id]: [],
 };
 
+/**
+ * 폐기된 규칙 (테스트 전용 데이터): RULE-002가 대체했다. 폐기 전 판정은 실패, 미확인. [폐기 포함]을 켜야 목록에 보인다.
+ */
+export const RETIRED_RULE: Rule = {
+  ...base,
+  id: '01JC0000000000000000000009',
+  displayId: 'RULE-009',
+  title: '결제 12시간 뒤 주문 취소 거절',
+  statement: 'WHEN 결제 후 12시간이 지난 주문의 취소를 요청하면 THE SYSTEM SHALL 요청을 거절한다',
+  kind: 'business',
+  createdAt: '2026-10-14T01:00:00.000Z',
+  updatedAt: '2026-10-14T01:00:00.000Z',
+};
+const RETIRED_AT = '2026-10-15T00:30:00.000Z';
+export const RETIRED_ITEM: RuleWithJudgment = {
+  rule: RETIRED_RULE,
+  judgment: {
+    status: 'fail',
+    latest: judgmentOf(RETIRED_RULE.id, '01JD0000000000000000000091', {
+      status: 'fail',
+      judgedAt: '2026-10-14T02:00:00.000Z',
+      commit: 'd4e5f6a'.padEnd(40, '0'),
+      runId: RUN_1,
+      cases: [],
+    }),
+  },
+  retirement: {
+    retiredAt: RETIRED_AT,
+    supersededBy: { id: failingRule.id, displayId: failingRule.displayId },
+    normChangeSeq: 6,
+  },
+};
+
+const SESSION = '01JS0000000000000000000001';
+const hashOf = (seq: number): string => String(seq).repeat(64).slice(0, 64);
+const change = (
+  patch: Pick<NormChangeView, 'seq' | 'at' | 'kind' | 'targetRef' | 'reason' | 'detail'>,
+): NormChangeView => ({
+  actor: { kind: 'agent', role: 'rule-writer' },
+  sessionId: SESSION,
+  runId: null,
+  textTruncated: false,
+  prevHash: hashOf(patch.seq - 1),
+  hash: hashOf(patch.seq),
+  ...patch,
+});
+
+/** 대체 근거 (표시 값: 응답에 이미 숨은 글자 표기로 온다. 화면은 다시 바꾸지 않는다). */
+export const SUPERSEDE_GROUNDS =
+  'RULE-009 진술 "결제 후 12시간이 지난 주문의 취소를" 거절하라는 내용은 24시간 기준과 동시에 만족될 수 없음';
+export const CREATE_REASON = '요구사항의 24시간 기준을 응답 거절 규칙으로 옮김';
+
+/** `normChange.list {targetRef: RULE-009}` 가짜 응답: 대체 기록 1건. */
+export const RETIRED_CHANGES: NormChangeListResult = {
+  entries: [
+    change({
+      seq: 6,
+      at: RETIRED_AT,
+      kind: 'superseded',
+      targetRef: { entity: 'Rule', id: RETIRED_RULE.id },
+      reason: SUPERSEDE_GROUNDS,
+      detail: {
+        retirement: {
+          supersededBy: { id: failingRule.id, displayId: failingRule.displayId },
+          createdSeq: 4,
+          judgmentSeq: 5,
+        },
+      },
+    }),
+  ],
+  chain: { valid: true, brokenAtSeq: null, reason: null },
+};
+
+/** `normChange.list {targetRef: RULE-002}` 가짜 응답: 신규 · 대체 판단(대상 RULE-009). */
+export const FAILING_CHANGES: NormChangeListResult = {
+  entries: [
+    change({
+      seq: 4,
+      at: RETIRED_AT,
+      kind: 'created',
+      targetRef: { entity: 'Rule', id: failingRule.id },
+      reason: CREATE_REASON,
+      detail: {},
+    }),
+    change({
+      seq: 5,
+      at: RETIRED_AT,
+      kind: 'judgment',
+      targetRef: { entity: 'Rule', id: failingRule.id },
+      reason: SUPERSEDE_GROUNDS,
+      detail: {
+        judgment: {
+          subject: 'supersede',
+          verdict: 'contradiction',
+          contradicts: [{ id: RETIRED_RULE.id, displayId: RETIRED_RULE.displayId }],
+          createdSeq: 4,
+          input: { requirements: { total: 1, included: 1 }, rules: { total: 3, included: 3 } },
+        },
+      },
+    }),
+  ],
+  chain: { valid: true, brokenAtSeq: null, reason: null },
+};
+
+/** 기록 없음 (사람이 만든 규칙 등). */
+export const NO_CHANGES: NormChangeListResult = {
+  entries: [],
+  chain: { valid: true, brokenAtSeq: null, reason: null },
+};
+
 export const FAILING_RULE = failingRule;
 export const PASSING_RULE = passingRule;
 export const UNJUDGED_RULE = unjudgedRule;
 
-/** 미노출 요소 (ADR-035): 변경 이력(P1) · 변이 상태(P1) · 대상 블록 · 위험도(P1). [실행]은 규칙 화면 상세에 있다(ADR-076). */
+/** 미노출 요소 (ADR-035): 변이 상태(P1) · 대상 블록 · 위험도(P1). [실행]은 규칙 화면 상세에 있다(ADR-076). */
 const hidden: ElementCheck[] = [
-  { label: '변경 이력 미노출', text: /변경 이력/, absent: true },
   {
     // 정상 변이 상태는 흐린 점(이름만), 예외는 글자 (1.4 상태 배지)
     label: '변이 상태 미노출 (흐린 점)',
@@ -209,7 +320,17 @@ const detail: ElementCheck[] = [
   },
   { label: '생성 주체 (이름)', testId: 'rule-field-author', text: '생성 주체에이전트 · 규칙 작성' },
   // 규칙 작성 역할이 바로 반영한 규칙은 미확인 (ADR-100 D1 · D2). 사람이 고치면 확인됨 (M7-03)
-  { label: '확인 상태 (미확인)', testId: 'rule-field-confirmation', text: '확인미확인' },
+  { label: '확인 상태 (미확인)', testId: 'rule-field-confirmation', text: '확인미확인확인' },
+  { label: '확인 상태 값', testId: 'rule-confirmation-state', text: '미확인' },
+  // 미확인이면 [확인] (사람 주체 confirmation.set, ADR-100 D2 · M7-15)
+  { label: '확인 버튼', testId: 'rule-confirm', role: 'button', name: '확인' },
+  { label: '폐기 표시 없음 (효력 있는 규칙)', testId: 'rule-detail-retired', absent: true },
+  {
+    label: '변경 이력 (기본 접힘)',
+    role: 'button',
+    name: '변경 이력',
+    attributes: { 'aria-expanded': 'false' },
+  },
   { label: '테스트 실행 결과', testId: 'rule-result', role: 'region', name: '테스트 실행 결과' },
   { label: '결과 판정 (실패)', testId: 'rule-field-result-status', text: '판정실패' },
   { label: '결과 커밋', testId: 'rule-field-result-commit', text: '커밋b2c3d4e' },

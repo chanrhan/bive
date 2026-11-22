@@ -1,7 +1,9 @@
 // `rule.*` 처리기 (NRM-02, NRM-04, JDG-02, M1-11, ADR-060, M7-03 #215 · ADR-109).
 // - 규칙 테이블의 규범(효력 · 잠정 승인)만 돌려준다. 승인 전 제안은 `proposals`에만 있으므로 섞이지 않는다 (NRM-04)
-// - `rule.list`는 폐기된 규칙을 빼고 돌려준다(M7-09 #221, ADR-112. 폐기 포함 옵션 · 폐기 표시는 M7-15). `rule.get` ·
-//   `judgment.list`는 폐기된 규칙도 돌려준다(판정 이력은 지우지 않는다)
+// - `rule.list`는 폐기된 규칙을 빼고 돌려준다(M7-09 #221, ADR-112). `includeRetired: true`면 폐기된 규칙도 넣는다(규칙 화면의
+//   [폐기 포함], M7-15 #227 · ADR-114). `rule.get` · `judgment.list`는 폐기된 규칙도 돌려준다(판정 이력은 지우지 않는다).
+//   폐기된 규칙의 항목에는 `retirement`(폐기 시각 · 대체한 규칙 · 사유가 든 규범 변경 기록 순번)가 실린다. 폐기 기록은 효력
+//   모듈에서 읽는다
 // - 규칙마다 최신 판정을 붙인다. 판정 기록이 없으면 미판정 (judgments/latest-judgment.ts)
 // - `judgment.list`: 규칙 상세의 실행 이력. 판정 기록 테이블(`judgments`)의 기록을 최신부터, 실행 표시 ID와 함께 (ADR-073)
 // - `rule.update`: 사람의 규칙 직접 편집(제목 · 진술, ADR-100 B② · A8). 사람 주체만 받고(에이전트 -32020) 편집 · 확인됨 ·
@@ -32,7 +34,12 @@ import {
   storedLatestJudgments,
   toRuleJudgment,
 } from '../judgments/latest-judgment.js';
-import { isEffectiveRule, retiredRuleSet, unretiredRules } from '../norms/effective.js';
+import {
+  isEffectiveRule,
+  listedRules,
+  retiredRuleSet,
+  ruleRetirementView,
+} from '../norms/effective.js';
 import { CONTROL_CHARACTERS, earsStatementProblem } from '../tools/ears.js';
 import { withProjectStore } from './project-store-access.js';
 import { RpcError, type MethodHandlers, type RequestContext } from './server.js';
@@ -62,6 +69,19 @@ const withJudgment = (rule: Rule, lookup: LatestJudgmentLookup): RuleWithJudgmen
   rule,
   judgment: toRuleJudgment(lookup(rule.id)),
 });
+
+/** 목록 · 단건 조회 항목: 폐기된 규칙에만 `retirement`를 싣는다 (ADR-114). */
+const listedItem = (
+  store: ProjectStore,
+  rule: Rule,
+  lookup: LatestJudgmentLookup,
+  retired: ReadonlySet<string>,
+): RuleWithJudgment => {
+  const retirement = ruleRetirementView(store, rule.id, retired);
+  return retirement === null
+    ? withJudgment(rule, lookup)
+    : { ...withJudgment(rule, lookup), retirement };
+};
 
 const ruleOrThrow = (store: ProjectStore, id: string): Rule => {
   const rule = store.rules.get(id);
@@ -212,15 +232,20 @@ export const createRuleHandlers = ({
   now = Date.now,
   ruleEditStarter,
 }: RuleHandlerDeps): RuleMethods => ({
-  'rule.list': ({ projectId }) =>
+  'rule.list': ({ projectId, includeRetired }) =>
     withProjectStore(biveHome, projectId, (store) => {
       const lookup = latestJudgments(store);
-      return { rules: unretiredRules(store).map((rule) => withJudgment(rule, lookup)) };
+      const retired = retiredRuleSet(store);
+      return {
+        rules: listedRules(store, includeRetired === true).map((rule) =>
+          listedItem(store, rule, lookup, retired),
+        ),
+      };
     }),
   'rule.get': ({ projectId, id }) =>
     withProjectStore(biveHome, projectId, (store) => {
       const rule = ruleOrThrow(store, id);
-      return withJudgment(rule, latestJudgments(store));
+      return listedItem(store, rule, latestJudgments(store), retiredRuleSet(store));
     }),
   'rule.update': ({ projectId, id, author, title, statement, expectedUpdatedAt }, context) => {
     // 저장소를 열기 전에 주체를 본다: 에이전트 주체는 프로젝트 · 규칙 유무와 상관없이 -32020

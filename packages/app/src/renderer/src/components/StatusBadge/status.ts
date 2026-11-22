@@ -3,7 +3,7 @@
 // - 제안 처리 결과(승인 · 거절)는 승인 대기 처리됨 필터에서 쓴다 (SCR-17, ADR-056)
 // - renderer는 shared를 import type으로만 가져오므로(architecture.md 2장) 표시명은 여기에 다시 적고,
 //   test/status-badge.test.ts가 shared의 *_LABELS와 같은지 대조한다
-import type { JudgmentStatus, MutationStatus } from '@bive/shared';
+import type { ConfirmationState, JudgmentStatus, MutationStatus } from '@bive/shared';
 
 /** 판정 상태 5종 표시명 (shared JUDGMENT_STATUS_LABELS와 같음). */
 export const JUDGMENT_LABELS = {
@@ -20,6 +20,12 @@ export const MUTATION_LABELS = {
   unverified: '변이 미검증',
   survived: '변이 생존',
 } as const satisfies Record<MutationStatus, string>;
+
+/** 확인 상태 2종 표시명 (ADR-100 C1, shared CONFIRMATION_STATE_LABELS와 같음). 미확인은 카드 예외 · 확인됨은 정상이다 */
+export const CONFIRMATION_LABELS = {
+  unconfirmed: '미확인',
+  confirmed: '확인됨',
+} as const satisfies Record<ConfirmationState, string>;
 
 /** 제안 처리 결과 2종 표시명 (shared PROPOSAL_STATE_LABELS의 같은 키와 같음). */
 export const DECISION_LABELS = {

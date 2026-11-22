@@ -11,6 +11,7 @@ import type { Rule, RunStatus } from '@bive/shared';
 import { useCallback, useId, useRef, useState } from 'react';
 
 import { Modal } from '../../components/Modal/Modal.js';
+import { visibleText } from '../../components/VisibleText/visibleText.js';
 import { RUN_START_TEXT as TEXT, runStartErrorText } from './runStartView.js';
 
 /** 만든 실행 (`run.create` 응답의 ID · 표시 ID · 생성 직후 상태). */
@@ -87,7 +88,7 @@ export const RunStart = ({ projectId, rule, onCreated }: RunStartProps): React.J
             </h2>
             <dl className="run-start-fields">
               <dt>{TEXT.targets}</dt>
-              <dd data-testid="run-start-target">{`${rule.displayId} · ${rule.title}`}</dd>
+              <dd data-testid="run-start-target">{`${rule.displayId} · ${visibleText(rule.title)}`}</dd>
             </dl>
             {dialog.phase === 'error' && (
               <p className="run-start-error" data-testid="run-start-error" role="alert">
