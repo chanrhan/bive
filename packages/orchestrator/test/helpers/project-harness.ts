@@ -6,6 +6,7 @@ import { createUlidGenerator, type Project } from '@bive/shared';
 import { openProjectStore, registerProject, type ProjectStore } from '@bive/store';
 
 import { createHandlers } from '../../src/ipc/handlers.js';
+import type { RuleEditStarter } from '../../src/ipc/rule-handlers.js';
 import { PipeServer } from '../../src/ipc/server.js';
 import { NetPipeTransport } from '../../src/ipc/transport.js';
 import { ProposalService } from '../../src/proposals/proposal-service.js';
@@ -42,6 +43,8 @@ export interface HarnessRegistry {
 export interface ProjectHarnessOptions {
   /** `requirement.create` 뒤 세션 창구를 만든다 (생략하면 세션을 띄우지 않는다) */
   ruleWriter?: (context: { biveHome: string; now: () => number }) => RuleWriterLauncher;
+  /** `rule.update`의 진술 변경 뒤 실행 자동 시작 창구 (생략하면 실행을 만들지 않는다) */
+  ruleEditStarter?: (context: { biveHome: string; now: () => number }) => RuleEditStarter;
 }
 
 export const startProjectHarness = async (
@@ -63,6 +66,7 @@ export const startProjectHarness = async (
   const now = () => clock.now;
   const socketPath = path.join(biveHome, 'p.sock');
   const ruleWriter = options.ruleWriter?.({ biveHome, now });
+  const ruleEditStarter = options.ruleEditStarter?.({ biveHome, now });
   const server = new PipeServer({
     transport: new NetPipeTransport(),
     path: socketPath,
@@ -74,6 +78,7 @@ export const startProjectHarness = async (
       biveHome,
       now,
       ...(ruleWriter === undefined ? {} : { ruleWriter }),
+      ...(ruleEditStarter === undefined ? {} : { ruleEditStarter }),
     }),
   });
   registry.servers.push(server);

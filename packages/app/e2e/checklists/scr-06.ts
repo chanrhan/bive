@@ -3,7 +3,8 @@
 // 규칙 상세는 `ruleDetailChecklist`(index.ts에 등록), 요구사항 상세는 `requirementDetailChecklist`(spec이 넘김)
 // - 기본(규칙): 진술 · 종류 · 검사 · 부모 요구사항 · 생성 주체(이름), 테스트 실행 결과(판정 · 시각 · 커밋 · 실행 · 케이스),
 //   테스트 출력(최신 판정이 실패라 자동 펼침: 실패 원인 = 케이스 이름 · `file:line` · 메시지), 실행 이력(최신부터).
-//   변경 이력(P1) · 변이 상태는 미노출 (ADR-035). 규칙 화면 상세의 머리에는 [실행] (ADR-076)
+//   변경 이력(P1) · 변이 상태는 미노출 (ADR-035). 규칙 화면 상세의 머리에는 [편집] · [실행] (ADR-076 · ADR-109),
+//   속성 줄에 확인 상태 (M7-03)
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-073 (실행 이력 자리만 비움 · "실행 이력 불러오기 실패", 나머지 상세는 그대로)
 // - 기본(요구사항): 표시 ID · [편집] · [삭제], 본문, 생성 주체(이름), 자식 규칙 목록(접힘). 변경 이력 · 구현 위치(P1)는
 //   미노출 (ADR-035). 로딩 · 에러는 ADR-078 (자식 규칙 자리만 비움 · "자식 규칙 불러오기 실패", 나머지 상세는 그대로)
@@ -207,6 +208,8 @@ const detail: ElementCheck[] = [
     text: `부모 요구사항${PARENT.displayId} · ${PARENT.text}`,
   },
   { label: '생성 주체 (이름)', testId: 'rule-field-author', text: '생성 주체에이전트 · 규칙 작성' },
+  // 규칙 작성 역할이 바로 반영한 규칙은 미확인 (ADR-100 D1 · D2). 사람이 고치면 확인됨 (M7-03)
+  { label: '확인 상태 (미확인)', testId: 'rule-field-confirmation', text: '확인미확인' },
   { label: '테스트 실행 결과', testId: 'rule-result', role: 'region', name: '테스트 실행 결과' },
   { label: '결과 판정 (실패)', testId: 'rule-field-result-status', text: '판정실패' },
   { label: '결과 커밋', testId: 'rule-field-result-commit', text: '커밋b2c3d4e' },
@@ -229,6 +232,8 @@ const detail: ElementCheck[] = [
   { label: '전체 케이스', testId: 'test-case', count: 2 },
   { label: '실행 이력', testId: 'rule-history', role: 'region', name: '실행 이력' },
   { label: '실행 버튼 (규칙 화면 상세 머리)', testId: 'run-start', role: 'button', name: '실행' },
+  { label: '편집 버튼 (규칙 상세 머리, M7-03)', testId: 'rule-edit', role: 'button', name: '편집' },
+  { label: '편집 입력 닫힘', testId: 'rule-editor', absent: true },
   ...hidden,
 ];
 
