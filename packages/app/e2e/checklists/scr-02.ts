@@ -1,6 +1,6 @@
-// SCR-02 요구사항 (screens.md SCR-02 · 1.4, ADR-029 · ADR-035 · ADR-053).
-// - 기본: 목록 + 상세 2단. 카드 1줄 요구사항 문장 · 생성 주체 아이콘, 2줄 ID · 예외 · 시각. [+ 새 요구사항] ·
-//   검색 · 필터 칩 4종(상태 · 작성 · 승인 · 블록) · [문제만]. 상세 자리는 고른 항목이 없어 "선택 항목 없음"
+// SCR-02 요구사항 (screens.md SCR-02 · 1.4, ADR-029 · ADR-035 · ADR-053, ADR-100 I3 · 명세 변경 목록 SCR-02 · ADR-114).
+// - 기본: 목록 + 상세 2단. 카드 1줄 요구사항 문장 · 생성 주체 아이콘, 2줄 ID · 예외(미확인 포함) · 시각. [+ 새 요구사항] ·
+//   검색 · 필터 칩 4종(상태 · 작성 · 확인 · 블록) · [문제만]. 상세 자리는 고른 항목이 없어 "선택 항목 없음"
 // - 빈: "요구사항 없음"(ADR-029), [+ 새 요구사항]은 그대로
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-053 (로딩 = 목록 자리 비움, 에러 = "요구사항 불러오기 실패")
 // 시각 문구는 e2e가 Asia/Seoul 시간대로 연다는 전제다 (scr-02.spec.ts).
@@ -23,7 +23,13 @@ const base = {
   unrulable: null,
   updatedBy: { kind: 'human' },
   deletedAt: null,
-  confirmation: { state: 'unconfirmed' },
+  // 사람이 쓴 요구사항은 저장 즉시 확인됨 (ADR-100 B①)
+  confirmation: {
+    state: 'confirmed',
+    at: '2026-10-15T01:00:00.000Z',
+    by: { kind: 'human' },
+    basis: { kind: 'requirement_record', at: '2026-10-15T01:00:00.000Z' },
+  },
 } as const satisfies Partial<Requirement>;
 
 /** `requirement.list` 가짜 응답 (테스트 전용 데이터, NFR-03). 삭제된 REQ-004는 화면에 보이면 안 된다. */
@@ -42,8 +48,9 @@ export const REQUIREMENTS: Requirement[] = [
     displayId: 'REQ-002',
     text: '주문 취소는 결제 후 24시간 이내만 허용',
     author: { kind: 'agent', role: 'planner' },
-    normState: 'provisional',
     updatedBy: { kind: 'agent', role: 'planner' },
+    // 에이전트가 쓴 요구사항: 사람이 아직 보지 않음
+    confirmation: { state: 'unconfirmed' },
     createdAt: '2026-10-15T03:20:00.000Z',
     updatedAt: '2026-10-15T03:20:00.000Z',
   },
@@ -67,14 +74,14 @@ export const REQUIREMENTS: Requirement[] = [
   },
 ];
 
-/** 화면에 보이는 순서: 문제 항목(잠정 · 규칙화 불가) 먼저 최신순, 그다음 정상 (ADR-034). */
+/** 화면에 보이는 순서: 문제 항목(미확인 · 규칙화 불가) 먼저 최신순, 그다음 정상 (ADR-034). */
 export const VISIBLE_ORDER = ['REQ-002', 'REQ-003', 'REQ-001'] as const;
 
 /** 필터 칩 4종 (SCR-02 필터). */
 export const CHIPS = [
   { id: 'status', label: '상태' },
   { id: 'author', label: '작성' },
-  { id: 'approval', label: '승인' },
+  { id: 'confirmation', label: '확인' },
   { id: 'block', label: '블록' },
 ] as const;
 
@@ -124,7 +131,9 @@ export const requirementsChecklist = {
           text: '주문 취소는 결제 후 24시간 이내만 허용',
         },
         { label: '카드 2줄 ID', testId: 'card-id', text: 'REQ-002' },
-        { label: '카드 2줄 예외', testId: 'card-exception', count: 2, text: '잠정' },
+        { label: '카드 2줄 예외', testId: 'card-exception', count: 2, text: '미확인' },
+        { label: '잠정 표시 없음', text: '잠정', absent: true },
+        { label: '승인 칩 없음', testId: 'filter-chip-approval', absent: true },
         { label: '카드 2줄 시각', text: '2026-10-15 12:20' },
         {
           label: '생성 주체 아이콘 (에이전트)',

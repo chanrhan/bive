@@ -125,6 +125,7 @@ export const COMPLIANCE_FILTER: FilterState = Object.freeze({
   query: '',
   selected: Object.freeze({ compliance: Object.freeze(['judgeable']) }),
   problemOnly: false,
+  includeHidden: false,
 });
 
 /**

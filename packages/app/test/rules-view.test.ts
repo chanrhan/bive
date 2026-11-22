@@ -1,5 +1,6 @@
-// 규칙 화면 표시 규칙 (이슈 #24, screens.md SCR-03 카드 · 필터 · 1.4, ADR-060).
+// 규칙 화면 표시 규칙 (이슈 #24, screens.md SCR-03 카드 · 필터 · 1.4, ADR-060, M7-15 #227 · ADR-100 I3 · D7 · ADR-114).
 import {
+  CONFIRMATION_STATE_LABELS,
   type JudgmentResult,
   type JudgmentStatus,
   RISK_LABELS as SHARED_RISK_LABELS,
@@ -14,9 +15,15 @@ import {
   EMPTY_FILTER,
   type ListEntry,
 } from '../src/renderer/src/components/ListView/filter.js';
-import { statusExceptions } from '../src/renderer/src/components/StatusBadge/status.js';
+import {
+  CONFIRMATION_LABELS,
+  statusExceptions,
+} from '../src/renderer/src/components/StatusBadge/status.js';
 import {
   complianceGroup,
+  complianceValues,
+  isRetiredRule,
+  RETIRED_HIDDEN,
   RISK_LABELS,
   RULE_CRITERIA,
   RULE_KIND_LABELS,
@@ -27,6 +34,12 @@ import {
 } from '../src/renderer/src/screens/rules/rulesView.js';
 
 const T0 = '2026-10-16T01:00:00.000Z';
+const CONFIRMED = {
+  state: 'confirmed',
+  at: T0,
+  by: { kind: 'human' },
+  basis: { kind: 'approval_log', seq: 1 },
+} as const;
 
 const rule = (patch: Partial<Rule> & Pick<Rule, 'id' | 'displayId'>): Rule => ({
   title: '중복 이메일 가입 거부',
@@ -44,7 +57,7 @@ const rule = (patch: Partial<Rule> & Pick<Rule, 'id' | 'displayId'>): Rule => ({
   createdAt: T0,
   updatedAt: T0,
   deletedAt: null,
-  confirmation: { state: 'unconfirmed' },
+  confirmation: CONFIRMED,
   ...patch,
 });
 
@@ -90,6 +103,31 @@ const QUARANTINED = judged(
   rule({ id: '01JA0000000000000000000005', displayId: 'RULE-005', kind: 'tech-constraint' }),
   'quarantined',
 );
+/** 에이전트가 만들고 사람이 아직 보지 않은 규칙 (판정 통과) */
+const UNCONFIRMED = judged(
+  rule({
+    id: '01JA0000000000000000000008',
+    displayId: 'RULE-008',
+    confirmation: { state: 'unconfirmed' },
+  }),
+  'pass',
+);
+/** 대체된 규칙: 폐기 전 판정은 실패, 미확인 */
+const RETIRED: RuleWithJudgment = {
+  ...judged(
+    rule({
+      id: '01JA0000000000000000000009',
+      displayId: 'RULE-009',
+      confirmation: { state: 'unconfirmed' },
+    }),
+    'fail',
+  ),
+  retirement: {
+    retiredAt: T0,
+    supersededBy: { id: '01JA0000000000000000000008', displayId: 'RULE-008' },
+    normChangeSeq: 6,
+  },
+};
 
 describe('WHEN 조건 (진술에서 그대로 자른다)', () => {
   it.each([
@@ -195,7 +233,7 @@ describe('카드', () => {
     expect(ruleCard(FRESH).author).toBe('human');
   });
 
-  it('예외: 판정 상태(통과 외)는 상태 배지 규칙대로 2줄 예외, 잠정 승인은 "잠정"', () => {
+  it('예외: 판정 상태(통과 외)는 상태 배지 규칙대로 2줄 예외, 그다음 미확인. 확인됨은 예외 없음 (옛 잠정 자리)', () => {
     const marks = (item: RuleWithJudgment) => {
       const card = ruleCard(item);
       return [...card.statuses.flatMap(statusExceptions), ...card.exceptions].map((m) => m.label);
@@ -205,10 +243,47 @@ describe('카드', () => {
     expect(marks(FRESH)).toEqual(['미판정']);
     expect(marks(QUARANTINED)).toEqual(['격리']);
     expect(marks(judged(PASS.rule, 'needs_recheck'))).toEqual(['재검증 필요']);
-    expect(marks(PROVISIONAL)).toEqual(['미판정', '잠정']);
-    expect(ruleCard(PROVISIONAL).exceptions).toEqual([
-      { key: 'provisional', label: '잠정', tone: 'info' },
+    expect(marks(UNCONFIRMED)).toEqual(['미확인']);
+    expect(marks(judged(UNCONFIRMED.rule, 'fail'))).toEqual(['실패', '미확인']);
+    expect(ruleCard(UNCONFIRMED).exceptions).toEqual([
+      { key: 'unconfirmed', label: '미확인', tone: 'info' },
     ]);
+    // 잠정 표시는 없어졌다 (ADR-100 명세 변경 목록 SCR-03)
+    expect(marks(PROVISIONAL)).toEqual(['미판정']);
+  });
+
+  it('폐기된 규칙: 폐기 전 판정 예외 없이 폐기 · 미확인 (폐기 뒤 판정하지 않음, ADR-112)', () => {
+    const card = ruleCard(RETIRED);
+    expect(card.statuses).toEqual([]);
+    expect(card.exceptions).toEqual([
+      { key: 'retired', label: '폐기', tone: 'warning' },
+      { key: 'unconfirmed', label: '미확인', tone: 'info' },
+    ]);
+    const confirmedRetired = { ...RETIRED, rule: { ...RETIRED.rule, confirmation: CONFIRMED } };
+    expect(ruleCard(confirmedRetired).exceptions.map((m) => m.label)).toEqual(['폐기']);
+    expect(isRetiredRule(RETIRED)).toBe(true);
+    expect(isRetiredRule(PASS)).toBe(false);
+    // 기본 목록에서 숨기는 기준 = 폐기 사실, 토글 이름은 [폐기 포함]
+    expect(RETIRED_HIDDEN.label).toBe('폐기 포함');
+    expect([PASS, RETIRED, UNCONFIRMED].filter(RETIRED_HIDDEN.isHidden)).toEqual([RETIRED]);
+  });
+
+  it('제목 · WHEN 조건 · 검색 대상은 숨은 글자를 보이는 표기로 (방향 제어 글자가 글 순서를 바꾸지 않게)', () => {
+    const tricky = judged(
+      rule({
+        id: '01JA000000000000000000000A',
+        displayId: 'RULE-010',
+        title: '가입 \u202e거부\u202c',
+        statement: 'WHEN 가입을\u200b 요청하면 THE SYSTEM SHALL 거부한다',
+      }),
+      'pass',
+    );
+    const card = ruleCard(tricky);
+    expect(card.title).toBe('가입 \\u202e거부\\u202c');
+    expect(card.note).toBe('WHEN 가입을\\u200b 요청하면');
+    expect(ruleSearchText(tricky)).toBe(
+      '가입 \\u202e거부\\u202c RULE-010 WHEN 가입을\\u200b 요청하면',
+    );
   });
 
   it('검색 대상은 카드에 보이는 제목 · 표시 ID · WHEN 조건', () => {
@@ -230,18 +305,29 @@ describe('카드', () => {
 });
 
 describe('준수 집계 묶음', () => {
-  it('잠정 승인 → 잠정, 최신 판정 격리 → 격리, 나머지 승인 규칙 → 판정 가능(분모)', () => {
+  it('최신 판정 격리 → 격리, 나머지 효력 규칙 → 판정 가능(분모), 폐기 · 효력 상태 아님은 어디에도 없음', () => {
     expect(complianceGroup(PASS)).toBe('judgeable');
     expect(complianceGroup(FAIL)).toBe('judgeable');
     expect(complianceGroup(FRESH)).toBe('judgeable');
     expect(complianceGroup(QUARANTINED)).toBe('quarantined');
-    expect(complianceGroup(PROVISIONAL)).toBe('provisional');
-    expect(complianceGroup(judged(PROVISIONAL.rule, 'quarantined'))).toBe('provisional');
+    expect(complianceGroup(PROVISIONAL)).toBeNull();
+    expect(complianceGroup(RETIRED)).toBeNull();
+  });
+
+  it('사람 확인 = 판정 가능 가운데 확인됨 (판정 가능과 함께 가진다, ADR-100 D7)', () => {
+    expect(complianceValues(PASS)).toEqual(['judgeable', 'human_confirmed']);
+    expect(complianceValues(UNCONFIRMED)).toEqual(['judgeable']);
+    // 격리는 사람 확인 기준 분모에도 들지 않는다
+    expect(complianceValues(QUARANTINED)).toEqual(['quarantined']);
+    expect(complianceValues(RETIRED)).toEqual([]);
+    expect(
+      complianceValues({ ...RETIRED, rule: { ...RETIRED.rule, confirmation: CONFIRMED } }),
+    ).toEqual([]);
   });
 });
 
 describe('필터 기준', () => {
-  const items = [PASS, FAIL, FRESH, PROVISIONAL, QUARANTINED];
+  const items = [PASS, FAIL, FRESH, PROVISIONAL, QUARANTINED, UNCONFIRMED, RETIRED];
   const entries: ListEntry<RuleWithJudgment>[] = items.map((item, index) => ({
     item,
     key: item.rule.id,
@@ -254,21 +340,22 @@ describe('필터 기준', () => {
   const labels = (id: string) =>
     RULE_CRITERIA.find((c) => c.id === id)?.options.map((o) => o.label);
 
-  it('6종: 판정 · 변이 · 준수 집계 · 블록 · 위험도 · 종류 순서', () => {
+  it('7종: 판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류 순서', () => {
     expect(RULE_CRITERIA.map((c) => c.label)).toEqual([
       '판정',
       '변이',
       '준수 집계',
+      '확인',
       '블록',
       '위험도',
       '종류',
     ]);
   });
 
-  it('판정: 5종, 개수는 최신 판정에서', () => {
+  it('판정: 5종, 개수는 최신 판정에서 (폐기된 규칙은 세지 않는다)', () => {
     expect(labels('judgment')).toEqual(['통과', '실패', '미판정', '격리', '재검증 필요']);
     expect(counts['judgment']).toEqual({
-      pass: 1,
+      pass: 2,
       fail: 1,
       unjudged: 2,
       quarantined: 1,
@@ -299,14 +386,21 @@ describe('필터 기준', () => {
     });
   });
 
-  it('준수 집계: 판정 가능 · 잠정 · 격리', () => {
-    expect(labels('compliance')).toEqual(['판정 가능', '잠정', '격리']);
-    expect(counts['compliance']).toEqual({ judgeable: 3, provisional: 1, quarantined: 1 });
+  it('준수 집계: 판정 가능 · 사람 확인 · 격리 (폐기 · 효력 상태 아님은 세지 않는다)', () => {
+    expect(labels('compliance')).toEqual(['판정 가능', '사람 확인', '격리']);
+    // 판정 가능 = PASS · FAIL · FRESH · UNCONFIRMED, 사람 확인 = 그 가운데 확인됨인 PASS · FAIL · FRESH
+    expect(counts['compliance']).toEqual({ judgeable: 4, human_confirmed: 3, quarantined: 1 });
+  });
+
+  it('확인: 미확인 · 확인됨, 개수는 확인 상태에서 (폐기된 규칙도 보이는 카드라 센다)', () => {
+    expect(labels('confirmation')).toEqual(['미확인', '확인됨']);
+    expect(counts['confirmation']).toEqual({ unconfirmed: 2, confirmed: 5 });
+    expect(CONFIRMATION_LABELS).toEqual(CONFIRMATION_STATE_LABELS);
   });
 
   it('종류: 아키텍처 · 기술 제약 · 비즈니스', () => {
     expect(labels('kind')).toEqual(['아키텍처', '기술 제약', '비즈니스']);
-    expect(counts['kind']).toEqual({ architecture: 1, 'tech-constraint': 1, business: 3 });
+    expect(counts['kind']).toEqual({ architecture: 1, 'tech-constraint': 1, business: 5 });
   });
 
   it('종류 · 위험도 표시명이 shared와 같다', () => {

@@ -2,6 +2,8 @@
 // - 검색: 공백으로 나눈 단어가 전부 들어 있어야 한다(대소문자 무시)
 // - 칩: 기준 안 여러 값 = OR, 기준끼리 = AND
 // - [문제만]: 문제 항목(카드 2줄째 예외 1개 이상)만
+// - 기본 숨김 항목(예: 규칙 화면의 폐기된 규칙, ADR-114)은 `includeHidden`(화면의 [폐기 포함] 같은 토글)이 켜졌을 때만 목록에
+//   들어간다. 거르기는 목록(ListView)이 이 계산 앞에서 한다(꺼져 있으면 개수 · 결과 줄에도 들어가지 않는다)
 // - 칩 값별 개수: 그 기준을 뺀 나머지 조건(검색 · 다른 기준 · [문제만])을 지키는 항목 중 그 값을 가진 수
 // - 정렬: 문제 항목 먼저, 같은 묶음 안에서는 시각 최신순(시각 없음은 뒤), 같으면 원래 순서
 // DOM · React에 의존하지 않는다 (test/list-filter.test.ts).
@@ -27,12 +29,15 @@ export interface FilterState {
   /** 기준 ID → 고른 값들. 빈 배열 · 없는 키 = 그 기준 미사용 */
   selected: Readonly<Record<string, readonly string[]>>;
   problemOnly: boolean;
+  /** 기본 숨김 항목도 보이는지 (목록이 숨김 기준을 줄 때만 뜻이 있다, 기본 꺼짐) */
+  includeHidden: boolean;
 }
 
 export const EMPTY_FILTER: FilterState = Object.freeze({
   query: '',
   selected: Object.freeze({}),
   problemOnly: false,
+  includeHidden: false,
 });
 
 /** 필터 계산에 쓰는 항목 한 건 (화면 데이터에서 한 번 만든다). */
@@ -141,10 +146,11 @@ export const sortProblemsFirst = <T>(entries: readonly ListEntry<T>[]): ListEntr
     return a.index - b.index;
   });
 
-/** 필터 사용 중이면 true (검색어 · 고른 칩 값 · [문제만] 중 하나라도). 결과 줄 표시 조건. */
+/** 필터 사용 중이면 true (검색어 · 고른 칩 값 · [문제만] · 숨김 포함 중 하나라도). 결과 줄 표시 조건. */
 export const isFilterActive = (state: FilterState): boolean =>
   state.query.trim() !== '' ||
   state.problemOnly ||
+  state.includeHidden ||
   Object.values(state.selected).some((values) => values.length > 0);
 
 /** 기준 `criterionId`의 값 `value`를 켜거나 끈다. */
