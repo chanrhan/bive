@@ -278,6 +278,70 @@ describe('sessions', () => {
   });
 });
 
+describe('세션의 규범 입력 기록 (M7-08 #220, ADR-108)', () => {
+  const NORM_INPUT = {
+    summary: {
+      requirements: { total: 2, included: 2, omitted: 0 },
+      rules: { total: 3, included: 2, omitted: 1 },
+      truncated: true,
+    },
+    requirementDisplayIds: ['REQ-001', 'REQ-002'],
+    ruleDisplayIds: ['RULE-001', 'RULE-003'],
+  };
+
+  it('세션을 열 때 받은 규범 입력의 기록을 남기고 init · 종료 뒤에도 그대로다. 바꾸는 UPDATE는 DB가 거부하고, 생략하면 null', () => {
+    withStore((store) => {
+      const { run, steps } = seedRun(store);
+      const base = {
+        runId: run.id,
+        stepId: stepOf(steps, 'test_writing').id,
+        role: 'test-writer' as const,
+        model: 'model-a',
+        workDir: '/tmp/w',
+        startedAt: T0,
+      };
+      const recorded = store.sessions.start({ ...base, id: newId(), normInput: NORM_INPUT });
+      expect(recorded.normInput).toEqual(NORM_INPUT);
+      store.sessions.recordInit(recorded.id, { sdkSessionId: 's', tools: [], mcpServers: [] });
+      store.sessions.end(recorded.id, { endReason: 'success', endedAt: T1 });
+      expect(store.sessions.get(recorded.id)?.normInput).toEqual(NORM_INPUT);
+      const without = store.sessions.start({ ...base, id: newId() });
+      expect(store.sessions.get(without.id)?.normInput).toBeNull();
+      // 끝나지 않은 세션이어도 기록은 바꿀 수 없다 (세션을 열 때 정해진다)
+      expect(() =>
+        store.db.prepare(`UPDATE sessions SET norm_input = '{}' WHERE id = ?`).run(without.id),
+      ).toThrow(/규범 입력 기록은 바꿀 수 없습니다/);
+      // JSON 객체가 아니면 DB가 거부한다
+      expect(() =>
+        store.db
+          .prepare(
+            `INSERT INTO sessions (id, run_id, step_id, role, model, work_dir, model_usage, tools,
+             mcp_servers, started_at, norm_input) VALUES (?, ?, ?, 'test-writer', 'model-a', '/tmp/w',
+             '{}', '[]', '[]', ?, '[]')`,
+          )
+          .run(newId(), run.id, base.stepId, T0),
+      ).toThrow(/CHECK constraint failed/);
+      // 읽기 스키마가 수 · 표시 ID 수 · 잘림의 어긋남을 막는다 (저장 전에 거부, 행이 남지 않는다)
+      const before = store.sessions.listByRun(run.id).length;
+      for (const bad of [
+        { ...NORM_INPUT, ruleDisplayIds: ['RULE-001'] },
+        { ...NORM_INPUT, summary: { ...NORM_INPUT.summary, truncated: false } },
+        { ...NORM_INPUT, requirementDisplayIds: ['RULE-001', 'REQ-002'] },
+        {
+          ...NORM_INPUT,
+          summary: {
+            ...NORM_INPUT.summary,
+            rules: { total: 3, included: 2, omitted: 0 },
+          },
+        },
+      ]) {
+        expect(() => store.sessions.start({ ...base, id: newId(), normInput: bad })).toThrow();
+      }
+      expect(store.sessions.listByRun(run.id)).toHaveLength(before);
+    });
+  });
+});
+
 describe('세션 한도 · 비용 기록 (M1-17, ADR-067)', () => {
   it('세션에 넘긴 한도를 저장하고 바꿀 수 없다. 한도 없이 연 세션은 null', () => {
     withStore((store) => {

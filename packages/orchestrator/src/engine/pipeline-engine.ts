@@ -1286,6 +1286,7 @@ export class PipelineEngine {
         model,
         workDir: request.workDir,
         budget: limits,
+        normInput: request.normInput ?? null,
         startedAt: this.#timestamp(),
       }),
     );

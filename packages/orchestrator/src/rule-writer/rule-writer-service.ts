@@ -15,7 +15,8 @@
 //   거기에 채운다. 화면 · `ruleWriter.status`는 이 기록과 세션 기록에서만 상태를 만든다 (M3-26, ADR-099)
 // - 시도 기록이 바뀌면(대기 · 시작 · 끝 · 생략) `onChanged`로 알린다 (`event.ruleWriter.changed`)
 // - 규범 입력(M7-07 #219, ADR-100 K1 · A15, ADR-106): 세션을 열기 직전에 효력 있는 요구사항 · 규칙을 읽어 작업 지시에 읽기 전용
-//   자료로 싣는다(도구가 아니라 프롬프트로만). 받은 수 · 잘린 사실은 세션 기록(`normInput`)과 로그에 남긴다. 규칙 생성마다 받는
+//   자료로 싣는다(도구가 아니라 프롬프트로만). 받은 수 · 잘린 사실은 세션 기록(`normInput`, 세션 행에도, M7-08 ADR-108)과
+//   로그에 남긴다. 규칙 생성마다 받는
 //   모순 판단은 반영 모듈이 같은 트랜잭션에서 규범 변경 기록(판단)에 남긴다
 // - 세션 행이 있는 세션이 끝나면 종료 기록 저장 뒤 `onSessionEnded`를 부른다. 오케스트레이터가 이것으로 실행을 자동 시작한다
 //   (M7-05 #217, ADR-107). 세션 안에서는 실행을 만들 수 없다(규칙 작성 역할의 도구는 규칙 생성 하나)
@@ -33,6 +34,7 @@ import {
   type Requirement,
   type RuleWriterSkipReason as StoredSkipReason,
   type SessionEndReason,
+  type SessionNormInput,
   SettingsIncompleteData,
   TOOL_CALL_NAME_DISPLAY_MAX,
   type ToolManifestEntry,
@@ -54,6 +56,7 @@ import {
   collectNormInput,
   type NormInput,
   type NormInputSummary,
+  normInputRecord,
   normInputSummaryText,
 } from '../norms/norm-input.js';
 import {
@@ -131,12 +134,11 @@ export interface RuleWriterSessionRecord {
   endedAt: string | null;
 }
 
-/** 세션이 받은 규범 입력의 기록: 수 · 잘린 사실과 실은 항목의 표시 ID (ADR-100 A15). */
-export interface RuleWriterNormInputRecord {
-  readonly summary: NormInputSummary;
-  readonly requirementDisplayIds: readonly string[];
-  readonly ruleDisplayIds: readonly string[];
-}
+/**
+ * 세션이 받은 규범 입력의 기록: 수 · 잘린 사실과 실은 항목의 표시 ID (ADR-100 A15). 테스트 작성 · 구현 세션과 같은 모양이고
+ * 세션 행(`sessions.norm_input`)에도 남는다(M7-08, ADR-108).
+ */
+export type RuleWriterNormInputRecord = SessionNormInput;
 
 export interface RuleWriterStartInput {
   readonly projectId: string;
@@ -611,6 +613,7 @@ export class RuleWriterService implements RuleWriterLauncher {
           model,
           workDir,
           budget,
+          normInput: record.normInput,
           startedAt: record.startedAt ?? this.#timestamp(),
         }),
       );
@@ -731,11 +734,7 @@ export class RuleWriterService implements RuleWriterLauncher {
     const norms = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
       collectNormInput(store, { requirementIds: [requirement.id], ruleIds: [] }),
     );
-    record.normInput = {
-      summary: norms.summary,
-      requirementDisplayIds: norms.requirements.map((entry) => entry.displayId),
-      ruleDisplayIds: norms.rules.map((entry) => entry.displayId),
-    };
+    record.normInput = normInputRecord(norms);
     const truncated = norms.summary.truncated ? ' 잘림' : '';
     this.#log(
       `규칙 작성 규범 입력${truncated} (${record.requirementDisplayId}, ${normInputSummaryText(norms.summary)})`,

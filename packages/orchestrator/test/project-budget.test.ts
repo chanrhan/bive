@@ -82,6 +82,7 @@ const session = (totalCostUsd: number | null, extra: Partial<Session> = {}): Ses
   modelUsage: {},
   firstTurnCacheWrite: null,
   budget: { maxBudgetUsd: 0.5, maxTurns: 20 },
+  normInput: null,
   tools: [],
   mcpServers: [],
   startedAt: '2026-11-21T09:00:00.000Z',

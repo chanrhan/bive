@@ -1,6 +1,8 @@
 // 테스트 작성 단계 실행기 (RUN-03 · RUN-04 · JDG-01 · NFR-02, architecture.md 4장 2단계, ADR-024 · ADR-026 · ADR-068).
 // 1. 세션 디렉터리 `$BIVE_HOME/work/<projectId>/sessions/<ID>/`(0700)에 허용 입력 사본만 둔다 (`test-writer/inputs.ts`)
-// 2. test-writer 세션을 연다: 세션 루트 = 세션 디렉터리, 쓰기는 대상 규칙 폴더 `bive-acceptance/<RULE-ID>/`만
+// 2. test-writer 세션을 연다: 세션 루트 = 세션 디렉터리, 쓰기는 대상 규칙 폴더 `bive-acceptance/<RULE-ID>/`만.
+//    작업 지시에는 세션을 열기 직전에 읽은 효력 있는 규범(초점 = 대상 규칙)을 싣고, 받은 표시 ID · 수를 세션 행에 남긴다
+//    (M7-08 #220, ADR-108). 재시도 · 재개의 새 세션은 그때 다시 읽는다
 // 3. 종료 조건: 세션이 성공으로 끝나고, 대상 규칙마다 `*.acc.ts`가 1개 이상이고, 모든 파일이 import 허용 목록을 지킨다
 //    (`judge/acceptance-lint.ts`). 아니면 `unmet` → 엔진이 새 세션으로 재시도(상한 2회, ADR-026)
 // 4. 통과면 결과 파일과 BIVE 선언 파일을 실행 워크트리에 옮기고 `passed` → 엔진이 커밋한다. 옮긴 파일이 프로젝트의
@@ -15,6 +17,7 @@ import { createUlidGenerator, type Step } from '@bive/shared';
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import { lintAcceptanceSource } from '../judge/acceptance-lint.js';
+import { collectNormInput, normInputRecord } from '../norms/norm-input.js';
 import {
   applyTestWriterOutputs,
   collectTestWriterOutputs,
@@ -196,14 +199,20 @@ export const createTestWritingExecutor =
         sessionDir,
         rules,
       });
+      // 효력 있는 규범은 작업 지시의 글로만 준다 (파일로 복사하지 않는다, ADR-100 A14)
+      const norms = context.read((store) =>
+        collectNormInput(store, { requirementIds: [], ruleIds: context.run.targetRuleIds }),
+      );
       const session = await context.runSession({
         workDir: sessionDir,
         systemPrompt: TEST_WRITER_SYSTEM_PROMPT,
         prompt: testWriterTaskPrompt({
           runDisplayId: context.run.displayId,
           rules,
+          norms,
           feedback: previousFeedback(context.steps, context.step),
         }),
+        normInput: normInputRecord(norms),
         vars: {
           ruleId: ruleIds[0] ?? '',
           ruleIds: ruleIds.join(','),
