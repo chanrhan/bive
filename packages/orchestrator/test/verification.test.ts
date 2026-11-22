@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { INTERRUPTED_EXIT_DETAIL } from '../src/engine/pipeline-engine.js';
 import type { PipeServer } from '../src/ipc/server.js';
+import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { createRun } from '../src/runs/run-service.js';
 import {
   basisOf,
@@ -421,6 +422,60 @@ describe('verification.summary', () => {
       { kind: 'test_writing', status: 'running', attempt: 1 },
       { kind: 'red_check', status: 'pending', attempt: 1 },
     ]);
+  });
+
+  it('폐기된 규칙은 지금의 준수 분모 · 규칙 목록에서 빠지고 판정 이력은 지워지지 않는다 (M7-09 #221, ADR-100 JDG-03 · D6, ADR-112)', async () => {
+    const seeded = h.read((store) => {
+      const kept = insertRule(store, '남는 규칙', 'approved');
+      const retired = insertRule(store, '폐기 규칙', 'approved');
+      const run = seedRun(store, {
+        ruleIds: [kept.id, retired.id],
+        at: T0 + 10_000,
+        sessions: [{ costUsd: 0.1, turns: 1 }],
+        status: 'merged',
+        headCommit: SHA_C,
+        mergeCommit: SHA_A,
+      });
+      store.judgments.record([
+        judgment(kept, 'pass', judgedIn(store, run), T0 + 12_000, SHA_C),
+        judgment(retired, 'fail', judgedIn(store, run), T0 + 12_000, SHA_C),
+      ]);
+      return { kept, retired };
+    });
+    const before = await summary();
+    expect(before.compliance).toEqual({ passed: 1, judgeable: 2 });
+    expect(before.denominator).toEqual([seeded.kept.id, seeded.retired.id]);
+
+    h.read((store) =>
+      retireAgentRule(
+        store,
+        {
+          ruleId: seeded.retired.id,
+          grounds: `진술 "${seeded.retired.statement}"과 새 요구사항이 모순`,
+          author: { kind: 'agent', role: 'rule-writer' },
+          sessionId: newId(),
+        },
+        { now: Date.now },
+      ),
+    );
+    const after = await summary();
+    // 분모 · 목록에서 빠져 준수 값이 바뀐다 (폐기 수 표시는 M7-15 · M7-16)
+    expect(after.compliance).toEqual({ passed: 1, judgeable: 1 });
+    expect(after.denominator).toEqual([seeded.kept.id]);
+    expect(after.rules.map((row) => row.rule.id)).toEqual([seeded.kept.id]);
+    expect(after.basis).toEqual(before.basis);
+    // 판정 이력 · 규칙 행은 남는다
+    h.read((store) => {
+      expect(store.judgments.listByRule(seeded.retired.id).map((item) => item.status)).toEqual([
+        'fail',
+      ]);
+      expect(store.rules.get(seeded.retired.id)?.deletedAt).toBeNull();
+    });
+    const history = await h.client.call('judgment.list', {
+      projectId: h.project.id,
+      ruleId: seeded.retired.id,
+    });
+    expect(history.judgments).toHaveLength(1);
   });
 
   it('진행 중 실행의 구현 판정은 준수 · 목록을 바꾸지 않는다', async () => {

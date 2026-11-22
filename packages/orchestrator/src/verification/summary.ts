@@ -10,7 +10,8 @@
 //   트리와 같다, ADR-069). 규칙별로 그중 최신(판정 시각 → ID). 구현 단계 판정 · 다른 실행 · 실행 밖 판정 · 미래 시각
 //   기록은 쓰지 않는다. 검사 · 병합 재검사는 승인된 규칙 전체(인수 테스트 폴더가 있는 것)를 판정하므로, 그 커밋에서
 //   판정되지 않은 규칙(그 뒤 승인 · 인수 테스트 없음)과 판정 기준이 없을 때는 미판정이다
-// - 준수: 분모 = 승인된(잠정 승인 제외, JDG-03) 규칙 중 위 판정이 격리가 아닌 것. 통과 = 분모 중 위 판정이 통과.
+// - 준수: 분모 = 효력 있는(잠정 승인 · 폐기 제외, JDG-03 · M7-09) 규칙 중 위 판정이 격리가 아닌 것. 통과 = 분모 중 위 판정이 통과.
+//   폐기된 규칙은 규칙 목록(`rules`)에서도 빠진다(판정 이력은 지우지 않는다, ADR-112).
 //   M1에는 격리 판정이 없어 규칙 화면 필터 `준수 집계: 판정 가능`(rulesView.ts `complianceGroup`)과 같은 목록이다
 // - 실행당 비용: 끝난 실행(병합 · 실패 · 예산 초과) 중 세션 비용을 모두 아는 실행(`usage.run.costUsd`가 있고
 //   값 모르는 세션 0개)의 비용 평균(1e-9 USD 반올림). 그런 실행이 없으면 `null`
@@ -38,15 +39,22 @@ import {
 import type { ProjectStore } from '@bive/store';
 
 import { toRuleJudgment } from '../judgments/latest-judgment.js';
+import { isEffectiveRule, retiredRuleSet, unretiredRules } from '../norms/effective.js';
 
 const NANO_PER_USD = 1e9;
 
 /** 지금보다 이만큼 넘게 미래인 판정 기록은 쓰지 않는다 (판정 기록 저장소의 최신 판정 조회와 같은 기준). */
 const FUTURE_LIMIT_MS = 60_000;
 
-/** 규칙이 준수 분모(판정 가능)에 드는지 (ADR-060 · ADR-072). */
-export const isJudgeable = (rule: Rule, judgment: RuleJudgment): boolean =>
-  rule.normState === 'approved' && judgment.status !== 'quarantined';
+/**
+ * 규칙이 준수 분모(판정 가능)에 드는지 (ADR-060 · ADR-072): 효력 있는 규칙(`norms/effective.ts`, 폐기된 규칙 제외 · M7-09)이고
+ * 판정이 격리가 아님. `retired` = 폐기된 규칙 ID.
+ */
+export const isJudgeable = (
+  rule: Rule,
+  judgment: RuleJudgment,
+  retired: ReadonlySet<string>,
+): boolean => isEffectiveRule(rule, retired) && judgment.status !== 'quarantined';
 
 /** 시각 → 정렬 값. 없거나 읽을 수 없으면 가장 앞. */
 const timeOf = (iso: string | null): number => {
@@ -244,11 +252,13 @@ export const verificationSummary = (
     };
   };
 
-  const rows = store.rules.list().map((rule) => {
+  // 폐기된 규칙은 목록 · 분모에서 뺀다 (판정 이력은 남는다, M7-09 · ADR-112. 폐기 표시 · 폐기 수는 M7-15 · M7-16)
+  const retired = retiredRuleSet(store);
+  const rows = unretiredRules(store).map((rule) => {
     const judgment = toRuleJudgment(judged.get(rule.id) ?? null);
     return { rule, judgment, run: linkOf(judgment.latest?.runId ?? null) };
   });
-  const judgeable = rows.filter(({ rule, judgment }) => isJudgeable(rule, judgment));
+  const judgeable = rows.filter(({ rule, judgment }) => isJudgeable(rule, judgment, retired));
   const passed = judgeable.filter(({ judgment }) => judgment.status === 'pass').length;
 
   const finished = runs

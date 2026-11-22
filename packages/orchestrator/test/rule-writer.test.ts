@@ -46,7 +46,7 @@ import {
   type RuleWriterSessionRecord,
   RuleWriterService,
 } from '../src/rule-writer/rule-writer-service.js';
-import { toolDefinitions } from '../src/tools/definitions.js';
+import { MIN_QUOTE_LENGTH, toolDefinitions } from '../src/tools/definitions.js';
 import { earsStatementProblem, isEarsStatement } from '../src/tools/ears.js';
 // 규칙 화면의 WHEN 조건 표시와 교차 확인한다 (DOM · React에 의존하지 않는 순수 함수, ADR-060 · ADR-062)
 import { whenCondition } from '../../app/src/renderer/src/screens/rules/rulesView.js';
@@ -61,6 +61,9 @@ const human = { kind: 'human' } as const satisfies Author;
 /** roadmap M1 흐름 2: rule-writer만 먼저 저장한다 */
 const RULE_WRITER_SETTINGS: RoleSettings = { model: 'test-model', maxBudgetUsd: 1, maxTurns: 20 };
 const RUN_LIMITS: RunLimits = { maxBudgetUsd: 5, maxTurns: 200 };
+
+/** 규칙 작성 역할의 도구: 규칙 생성 · 폐기 · 대체 (M7-09 #221, ADR-112). */
+const RULE_WRITER_TOOLS = ['propose_rule', 'retire_rule', 'supersede_rule'];
 
 /** 효력 있는 규범이 없는 입력 (프롬프트 문장 시험용). */
 const NO_NORMS: NormInput = {
@@ -415,7 +418,7 @@ describe('requirement.create 뒤 rule-writer 세션 (happy-path)', () => {
           role: 'rule-writer',
           endReason: 'success',
           sdkSessionId: record.sdkSessionId,
-          tools: ['propose_rule'],
+          tools: RULE_WRITER_TOOLS,
           mcpServers: ['bive'],
           totalCostUsd: record.result?.total_cost_usd,
         }),
@@ -712,7 +715,7 @@ describe('propose_rule 검증 (제목 · EARS 진술 · 검사 종류 · 부모 
 });
 
 describe('도구 목록 · 모델 · 한도 (ADR-024)', () => {
-  it('도구 목록은 propose_rule 하나이고 설정의 rule-writer 모델 · 한도로 시작한다', async () => {
+  it('도구 목록은 규범 도구(propose_rule · retire_rule · supersede_rule)뿐이고 설정의 rule-writer 모델 · 한도로 시작한다', async () => {
     const h = await startHarness();
     // 다른 역할 값과 섞이지 않는지 보려고 다른 값을 함께 저장한다
     const other: RoleSettings = { model: 'other-model', maxBudgetUsd: 2, maxTurns: 100 };
@@ -725,14 +728,14 @@ describe('도구 목록 · 모델 · 한도 (ADR-024)', () => {
     const requirement = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
     await h.service.whenSettled(h.project.id, requirement.id);
 
-    expect(toolDefinitions('rule-writer').map((definition) => definition.name)).toEqual([
-      'propose_rule',
-    ]);
+    expect(toolDefinitions('rule-writer').map((definition) => definition.name)).toEqual(
+      RULE_WRITER_TOOLS,
+    );
     expect(h.specs).toHaveLength(1);
     const [spec] = h.specs;
     if (spec === undefined) throw new Error('세션 없음');
     expect(spec.role).toBe('rule-writer');
-    expect(spec.tools.toolNames).toEqual(['propose_rule']);
+    expect(spec.tools.toolNames).toEqual(RULE_WRITER_TOOLS);
     expect(spec.model).toBe('test-model');
     expect(spec.budget).toEqual({ maxBudgetUsd: 1, maxTurns: 20 });
     expect(spec.runId).toBeUndefined();
@@ -748,13 +751,13 @@ describe('도구 목록 · 모델 · 한도 (ADR-024)', () => {
     const init = h.events.find((event) => event.type === 'init');
     expect(init).toMatchObject({
       model: 'test-model',
-      tools: ['propose_rule'],
+      tools: RULE_WRITER_TOOLS,
       mcpServers: ['bive'],
     });
     expect(onlyRecord(h, requirement.id)).toMatchObject({
       model: 'test-model',
       budget: { maxBudgetUsd: 1, maxTurns: 20 },
-      manifest: { role: 'rule-writer', tools: ['propose_rule'], mcpServerCount: 1 },
+      manifest: { role: 'rule-writer', tools: RULE_WRITER_TOOLS, mcpServerCount: 1 },
     });
     expect(h.logs.some((line) => line.includes('모델 test-model, 한도 USD 1 · 턴 20'))).toBe(true);
   });
@@ -793,7 +796,7 @@ describe('도구 목록 · 모델 · 한도 (ADR-024)', () => {
     expect(record).toMatchObject({
       status: 'ended',
       endReason: 'guard_violation',
-      manifest: { role: 'rule-writer', tools: ['propose_rule', 'mcp__evil__run'] },
+      manifest: { role: 'rule-writer', tools: [...RULE_WRITER_TOOLS, 'mcp__evil__run'] },
     });
     expect(record.toolCalls).toEqual([]);
     expect(h.read((store) => store.rules.list())).toEqual([]);
@@ -1454,8 +1457,13 @@ describe('사후 확인 전환: 프롬프트 · 대기 중이던 제안 (M7-02 #
       },
       NO_NORMS,
     );
-    const [tool] = toolDefinitions('rule-writer');
-    for (const text of [RULE_WRITER_SYSTEM_PROMPT, task, tool?.description ?? '']) {
+    const tools = toolDefinitions('rule-writer');
+    const [tool] = tools;
+    for (const text of [
+      RULE_WRITER_SYSTEM_PROMPT,
+      task,
+      ...tools.map((definition) => definition.description),
+    ]) {
       expect(text).not.toMatch(APPROVAL_PREMISE);
       expect(text).not.toContain('제안');
     }
@@ -1464,6 +1472,29 @@ describe('사후 확인 전환: 프롬프트 · 대기 중이던 제안 (M7-02 #
     expect(tool?.description).toContain('바로 효력');
     // 이 변경 전 문장이 남아 있지 않다 (ADR-100 결과 절의 ADR-062 항목)
     expect(RULE_WRITER_SYSTEM_PROMPT).not.toContain('제안은 사람이 승인해야 규칙이 되고');
+  });
+
+  it('시스템 프롬프트에 폐기 · 대체 도구의 쓰임이 고정 문장으로 있고, 기존 규칙을 폐기하는 도구가 없다는 옛 문장은 없다 (M7-09 #221, ADR-112, 스냅샷)', () => {
+    const lines = RULE_WRITER_SYSTEM_PROMPT.split('\n');
+    const start = lines.indexOf(
+      '모순의 해소: 이번 요구사항이 기존 규칙의 내용을 바꾸거나 없애라고 하면, 기존 규칙을 그대로 두지 말고 폐기 · 대체한다.',
+    );
+    expect(start).toBeGreaterThan(0);
+    expect(lines.slice(start)).toEqual([
+      '모순의 해소: 이번 요구사항이 기존 규칙의 내용을 바꾸거나 없애라고 하면, 기존 규칙을 그대로 두지 말고 폐기 · 대체한다.',
+      '- supersede_rule: ruleId의 기존 규칙을 폐기하고 같은 호출의 새 규칙으로 바꾼다(폐기와 새 규칙 반영이 한 번에 일어난다). 새 규칙의 칸은 propose_rule과 같고, contradiction에는 대상 밖의 효력 있는 규칙과의 모순 판단을 적는다(대상은 넣지 않는다). 대체로 생긴 새 규칙의 실행은 자동으로 시작된다.',
+      '- retire_rule: ruleId의 기존 규칙을 폐기만 한다. 새 규칙이 없으므로 새 실행은 생기지 않는다.',
+      '- 두 도구 모두 grounds에 대상 규칙의 진술이나 최근 판정의 인수 테스트 케이스 이름의 일부를 글자 그대로(연속 10자 이상) 옮겨 적고, 왜 그 규칙이 더는 효력을 가지면 안 되는지 적는다. 인용이 없으면 거부된다.',
+      '- 폐기된 규칙은 판정 · 실행의 기준에서 빠진다(규칙과 판정 이력은 남는다). 폐기 · 대체는 근거와 함께 규범 변경 기록에 남고 사람이 나중에 본다. 모순이 아니면 폐기 · 대체하지 않는다.',
+      '- 자료에서 부모 요구사항이 없음 (내장 구조 규칙)인 규칙은 폐기 · 대체할 수 없다.',
+    ]);
+    expect(RULE_WRITER_SYSTEM_PROMPT).toContain(
+      '기존 규칙은 retire_rule(폐기)과 supersede_rule(대체)로만 바꾼다.',
+    );
+    expect(RULE_WRITER_SYSTEM_PROMPT).not.toContain('폐기하는 도구는 없다');
+    expect(RULE_WRITER_SYSTEM_PROMPT).not.toContain('기존 규칙을 고치거나 지우는 도구');
+    // 인용 최소 길이 문장은 제품 상수와 같다
+    expect(RULE_WRITER_SYSTEM_PROMPT).toContain(`연속 ${String(MIN_QUOTE_LENGTH)}자 이상`);
   });
 
   it('이 변경 전부터 대기 중이던 제안은 proposal.approve(확인됨) · proposal.reject로 처리되고, 규칙 작성 세션은 새 제안을 만들지 않는다', async () => {
@@ -1750,6 +1781,7 @@ describe('규칙 작성 세션의 기존 규범 입력 · 모순 판단 기록 (
         '',
         `이 요구사항에서 규칙을 도출해 propose_rule로 만들어라. 모든 규칙의 parentRequirementId는 ${target.id}이다.`,
         '규칙마다 위 자료의 효력 있는 규칙과의 모순 판단을 contradiction에 적어라.',
+        '이 요구사항이 위 자료의 기존 규칙을 바꾸거나 없애라고 하면 propose_rule 대신 supersede_rule(대체) 또는 retire_rule(폐기)을 써라.',
       ].join('\n'),
     );
     // 틀: 자료가 끝 표시를 흉내 내도 줄 첫머리의 끝 표시 줄은 하나뿐이고, 자료의 모든 줄은 고정 머리말로 시작한다
@@ -1768,7 +1800,7 @@ describe('규칙 작성 세션의 기존 규범 입력 · 모순 판단 기록 (
     }
     // 규범은 도구가 아니라 작업 지시로만 받는다: 도구 목록 · 시스템 프롬프트는 그대로
     const spec = h.specs.at(-1);
-    expect(spec?.tools.toolNames).toEqual(['propose_rule']);
+    expect(spec?.tools.toolNames).toEqual(RULE_WRITER_TOOLS);
     expect(spec?.systemPrompt).toBe(RULE_WRITER_SYSTEM_PROMPT);
     expect(RULE_WRITER_SYSTEM_PROMPT).not.toContain('RULE-001');
     // 세션 기록: 받은 수와 실은 표시 ID
@@ -1915,6 +1947,64 @@ describe('규칙 작성 세션의 기존 규범 입력 · 모순 판단 기록 (
       ['judgment', 'contradiction'],
     ]);
     expect(listed.chain.valid).toBe(true);
+  });
+
+  it('contradiction: 둘째 요구사항의 세션이 자료에서 RULE-001을 보고 supersede_rule로 대체하면 RULE-001은 효력을 잃고(행 · 판정 이력은 남음) RULE-002가 바로 효력을 가지며, 그 뒤 세션의 규범 자료에는 RULE-001이 없다 (M7-09 #221, ADR-112)', async () => {
+    const h = await startHarness({ scenario: loadScenario('contradiction') });
+    await saveSettings(h);
+    const first = await createRequirement(h, '헬스 체크 응답에 서버 시각 포함');
+    await h.service.whenSettled(h.project.id, first.id);
+    const second = await createRequirement(h, '헬스 체크 응답에서 서버 시각 제거');
+    await h.service.whenSettled(h.project.id, second.id);
+
+    expect(h.specs).toHaveLength(2);
+    expect(blockLines(h.specs[1]?.prompt ?? '')).toEqual(
+      expect.arrayContaining(['- RULE-001', '- REQ-002 (이번 작업 대상)']),
+    );
+    const record = onlyRecord(h, second.id);
+    expect(record.toolCalls.map((call) => [call.name, call.status])).toEqual([
+      ['supersede_rule', 'ok'],
+    ]);
+    const results = h.events.flatMap((event) =>
+      event.type === 'tool_result' ? [event.result.content] : [],
+    );
+    expect(results.at(-1)).toBe(
+      '규칙 RULE-001을 폐기하고 RULE-002로 대체 (바로 효력, 사람은 나중에 봄)',
+    );
+    const turn = loadScenario('contradiction').roles['rule-writer']?.sessions[1]?.turns[0];
+    const grounds = turn !== undefined && 'tool' in turn ? String(turn.args.grounds) : '';
+    h.read((store) => {
+      const [rule1, rule2] = store.rules.list();
+      if (rule1 === undefined || rule2 === undefined) throw new Error('규칙 없음');
+      expect(record.ruleIds).toEqual([rule2.id]);
+      expect(store.ruleRetirements.list()).toEqual([
+        {
+          ruleId: rule1.id,
+          retiredAt: rule2.createdAt,
+          supersededBy: rule2.id,
+          normChangeSeq: 5,
+        },
+      ]);
+      expect(
+        store.normChanges.list().map((change) => [change.seq, change.kind, change.targetRef.id]),
+      ).toEqual([
+        [1, 'created', rule1.id],
+        [2, 'judgment', rule1.id],
+        [3, 'created', rule2.id],
+        [4, 'judgment', rule2.id],
+        [5, 'superseded', rule1.id],
+      ]);
+      expect(store.normChanges.list()[4]).toMatchObject({ reason: grounds, sessionId: record.id });
+      expect(store.normChanges.verify()).toMatchObject({ valid: true });
+      expect(store.approvalLog.list()).toEqual([]);
+      // 폐기는 삭제가 아니다
+      expect(rule1.deletedAt).toBeNull();
+      // 그 뒤의 규범 입력(모든 역할 공통)에는 RULE-001이 없다
+      const after = collectNormInput(store, { requirementIds: [], ruleIds: [] });
+      expect(after.rules.map((rule) => rule.displayId)).toEqual(['RULE-002']);
+    });
+    const listed = await h.client.call('rule.list', { projectId: h.project.id });
+    expect(listed.rules.map((entry) => entry.rule.displayId)).toEqual(['RULE-002']);
   });
 
   it('어긋난 모순 판단(없음 · 빈 근거 · 없는 규칙 · 효력 없는 규칙 · 모순 없음인데 대상 · 대상 없는 모순 · 중복)은 invalid_args로 사유와 함께 거부하고 아무것도 남기지 않는다', async () => {

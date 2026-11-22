@@ -1,5 +1,7 @@
 // `rule.*` 처리기 (NRM-02, NRM-04, JDG-02, M1-11, ADR-060, M7-03 #215 · ADR-109).
 // - 규칙 테이블의 규범(효력 · 잠정 승인)만 돌려준다. 승인 전 제안은 `proposals`에만 있으므로 섞이지 않는다 (NRM-04)
+// - `rule.list`는 폐기된 규칙을 빼고 돌려준다(M7-09 #221, ADR-112. 폐기 포함 옵션 · 폐기 표시는 M7-15). `rule.get` ·
+//   `judgment.list`는 폐기된 규칙도 돌려준다(판정 이력은 지우지 않는다)
 // - 규칙마다 최신 판정을 붙인다. 판정 기록이 없으면 미판정 (judgments/latest-judgment.ts)
 // - `judgment.list`: 규칙 상세의 실행 이력. 판정 기록 테이블(`judgments`)의 기록을 최신부터, 실행 표시 ID와 함께 (ADR-073)
 // - `rule.update`: 사람의 규칙 직접 편집(제목 · 진술, ADR-100 B② · A8). 사람 주체만 받고(에이전트 -32020) 편집 · 확인됨 ·
@@ -30,6 +32,7 @@ import {
   storedLatestJudgments,
   toRuleJudgment,
 } from '../judgments/latest-judgment.js';
+import { isEffectiveRule, retiredRuleSet, unretiredRules } from '../norms/effective.js';
 import { CONTROL_CHARACTERS, earsStatementProblem } from '../tools/ears.js';
 import { withProjectStore } from './project-store-access.js';
 import { RpcError, type MethodHandlers, type RequestContext } from './server.js';
@@ -142,8 +145,14 @@ const editRuleByHuman = (
     if (current.builtin) {
       throw conflict('builtin_rule', '내장 구조 규칙은 직접 편집할 수 없습니다');
     }
-    if (current.normState !== 'approved') {
-      throw conflict('rule_not_effective', `효력 없는 규칙입니다 (${current.normState})`);
+    // 효력 판정은 효력 모듈 한 곳 (잠정 · 폐기된 규칙은 효력이 없다, M7-09 · ADR-112). 폐기된 규칙의 편집도 같은 사유로 거부한다
+    if (!isEffectiveRule(current, retiredRuleSet(store))) {
+      throw conflict(
+        'rule_not_effective',
+        retiredRuleSet(store).has(current.id)
+          ? '폐기된 규칙입니다'
+          : `효력 없는 규칙입니다 (${current.normState})`,
+      );
     }
     if (input.expectedUpdatedAt !== undefined && input.expectedUpdatedAt !== current.updatedAt) {
       throw conflict(
@@ -206,7 +215,7 @@ export const createRuleHandlers = ({
   'rule.list': ({ projectId }) =>
     withProjectStore(biveHome, projectId, (store) => {
       const lookup = latestJudgments(store);
-      return { rules: store.rules.list().map((rule) => withJudgment(rule, lookup)) };
+      return { rules: unretiredRules(store).map((rule) => withJudgment(rule, lookup)) };
     }),
   'rule.get': ({ projectId, id }) =>
     withProjectStore(biveHome, projectId, (store) => {

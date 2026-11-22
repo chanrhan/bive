@@ -2,8 +2,9 @@
 // 마지막 구현 커밋(`Run.headCommit`)의 깨끗한 체크아웃에서 승인된 규칙 전체의 인수 테스트를 판정 러너로 돌린다(M1 검사 =
 // 인수 테스트만). 판정 전 인수 테스트 해시를 Red 확인 기록과 대조하고(다르면 `failed`(`guard_violation`)), 판정 직전 ·
 // 판정 뒤 규범 저장소를 단계 시작 때 스냅숏과 대조한다.
-// - 판정 대상 = 승인 상태이고 삭제되지 않은 규칙 중 체크아웃에 규칙 폴더(`bive-acceptance/<RULE-ID>/*.acc.ts`)가 있는 것.
-//   승인되지 않았거나 삭제된 규칙의 폴더는 판정하지 않는다(규칙 폴더 목록은 해시 대조로 Red 확인 뒤 바뀌지 않았다)
+// - 판정 대상 = 효력 있는 규칙(효력 상태 · 삭제 안 됨 · 폐기 안 됨) 중 체크아웃에 규칙 폴더(`bive-acceptance/<RULE-ID>/*.acc.ts`)가
+//   있는 것. 효력이 없거나 삭제 · 폐기된 규칙의 폴더는 판정하지 않는다(규칙 폴더 목록은 해시 대조로 Red 확인 뒤 바뀌지 않았다.
+//   폐기된 규칙의 폴더는 지우지 않고 남는다, ADR-112)
 // - 판정 러너가 `completed`면 규칙별 판정 기록(상태 · 커밋 · 시각 · 종료 코드 · 원본 JSON · 케이스 `file:line`)을 저장한다.
 //   모두 `pass`면 `passed`, 하나라도 `fail`이면 `unmet` → 엔진이 구현으로 회귀(`regressionCount`, 상한 2회)
 // - `collect_error`(훅 실패 등 파일 수준 오류)는 구현이 만든 문제일 수 있어 `unmet`. 판정 기록은 남기지 않는다
@@ -12,6 +13,7 @@
 import type { Rule } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
+import { effectiveRules } from '../norms/effective.js';
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
 import {
   createNormGuard,
@@ -29,11 +31,12 @@ import {
 
 export type CheckOptions = JudgingOptions;
 
-/** 판정 대상이 되는 규칙: 승인 상태 · 삭제 안 됨 (잠정 승인은 M1에서 생기지 않고 판정 가능 분모에서도 뺀다, JDG-03). */
+/**
+ * 판정 대상이 되는 규칙: 효력 있는 규칙(효력 상태 · 삭제 안 됨 · 폐기 안 됨, `norms/effective.ts`). 잠정 승인은 M1에서 생기지
+ * 않고 판정 가능 분모에서도 뺀다(JDG-03). 폐기된 규칙은 인수 테스트 폴더가 남아 있어도 판정하지 않는다(M7-09, ADR-112).
+ */
 export const approvedRules = (context: StepContext): Rule[] =>
-  context.read((store) =>
-    store.rules.list().filter((rule) => rule.normState === 'approved' && rule.deletedAt === null),
-  );
+  context.read((store) => effectiveRules(store));
 
 const halt = (reason: string, exitDetail: Record<string, unknown>): StepOutcome => ({
   status: 'halt',

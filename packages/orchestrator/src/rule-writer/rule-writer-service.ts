@@ -3,7 +3,9 @@
 //   동기로 하고 세션은 대기열에서 하나씩 비동기로 돈다(응답을 세션 종료까지 붙잡지 않는다)
 // - 설정의 rule-writer 모델 · 한도(`roleSessionSettings(settings, 'rule-writer')`, 실행 전체 한도 검사 포함)가 없으면 세션을 띄우지 않고
 //   그 사실을 기록한다. 요구사항 저장 자체는 성공한다 (NRM-01, ADR-062)
-// - 세션 도구는 규칙 생성 도구 `propose_rule` 하나다(ADR-024). 호출 1건이 승인 대기 제안 없이 규칙 1개(효력 상태, 미확인,
+// - 폐기 · 대체 도구 `retire_rule` · `supersede_rule`(M7-09 #221, ADR-112)도 같은 반영 모듈이 트랜잭션 1개로 남긴다. 대체로 생긴
+//   새 규칙은 신규 기록을 남기므로 세션이 끝나면 그 규칙의 실행이 자동 시작된다(폐기만이면 실행 없음)
+// - 세션 도구는 규칙 생성 도구 `propose_rule`과 위의 폐기 · 대체 도구뿐이다(ADR-024). 규칙 생성 호출 1건이 승인 대기 제안 없이 규칙 1개(효력 상태, 미확인,
 //   생성 주체 규칙 작성 역할)와 규범 변경 기록 1건(신규)을 트랜잭션 1개로 남긴다(`norms/agent-rule.ts`, M7-02 #214,
 //   ADR-100 D1 · C2, ADR-103). 세션 가드가 init의 도구 · MCP 서버 목록을 검사한다(NFR-02)
 // - 같은 요구사항에 세션을 두 번 띄우지 않는다: 프로세스 안에서는 요구사항별 기록으로, 재기동 뒤에는 그 요구사항에서
@@ -19,7 +21,7 @@
 //   로그에 남긴다. 규칙 생성마다 받는
 //   모순 판단은 반영 모듈이 같은 트랜잭션에서 규범 변경 기록(판단)에 남긴다
 // - 세션 행이 있는 세션이 끝나면 종료 기록 저장 뒤 `onSessionEnded`를 부른다. 오케스트레이터가 이것으로 실행을 자동 시작한다
-//   (M7-05 #217, ADR-107). 세션 안에서는 실행을 만들 수 없다(규칙 작성 역할의 도구는 규칙 생성 하나)
+//   (M7-05 #217, ADR-107). 세션 안에서는 실행을 만들 수 없다(규칙 작성 역할의 도구는 규칙 생성 · 폐기 · 대체뿐)
 // - 다시 시도(`retry`): 사람이 요구사항을 직접 편집해 저장했을 때, 가장 최근 시도가 생략 · 실패(`success` 아닌 종료)이고
 //   그 요구사항에서 규칙 작성 역할이 만든 규칙(이 변경 전의 규칙 자동 생성 제안 포함)이 없으면 새 시도를 띄운다. 진행 중 · 대기 중이거나 성공한 요구사항은 띄우지 않는다 (ADR-099)
 import { mkdirSync, rmSync } from 'node:fs';
@@ -51,7 +53,13 @@ import { runGuardedSession } from '../agent/guarded-session.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import type { TaskTracker } from '../lifecycle.js';
-import { createAgentRule, NormJudgmentInputError } from '../norms/agent-rule.js';
+import {
+  createAgentRule,
+  NormJudgmentInputError,
+  NormRetirementInputError,
+  retireAgentRule,
+  supersedeAgentRule,
+} from '../norms/agent-rule.js';
 import {
   collectNormInput,
   type NormInput,
@@ -67,7 +75,11 @@ import {
 } from '../settings/project-budget.js';
 import { roleSessionSettings } from '../settings/settings-service.js';
 import { displayText } from '../text-limit.js';
-import type { ProposeRuleInput } from '../tools/definitions.js';
+import type {
+  ProposeRuleInput,
+  RetireRuleInput,
+  SupersedeRuleInput,
+} from '../tools/definitions.js';
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
 import { denied, failed, invalidArgs, type IssueList, ok } from '../tools/result.js';
 import { RULE_WRITER_SYSTEM_PROMPT, ruleWriterTaskPrompt } from './prompts.js';
@@ -591,6 +603,8 @@ export class RuleWriterService implements RuleWriterLauncher {
         now: () => new Date(this.#now()),
         hooks: {
           proposeRule: (input) => this.#propose(record, norms.summary, input),
+          retireRule: (input) => this.#retire(record, input),
+          supersedeRule: (input) => this.#supersede(record, norms.summary, input),
           onToolCall: (call) => {
             record.toolCalls.push(call);
             this.#persistToolCall(record, call);
@@ -889,6 +903,102 @@ export class RuleWriterService implements RuleWriterLauncher {
       }
       if (isIssueList(error)) return invalidArgs('propose_rule', error);
       throw error;
+    }
+  }
+
+  /** 폐기 · 대체 도구의 저장소 오류를 도구 결과로 바꾼다 (모르는 오류는 다시 던진다). */
+  #retirementError(tool: 'retire_rule' | 'supersede_rule', error: unknown): ToolResult {
+    if (error instanceof NormRetirementInputError) {
+      return denied(
+        error.code,
+        `${tool} 인자 오류: ${error.message} (작업 지시의 효력 있는 규칙 표시 ID를 쓴다)`,
+      );
+    }
+    if (error instanceof NormJudgmentInputError) {
+      return denied(
+        'invalid_args',
+        `${tool} 인자 오류: contradiction.ruleIds ${error.message} (작업 지시의 효력 있는 규칙 표시 ID를 쓴다)`,
+      );
+    }
+    if (error instanceof ConflictError) {
+      return failed('state_conflict', `${tool}: ${error.message}`);
+    }
+    if (error instanceof NotFoundError) {
+      return failed('not_found', `${tool}: ${error.message}`);
+    }
+    if (error instanceof RpcError && error.code === ErrorCode.NotFound) {
+      return failed('not_found', error.message);
+    }
+    if (isIssueList(error)) return invalidArgs(tool, error);
+    throw error;
+  }
+
+  /**
+   * `retire_rule`(규칙 폐기) 콜백 (M7-09, ADR-112): 규칙을 폐기하고 규범 변경 기록(`retired`)을 같은 트랜잭션으로 남긴다.
+   * 대상이 없거나 효력이 없거나 근거가 인용하지 않으면 `denied`(`invalid_args`), 내장 구조 규칙이면 `denied`(`builtin_rule`).
+   */
+  async #retire(record: RuleWriterSessionRecord, input: RetireRuleInput): Promise<ToolResult> {
+    try {
+      const { rule } = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+        retireAgentRule(
+          store,
+          {
+            ruleId: input.ruleId,
+            grounds: input.grounds,
+            author: { kind: 'agent', role: RULE_WRITER_ROLE },
+            sessionId: record.id,
+          },
+          { now: this.#now },
+        ),
+      );
+      return ok(`규칙 ${rule.displayId} 폐기 (판정 · 실행의 기준에서 빠짐, 사람은 나중에 봄)`);
+    } catch (error) {
+      return this.#retirementError('retire_rule', error);
+    }
+  }
+
+  /**
+   * `supersede_rule`(규칙 대체) 콜백 (M7-09, ADR-100 D6, ADR-112): 대상 폐기와 새 규칙 반영을 같은 트랜잭션으로 남긴다.
+   * 새 규칙의 부모는 이 세션의 요구사항이어야 한다(`propose_rule`과 같다). 거부 사유는 `#retire` · `#propose`와 같다.
+   */
+  async #supersede(
+    record: RuleWriterSessionRecord,
+    normInput: NormInputSummary,
+    input: SupersedeRuleInput,
+  ): Promise<ToolResult> {
+    if (input.parentRequirementId !== record.requirementId) {
+      return denied(
+        'invalid_args',
+        `supersede_rule 인자 오류: parentRequirementId는 이 세션의 요구사항 ${record.requirementId}만 쓸 수 있음`,
+      );
+    }
+    const { rationale, contradiction, ruleId, grounds, ...payload } = input;
+    try {
+      const { rule, superseded } = withRegisteredProjectStore(
+        this.#biveHome,
+        record.projectId,
+        (store) =>
+          supersedeAgentRule(
+            store,
+            {
+              payload,
+              rationale,
+              author: { kind: 'agent', role: RULE_WRITER_ROLE },
+              sessionId: record.id,
+              contradiction,
+              normInput,
+              ruleId,
+              grounds,
+            },
+            { now: this.#now, newId: this.#newId },
+          ),
+      );
+      record.ruleIds.push(rule.id);
+      return ok(
+        `규칙 ${superseded.displayId}을 폐기하고 ${rule.displayId}로 대체 (바로 효력, 사람은 나중에 봄)`,
+      );
+    } catch (error) {
+      return this.#retirementError('supersede_rule', error);
     }
   }
 }

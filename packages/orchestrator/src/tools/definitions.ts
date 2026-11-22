@@ -1,7 +1,8 @@
 // 역할별 고정 도구 목록과 도구 정의 (NFR-02 · ADR-024 · ADR-052).
 // 정의(이름 · 설명 · 입력 스키마)는 한 곳에만 두고, 실행기(FixedToolExecutor)의 인자 검증과
 // SDK MCP 서버 노출(M1-26)이 같은 스키마를 쓴다. 승인 · 잠정 승인 · 확인 표시 · 셸 도구는 없다(NFR-01 · NFR-02).
-// 규범을 쓰는 도구는 규칙 작성 역할의 규칙 생성 도구(`propose_rule`) 하나뿐이다(M7-02, ADR-100 D1 · D4, ADR-103).
+// 규범을 쓰는 도구는 규칙 작성 역할의 규칙 생성 · 폐기 · 대체 도구(`propose_rule` · `retire_rule` · `supersede_rule`)뿐이다
+// (M7-02 · M7-09, ADR-100 D1 · D4 · D5 · D6, ADR-103 · ADR-112).
 import { type AgentRole, CheckKind, RuleKind } from '@bive/shared';
 import { z } from 'zod';
 
@@ -23,8 +24,10 @@ export const COMMAND_TOOL_NAMES = [
  * 규범 도구 (규범을 쓰는 에이전트 도구). 규칙 작성 역할에만 둔다(ADR-100 D4: 테스트 작성 · 구현 역할에는 없다).
  * `propose_rule`은 규칙 생성 도구다: 호출하면 주입된 콜백이 규칙을 바로 반영하고 규범 변경 기록을 남긴다(M7-02).
  * 이름은 이 변경 전부터 쓰던 것을 그대로 둔다(시나리오 · 실제 SDK 세션 · 로드맵 M3 행이 이 이름을 쓴다, ADR-103).
+ * `retire_rule` · `supersede_rule`은 폐기 · 대체 도구다(M7-09, ADR-100 D5 · D6, ADR-112): 폐기는 규칙의 효력을 끝내고(행 ·
+ * 판정 이력은 남음), 대체는 폐기와 새 규칙 반영을 한 트랜잭션으로 한다. 내장 구조 규칙은 폐기 · 대체할 수 없다(B⑨).
  */
-export const NORM_TOOL_NAMES = ['propose_rule'] as const;
+export const NORM_TOOL_NAMES = ['propose_rule', 'retire_rule', 'supersede_rule'] as const;
 
 export type FileToolName = (typeof FILE_TOOL_NAMES)[number];
 export type CommandToolName = (typeof COMMAND_TOOL_NAMES)[number];
@@ -36,7 +39,7 @@ export type FixedToolName = FileToolName | CommandToolName | NormToolName;
  * planner · chat은 M1에서 도구가 없다(해당 마일스톤에서 추가, ADR-052). 규범 도구는 규칙 작성 역할에만 있다(ADR-100 D4).
  */
 export const ROLE_TOOL_NAMES = {
-  'rule-writer': ['propose_rule'],
+  'rule-writer': ['propose_rule', 'retire_rule', 'supersede_rule'],
   planner: [],
   'test-writer': ['read_file', 'write_file', 'list_files', 'search_files', 'run_tests'],
   implementer: [
@@ -174,6 +177,48 @@ export const ProposeRuleInput = z.strictObject({
 });
 export type ProposeRuleInput = z.infer<typeof ProposeRuleInput>;
 
+/** 폐기 · 대체 근거의 길이 상한 (ADR-112, 모순 판단 근거와 같다). */
+export const MAX_RETIREMENT_GROUNDS = MAX_CONTRADICTION_GROUNDS;
+
+/** 폐기 · 대체 대상 규칙 (표시 ID 또는 ID, `contradiction.ruleIds`와 같은 방식). */
+const TargetRuleArg = z
+  .string()
+  .min(1)
+  .max(64)
+  .describe('폐기할 규칙의 표시 ID(RULE-001 형식) 또는 ID. 작업 지시의 효력 있는 규칙 가운데');
+
+/**
+ * 폐기 · 대체 근거 (NRM-07, ADR-100 A6 · R3, ADR-112). 대상 규칙의 진술이나 최근 판정의 인수 테스트 케이스 이름 가운데 하나
+ * 이상을 글자 그대로 옮긴 부분(공백 정리 뒤 연속 {@link MIN_QUOTE_LENGTH}자 이상)이 있어야 한다. 인용 대조는 반영 모듈이 저장소의
+ * 진술 · 케이스 이름으로 한다(`norms/agent-rule.ts`).
+ */
+const RetirementGrounds = NonBlank(z.string().min(1).max(MAX_RETIREMENT_GROUNDS)).describe(
+  '근거: 대상 규칙의 진술이나 최근 판정의 인수 테스트 케이스 이름의 일부를 글자 그대로(연속 10자 이상) 옮기고, 왜 그 규칙이 더는 효력을 가지면 안 되는지',
+);
+
+/** 근거 인용의 최소 길이 (공백 정리 뒤 코드 포인트 수, ADR-112). */
+export const MIN_QUOTE_LENGTH = 10;
+
+/** 규칙 폐기 입력 (M7-09, ADR-112): 대상 규칙과 근거. */
+export const RetireRuleInput = z.strictObject({
+  ruleId: TargetRuleArg,
+  grounds: RetirementGrounds,
+});
+export type RetireRuleInput = z.infer<typeof RetireRuleInput>;
+
+/**
+ * 규칙 대체 입력 (M7-09, ADR-100 D6, ADR-112): 대상 규칙 · 근거와 새 규칙(규칙 생성 입력과 같은 칸). `contradiction`은 새 규칙과
+ * 대상 밖의 효력 있는 규칙의 모순 판단이다(대상은 넣지 않는다. 대체 자체가 대상과 모순이라는 판단이다).
+ */
+export const SupersedeRuleInput = ProposeRuleInput.extend({
+  ruleId: TargetRuleArg.describe('대체할(폐기할) 규칙의 표시 ID(RULE-001 형식) 또는 ID'),
+  grounds: RetirementGrounds,
+  contradiction: RuleContradictionInput.describe(
+    '새 규칙과 대상 밖의 효력 있는 규칙의 모순 판단. 없으면 {"verdict":"none"} (대상 규칙은 넣지 않는다)',
+  ),
+});
+export type SupersedeRuleInput = z.infer<typeof SupersedeRuleInput>;
+
 /** 도구 정의. SDK MCP 서버(M1-26)는 strict 스키마에서 만든 JSON 스키마로 노출하고 인자 검증은 실행기에 맡긴다. */
 export interface ToolDefinition {
   name: FixedToolName;
@@ -227,6 +272,17 @@ const DEFINITIONS: Record<FixedToolName, ToolDefinition> = {
     name: 'propose_rule',
     description: `요구사항에서 도출한 규칙을 만든다. 만든 규칙은 바로 효력을 갖고 근거와 함께 규범 변경 기록에 남으며, 사람은 나중에 확인한다. 진술은 ${EARS_FORMAT} 형식 한 줄. 효력 있는 기존 규칙과의 모순 판단(contradiction)이 필수이고 그 판단도 규범 변경 기록에 남는다. 모순이어도 규칙은 만들어지고 기존 규칙은 그대로 효력을 갖는다.`,
     inputSchema: ProposeRuleInput,
+  },
+  retire_rule: {
+    name: 'retire_rule',
+    description:
+      '효력 있는 기존 규칙을 폐기한다. 폐기된 규칙은 판정 · 실행의 기준에서 빠지고(규칙과 판정 이력은 남는다) 근거와 함께 규범 변경 기록에 남으며, 사람은 나중에 확인한다. 근거에 대상 규칙의 진술이나 최근 판정의 인수 테스트 케이스 이름의 일부를 글자 그대로(연속 10자 이상) 옮겨야 한다. 내장 구조 규칙은 폐기할 수 없다. 새 실행은 생기지 않는다.',
+    inputSchema: RetireRuleInput,
+  },
+  supersede_rule: {
+    name: 'supersede_rule',
+    description: `효력 있는 기존 규칙을 폐기하고 그 자리를 새 규칙으로 바꾼다(폐기와 새 규칙 반영이 한 번에 일어난다). 새 규칙의 칸은 propose_rule과 같고 진술은 ${EARS_FORMAT} 형식 한 줄. 근거에 대상 규칙의 진술이나 최근 판정의 인수 테스트 케이스 이름의 일부를 글자 그대로(연속 10자 이상) 옮겨야 한다. contradiction은 새 규칙과 대상 밖의 효력 있는 규칙의 모순 판단이다. 내장 구조 규칙은 대체할 수 없다.`,
+    inputSchema: SupersedeRuleInput,
   },
 };
 

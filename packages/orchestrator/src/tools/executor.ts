@@ -17,8 +17,10 @@ import {
   ListFilesInput,
   ProposeRuleInput,
   ReadFileInput,
+  RetireRuleInput,
   roleToolNames,
   SearchFilesInput,
+  SupersedeRuleInput,
   WriteFileInput,
 } from './definitions.js';
 import { listFiles, readFile, searchFiles, writeFile } from './file-tools.js';
@@ -55,6 +57,22 @@ export interface RoleToolsHooks {
    */
   proposeRule?: (
     input: ProposeRuleInput,
+    context: ProposalContext,
+  ) => Promise<string | ToolResult> | string | ToolResult;
+  /**
+   * `retire_rule`(규칙 폐기, M7-09): 규칙을 폐기하고 규범 변경 기록을 남긴다. 반환 규칙은 `proposeRule`과 같다.
+   * 주입하지 않으면 호출이 `error`(`not_configured`)로 끝난다.
+   */
+  retireRule?: (
+    input: RetireRuleInput,
+    context: ProposalContext,
+  ) => Promise<string | ToolResult> | string | ToolResult;
+  /**
+   * `supersede_rule`(규칙 대체, M7-09): 폐기와 새 규칙 반영을 한 트랜잭션으로 한다. 반환 규칙은 `proposeRule`과 같다.
+   * 주입하지 않으면 호출이 `error`(`not_configured`)로 끝난다.
+   */
+  supersedeRule?: (
+    input: SupersedeRuleInput,
     context: ProposalContext,
   ) => Promise<string | ToolResult> | string | ToolResult;
   /** 도구 호출이 끝날 때마다 (거부 · 오류 포함) */
@@ -197,6 +215,8 @@ export class FixedToolExecutor implements ToolExecutor {
     if (isCommandTool(tool)) return runCommand(tool, args, this.commandContext);
     if (tool === 'propose_rule')
       return { result: await this.proposeRule(args), summary: summarizeArgs(args) };
+    if (tool === 'retire_rule' || tool === 'supersede_rule')
+      return { result: await this.retirement(tool, args), summary: summarizeArgs(args) };
     return { result: await this.fileTool(tool, args), summary: summaryOf(tool, args) };
   }
 
@@ -234,6 +254,33 @@ export class FixedToolExecutor implements ToolExecutor {
     if (register === undefined) return failed('not_configured', '규칙 반영 경로가 연결되지 않음');
     try {
       const outcome = await register(parsed.data, { role: this.role, sessionId: this.sessionId });
+      return typeof outcome === 'string' ? ok(outcome) : outcome;
+    } catch (error) {
+      return failed('tool_failed', error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** 폐기 · 대체 (M7-09): 인자 검증 뒤 주입된 콜백에 넘긴다. */
+  private async retirement(
+    tool: 'retire_rule' | 'supersede_rule',
+    args: Record<string, unknown>,
+  ): Promise<ToolResult> {
+    const context = { role: this.role, sessionId: this.sessionId };
+    try {
+      if (tool === 'retire_rule') {
+        const parsed = RetireRuleInput.safeParse(args);
+        if (!parsed.success) return invalidArgs(tool, parsed.error);
+        const retire = this.hooks.retireRule;
+        if (retire === undefined) return failed('not_configured', '규칙 폐기 경로가 연결되지 않음');
+        const outcome = await retire(parsed.data, context);
+        return typeof outcome === 'string' ? ok(outcome) : outcome;
+      }
+      const parsed = SupersedeRuleInput.safeParse(args);
+      if (!parsed.success) return invalidArgs(tool, parsed.error);
+      const supersede = this.hooks.supersedeRule;
+      if (supersede === undefined)
+        return failed('not_configured', '규칙 대체 경로가 연결되지 않음');
+      const outcome = await supersede(parsed.data, context);
       return typeof outcome === 'string' ? ok(outcome) : outcome;
     } catch (error) {
       return failed('tool_failed', error instanceof Error ? error.message : String(error));

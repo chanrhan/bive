@@ -22,7 +22,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { selectAgent } from '../src/agent/select.js';
 import { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
-import { createAgentRule } from '../src/norms/agent-rule.js';
+import { createAgentRule, retireAgentRule, supersedeAgentRule } from '../src/norms/agent-rule.js';
+import { checkRunStartBasis } from '../src/engine/start-basis.js';
+import { createRun, evaluateApprovalStep, startNextQueuedRun } from '../src/runs/run-service.js';
 import { type Orchestrator, startOrchestrator } from '../src/orchestrator.js';
 import { AUTO_START_REASON, AutoStarter, autoStartRun } from '../src/runs/auto-start.js';
 import { connect, type TestClient } from './helpers/client.js';
@@ -747,6 +749,193 @@ describe('autoStartRun: 생략 · 멱등 (ADR-107)', () => {
         skips: store.db.prepare('SELECT count(*) AS n FROM auto_start_skips').get(),
       })),
     ).toEqual({ runs: 0, autoStarts: 0, approvals: 0, exe: 0, skips: { n: 0 } });
+  });
+});
+
+// ── 폐기 · 대체 뒤 자동 시작 (M7-09 #221 수용 기준 4, ADR-100 A4, ADR-112) ─────────────
+
+/** seedProject의 RULE-001 진술을 글자 그대로 인용한 근거. */
+const SEED_GROUNDS =
+  'RULE-001 진술 "time 필드에 서버 시각을 담는다"는 새 요구사항(서버 시각 제거)과 동시에 만족될 수 없다';
+const NORM_INPUT_ONE = {
+  requirements: { total: 1, included: 1, omitted: 0 },
+  rules: { total: 1, included: 1, omitted: 0 },
+  truncated: false,
+} as const;
+
+/** 규칙 작성 역할이 세션 `sessionId`에서 RULE-001(또는 `ruleId`)을 대체한 것과 같은 기록. 새 규칙의 신규 기록을 돌려준다. */
+const supersedeRule = (
+  h: StoreHarness,
+  sessionId: string,
+  title: string,
+  ruleId = 'RULE-001',
+): NormChangeEntry =>
+  h.read(
+    (store) =>
+      supersedeAgentRule(
+        store,
+        {
+          payload: {
+            title,
+            statement: `WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL ${title}을 담지 않는다`,
+            kind: 'business',
+            checkKinds: ['test'],
+            parentRequirementId: h.requirementId,
+          },
+          rationale: '시험 근거',
+          author: { kind: 'agent', role: 'rule-writer' },
+          sessionId,
+          contradiction: { verdict: 'none' },
+          normInput: NORM_INPUT_ONE,
+          ruleId,
+          grounds: SEED_GROUNDS,
+        },
+        clock,
+      ).normChange,
+  );
+
+describe('autoStartRun: 폐기 · 대체 뒤 (M7-09 #221 수용 기준 4, ADR-100 A4, ADR-112)', () => {
+  it('대체한 세션: 새 규칙의 신규 기록이 원인이 되어 새 규칙의 실행 1개가 생기고(옛 규칙의 실행은 없음), 엔진의 시작 근거 대조 · 승인 단계 자리를 통과한다', () => {
+    const h = storeHarness();
+    const session = newId();
+    const created = supersedeRule(h, session, '서버 시각');
+    const outcome = h.read((store) => autoStartRun(store, { sessionId: session }, clock));
+    if (outcome.status !== 'started') throw new Error(`시작 안 됨: ${outcome.status}`);
+    expect(outcome.runs).toHaveLength(1);
+    const [only] = outcome.runs;
+    if (only === undefined) throw new Error('실행 없음');
+    expect(only.detail.run.targetRuleIds).toEqual([created.targetRef.id]);
+    expect(only.detail.run.startedBy).toEqual({ kind: 'orchestrator', causeSeqs: [created.seq] });
+    // 원인은 신규(created) 기록 하나다: 판단 · 대체 기록은 원인이 아니다
+    expect(h.read((store) => store.normChanges.list().map((entry) => entry.kind))).toEqual([
+      'created',
+      'judgment',
+      'superseded',
+      'auto_start',
+    ]);
+    h.read((store) => {
+      expect(checkRunStartBasis(store, only.detail.run).mismatch).toBeNull();
+      expect(evaluateApprovalStep(store, only.detail.run.id, clock)).toMatchObject({
+        approved: true,
+        unapprovedRuleIds: [],
+      });
+    });
+    expect(h.read(counts)).toEqual({ runs: 1, autoStarts: 1, approvals: 0 });
+  });
+
+  it('폐기만 한 세션: 새 규칙이 없으므로 실행 · 자동 시작 항목 · 생략 기록이 생기지 않는다', () => {
+    const h = storeHarness();
+    const session = newId();
+    h.read((store) =>
+      retireAgentRule(
+        store,
+        {
+          ruleId: 'RULE-001',
+          grounds: SEED_GROUNDS,
+          author: { kind: 'agent', role: 'rule-writer' },
+          sessionId: session,
+        },
+        clock,
+      ),
+    );
+    expect(h.read((store) => autoStartRun(store, { sessionId: session }, clock))).toEqual({
+      status: 'no_rules',
+    });
+    expect(h.read(counts)).toEqual({ runs: 0, autoStarts: 0, approvals: 0 });
+    expect(h.read((store) => store.autoStartSkips.get(session))).toBeNull();
+  });
+
+  it('한 세션이 propose_rule · supersede_rule · retire_rule을 섞어 부르면 새 규칙마다 실행 1개가 신규 기록 순서(생성 · 대체 · 생성)대로 생기고, 폐기는 실행을 더하지 않는다', () => {
+    const h = storeHarness();
+    const session = newId();
+    const first = makeRule(h, session, '버전');
+    const second = supersedeRule(h, session, '서버 시각');
+    const third = makeRule(h, session, '호스트');
+    // 같은 세션이 방금 만든 규칙을 폐기해도 그 규칙의 신규 기록은 원인으로 남지만, 실행은 승인 단계 자리에서 끝난다
+    const retiredRule = makeRule(h, session, '지역');
+    h.read((store) =>
+      retireAgentRule(
+        store,
+        {
+          ruleId: retiredRule.targetRef.id,
+          grounds: '진술 "THE SYSTEM SHALL 지역을 담는다"는 필요 없다',
+          author: { kind: 'agent', role: 'rule-writer' },
+          sessionId: session,
+        },
+        clock,
+      ),
+    );
+    const outcome = h.read((store) => autoStartRun(store, { sessionId: session }, clock));
+    if (outcome.status !== 'started') throw new Error(`시작 안 됨: ${outcome.status}`);
+    expect(
+      outcome.runs.map(({ detail }) => [detail.run.displayId, detail.run.targetRuleIds]),
+    ).toEqual([
+      ['EXE-001', [first.targetRef.id]],
+      ['EXE-002', [second.targetRef.id]],
+      ['EXE-003', [third.targetRef.id]],
+      ['EXE-004', [retiredRule.targetRef.id]],
+    ]);
+    expect(outcome.runs.map(({ normChange }) => normChange.detail.causeSeqs)).toEqual([
+      [first.seq],
+      [second.seq],
+      [third.seq],
+      [retiredRule.seq],
+    ]);
+    // 폐기된 규칙의 실행은 승인 단계 자리(효력 확인)에서 효력 없음이다 (사람을 기다리지 않고 끝난다)
+    h.read((store) => {
+      const last = outcome.runs[3];
+      if (last === undefined) throw new Error('실행 없음');
+      expect(evaluateApprovalStep(store, last.detail.run.id, clock)).toMatchObject({
+        approved: false,
+        unapprovedRuleIds: [retiredRule.targetRef.id],
+      });
+    });
+  });
+
+  it('실행 대기 중인 실행의 대상 규칙이 대체되면 시작할 차례의 재검사에서 효력 없음(target_rule_unavailable)으로 끝나고 다음 대기(새 규칙의 실행)가 시작된다', () => {
+    const h = storeHarness();
+    const at = () => new Date().toISOString();
+    const holderSession = newId();
+    makeRule(h, holderSession, '버전');
+    const holder = h.read((store) => autoStartRun(store, { sessionId: holderSession }, clock));
+    if (holder.status !== 'started') throw new Error('시작 안 됨');
+    const replaceSession = newId();
+    const oldRunId = h.read((store) => {
+      const [first] = holder.runs;
+      if (first === undefined) throw new Error('실행 없음');
+      expect(evaluateApprovalStep(store, first.detail.run.id, clock).run.status).toBe('running');
+      // 옛 규칙(RULE-001)의 사람 [실행]은 자리가 없어 실행 대기
+      const rule = store.rules.list().find((item) => item.displayId === 'RULE-001');
+      if (rule === undefined) throw new Error('규칙 없음');
+      const old = createRun(
+        store,
+        { ruleIds: [rule.id], author: human },
+        { clientId: null },
+        clock,
+      ).run;
+      expect(evaluateApprovalStep(store, old.id, clock).run.status).toBe('queued');
+      return old.id;
+    });
+    supersedeRule(h, replaceSession, '서버 시각');
+    const replaced = h.read((store) => autoStartRun(store, { sessionId: replaceSession }, clock));
+    if (replaced.status !== 'started') throw new Error('시작 안 됨');
+    const [newRun] = replaced.runs;
+    if (newRun === undefined) throw new Error('실행 없음');
+    const advance = h.read((store) => {
+      expect(evaluateApprovalStep(store, newRun.detail.run.id, clock).run.status).toBe('queued');
+      const [first] = holder.runs;
+      if (first === undefined) throw new Error('실행 없음');
+      // 앞 실행이 끝났다 (엔진 없이 저장만)
+      store.runs.transition(first.detail.run.id, {
+        expectedStatus: 'running',
+        run: { status: 'failed', failureReason: 'scripted_halt', endedAt: at() },
+      });
+      return startNextQueuedRun(store, clock);
+    });
+    expect(
+      advance.failed.map((detail) => [detail.run.id, detail.run.status, detail.run.failureReason]),
+    ).toEqual([[oldRunId, 'failed', 'target_rule_unavailable']]);
+    expect(advance.started?.run).toMatchObject({ id: newRun.detail.run.id, status: 'running' });
   });
 });
 

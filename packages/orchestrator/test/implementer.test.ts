@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor } from '../src/engine/types.js';
 import { IMPLEMENTER_SYSTEM_PROMPT, implementerTaskPrompt } from '../src/implementer/prompts.js';
+import { createGitRunner } from '../src/git/git-exec.js';
 import { createRunHandlers } from '../src/ipc/run-handlers.js';
 import { buildJudgeConfig } from '../src/judge/config.js';
 import { lintAcceptanceSource } from '../src/judge/acceptance-lint.js';
@@ -30,6 +31,7 @@ import {
   NORM_INPUT_LIMITS,
   type NormInput,
 } from '../src/norms/norm-input.js';
+import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { NORM_INTEGRITY_STAGE } from '../src/steps/judging.js';
 import {
   human,
@@ -472,6 +474,156 @@ describe('검사 단계: 승인된 규칙 전체 인수 테스트를 판정하�
 });
 
 // ── 수용 기준 3: false-pass ─────────────────────────────────────
+
+// ── M7-09 #221 수용 기준 3 · 4: 폐기된 규칙은 검사 · 병합 재검사 대상에서 빠진다, 병합 직전 폐기 ───────────
+
+describe('폐기된 규칙: 검사 · 병합 재검사 대상에서 빠지고 판정 이력은 남는다 (M7-09 #221, ADR-100 D5 · A3, ADR-112)', () => {
+  const OTHER_ACC = 'bive-acceptance/RULE-002/ok.acc.ts';
+  const retireBy = (h: PipelineHarness, ruleId: string, grounds: string) =>
+    withProject(h.biveHome, h.project.id, (store) =>
+      retireAgentRule(
+        store,
+        { ruleId, grounds, author: { kind: 'agent', role: 'rule-writer' }, sessionId: newId() },
+        { now: Date.now },
+      ),
+    );
+  const commitOnBase = (repo: string) => {
+    fs.writeFileSync(path.join(repo, 'NOTES.md'), '사용자 메모\n');
+    userGit(repo, 'add', 'NOTES.md');
+    userGit(repo, 'commit', '-q', '-m', '사용자 커밋');
+  };
+
+  it('대상이 아닌 규칙이 폐기되면 인수 테스트 폴더가 남아 있어도 검사 · 병합 재검사가 판정하지 않고(폴더는 unjudgedDirs), 그 규칙의 판정 이력은 지워지지 않는다', async () => {
+    const h = setup({
+      secondRule: true,
+      prepareRepo: (repo) => {
+        fs.mkdirSync(path.dirname(path.join(repo, OTHER_ACC)), { recursive: true });
+        // 폐기된 규칙의 테스트: 판정되면 실패한다(새 구현과 모순되는 옛 테스트의 자리)
+        fs.writeFileSync(
+          path.join(repo, OTHER_ACC),
+          "import { it } from 'vitest';\nit('ok', () => {});\n",
+        );
+      },
+      decide: (call) =>
+        Object.fromEntries(
+          (call.input.ruleIds ?? []).map((id) => [
+            id,
+            call.kind === 'red_check' || id === 'RULE-002' ? ['failed'] : ['passed', 'passed'],
+          ]),
+        ),
+      executors: (defaults) => ({
+        ...defaults,
+        merge: before(defaults.merge, (context) => commitOnBase(context.git.repoPath)),
+      }),
+    });
+    const [rule1, rule2] = h.rules;
+    if (rule1 === undefined || rule2 === undefined) throw new Error('규칙 없음');
+    // 폐기 전 판정 이력 1건
+    withProject(h.biveHome, h.project.id, (store) => seedNormCases(store, rule2, ['ok'], T0 + 10));
+    retireBy(h, 'RULE-002', '진술 "응답 JSON의 ok 값 true를 유지한다"는 더 필요 없다');
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({ status: 'merged', regressionCount: 0 });
+    const calls = h.judgeCalls.filter((c) => c.kind === 'check' || c.kind === 'merge');
+    expect(calls.map((c) => [c.kind, c.input.ruleIds])).toEqual([
+      ['check', ['RULE-001']],
+      ['merge', ['RULE-001']],
+    ]);
+    expect(exitOf(done, 'check')).toMatchObject({
+      ruleIds: ['RULE-001'],
+      unjudgedDirs: ['RULE-002'],
+    });
+    withProject(h.biveHome, h.project.id, (store) => {
+      // 판정 이력은 남고 새 판정은 생기지 않았다
+      expect(store.judgments.listByRule(rule2.id)).toHaveLength(1);
+      expect(store.rules.get(rule2.id)).toMatchObject({ deletedAt: null });
+      expect(store.judgments.listByRule(rule1.id).length).toBeGreaterThan(0);
+    });
+    // 폐기된 규칙의 인수 테스트 파일은 지우지 않는다 (병합된 기준 브랜치에 그대로)
+    expect(
+      userGit(
+        h.repo,
+        'ls-tree',
+        '--name-only',
+        '-r',
+        'refs/heads/main',
+        'bive-acceptance/RULE-002',
+      ),
+    ).toBe(OTHER_ACC);
+  }, 60_000);
+
+  it('병합 단계를 연 뒤 병합을 부르기 직전(실행 브랜치 끝 확인 동안)에 대상 규칙이 폐기되면 병합하지 않고 failed(target_rule_retired, before_merge)', async () => {
+    const real = createGitRunner();
+    let retired = false;
+    const h = setup({
+      merge: {
+        git: async (args, options) => {
+          const result = await real(args, options);
+          // 병합 실행기의 첫 git 호출(실행 브랜치 끝 확인) 뒤에 폐기가 끼어든다
+          if (!retired && args.includes('--quiet') && args.includes('rev-parse')) {
+            retired = true;
+            retireBy(
+              h,
+              'RULE-001',
+              '진술 "응답 JSON의 time 필드에 서버 시각을 담는다"는 새 요구사항과 모순',
+            );
+          }
+          return result;
+        },
+      },
+    });
+    const baseTip = mainTip(h);
+    const done = await runToEnd(h);
+    expect(retired).toBe(true);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'target_rule_retired',
+      mergeCommit: null,
+    });
+    expect(exitOf(done, 'merge')).toMatchObject({
+      reason: 'target_rule_retired',
+      detail: { stage: 'before_merge', retiredRuleIds: ['RULE-001'] },
+    });
+    expect(mainTip(h)).toBe(baseTip);
+  }, 60_000);
+
+  it('병합 재검사가 도는 동안 대상 규칙이 폐기되면 통과여도 병합하지 않고 failed(target_rule_retired), 기준 브랜치는 그대로이고 실행 브랜치는 보존된다', async () => {
+    let baseTip = '';
+    const h = setup({
+      onJudge: (call) => {
+        if (call.kind === 'merge') {
+          retireBy(
+            h,
+            'RULE-001',
+            '진술 "응답 JSON의 time 필드에 서버 시각을 담는다"는 새 요구사항과 모순',
+          );
+        }
+      },
+      executors: (defaults) => ({
+        ...defaults,
+        merge: before(defaults.merge, (context) => {
+          commitOnBase(context.git.repoPath);
+          baseTip = userGit(context.git.repoPath, 'rev-parse', 'refs/heads/main');
+        }),
+      }),
+    });
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'target_rule_retired',
+      mergeCommit: null,
+    });
+    expect(exitOf(done, 'merge')).toMatchObject({
+      reason: 'target_rule_retired',
+      detail: { stage: 'merge_recheck', retiredRuleIds: ['RULE-001'], mergeStatus: 'failed' },
+    });
+    expect(judgeKinds(h)).toEqual(['red_check', 'implementation', 'check', 'merge']);
+    expect(mainTip(h)).toBe(baseTip);
+    expect(done.run.branch).not.toBeNull();
+    expect(userGit(h.repo, 'branch', '--list', done.run.branch ?? '')).toContain(
+      done.run.branch ?? '',
+    );
+  }, 60_000);
+});
 
 describe('false-pass 시나리오: 에이전트가 "통과"라고 보고해도 판정은 실행 결과로 (수용 기준 3, JDG-01)', () => {
   it('구현 세션이 통과했다고 보고하지만 판정은 fail이고, 실행 상태는 에이전트 메시지로 바뀌지 않는다', async () => {

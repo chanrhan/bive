@@ -25,6 +25,7 @@ import { loadScenario } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { INTERRUPTED_EXIT_DETAIL, PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
+import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { runPaths } from '../src/run-paths.js';
 import { createRun, saveNewRun } from '../src/runs/run-service.js';
 import { connect, RpcCallError, type TestClient } from './helpers/client.js';
@@ -350,6 +351,107 @@ describe('유형 A 단계 순서 · 전이 (수용 기준 1)', () => {
     expect(() => h.engine.evaluateApproval(h.project.id, h.runId)).toThrow(/승인 단계가 아닙니다/);
     expect(detailOf(h)).toEqual(after);
   });
+
+  it('검사를 통과한 뒤 병합 전에 대상 규칙이 폐기됐으면 다음 단계를 열지 않고 병합하지 않은 채 failed(target_rule_retired)로 끝내고 사유(폐기된 대상 규칙)를 기록한다: 기준 브랜치 그대로 · 브랜치 보존 (ADR-100 A3 · A4, M7-09)', async () => {
+    // 검사 단계가 끝나는 사이에 규칙 작성 역할이 대상 규칙을 폐기한다 (실행 밖 세션의 정당한 폐기 = 오케스트레이터 저장소 쓰기)
+    const retireTarget: StepExecutor = async (context) => {
+      context.read((store) =>
+        retireAgentRule(
+          store,
+          {
+            ruleId: 'RULE-001',
+            grounds: '진술 "응답 JSON의 time 필드에 서버 시각을 담는다"는 새 요구사항과 모순',
+            author: { kind: 'agent', role: 'rule-writer' },
+            sessionId: newId(),
+          },
+          { now: Date.now },
+        ),
+      );
+      return { status: 'passed' };
+    };
+    let merged = false;
+    const h = setup({
+      executors: {
+        check: retireTarget,
+        merge: async () => {
+          merged = true;
+          return { status: 'passed' };
+        },
+      },
+    });
+    const baseTip = mainTip(h);
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'target_rule_retired',
+      mergeCommit: null,
+    });
+    expect(attempts(done)).toEqual([
+      'approval#1:passed',
+      'test_writing#1:passed',
+      'red_check#1:passed',
+      'implementation#1:passed',
+      'check#1:passed',
+      'mutation#1:failed',
+      'merge#1:pending',
+      'screen_update#1:pending',
+    ]);
+    // 검사 뒤 다음 단계(변이 주입 자리)를 열기 전에 끝난다: 병합 단계는 열리지 않는다
+    expect(stepOf(done, 'mutation').exitDetail).toEqual({
+      reason: 'target_rule_retired',
+      detail: {
+        message: '실행 도중 대상 규칙이 폐기되어 다음 단계를 진행하지 않았습니다',
+        retiredRuleIds: ['RULE-001'],
+      },
+    });
+    // 병합 실행기를 부르지 않았고 기준 브랜치는 그대로, 실행 브랜치는 보존된다
+    expect(merged).toBe(false);
+    expect(mainTip(h)).toBe(baseTip);
+    expect(userGit(h.repo, 'branch', '--list', done.run.branch ?? '')).toContain(
+      done.run.branch ?? '',
+    );
+    // 폐기는 규범 저장소 불일치(guard)가 아니다: 오케스트레이터의 정당한 쓰기
+    expect(done.run.failureReason).not.toBe('guard_violation');
+  }, 60_000);
+
+  it('단계 사이(테스트 작성 뒤)에 대상 규칙이 폐기되면 다음 단계를 열지 않고 failed(target_rule_retired), 세션을 더 열지 않는다', async () => {
+    let later = 0;
+    const counted: StepExecutor = async () => {
+      later += 1;
+      return { status: 'passed' };
+    };
+    const h = setup({
+      executors: {
+        test_writing: async (context) => {
+          context.read((store) =>
+            retireAgentRule(
+              store,
+              {
+                ruleId: 'RULE-001',
+                grounds: '진술 "응답 JSON의 time 필드에 서버 시각을 담는다"는 새 요구사항과 모순',
+                author: { kind: 'agent', role: 'rule-writer' },
+                sessionId: newId(),
+              },
+              { now: Date.now },
+            ),
+          );
+          return { status: 'passed' };
+        },
+        red_check: counted,
+        implementation: counted,
+        check: counted,
+        merge: counted,
+      },
+    });
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({ status: 'failed', failureReason: 'target_rule_retired' });
+    expect(attempts(done).slice(0, 3)).toEqual([
+      'approval#1:passed',
+      'test_writing#1:passed',
+      'red_check#1:failed',
+    ]);
+    expect(later).toBe(0);
+  }, 60_000);
 
   it('승인 대기에 머무는 경로가 없다: 효력 있는 대상이면 통과, 아니면 실패. 꺼진 동안 남은 승인 대기는 기동 때 판정한다 (ADR-107)', async () => {
     // 효력 있음 → 통과 · 구동 (승인 대기를 벗어난다)
