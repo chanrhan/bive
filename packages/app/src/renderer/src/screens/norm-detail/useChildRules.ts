@@ -3,7 +3,7 @@
 // - 같은 요구사항이 바뀌면(`updatedAt`, 직접 편집 저장 뒤) 지금 목록을 둔 채 다시 읽는다
 // - 늦게 온 이전 응답은 버린다
 // - `replace`: 펼친 자식 규칙의 직접 편집이 저장되면 응답의 규칙으로 그 항목을 바꾼다(옛 제목을 남기지 않음, M7-03).
-//   그 전에 보낸 요청의 결과는 편집 전 값일 수 있어 버린다
+//   그 전에 보낸 요청의 결과는 편집 전 값일 수 있어 버리고, 버린 요청이 있었으면 한 번 다시 읽는다
 // 실행 알림은 구독하지 않는다: 펼친 자식 규칙의 판정은 다시 들어올 때까지 낡을 수 있다(ADR-078 한계)
 import type { RuleWithJudgment } from '@bive/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -33,12 +33,17 @@ export const useChildRules = (
   );
   // 바꾼 횟수. 요청을 보낸 뒤 바뀌었으면 그 응답은 편집 전 값일 수 있어 버린다
   const replaced = useRef(0);
+  // 응답을 기다리는 요청이 있는지, 다시 읽기 계기
+  const inFlight = useRef(false);
+  const [reload, setReload] = useState(0);
 
   useEffect(() => {
     let live = true;
     const mine = replaced.current;
+    inFlight.current = true;
     window.bive.invoke('rule.list', { projectId }).then(
       ({ rules }) => {
+        if (live) inFlight.current = false;
         if (live && replaced.current === mine) {
           setLoaded({
             requirementId,
@@ -47,18 +52,20 @@ export const useChildRules = (
         }
       },
       () => {
+        if (live) inFlight.current = false;
         if (live) setLoaded({ requirementId, load: { state: 'error' } });
       },
     );
     return () => {
       live = false;
     };
-    // 수정 시각은 다시 읽는 계기로만 쓴다
-  }, [projectId, requirementId, updatedAt]);
+    // 수정 시각 · 다시 읽기 번호는 다시 읽는 계기로만 쓴다
+  }, [projectId, requirementId, updatedAt, reload]);
 
   const replace = useCallback(
     (item: RuleWithJudgment): void => {
       replaced.current += 1;
+      const dropped = inFlight.current;
       setLoaded((current) =>
         current === null ||
         current.requirementId !== requirementId ||
@@ -72,6 +79,7 @@ export const useChildRules = (
               },
             },
       );
+      if (dropped) setReload((n) => n + 1);
     },
     [requirementId],
   );

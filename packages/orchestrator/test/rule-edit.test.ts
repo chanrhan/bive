@@ -242,7 +242,7 @@ describe('rule.update: 편집 · 확인됨 · 승인 기록 (수용 기준 1, AD
     await start();
     const requirement = await createRequirement();
     const rule = seedRule(requirement.id);
-    const hidden = '가입‮거부​';
+    const hidden = '가입\u202e거부\u200b';
     const result = await update({ id: rule.id, title: hidden });
     expect(result.rule.title).toBe(hidden);
     expect(ruleOf(rule.id)?.title).toBe(hidden);
@@ -323,7 +323,15 @@ describe('rule.update: 형식 검사 (EARS · 한 줄 · 길이 · 바뀐 것 �
     await start();
     const requirement = await createRequirement();
     const rule = seedRule(requirement.id);
-    for (const title of ['   ', '두 줄\n제목', '탭\t제목', '구분 제목', 'ㄱ'.repeat(201)]) {
+    for (const title of [
+      '   ',
+      ' 앞 공백',
+      '뒤 공백 ',
+      '두 줄\n제목',
+      '탭\t제목',
+      `구분${String.fromCodePoint(0x2028)}제목`,
+      'ㄱ'.repeat(201),
+    ]) {
       await expect(update({ id: rule.id, title })).rejects.toMatchObject({
         code: ErrorCode.ValidationFailed,
         data: { reason: 'RULE_EDIT_INVALID', issues: [{ path: 'title' }] },

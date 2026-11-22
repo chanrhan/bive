@@ -32,7 +32,7 @@ import {
   RULE_EDIT_START_REASON,
   RuleEditAutoStarter,
 } from '../src/runs/rule-edit-start.js';
-import { saveNewRun } from '../src/runs/run-service.js';
+import { saveNewRun, startNextQueuedRun } from '../src/runs/run-service.js';
 import { connect, type TestClient } from './helpers/client.js';
 import {
   COMPLETE_SETTINGS,
@@ -644,4 +644,59 @@ describe('오케스트레이터 · 파이프: 사람의 진술 편집 → 실행
       confirmation: { state: 'confirmed' },
     });
   }, 60_000);
+});
+
+describe('실행 대기에서 시작할 차례의 하루 한도 문: 편집 원인 실행에도 (ADR-111 · ADR-109)', () => {
+  /** 승인 단계를 통과해 실행 대기에 선 모양으로 둔다 (엔진의 승인 단계 판정 대역, 테스트 전용). */
+  const toQueued = (h: StoreHarness, runId: string): void =>
+    h.read((store) => {
+      const at = new Date().toISOString();
+      store.db
+        .prepare(
+          "UPDATE steps SET status = 'passed', ended_at = ? WHERE run_id = ? AND kind = 'approval'",
+        )
+        .run(at, runId);
+      store.db
+        .prepare(
+          "UPDATE runs SET status = 'queued', current_step = 'test_writing', last_completed_step = 'approval' WHERE id = ?",
+        )
+        .run(runId);
+    });
+
+  it('대기 중인 편집 원인 실행이 차례에 하루 한도에 이르렀으면 작업 폴더 · 브랜치 없이 budget_exceeded(project_daily_budget_exceeded)로 끝나고 다음 대기(사람 실행)가 시작한다', () => {
+    const h = storeHarness();
+    const edit = humanEdit(h, { statement: NEW_STATEMENT });
+    const byEdit = startEdit(h, edit.seq);
+    if (byEdit.status !== 'started') throw new Error('시작 안 됨');
+    const human = h.read((store) =>
+      saveNewRun(
+        store,
+        store.settings.get(),
+        { runId: newId(), ruleIds: [h.ruleId], startedBy: { kind: 'human' } },
+        new Date().toISOString(),
+        newId,
+      ),
+    );
+    toQueued(h, byEdit.detail.run.id);
+    toQueued(h, human.run.id);
+    // 대기하는 사이 오늘 지출이 한도에 이름 (한도 0)
+    h.read((store) =>
+      store.settings.update(
+        { dailyBudgetUsd: 0 },
+        { by: { kind: 'human' }, at: new Date().toISOString() },
+      ),
+    );
+    const advance = h.read((store) => startNextQueuedRun(store, { now: Date.now }));
+    expect(advance.failed.map((detail) => detail.run)).toEqual([
+      expect.objectContaining({
+        id: byEdit.detail.run.id,
+        status: 'budget_exceeded',
+        failureReason: 'project_daily_budget_exceeded',
+        branch: null,
+        worktreePath: null,
+        startedAt: null,
+      }),
+    ]);
+    expect(advance.started?.run).toMatchObject({ id: human.run.id, status: 'running' });
+  });
 });

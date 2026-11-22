@@ -93,6 +93,17 @@ describe('ruleEditView', () => {
         },
       }),
     ).toEqual({ label: '제목 형식 오류', detail: '사유 B · 사유 C' });
+    // 제목 앞뒤 공백 거부도 제목 형식 오류다 (서버 사유 그대로)
+    expect(
+      ruleEditErrorText({
+        code: -32001,
+        message: 'x',
+        data: {
+          reason: 'RULE_EDIT_INVALID',
+          issues: [{ path: 'title', message: '제목 앞뒤에 공백을 둘 수 없음' }],
+        },
+      }),
+    ).toEqual({ label: '제목 형식 오류', detail: '제목 앞뒤에 공백을 둘 수 없음' });
     expect(
       ruleEditErrorText({ code: -32001, message: 'x', data: { reason: 'RULE_EDIT_NO_CHANGE' } }),
     ).toEqual({ label: '변경 없음', detail: null });

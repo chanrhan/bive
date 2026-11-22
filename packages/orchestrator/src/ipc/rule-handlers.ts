@@ -104,6 +104,9 @@ const editIssues = (change: {
       issues.push({ path: 'title', message: '제목이 비어 있음' });
     else if (CONTROL_CHARACTERS.test(change.title)) {
       issues.push({ path: 'title', message: '제목은 한 줄이어야 함 (줄바꿈 · 제어 문자 불가)' });
+    } else if (change.title !== change.title.trim()) {
+      // 앞뒤 공백은 다듬지 않고 거부한다(사람이 쓴 글을 조용히 바꾸지 않는다. 진술의 EARS 검사와 같은 기준)
+      issues.push({ path: 'title', message: '제목 앞뒤에 공백을 둘 수 없음' });
     } else if (change.title.length > RULE_TITLE_MAX) {
       issues.push({ path: 'title', message: `제목은 ${String(RULE_TITLE_MAX)}자까지` });
     }

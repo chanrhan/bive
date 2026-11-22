@@ -3,7 +3,7 @@
 // - 실행 알림을 받으면 지금 목록을 둔 채 다시 불러온다 (M1-19, ADR-076, useRunEventRefresh)
 // - 늦게 온 이전 요청의 결과는 버린다(마지막으로 보낸 요청의 결과만 쓴다)
 // - `replace`: 규칙 상세의 직접 편집이 저장되면 응답의 규칙으로 목록의 그 항목을 바꾼다(옛 제목 · 진술을 남기지 않음, M7-03).
-//   그 전에 보낸 요청의 결과는 편집 전 값일 수 있어 버린다
+//   그 전에 보낸 요청의 결과는 편집 전 값일 수 있어 버리고, 버린 요청이 있었으면 한 번 다시 읽는다(실행 알림의 새로고침을 잃지 않게)
 import type { RuleWithJudgment } from '@bive/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -26,17 +26,25 @@ export const useRules = (projectId: string): RulesState => {
   const [loaded, setLoaded] = useState<{ projectId: string; load: RulesLoad } | null>(null);
   // 마지막 요청 번호. 응답이 왔을 때 번호가 다르면 더 새 요청이 있으므로 버린다
   const seq = useRef(0);
+  // 응답을 기다리는 요청 번호 (없으면 0)
+  const inFlight = useRef(0);
 
   const fetchRules = useCallback((): Promise<void> => {
     seq.current += 1;
     const mine = seq.current;
+    inFlight.current = mine;
+    const settle = (): void => {
+      if (inFlight.current === mine) inFlight.current = 0;
+    };
     return window.bive.invoke('rule.list', { projectId }).then(
       ({ rules }) => {
+        settle();
         if (seq.current === mine) {
           setLoaded({ projectId, load: { state: 'ready', items: visibleRules(rules) } });
         }
       },
       () => {
+        settle();
         if (seq.current === mine) setLoaded({ projectId, load: { state: 'error' } });
       },
     );
@@ -54,8 +62,10 @@ export const useRules = (projectId: string): RulesState => {
 
   const replace = useCallback(
     (item: RuleWithJudgment): void => {
-      // 이미 보낸 요청의 결과(편집 전 값일 수 있음)는 버린다
+      // 이미 보낸 요청의 결과(편집 전 값일 수 있음)는 버리고, 버린 요청이 있었으면 아래에서 다시 읽는다
+      const dropped = inFlight.current !== 0;
       seq.current += 1;
+      inFlight.current = 0;
       setLoaded((current) =>
         current === null || current.projectId !== projectId || current.load.state !== 'ready'
           ? current
@@ -67,8 +77,9 @@ export const useRules = (projectId: string): RulesState => {
               },
             },
       );
+      if (dropped) void fetchRules();
     },
-    [projectId],
+    [projectId, fetchRules],
   );
 
   return {
