@@ -10,6 +10,9 @@
 // 사람의 규칙 진술 편집으로 시작한 실행(시작 주체 `causeLog: 'approval_log'`, M7-03 #215 · ADR-109)은 자동 시작 항목의 원인이
 // `ruleEditSeqs`(승인 기록 순번)이고, 그 순번이 대상 규칙 1개의 진술을 바꾼 사람의 `rule_edit` 기록이어야 하며 다른 자동 시작
 // 항목이 같은 편집을 쓰지 않아야 한다(`ruleEditMismatch`).
+// 기존 규칙 모순으로 끝난 실행의 대상 규칙을 다시 시작한 실행(M7-12 #224, ADR-118)은 원인이 그 실행의 검사 실패 판단 기록(결과 모순,
+// 모순 대상에 이 실행의 대상 규칙)이고, 그 판단의 연결 실행이 기존 규칙 모순으로 끝난 다른 실행이어야 한다. 이 원인은 끝난 실행의 대상
+// 규칙마다 한 번씩 쓰이므로 재사용은 "같은 원인 · 같은 대상 규칙"을 다른 항목이 쓸 때만이다.
 import { type NormChangeEntry, type Run, ruleStatementEditOf } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
@@ -27,7 +30,10 @@ export type StartBasisMismatch =
   | 'not_single_rule'
   /** 근거의 대상 규칙이 실행의 대상 규칙과 다름 */
   | 'rules_mismatch'
-  /** 원인 순번이 시작 주체와 다르거나, 대상 규칙을 만든 실제 신규 기록이 아님 */
+  /**
+   * 원인 순번이 시작 주체와 다르거나, 대상 규칙을 만든 실제 신규 기록 · 그 대상 규칙을 모순 대상으로 둔 기존 규칙 모순 판단(M7-12)이
+   * 아님
+   */
   | 'cause_mismatch'
   /** 같은 원인 순번을 다른 실행의 자동 시작 항목도 씀 */
   | 'cause_reused';
@@ -42,8 +48,42 @@ export interface StartBasisCheck {
 const sameList = <T>(a: readonly T[] | undefined, b: readonly T[]): boolean =>
   a !== undefined && a.length === b.length && a.every((value, index) => value === b[index]);
 
+/** 기존 규칙 모순으로 끝난 실행의 실패 사유 (`steps/existing-rule.ts`와 같은 값). */
+const EXISTING_RULE_CONTRADICTION = 'existing_rule_contradiction';
+
+/**
+ * 원인이 기존 규칙 모순 판단인지 (M7-12, ADR-118): 검사 실패 판단 · 결과 모순 · 모순 대상에 `ruleId`, 연결 실행이 기존 규칙 모순으로
+ * 끝난 다른 실행.
+ */
+const isContradictionCause = (
+  store: ProjectStore,
+  run: Run,
+  cause: NormChangeEntry,
+  ruleId: string | undefined,
+): boolean => {
+  const judged = cause.detail.judgment;
+  if (
+    cause.kind !== 'judgment' ||
+    judged?.subject !== 'check_failure' ||
+    judged.verdict !== 'contradiction' ||
+    ruleId === undefined ||
+    !judged.contradicts.some((rule) => rule.id === ruleId) ||
+    cause.runId === null ||
+    cause.runId === run.id
+  ) {
+    return false;
+  }
+  const ended = store.runs.get(cause.runId);
+  return (
+    ended !== null &&
+    ended.status === 'failed' &&
+    ended.failureReason === EXISTING_RULE_CONTRADICTION
+  );
+};
+
 /** 실행 자동 시작 항목의 원인이 맞는지 (`null`이면 맞음). */
 const autoStartMismatch = (
+  store: ProjectStore,
   run: Run,
   entry: NormChangeEntry,
   all: readonly NormChangeEntry[],
@@ -59,16 +99,25 @@ const autoStartMismatch = (
   const causeSeqs = entry.detail.causeSeqs ?? [];
   if (!sameList(causeSeqs, run.startedBy.causeSeqs)) return 'cause_mismatch';
   const bySeq = new Map(all.map((change) => [change.seq, change]));
-  const causesAreCreations = causeSeqs.every((seq, index) => {
-    const cause = bySeq.get(seq);
-    return (
-      cause !== undefined &&
-      cause.kind === 'created' &&
-      cause.targetRef.entity === 'Rule' &&
-      cause.targetRef.id === run.targetRuleIds[index]
+  const [causeSeq] = causeSeqs;
+  const cause = causeSeq === undefined ? undefined : bySeq.get(causeSeq);
+  if (cause === undefined) return 'cause_mismatch';
+  const [ruleId] = run.targetRuleIds;
+  if (cause.kind === 'judgment') {
+    // 기존 규칙 모순으로 끝난 실행의 대상 규칙 다시 시작: 같은 원인 · 같은 대상 규칙을 다른 항목이 쓰면 재사용
+    if (!isContradictionCause(store, run, cause, ruleId)) return 'cause_mismatch';
+    const reused = all.some(
+      (other) =>
+        other.kind === 'auto_start' &&
+        other.seq !== entry.seq &&
+        (other.detail.causeSeqs ?? []).includes(cause.seq) &&
+        sameList(other.detail.ruleIds, run.targetRuleIds),
     );
-  });
-  if (!causesAreCreations) return 'cause_mismatch';
+    return reused ? 'cause_reused' : null;
+  }
+  const isCreation =
+    cause.kind === 'created' && cause.targetRef.entity === 'Rule' && cause.targetRef.id === ruleId;
+  if (!isCreation) return 'cause_mismatch';
   const reused = all.some(
     (other) =>
       other.kind === 'auto_start' &&
@@ -108,7 +157,7 @@ export const checkRunStartBasis = (store: ProjectStore, run: Run): StartBasisChe
   return result(
     run.startedBy.kind === 'orchestrator' && run.startedBy.causeLog === 'approval_log'
       ? ruleEditMismatch(store, run, autoStart, changes)
-      : autoStartMismatch(run, autoStart, changes),
+      : autoStartMismatch(store, run, autoStart, changes),
   );
 };
 

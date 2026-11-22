@@ -9,6 +9,8 @@
 //   턴 한도가 반드시 소진되어, 중단 · 재개 되풀이가 끝없이 이어지지 않는다
 // - 이의 제기로 끝났는데(`objection_raised`) 값을 모르는 세션: 그 세션에 넘긴 한도 전부 (에이전트가 고를 수 있는 경로라 덜 세지
 //   않는다, M7-11 · ADR-115 검토 1회차)
+// - 실행 안 판단 세션(규칙 작성 역할, 실행의 단계 시도에 묶인 세션, M7-12 · ADR-118)의 값을 모르면(init 뒤): 그 세션에 넘긴 한도
+//   전부. 다른 역할의 세션 값으로 추정하지 않는다(역할 · 작업이 달라 값의 크기가 다르고, 덜 세지 않는 쪽)
 // 남은 USD는 한도를 나노 달러 단위로 내리고 사용량을 올려 계산한다(`remainingUsd`). 엔진은 남은 한도가 0 이하면
 // 세션을 열지 않는다: 0을 한도로 넘기면 어댑터가 설정 미비(-32010)처럼 거부해 예산 초과가 설정 문제로 잘못 보이기
 // 때문이다. 세션이 끝난 뒤 같은 방식의 합계가 한도를 넘었으면(`budgetOverrun`) 결과 subtype이 성공이어도 실행을
@@ -23,6 +25,9 @@ import {
 } from '@bive/shared';
 
 import type { SessionBudget } from '../agent/adapter.js';
+
+/** 실행 안 판단 세션의 역할 (실행의 단계 시도에 묶이는 규칙 작성 세션, M7-12 · ADR-118). */
+const JUDGMENT_SESSION_ROLE = 'rule-writer';
 
 /** 세션 한도 기록이 없을 때 쓰는 한도: 역할 스냅샷 한도 → 실행 한도. */
 const sessionAllotment = (session: Session, snapshot: BudgetSnapshot): BudgetLimits =>
@@ -51,19 +56,22 @@ export const chargeSessions = (
   return sessions.map((session) => {
     const beforeModel = session.sdkSessionId === null && session.endReason !== null;
     const allotment = sessionAllotment(session, snapshot);
-    const objection = !beforeModel && session.endReason === 'objection_raised';
+    // 값을 모르면 한도 전부로 세는 세션: 이의 제기로 끝난 세션 · 실행 안 판단 세션 (덜 세지 않는다)
+    const fullAllotment =
+      !beforeModel &&
+      (session.endReason === 'objection_raised' || session.role === JUDGMENT_SESSION_ROLE);
     const usd =
       session.totalCostUsd ??
       (beforeModel
         ? 0
-        : objection
+        : fullAllotment
           ? allotment.maxBudgetUsd
           : Math.min(maxUsd ?? allotment.maxBudgetUsd, allotment.maxBudgetUsd));
     const turns =
       session.numTurns ??
       (beforeModel
         ? 0
-        : objection
+        : fullAllotment
           ? allotment.maxTurns
           : Math.min(Math.max(maxTurns ?? allotment.maxTurns, 1), allotment.maxTurns));
     return {
@@ -145,7 +153,8 @@ export const sessionLimits = (
 
 /**
  * 실행 전체 한도의 남은 USD · 턴 (역할과 무관, 계산 규칙은 {@link sessionLimits}의 실행 쪽과 같다). 하나라도 0 이하면 `null`.
- * 실행 스냅샷에 역할이 없는 실행 안 판단 세션(규칙 작성 역할, M7-11 · ADR-115)의 한도를 묶을 때 쓴다.
+ * 실행 스냅샷에 역할이 없는 실행 안 판단 세션(규칙 작성 역할, M7-11 · ADR-115)의 한도를 묶을 때 쓴다. 판단 세션 행도 실행에 묶이므로
+ * (M7-12 · ADR-118) 앞선 판단 세션이 쓴 돈은 이 합계에 든다.
  */
 export const runRemaining = (
   snapshot: BudgetSnapshot,

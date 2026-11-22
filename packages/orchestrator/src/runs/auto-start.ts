@@ -17,6 +17,11 @@
 // - 멈춤 장치는 하루 예산뿐이다(ADR-100 D8 · B⑤). 요구사항 세션은 사람의 요구사항 저장 · 편집에서만 시작한다. 실행 안의 판단
 //   세션(구현 역할의 이의, M7-11 · ADR-115)이 대체로 새 규칙을 만들면 그 세션 종료 뒤 이 모듈이 새 실행을 만든다: "실행 → 판단 →
 //   대체 → 자동 시작"의 연쇄가 생길 수 있고 그것을 끊는 것도 하루 예산뿐이다(ADR-115에 근거와 비용)
+// - 기존 규칙 모순으로 끝난 실행의 대상 규칙 다시 시작(M7-12 #224, ADR-100 B⑧ · A4, ADR-118, {@link restartAfterContradiction}):
+//   검사 단계 · 병합 재검사에서 대상 밖 규칙이 모순으로 판단돼 폐기 · 대체되면 그 실행은 병합 없이 끝난다. 그 실행의 대상 규칙(아직
+//   병합되지 못한 새 규칙)은 실행이 끝난 뒤 대상 규칙마다 실행 1개로 다시 시작한다(원인 = 그 실행의 첫 모순 판단 기록 순번, 대상 규칙
+//   1개). 대체로 생긴 규칙의 실행은 판단 세션 종료 뒤 위의 기존 경로가 만든다(신규 기록이 원인). 하루 한도 문 · 멱등(같은 원인 ·
+//   같은 대상 규칙은 한 번)은 같고, 생략은 기록하지 않는다(로그만). 실행 종료 저장 이벤트를 받는 오케스트레이터 배선이 부른다
 import {
   type AutoStartSkipReason,
   createUlidGenerator,
@@ -27,7 +32,10 @@ import {
 } from '@bive/shared';
 import type { ProjectStore, RunDetail } from '@bive/store';
 
+import type { EngineEvent } from '../engine/types.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
+import { contradictionJudgmentsOf } from '../norms/check-contradiction.js';
+import { isEffectiveRule, retiredRuleSet } from '../norms/effective.js';
 import { autoStartBlock } from '../settings/auto-start-gate.js';
 import { saveNewRun } from './run-service.js';
 
@@ -143,6 +151,90 @@ export const autoStartRun = (
     return { status: 'started', runs };
   });
 
+/** 다시 시작 항목의 사유 (주체가 오케스트레이터라 필수는 아니지만 기록을 읽는 사람을 위해 남긴다). */
+export const CONTRADICTION_RESTART_REASON =
+  '기존 규칙 모순으로 병합 없이 끝난 실행의 대상 규칙 실행 다시 시작';
+
+/** 기존 규칙 모순으로 끝난 실행의 실패 사유 (`steps/existing-rule.ts`와 같은 값). */
+const EXISTING_RULE_CONTRADICTION = 'existing_rule_contradiction';
+
+export type ContradictionRestartOutcome =
+  /** 대상 규칙마다 실행을 만들었다 (대상 규칙 순) */
+  | { readonly status: 'started'; readonly runs: readonly AutoStartedRun[] }
+  /** 하루 한도 문에 걸려 만들지 않았다 (기록 없음) */
+  | { readonly status: 'skipped'; readonly reason: AutoStartSkipReason }
+  /** 이미 만들었거나(`duplicate`) 다시 시작할 대상 규칙이 없다(`no_rules`, 효력 없음) */
+  | { readonly status: 'duplicate' | 'no_rules' }
+  /** 기존 규칙 모순으로 끝난 실행이 아니다 */
+  | { readonly status: 'not_applicable' };
+
+/**
+ * 기존 규칙 모순으로 끝난 실행 `runId`의 대상 규칙마다 실행 1개를 다시 시작한다 (쓰기 트랜잭션 1개). 원인은 그 실행의 첫 모순 판단
+ * 기록(검사 실패 판단, 결과 모순)이고 대상 규칙마다 한 번만 쓴다. 효력이 없어진 대상 규칙은 건너뛴다.
+ */
+export const restartAfterContradiction = (
+  store: ProjectStore,
+  input: { readonly runId: Ulid },
+  clock: AutoStartClock,
+): ContradictionRestartOutcome =>
+  store.transaction(() => {
+    const ended = store.runs.get(input.runId);
+    if (
+      ended === null ||
+      ended.status !== 'failed' ||
+      ended.failureReason !== EXISTING_RULE_CONTRADICTION
+    ) {
+      return { status: 'not_applicable' };
+    }
+    const [cause] = contradictionJudgmentsOf(store, ended.id);
+    if (cause === undefined) return { status: 'not_applicable' };
+    const changes = store.normChanges.list();
+    const retired = retiredRuleSet(store);
+    const ruleIds = ended.targetRuleIds.filter((ruleId) => {
+      const rule = store.rules.get(ruleId);
+      return rule !== null && isEffectiveRule(rule, retired);
+    });
+    if (ruleIds.length === 0) return { status: 'no_rules' };
+    const pending = ruleIds.filter(
+      (ruleId) =>
+        !changes.some(
+          (entry) =>
+            entry.kind === 'auto_start' &&
+            (entry.detail.causeSeqs ?? []).includes(cause.seq) &&
+            entry.detail.ruleIds?.length === 1 &&
+            entry.detail.ruleIds[0] === ruleId,
+        ),
+    );
+    if (pending.length === 0) return { status: 'duplicate' };
+    const now = clock.now();
+    const settings = store.settings.get();
+    const block = autoStartBlock(store, settings, now);
+    if (block !== null) return { status: 'skipped', reason: block.reason };
+    const at = new Date(now).toISOString();
+    const runs = pending.map((ruleId): AutoStartedRun => {
+      const runId = clock.newId();
+      const detail = saveNewRun(
+        store,
+        settings,
+        { runId, ruleIds: [ruleId], startedBy: { kind: 'orchestrator', causeSeqs: [cause.seq] } },
+        at,
+        clock.newId,
+      );
+      const normChange = store.normChanges.append({
+        at,
+        kind: 'auto_start',
+        actor: { kind: 'orchestrator' },
+        targetRef: { entity: 'Run', id: runId },
+        sessionId: null,
+        runId,
+        reason: CONTRADICTION_RESTART_REASON,
+        detail: { causeSeqs: [cause.seq], ruleIds: [ruleId] },
+      });
+      return { detail, normChange };
+    });
+    return { status: 'started', runs };
+  });
+
 /** 실행 생성 뒤 엔진이 할 일 (`PipelineEngine.onRunCreated`: 승인 단계 판정 → 실행 · 실행 대기). */
 export interface AutoStartEngine {
   onRunCreated(projectId: string, runId: string): void;
@@ -167,6 +259,9 @@ export class AutoStarter {
   readonly #engine: AutoStartEngine;
   readonly #clock: AutoStartClock;
   readonly #log: (line: string) => void;
+  /** 이 프로세스에서 다시 시작을 본 실행 (저장소의 멱등이 한 번 더 막는다) */
+  readonly #restarted = new Set<string>();
+  readonly #pending = new Set<Promise<void>>();
 
   constructor({ biveHome, engine, now = Date.now, log }: AutoStarterOptions) {
     this.#biveHome = biveHome;
@@ -200,6 +295,54 @@ export class AutoStarter {
       this.#log(`실행 자동 시작 실패 (세션 ${sessionId}): ${errorMessage(error)}`);
       return null;
     }
+    if (outcome.status === 'skipped') {
+      this.#log(`실행 자동 시작 생략 (세션 ${sessionId}, ${outcome.reason})`);
+    }
+    this.#announce(projectId, outcome);
+    return outcome;
+  }
+
+  /**
+   * 엔진의 저장 이벤트 하나 (오케스트레이터 배선이 넘긴다). 기존 규칙 모순으로 끝난 실행을 처음 보면 그 대상 규칙의 실행을 다시
+   * 시작한다(M7-12, ADR-118). 엔진의 종료 처리가 끝난 다음 차례에 하고 기다리지 않는다. 던지지 않는다.
+   */
+  observe(event: EngineEvent): void {
+    if (event.type !== 'run.saved') return;
+    const { run } = event.detail;
+    if (run.status !== 'failed' || run.failureReason !== EXISTING_RULE_CONTRADICTION) return;
+    if (this.#restarted.has(run.id)) return;
+    this.#restarted.add(run.id);
+    const task = Promise.resolve().then(() => {
+      this.afterContradiction(event.projectId, run.id);
+    });
+    this.#pending.add(task);
+    void task.finally(() => this.#pending.delete(task));
+  }
+
+  /** 진행 중인 다시 시작이 모두 끝날 때까지 (종료 · 시험용). */
+  async idle(): Promise<void> {
+    while (this.#pending.size > 0) await Promise.all([...this.#pending]);
+  }
+
+  /** 기존 규칙 모순으로 끝난 실행의 대상 규칙을 다시 시작한다 (실행 종료 저장 뒤). 예외는 로그만 남기고 `null`. */
+  afterContradiction(projectId: string, runId: Ulid): ContradictionRestartOutcome | null {
+    let outcome: ContradictionRestartOutcome;
+    try {
+      outcome = withRegisteredProjectStore(this.#biveHome, projectId, (store) =>
+        restartAfterContradiction(store, { runId }, this.#clock),
+      );
+    } catch (error) {
+      this.#log(`대상 규칙 다시 시작 실패 (실행 ${runId}): ${errorMessage(error)}`);
+      return null;
+    }
+    if (outcome.status === 'skipped') {
+      this.#log(`대상 규칙 다시 시작 생략 (실행 ${runId}, ${outcome.reason})`);
+    }
+    this.#announce(projectId, outcome);
+    return outcome;
+  }
+
+  #announce(projectId: string, outcome: AutoStartOutcome | ContradictionRestartOutcome): void {
     switch (outcome.status) {
       case 'started':
         // 만든 순서대로 알린다: 엔진의 생성 뒤 처리는 부른 순서로 판정하므로 첫 실행이 자리를 잡고 나머지는 실행 대기다
@@ -211,13 +354,8 @@ export class AutoStarter {
           this.#engine.onRunCreated(projectId, detail.run.id);
         }
         break;
-      case 'skipped':
-        this.#log(`실행 자동 시작 생략 (세션 ${sessionId}, ${outcome.reason})`);
-        break;
-      case 'duplicate':
-      case 'no_rules':
+      default:
         break;
     }
-    return outcome;
   }
 }

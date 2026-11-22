@@ -149,6 +149,11 @@ export interface NormInputRule {
   readonly cases: readonly string[] | null;
   /** 상한 때문에 싣지 않은 케이스 수 */
   readonly casesOmitted: number;
+  /**
+   * 인수 테스트 파일에서 찾지 못해 이름을 싣지 않은 케이스 수 (케이스 이름을 거를 때만, 검사 실패 판단 세션, M7-12 · ADR-118).
+   * 없으면 0
+   */
+  readonly casesUnknown?: number;
   /** 초점 규칙인지 */
   readonly focus: boolean;
 }
@@ -195,11 +200,24 @@ const count = (total: number, included: number): NormInputCount => ({
   omitted: total - included,
 });
 
+/** 규범 입력을 모을 때의 선택. */
+export interface NormInputOptions {
+  /**
+   * 최근 판정 케이스 이름 가운데 실을 것 (검사 실패 판단 세션: 그 규칙의 인수 테스트 파일에 적힌 이름만, M7-12 · ADR-118). 거른
+   * 이름은 수(`casesUnknown`)로만 남는다. 없으면 모두 싣는다
+   */
+  readonly isKnownCase?: (ruleDisplayId: string, name: string) => boolean;
+}
+
 /**
  * 저장소에서 규범 입력을 모은다 (읽기만). 상한은 {@link NORM_INPUT_LIMITS}.
  * 초점 규칙 → 초점 요구사항과 초점 규칙의 부모 → 그 요구사항들을 부모로 하는 규칙 순으로 먼저 남긴다(A15).
  */
-export const collectNormInput = (store: ProjectStore, focus: NormInputFocus): NormInput => {
+export const collectNormInput = (
+  store: ProjectStore,
+  focus: NormInputFocus,
+  options: NormInputOptions = {},
+): NormInput => {
   const limits = NORM_INPUT_LIMITS;
   const requirements = effectiveRequirements(store);
   const rules = effectiveRules(store);
@@ -245,7 +263,13 @@ export const collectNormInput = (store: ProjectStore, focus: NormInputFocus): No
     .filter((rule) => keptRules.has(rule.id))
     .map((rule): NormInputRule => {
       const judgment = latest.get(rule.id);
-      const names = judgment?.cases.map((testCase) => testCase.name) ?? null;
+      const all = judgment?.cases.map((testCase) => testCase.name) ?? null;
+      const { isKnownCase } = options;
+      const names =
+        all === null || isKnownCase === undefined
+          ? all
+          : all.filter((name) => isKnownCase(rule.displayId, name));
+      const casesUnknown = all === null || names === null ? 0 : all.length - names.length;
       let parent: NormInputParent;
       if (rule.parentRequirementId !== null) {
         parent = {
@@ -269,6 +293,7 @@ export const collectNormInput = (store: ProjectStore, focus: NormInputFocus): No
                 .map((name) => displayText(name, NORM_INPUT_LIMITS.caseName).text),
         casesOmitted:
           names === null ? 0 : Math.max(0, names.length - NORM_INPUT_LIMITS.casesPerRule),
+        ...(casesUnknown > 0 ? { casesUnknown } : {}),
         focus: focusRules.has(rule.id),
       };
     });
@@ -319,13 +344,19 @@ export const renderNormInput = (input: NormInput, focusLabel: string): string =>
       lines.push('  최근 판정의 인수 테스트 케이스: 판정 기록 없음');
       continue;
     }
+    const unknown = rule.casesUnknown ?? 0;
     lines.push(
-      `  최근 판정의 인수 테스트 케이스: ${String(rule.cases.length + rule.casesOmitted)}건`,
+      `  최근 판정의 인수 테스트 케이스: ${String(rule.cases.length + rule.casesOmitted + unknown)}건`,
     );
     for (const name of rule.cases) lines.push(`    케이스: ${name}`);
     if (rule.casesOmitted > 0) {
       lines.push(
         `    (케이스 ${String(rule.casesOmitted)}건 더 있음, 상한 ${String(NORM_INPUT_LIMITS.casesPerRule)}건)`,
+      );
+    }
+    if (unknown > 0) {
+      lines.push(
+        `    (알 수 없는 케이스 ${String(unknown)}건: 인수 테스트 파일에서 이름을 찾지 못해 싣지 않음)`,
       );
     }
   }

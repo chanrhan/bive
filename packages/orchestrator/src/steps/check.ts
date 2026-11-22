@@ -10,10 +10,15 @@
 // - `collect_error`(훅 실패 등 파일 수준 오류)는 구현이 만든 문제일 수 있어 `unmet`. 판정 기록은 남기지 않는다
 // - `runner_error` · 체크아웃 · 설치 실패는 `failed`(`judge_runner_error`): 같은 커밋이 구현 단계 판정에서 이미 빌드 ·
 //   설치를 통과했으므로 환경 문제로 보고 구현을 다시 하지 않는다 (Red 확인과 같은 분류, ADR-068)
+// - 대상이 아닌 효력 있는 규칙만 실패하면(내장 구조 규칙 제외) 규칙을 맡는 역할이 모순인지 한 번 판단한다(M7-12 #224, ADR-100
+//   B⑧ · A4 · A5, ADR-118, `steps/existing-rule.ts`): 모순이면 `failed`(`existing_rule_contradiction`, 병합 없음), 모순 없음이면
+//   지금처럼 `unmet` → 구현 회귀(같은 회귀 상한)이고 다음 구현 세션은 판단 근거를 받는다. 대상 규칙이 함께 실패하면 판단 없이 회귀한다.
+//   이 실행에 모순 판단이 이미 있으면(재기동 · 재개) 판정하지 않고 끝낸다
 import type { Rule } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
 import { effectiveRules } from '../norms/effective.js';
+import { contradictionHalt, judgeExistingRuleFailures } from './existing-rule.js';
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
 import {
   createNormGuard,
@@ -63,6 +68,9 @@ export const createCheckExecutor =
         message: 'Red 확인 통과 기록(인수 테스트 해시)이 없습니다',
       });
     }
+    // 모순 판단으로 끝나야 할 실행은 다시 판정하지 않는다 (폐기된 규칙이 빠져 통과로 보이는 길을 막는다, ADR-100 A4)
+    const contradicted = contradictionHalt(context);
+    if (contradicted !== null) return contradicted;
     const norms = createNormGuard(context);
     const rules = approvedRules(context);
     const targets = context.read((store) =>
@@ -82,6 +90,7 @@ export const createCheckExecutor =
         expectedAcceptanceHashes: expectedHashes,
         norms,
         signal: context.signal,
+        readAcceptanceTexts: true,
       },
       options,
     );
@@ -154,7 +163,33 @@ export const createCheckExecutor =
     );
     const judgments = judgmentDigest(recorded, judgedRules);
     if (recorded.some((judgment) => judgment.status !== 'pass')) {
-      return { status: 'unmet', exitDetail: { ...detail, reason: 'check_failed', judgments } };
+      // 대상 밖 규칙의 실패: 규칙을 맡는 역할의 판단 (판단 입력은 실패한 규칙 ID와 케이스 이름뿐, 실행기 출력은 넘기지 않는다)
+      const existing = await judgeExistingRuleFailures(context, {
+        stage: 'check',
+        judgments: recorded,
+        rules: judgedRules,
+        acceptanceTexts: judged.acceptanceTexts ?? {},
+      });
+      if (existing.kind === 'halt') {
+        const outcome = existing.outcome;
+        return outcome.status === 'halt'
+          ? {
+              ...outcome,
+              exitDetail: { ...detail, judgments, ...(outcome.exitDetail as object) },
+            }
+          : outcome;
+      }
+      return {
+        status: 'unmet',
+        exitDetail: {
+          ...detail,
+          reason: 'check_failed',
+          judgments,
+          ...(existing.kind === 'no_contradiction'
+            ? { existingRuleJudgment: existing.detail }
+            : {}),
+        },
+      };
     }
     return { status: 'passed', exitDetail: { ...detail, judgments } };
   };

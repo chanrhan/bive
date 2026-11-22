@@ -195,12 +195,15 @@ const changesOf = (h: PipelineHarness): NormChangeEntry[] =>
 const sessionsOf = (h: PipelineHarness, runId = h.runId): Session[] =>
   withProject(h.biveHome, h.project.id, (store) => store.sessions.listByRun(runId));
 
-/** 판단 세션 (실행 밖 규칙 작성 세션, 시작 순). 이 하네스는 요구사항 세션을 띄우지 않는다 */
+/**
+ * 판단 세션 (규칙 작성 세션, 시작 순). 이 하네스는 요구사항 세션을 띄우지 않는다. 판단 세션 행은 그 실행 · 판단을 청한 단계 시도에
+ * 묶인다(M7-12, ADR-118)
+ */
 const judgeSessionsOf = (h: PipelineHarness): Session[] =>
   withProject(h.biveHome, h.project.id, (store) =>
     store.sessions
       .listStartedBetween(0, Date.now() + 86_400_000)
-      .filter((session) => session.role === 'rule-writer' && session.runId === null),
+      .filter((session) => session.role === 'rule-writer'),
   );
 
 const specsOf = (h: PipelineHarness, role: SessionSpec['role']): SessionSpec[] =>
@@ -470,17 +473,19 @@ describe('시나리오 objection: 구현 시도 1의 이의 → 판단 세션의
     });
     expect(routeOf(h)).toContain('toISOString()');
 
-    // 세션: 구현 1(이의 제기로 끝남) → 판단 세션(규칙 작성 역할, 실행 밖 세션 행) → 구현 2
+    // 세션: 구현 1(이의 제기로 끝남) → 판단 세션(규칙 작성 역할, 이의를 청한 구현 시도에 묶인 실행 세션, M7-12 · ADR-118) → 구현 2
     const sessions = sessionsOf(h);
     const roles = sessions.map((session) => `${session.role}:${String(session.endReason)}`);
     expect(roles).toEqual([
       'test-writer:success',
       'implementer:objection_raised',
+      'rule-writer:success',
       'implementer:success',
     ]);
     const judges = judgeSessionsOf(h);
     expect(judges).toHaveLength(1);
     const judgment = judges[0];
+    expect(judgment).toMatchObject({ runId: h.runId, stepId: first.id });
     expect(judgment?.endReason).toBe('success');
     expect(exit.judgmentSession).toEqual({ sessionId: judgment?.id, endReason: 'success' });
     expect(judgment?.normInput?.ruleDisplayIds).toContain('RULE-001');
@@ -819,12 +824,11 @@ describe('판단 없음 · 판단 세션의 실패는 유지로 본다 (판단 �
     const request = {
       projectId: h.project.id,
       run: { id: h.runId, displayId: 'EXE-001' },
-      stepId: newId(),
+      stepId: detailOf(h).steps[0]?.id ?? newId(),
       runBudget: { maxBudgetUsd: 5, maxTurns: 100 },
       signal: new AbortController().signal,
-      cause: { kind: 'objection' as const, seq: 1 },
+      cause: { kind: 'objection' as const, seq: 1, text: '이유' },
       ruleIds: [h.rule.id],
-      text: '이유',
     };
     await expect(service.judge(request)).resolves.toMatchObject({
       status: 'not_opened',
@@ -1475,12 +1479,12 @@ describe('판단 세션의 한도 = min(규칙 작성 역할 설정, 프로젝�
     const outcome = await service.judge({
       projectId: h.project.id,
       run: { id: h.runId, displayId: 'EXE-001' },
-      stepId: newId(),
+      // 판단 세션 행은 그 실행의 단계 시도에 묶인다 (M7-12, ADR-118)
+      stepId: detailOf(h).steps[0]?.id ?? newId(),
       runBudget,
       signal: new AbortController().signal,
-      cause: { kind: 'objection', seq: 1 },
+      cause: { kind: 'objection', seq: 1, text: '이유' },
       ruleIds: [h.rule.id],
-      text: '이유',
     });
     if (outcome.status !== 'ended') throw new Error(`열지 못함: ${outcome.status}`);
     return withProject(h.biveHome, h.project.id, (store) => store.sessions.get(outcome.sessionId))
