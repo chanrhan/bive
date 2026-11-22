@@ -1206,11 +1206,73 @@ describe('0016 run_auto_start: 실행 시작 주체에 오케스트레이터(원
   it('0015까지의 빈 DB에도 적용되고, 다시 실행해도 스키마가 같다', () => {
     withDb((db) => {
       migrate(db, PROJECT_MIGRATIONS.slice(0, 15), { now: fixedNow });
-      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([16]);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 16), { now: fixedNow }).applied).toEqual([16]);
+      const schema = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 16), { now: fixedNow }).applied).toEqual([]);
+      expect(schemaOf(db)).toEqual(schema);
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+    });
+  });
+});
+
+describe('0017 session_norm_input: 세션이 받은 규범 입력의 기록 (M7-08 #220, ADR-108)', () => {
+  const insertSession = (db: SqliteDatabase, id: string, normInput?: string) =>
+    normInput === undefined
+      ? db
+          .prepare(
+            `INSERT INTO sessions (id, role, model, work_dir, model_usage, tools, mcp_servers, started_at)
+             VALUES (?, 'rule-writer', 'm', '/w', '{}', '[]', '[]', '2026-11-22T00:00:00.000Z')`,
+          )
+          .run(id)
+      : db
+          .prepare(
+            `INSERT INTO sessions (id, role, model, work_dir, model_usage, tools, mcp_servers, started_at, norm_input)
+             VALUES (?, 'rule-writer', 'm', '/w', '{}', '[]', '[]', '2026-11-22T00:00:00.000Z', ?)`,
+          )
+          .run(id, normInput);
+
+  it('0016까지의 세션 행은 값 그대로 남고 기록 칸은 NULL이며, 기존 트리거(끝난 세션 · 식별 정보 · 한도)는 그대로다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 16), { now: fixedNow });
+      const old = newId();
+      insertSession(db, old);
+      const before = db.prepare('SELECT * FROM sessions').get() as Record<string, unknown>;
+      const triggers = () =>
+        db
+          .prepare(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'sessions' ORDER BY name",
+          )
+          .all() as { name: string; sql: string }[];
+      const oldTriggers = triggers();
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([17]);
+      expect(db.prepare('SELECT * FROM sessions').get()).toEqual({ ...before, norm_input: null });
+      // 기존 트리거는 SQL 그대로이고 기록 칸의 불변 트리거 하나만 더해진다
+      const after = triggers();
+      expect(after.filter((t) => t.name !== 'sessions_norm_input_immutable')).toEqual(oldTriggers);
+      expect(after.map((t) => t.name)).toContain('sessions_norm_input_immutable');
+      expect(after).toHaveLength(oldTriggers.length + 1);
+      // 옛 행에도 나중에 기록을 채울 수 없다 (열 때 정해지는 값)
+      expect(() =>
+        db.prepare(`UPDATE sessions SET norm_input = '{}' WHERE id = ?`).run(old),
+      ).toThrow(/규범 입력 기록은 바꿀 수 없습니다/);
+      // 다른 칸의 갱신(끝내기)은 그대로 된다
+      db.prepare(`UPDATE sessions SET end_reason = 'success' WHERE id = ?`).run(old);
+      expect(() => db.prepare(`UPDATE sessions SET error = 'x' WHERE id = ?`).run(old)).toThrow(
+        /끝난 세션은 바꿀 수 없습니다/,
+      );
+    });
+  });
+
+  it('기록은 JSON 객체만 받고, 다시 실행해도 스키마가 같다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      insertSession(db, newId(), '{"summary":{}}');
+      for (const bad of ['[]', '"x"', '1', 'not json']) {
+        expect(() => insertSession(db, newId(), bad)).toThrow(/CHECK/);
+      }
       const schema = schemaOf(db);
       expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
       expect(schemaOf(db)).toEqual(schema);
-      expect(db.pragma('foreign_key_check')).toEqual([]);
     });
   });
 });

@@ -1,7 +1,9 @@
 // 구현 단계 실행기 (RUN-02 · RUN-04 · JDG-01 · NFR-01 · NFR-02, architecture.md 4장 4단계, ADR-024 · ADR-026 · ADR-052 · ADR-069).
 // 1. 실행 워크트리에 의존성을 lockfile 기준으로 설치한다(오케스트레이터 몫, ADR-024 · C-14). 실패는 환경 문제라 `failed`
 // 2. implementer 세션을 연다: 세션 루트 = 실행 워크트리. 경로 가드가 `bive-acceptance/**` · `node_modules/**` · `.git` ·
-//    `.bive.json` 쓰기를 거부한다(ADR-052). 세션의 보고 내용은 어디에도 쓰지 않는다(JDG-01: 판정 근거는 실행기 결과뿐)
+//    `.bive.json` 쓰기를 거부한다(ADR-052). 세션의 보고 내용은 어디에도 쓰지 않는다(JDG-01: 판정 근거는 실행기 결과뿐).
+//    작업 지시에는 세션을 열기 직전에 읽은 효력 있는 규범(초점 = 대상 규칙)을 싣고, 받은 표시 ID · 수를 세션 행에 남긴다
+//    (M7-08 #220, ADR-108). 재시도 · 재개의 새 세션은 그때 다시 읽는다
 // 3. 세션 뒤 규범 저장소를 세션 전 스냅숏과 대조한다(에이전트 코드가 `run_tests`로 돌았던 구간, #117 기본 조치)
 // 4. 변경을 커밋하고(판정한 코드 = 병합될 코드) 그 커밋의 깨끗한 체크아웃에서: Red 확인 때의 인수 테스트 해시와 대조
 //    (다르면 `failed`(`guard_violation`)) → 의존성 새로 설치 → 판정 직전 규범 확인 → 대상 규칙만 판정 → 판정 뒤 규범 확인
@@ -20,6 +22,7 @@ import { IMPLEMENTER_SYSTEM_PROMPT, implementerTaskPrompt } from '../implementer
 import { DEFAULT_INSTALL_TIMEOUT_MS, JudgeCheckoutError } from '../judge/checkout.js';
 import { installDependencies } from '../judge/checkout.js';
 import type { JudgeRunResult } from '../judge/runner.js';
+import { collectNormInput, normInputRecord } from '../norms/norm-input.js';
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
 import {
   caseSummary,
@@ -229,6 +232,10 @@ export const createImplementationExecutor =
       ruleIds.some((id) => file.startsWith(`bive-acceptance/${id}/`)),
     );
     const installAllowlist = context.read((store) => store.settings.get().installAllowlist);
+    // 효력 있는 규범은 작업 지시로만 준다 (도구 목록은 그대로, ADR-100 K1 · A14)
+    const normInput = context.read((store) =>
+      collectNormInput(store, { requirementIds: [], ruleIds: context.run.targetRuleIds }),
+    );
     let session;
     try {
       session = await context.runSession({
@@ -238,8 +245,10 @@ export const createImplementationExecutor =
           runDisplayId: context.run.displayId,
           rules,
           acceptanceFiles,
+          norms: normInput,
           feedback: previousImplementationFeedback(context.steps, context.step),
         }),
+        normInput: normInputRecord(normInput),
         vars: {
           ruleId: ruleIds[0] ?? '',
           ruleIds: ruleIds.join(','),

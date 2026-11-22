@@ -92,6 +92,7 @@ const session = (
   modelUsage,
   firstTurnCacheWrite: null,
   budget: null,
+  normInput: null,
   tools: [],
   mcpServers: [],
   startedAt: '2026-10-16T09:00:00.000Z',

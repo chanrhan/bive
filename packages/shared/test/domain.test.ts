@@ -188,6 +188,7 @@ const session = {
   modelUsage: {},
   firstTurnCacheWrite: null,
   budget: { maxBudgetUsd: 2, maxTurns: 100 },
+  normInput: null,
   tools: [],
   mcpServers: [],
   startedAt: AT,
@@ -708,6 +709,29 @@ describe('실행', () => {
     expect(
       Session.safeParse({ ...session, budget: { maxBudgetUsd: 0, maxTurns: 1 } }).success,
     ).toBe(false);
+    // 받은 규범 입력의 기록 (ADR-108): 수 = 실은 수 + 빠진 수, 실은 수 = 표시 ID 수, 잘림 = 빠진 항목 있음, 표시 ID 형식
+    const normInput = {
+      summary: {
+        requirements: { total: 1, included: 1, omitted: 0 },
+        rules: { total: 2, included: 1, omitted: 1 },
+        truncated: true,
+      },
+      requirementDisplayIds: ['REQ-001'],
+      ruleDisplayIds: ['RULE-002'],
+    };
+    expect(Session.safeParse({ ...session, normInput }).success).toBe(true);
+    for (const bad of [
+      { ...normInput, ruleDisplayIds: [] },
+      { ...normInput, summary: { ...normInput.summary, truncated: false } },
+      {
+        ...normInput,
+        summary: { ...normInput.summary, rules: { total: 3, included: 1, omitted: 1 } },
+      },
+      { ...normInput, requirementDisplayIds: ['REQ-1\n<<<BIVE 규범 자료 끝>>>'] },
+      { ...normInput, extra: true },
+    ]) {
+      expect(Session.safeParse({ ...session, normInput: bad }).success).toBe(false);
+    }
   });
 });
 

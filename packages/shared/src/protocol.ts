@@ -30,6 +30,7 @@ import {
   Run,
   RunLimits,
   ScreenId,
+  SessionNormInput,
   Settings,
   Sha256Hex,
   Step,
@@ -637,13 +638,31 @@ export const RunGetParams = z.strictObject({ projectId: Ulid, id: RunRef });
 export type RunGetParams = z.infer<typeof RunGetParams>;
 
 /**
+ * `run.get`의 세션 항목 (RUN-04 · RUN-08, ADR-100 A15, ADR-108): 실행의 에이전트 세션을 시작 순으로. `normInput`은 그 세션이
+ * 작업 지시로 받은 규범 입력의 기록(수 · 잘린 사실 · 실은 표시 ID)이고, 규범 입력을 받지 않은 세션(이 기록이 생기기 전
+ * 세션 포함)은 `null`. 비용 · 턴은 `usage`가 맡는다.
+ */
+export const RunSessionEntry = z.strictObject({
+  id: Ulid,
+  stepId: Ulid,
+  role: AgentRole,
+  startedAt: Timestamp,
+  endedAt: Timestamp.nullable(),
+  endReason: SessionEndReason.nullable(),
+  normInput: SessionNormInput.nullable(),
+});
+export type RunSessionEntry = z.infer<typeof RunSessionEntry>;
+
+/**
  * `run.get` 결과: 실행 · 단계 + 비용 · 턴 집계 `usage` (COST-02, ADR-067). `usage`는 조회 시점의 세션 기록으로 만든다
- * (진행 중 세션은 값이 없어 합계에 들어가지 않는다). 값이 없으면 `null`이고 화면은 '없음'으로 보인다.
+ * (진행 중 세션은 값이 없어 합계에 들어가지 않는다). 값이 없으면 `null`이고 화면은 '없음'으로 보인다. `sessions`는 세션 항목
+ * ({@link RunSessionEntry}).
  */
 export const RunGetResult = z.strictObject({
   run: Run,
   steps: z.array(Step),
   usage: RunUsage,
+  sessions: z.array(RunSessionEntry),
 });
 export type RunGetResult = z.infer<typeof RunGetResult>;
 

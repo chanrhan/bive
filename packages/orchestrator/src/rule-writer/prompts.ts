@@ -1,10 +1,17 @@
 // rule-writer 세션의 시스템 프롬프트 · 작업 지시 (NRM-02, 기획서 3.1, ADR-009 · ADR-062).
 // 고정 부분(진술 형식 · 검사 종류 · 반영 경로 · 모순 판단의 뜻과 절차)만 시스템 프롬프트에 둔다. 만든 규칙은 사람의 승인 없이
 // 바로 효력을 갖는다(M7-02, ADR-100 D1). 효력 있는 기존 규범은 세션마다 다르므로 작업 지시에 읽기 전용 자료로 싣는다
-// (M7-07, ADR-100 K1 · D5, ADR-106). 역할별 문장 지침(작성 규칙, NRM-10)은 M6-05가 이 뒤에 붙인다.
+// (M7-07, ADR-100 K1 · D5, ADR-106). 작업 지시 머리의 요구사항 본문도 자료와 같은 표시 값(한 줄)이다(M7-08, ADR-108).
+// 역할별 문장 지침(작성 규칙, NRM-10)은 M6-05가 이 뒤에 붙인다.
 import { CheckKind, type Requirement, RuleKind } from '@bive/shared';
 
-import { type NormInput, renderNormInput } from '../norms/norm-input.js';
+import {
+  NORM_INPUT_FOCUS_LABEL,
+  type NormInput,
+  renderNormInput,
+  TASK_HEADER_LIMITS,
+  taskHeaderText,
+} from '../norms/norm-input.js';
 import { EARS_FORMAT } from '../tools/ears.js';
 
 /** rule-writer 시스템 프롬프트 (고정 부분). */
@@ -32,9 +39,12 @@ export const RULE_WRITER_SYSTEM_PROMPT = [
 ].join('\n');
 
 /** 작업 지시의 규범 자료에서 작업 대상 요구사항 뒤에 붙는 말. */
-export const RULE_WRITER_FOCUS_LABEL = '이번 작업 대상';
+export const RULE_WRITER_FOCUS_LABEL = NORM_INPUT_FOCUS_LABEL;
 
-/** 요구사항 1개에 대한 작업 지시 (첫 사용자 메시지). 효력 있는 규범 자료를 틀 안에 싣는다(M7-07). */
+/**
+ * 요구사항 1개에 대한 작업 지시 (첫 사용자 메시지). 효력 있는 규범 자료를 틀 안에 싣는다(M7-07). 머리의 요구사항 본문은
+ * 표시 값 한 줄이다(줄바꿈은 `\n` 표기, ADR-108): 본문이 표시 줄 모양의 줄을 만들어 틀보다 앞에서 자료를 흉내 내지 못한다.
+ */
 export const ruleWriterTaskPrompt = (
   requirement: Pick<Requirement, 'id' | 'displayId' | 'text'>,
   norms: NormInput,
@@ -42,8 +52,7 @@ export const ruleWriterTaskPrompt = (
   [
     `요구사항 ID: ${requirement.id}`,
     `표시 ID: ${requirement.displayId}`,
-    '요구사항:',
-    requirement.text,
+    `요구사항 본문: ${taskHeaderText(requirement.text, TASK_HEADER_LIMITS.requirementText)}`,
     '',
     renderNormInput(norms, RULE_WRITER_FOCUS_LABEL),
     '',

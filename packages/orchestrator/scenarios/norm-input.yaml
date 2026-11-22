@@ -1,0 +1,210 @@
+# 규범 입력 (roadmap M7-08 #220, ADR-100 K1 · A14 · A15, ADR-106 · ADR-108).
+# 형식: src/agent/scenario.ts. 요구사항 2개를 차례로 저장하면 규칙 작성 세션이 요구사항마다 규칙 1개를 만든다(세션 vars의
+# requirementDisplayId로 고른다): REQ-001 → RULE-001(time), REQ-002 → RULE-002(version). 요구사항마다 규칙 1개라 실행을
+# 규칙마다 만들어도(사람의 [실행] · 자동 시작 어느 쪽이든) 실행 번호가 요구사항 순서와 같다(EXE-001 = RULE-001, EXE-002 = RULE-002).
+# 실행 안 세션(테스트 작성 · 구현)은 `when.ruleId`로 고른다(ADR-092). 테스트 작성 세션은 {{ruleId}}(첫 대상 규칙) 폴더에만 쓴다.
+# 둘째 실행의 구현 세션은 작업 지시의 규범 자료에서 앞 실행의 RULE-001을 본다(시험이 run.get의 세션 항목으로 단언한다).
+# 인수 테스트 · 구현은 multi-rule과 같다: 실행 2의 구현은 실행 1이 병합한 time을 그대로 두고 version을 더한다.
+name: norm-input
+description: 요구사항 2개를 차례로 저장해 규칙 2개(time · version)를 만들고, 실행 1이 time, 실행 2가 time을 유지한 채 version을 더해 둘 다 병합
+roles:
+  rule-writer:
+    sessions:
+      - description: REQ-001 - 서버 시각 포함
+        when:
+          requirementDisplayId: REQ-001
+        turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답의 서버 시각
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 time 필드에 응답 시점의 서버 시각을 ISO 8601 UTC 문자열로 담는다
+              kind: business
+              checkKinds: [test]
+              rationale: 요구사항의 '서버 시각 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+              contradiction: { verdict: none }
+          - message: 규칙 1건을 반영했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0156
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 920
+              outputTokens: 310
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 2600
+              costUSD: 0.0156
+      - description: REQ-002 - 버전 포함 (기존 RULE-001과 모순 없음)
+        when:
+          requirementDisplayId: REQ-002
+        turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답의 버전
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 version 필드에 MAJOR.MINOR.PATCH 형식의 버전 문자열을 담는다
+              kind: business
+              checkKinds: [test]
+              rationale: 요구사항의 '버전 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+              contradiction: { verdict: none }
+          - message: 규칙 1건을 반영했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0156
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 920
+              outputTokens: 310
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 2600
+              costUSD: 0.0156
+  test-writer:
+    sessions:
+      - description: RULE-001 - 서버 시각 인수 테스트
+        when:
+          ruleId: RULE-001
+        turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 서버 시각. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+
+                describe('GET /api/health 서버 시각', () => {
+                  it('응답 JSON의 time이 응답 시점의 ISO 8601 UTC 시각이다', async () => {
+                    const before = Date.now();
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+                    const after = Date.now();
+
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as { ok?: unknown; time?: unknown };
+                    expect(body.ok).toBe(true);
+                    expect(typeof body.time).toBe('string');
+                    const time = String(body.time);
+                    expect(time).toMatch(ISO_UTC);
+                    const at = Date.parse(time);
+                    expect(at).toBeGreaterThanOrEqual(before - 1000);
+                    expect(at).toBeLessThanOrEqual(after + 1000);
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0421
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2310
+              outputTokens: 940
+              cacheReadInputTokens: 4100
+              cacheCreationInputTokens: 6050
+              costUSD: 0.0421
+      - description: RULE-002 - 버전 인수 테스트
+        when:
+          ruleId: RULE-002
+        turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-version.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 버전. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                const SEMVER = /^\d+\.\d+\.\d+$/;
+
+                describe('GET /api/health 버전', () => {
+                  it('응답 JSON의 version이 MAJOR.MINOR.PATCH 형식 문자열이다', async () => {
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as { ok?: unknown; version?: unknown };
+                    expect(body.ok).toBe(true);
+                    expect(typeof body.version).toBe('string');
+                    expect(String(body.version)).toMatch(SEMVER);
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0376
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2080
+              outputTokens: 760
+              cacheReadInputTokens: 4100
+              cacheCreationInputTokens: 6050
+              costUSD: 0.0376
+  implementer:
+    sessions:
+      - description: RULE-001 - 헬스 체크 응답에 time을 더함
+        when:
+          ruleId: RULE-001
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 서버 시각을 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true, time: new Date().toISOString() });
+                }
+          - message: 헬스 체크 응답에 서버 시각(time)을 추가했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0587
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 3120
+              outputTokens: 1180
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0587
+      - description: RULE-002 - 실행 1의 time을 유지하고 version을 더함
+        when:
+          ruleId: RULE-002
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태 · 서버 시각 · 버전을 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true, time: new Date().toISOString(), version: '0.1.0' });
+                }
+          - message: 헬스 체크 응답에 time을 유지하고 버전(version)을 더했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0563
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 3010
+              outputTokens: 1090
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0563

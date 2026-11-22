@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 import {
   type Author,
   createUlidGenerator,
+  type NormState,
   type Project,
+  type Requirement,
   type Rule,
   type SettingsPatch,
 } from '@bive/shared';
@@ -95,12 +97,20 @@ export interface SeededProject {
   rule: Rule;
 }
 
+/** 시험이 바꿔 넣는 시드 글 (요구사항 본문 · 규칙 제목 · 진술). 생략하면 기본 글. */
+export interface SeedTexts {
+  readonly requirement?: string;
+  readonly title?: string;
+  readonly statement?: string;
+}
+
 /** 프로젝트 등록 + 설정 + 승인된 규칙 1개(`RULE-001`). */
 export const seedProject = (
   biveHome: string,
   repo: string,
   settings: SettingsPatch = COMPLETE_SETTINGS,
   normState: Rule['normState'] = 'approved',
+  texts: SeedTexts = {},
 ): SeededProject => {
   const project = registerProject(
     {
@@ -116,15 +126,16 @@ export const seedProject = (
     store.settings.update(settings, { by: human, at: new Date(T0).toISOString() });
     const requirement = store.requirements.create({
       id: newId(),
-      text: '헬스 체크 응답에 서버 시각 포함',
+      text: texts.requirement ?? '헬스 체크 응답에 서버 시각 포함',
       author: human,
       normState: 'approved',
       createdAt: new Date(T0).toISOString(),
     });
     const rule = store.rules.create({
       id: newId(),
-      title: '헬스 체크 서버 시각',
+      title: texts.title ?? '헬스 체크 서버 시각',
       statement:
+        texts.statement ??
         'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 time 필드에 서버 시각을 담는다',
       kind: 'business',
       checkKinds: ['test'],
@@ -139,6 +150,81 @@ export const seedProject = (
     });
     return { project, rule };
   });
+};
+
+// ── 규범 입력 시험의 시드 (M7-08, ADR-106 · ADR-108) ───────────────────
+
+/** 요구사항 1개 (기본 효력 상태). `at`은 생성 · 변경 시각(ms). */
+export const seedNormRequirement = (
+  store: ProjectStore,
+  text: string,
+  at: number,
+  normState: NormState = 'approved',
+): Requirement =>
+  store.requirements.create({
+    id: newId(),
+    text,
+    author: human,
+    normState,
+    createdAt: new Date(at).toISOString(),
+  });
+
+export interface SeedNormRule {
+  readonly title: string;
+  readonly statement: string;
+  readonly parent: Requirement | null;
+  readonly at: number;
+  readonly normState?: NormState;
+  readonly builtin?: boolean;
+}
+
+/** 규칙 1개 (부모 없음 + 내장 아님이면 부모 해제 규칙과 같은 모양). */
+export const seedNormRule = (store: ProjectStore, seed: SeedNormRule): Rule =>
+  store.rules.create({
+    id: newId(),
+    title: seed.title,
+    statement: seed.statement,
+    kind: seed.builtin === true ? 'architecture' : 'business',
+    checkKinds: ['test'],
+    parentRequirementId: seed.parent?.id ?? null,
+    builtin: seed.builtin ?? false,
+    targetBlockIds: [],
+    risk: null,
+    contractId: null,
+    author: { kind: 'agent', role: 'rule-writer' },
+    normState: seed.normState ?? 'approved',
+    createdAt: new Date(seed.at).toISOString(),
+  });
+
+/** 규칙의 판정 기록 1건 (케이스 이름만 의미 있다, 실행 밖 판정). */
+export const seedNormCases = (
+  store: ProjectStore,
+  rule: Rule,
+  names: readonly string[],
+  at: number,
+): void => {
+  store.judgments.record([
+    {
+      id: newId(),
+      ruleId: rule.id,
+      runId: null,
+      stepId: null,
+      commit: 'a'.repeat(40),
+      judgedAt: new Date(at).toISOString(),
+      status: 'pass',
+      runner: 'vitest',
+      exitCode: 0,
+      reporterPath: null,
+      cases: names.map((name) => ({
+        name,
+        file: `bive-acceptance/${rule.displayId}/health.acc.ts`,
+        line: 1,
+        status: 'passed' as const,
+        message: null,
+      })),
+      quarantineReason: null,
+    },
+  ]);
 };
 
 /** 역할 세션을 실행 워크트리에서 열고 성공이면 통과, 아니면 미충족. */

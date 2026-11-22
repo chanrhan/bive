@@ -36,6 +36,7 @@ import {
   ROUTE,
   seedProject,
   type SeededProject,
+  type SeedTexts,
   T0,
   userGit,
   withProject,
@@ -236,6 +237,8 @@ export interface PipelineSetupOptions {
   secondRule?: boolean;
   /** 실행 시작 전 저장소를 고치고 커밋한다 */
   prepareRepo?: (repo: string) => void;
+  /** 시드 요구사항 · 대상 규칙(RULE-001)의 글 (기본 글을 바꿔 넣는다) */
+  seedTexts?: SeedTexts;
   /** 판정 계획 (기본 `contentJudge`) */
   decide?: (call: JudgeCall, index: number) => JudgeDecision;
   onJudge?: (call: JudgeCall, context: StepContext) => void;
@@ -267,7 +270,7 @@ export const setupPipeline = (options: PipelineSetupOptions): PipelineHarness =>
     userGit(repo, 'add', '--all');
     userGit(repo, 'commit', '-q', '-m', 'fixture: 시험 준비');
   }
-  const seeded = seedProject(biveHome, repo);
+  const seeded = seedProject(biveHome, repo, undefined, undefined, options.seedTexts);
   const rules = [seeded.rule];
   if (options.secondRule === true) {
     rules.push(

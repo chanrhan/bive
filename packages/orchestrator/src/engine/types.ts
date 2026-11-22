@@ -7,6 +7,7 @@ import {
   type Project,
   type Run,
   type RunStatus,
+  type SessionNormInput,
   type Step,
   type StepKind,
   STEP_KIND_LABELS,
@@ -134,6 +135,10 @@ export interface StepSessionRequest {
   readonly writableRuleDirs?: readonly string[];
   /** 제안 도구 훅 (도구 호출 기록은 엔진이 저장한다) */
   readonly hooks?: Pick<RoleToolsHooks, 'proposeRule'>;
+  /**
+   * 작업 지시에 실은 규범 입력의 기록 (ADR-108). 엔진이 세션 행을 만들 때 함께 남긴다(바뀌지 않는다). 생략하면 `null`
+   */
+  readonly normInput?: SessionNormInput;
 }
 
 /** 단계 세션 결과. 가드 위반 · 예산 초과는 엔진이 실행을 끝내므로 여기로 오지 않는다. */
