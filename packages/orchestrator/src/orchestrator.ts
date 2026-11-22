@@ -17,6 +17,7 @@ import { PipeServer } from './ipc/server.js';
 import { NetPipeTransport, type PipeTransport } from './ipc/transport.js';
 import { DEFAULT_IDLE_SHUTDOWN_MS, Lifecycle, type RunTracker } from './lifecycle.js';
 import { acquirePidLock } from './lock.js';
+import { observeThenPublish, TestChangeNotifier } from './norms/test-change.js';
 import { assertSocketPathLength } from './pipe-path.js';
 import { RuleWriterService } from './rule-writer/rule-writer-service.js';
 import { type RunPaths, runPaths } from './run-paths.js';
@@ -177,6 +178,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
           await ruleWriter.close();
           // 진행 중 실행을 중단한다. 상태는 저장하지 않으므로 다음 기동 때 interrupted가 된다
           await engine.stop();
+          // 병합된 실행의 테스트 변경 알림 기록이 끝나기를 기다린다 (저장소를 닫은 뒤에 쓰지 않게)
+          await testChanges.idle();
           await closeAndCleanup();
         } finally {
           resolveClosed(reason);
@@ -196,12 +199,21 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
     // 실행 저장 · 화면 갱신 단계 → event.step.updated · event.run.updated (ADR-076). 서버를 만들기 전(기동 중
     // 중단 표시)에는 받을 연결이 없으므로 보내지 않는다
     const runEvents = new RunEventPublisher({ biveHome: options.biveHome, sink: () => server });
+    // 병합으로 끝난 실행이 사람이 확인한 규칙의 기존 인수 테스트를 바꿨으면 테스트 변경 알림을 남긴다 (M7-13 #225, ADR-100 G,
+    // ADR-113). 엔진은 기다리지 않고 실패는 로그만 (실행 상태에 영향 없음)
+    const testChanges = new TestChangeNotifier({ biveHome: options.biveHome, log });
     const engine = new PipelineEngine({
       biveHome: options.biveHome,
       agent: agent.adapter,
       runs: lifecycle,
       log,
-      onEvent: (event) => runEvents.publish(event),
+      onEvent: observeThenPublish(
+        (event) => {
+          testChanges.observe(event);
+        },
+        (event) => runEvents.publish(event),
+        log,
+      ),
       ...(options.executors === undefined ? {} : { executors: options.executors }),
     });
     // 규칙 작성 세션이 규칙을 만들고 정상 종료하면 세션 밖에서 실행을 자동 시작한다 (M7-05 #217, ADR-100 D1 · B⑤ · C2, ADR-107)

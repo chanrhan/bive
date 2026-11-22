@@ -11,8 +11,11 @@
 // - 폐기 · 대체(M7-09 #221, ADR-100 D5 · D6 · B⑨ · A6, ADR-112): `retireAgentRule`은 규칙 폐기 기록 + 규범 변경 기록 `retired`,
 //   `supersedeAgentRule`은 새 규칙 + 신규 · 판단(주제 `supersede`) 기록 + 규범 변경 기록 `superseded` + 폐기 기록을 각각
 //   트랜잭션 1개로 남긴다. 하나라도 실패하면 아무것도 남지 않아, 모순된 두 규칙이 함께 효력을 갖는 시점이나 옛 규칙만 폐기된
-//   시점이 없다. 폐기의 쓰기(규범 변경 기록 + 폐기 기록)는 {@link writeRetirement} 한 함수에만 있다(확인 풀림 M7-13이 같은
-//   트랜잭션에 끼워 넣을 자리)
+//   시점이 없다. 폐기의 쓰기(규범 변경 기록 + 폐기 기록 + 확인 풀림)는 {@link writeRetirement} 한 함수에만 있다
+// - 확인 풀림(M7-13 #225, ADR-100 D3 · C2, ADR-113): 폐기 · 대체되는 규칙이 사람이 확인한 규칙이면 {@link writeRetirement}가 같은
+//   트랜잭션에서 폐기 기록 뒤에 확인 풀림 기록(종류 `unconfirmed`, 주체 오케스트레이터, 원인 = 폐기 · 대체 기록 순번, 앞선 확인)을
+//   남기고 확인 서비스의 `releaseConfirmation`으로 미확인으로 되돌린다. 이 모듈이 확인 서비스에서 가져오는 것은 그 함수뿐이다
+//   (확인됨을 만드는 함수는 가져오지 않는다). 미확인 규칙이면 아무것도 더하지 않는다. 대체로 생긴 새 규칙은 미확인이다
 // - 대상 검증: 없는 규칙(다른 프로젝트 · 같은 호출이 만들 규칙 포함) · 삭제 · 폐기 · 잠정 규칙은 `invalid_args`, 내장 구조
 //   규칙은 `builtin_rule`. 근거는 대상 규칙의 진술이나 최근 판정의 인수 테스트 케이스 이름을 글자 그대로 인용해야 한다
 //   ({@link quotesRule}, 형식 검사일 뿐이다, A6)
@@ -28,6 +31,7 @@ import {
 } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
+import { releaseConfirmation } from '../confirmations/confirmation-service.js';
 import { displayText } from '../text-limit.js';
 import { MIN_QUOTE_LENGTH } from '../tools/definitions.js';
 import { isEffectiveRule, retiredRuleSet } from './effective.js';
@@ -323,16 +327,23 @@ const assertQuoted = (store: ProjectStore, rule: Rule, grounds: string): void =>
   }
 };
 
-/** 폐기 · 대체 결과의 폐기 쪽 (규범 변경 기록 + 폐기 기록). */
+/** 폐기 · 대체 결과의 폐기 쪽 (규범 변경 기록 + 폐기 기록 + 확인 풀림 기록). */
 export interface RetirementWrite {
   /** 규범 변경 기록 (`retired` · `superseded`) */
   readonly normChange: NormChangeEntry;
   readonly retirement: RuleRetirement;
+  /** 확인 풀림 기록 (`unconfirmed`). 대상이 사람이 확인한 규칙이 아니었으면 `null` */
+  readonly released: NormChangeEntry | null;
 }
+
+/** 확인 풀림 기록의 사유 (오케스트레이터의 고정 문장). */
+export const RELEASE_REASON =
+  '사람이 확인한 규칙을 에이전트가 폐기 · 대체해 확인이 풀림 (ADR-100 D3)';
 
 /**
  * 폐기의 쓰기 (부른 쪽 트랜잭션 안, 폐기 · 대체 공통): 규범 변경 기록(`retired` · `superseded`, 사유 = 근거, `before` = 폐기 직전
- * 규칙 내용) 뒤 폐기 기록. 폐기 기록은 그 순번을 가리킨다(DB 트리거가 짝을 확인한다). 확인 풀림(M7-13)은 여기에 더한다.
+ * 규칙 내용) 뒤 폐기 기록. 폐기 기록은 그 순번을 가리킨다(DB 트리거가 짝을 확인한다). 대상이 확인됨이면 이어서 확인 풀림 기록
+ * (주체 오케스트레이터, 같은 시각, 원인 = 폐기 · 대체 기록 순번, 앞선 확인)과 확인 상태 되돌리기(M7-13, ADR-113).
  */
 const writeRetirement = (
   store: ProjectStore,
@@ -376,7 +387,21 @@ const writeRetirement = (
     supersededBy: supersede?.rule.id ?? null,
     normChangeSeq: normChange.seq,
   });
-  return { normChange, retirement };
+  // 확인 상태는 트랜잭션 안에서 읽은 대상 규칙의 값이다 (대상은 이 트랜잭션에서 찾았다)
+  const previous = target.confirmation;
+  if (previous.state !== 'confirmed') return { normChange, retirement, released: null };
+  const released = store.normChanges.append({
+    at: input.at,
+    kind: 'unconfirmed',
+    actor: { kind: 'orchestrator' },
+    targetRef: { entity: 'Rule', id: target.id },
+    sessionId: null,
+    runId: null,
+    reason: RELEASE_REASON,
+    detail: { unconfirm: { causeSeq: normChange.seq, previous } },
+  });
+  releaseConfirmation(store, released);
+  return { normChange, retirement, released };
 };
 
 /** 폐기 입력 (`retire_rule`의 인자에 주체 · 세션을 더한 것). */

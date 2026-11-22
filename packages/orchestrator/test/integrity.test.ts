@@ -743,7 +743,8 @@ describe('확인됨을 쓰는 경로는 사람 RPC · 사람의 제안 승인뿐
     expect(files.filter((f) => /\.confirmations\b/.test(f.text)).map((f) => f.rel)).toEqual([
       'confirmations/confirmation-service.ts',
     ]);
-    // 확인 서비스를 가져오는 파일 = 확인 RPC · 요구사항 RPC(사람의 작성 · 편집) · 규칙 RPC(사람의 직접 편집, M7-03) · 제안 승인
+    // 확인 서비스를 가져오는 파일 = 확인 RPC · 요구사항 RPC(사람의 작성 · 편집) · 규칙 RPC(사람의 직접 편집, M7-03) · 제안 승인 ·
+    // 폐기 · 대체 반영 모듈(확인 풀림만, M7-13 · ADR-113: 아래 시험이 가져오는 이름을 묶는다)
     expect(
       files
         .filter((f) => /from '[./]+\/?confirmations\/confirmation-service\.js'/.test(f.text))
@@ -753,6 +754,7 @@ describe('확인됨을 쓰는 경로는 사람 RPC · 사람의 제안 승인뿐
       'ipc/confirmation-handlers.ts',
       'ipc/requirement-handlers.ts',
       'ipc/rule-handlers.ts',
+      'norms/agent-rule.ts',
       'proposals/proposal-service.ts',
     ]);
     // 오케스트레이터 내부(엔진 · 단계 실행기 · 역할 세션 · 도구 · 규칙 작성)와 에이전트 도구에는 확인 경로가 없다
@@ -761,6 +763,128 @@ describe('확인됨을 쓰는 경로는 사람 RPC · 사람의 제안 승인뿐
         /^(engine|steps|agent|tools|rule-writer|test-writer|implementer|judge|runs)\//.test(rel)
       ) {
         expect(/confirm/i.test(text), rel).toBe(false);
+      }
+    }
+  });
+});
+
+/** 파일이 확인 서비스에서 가져오는 이름 (정렬). `import { a, b } from '…confirmation-service.js'` 한 줄 또는 여러 줄. */
+const confirmationServiceImports = (text: string): string[] =>
+  [
+    ...text.matchAll(
+      /import\s*\{([^}]*)\}\s*from '[./]+\/?confirmations\/confirmation-service\.js'/g,
+    ),
+  ]
+    .flatMap((match) => (match[1] ?? '').split(','))
+    .map((name) => name.trim().replace(/^type\s+/, ''))
+    .filter((name) => name !== '')
+    .sort();
+
+describe('확인됨을 만드는 경로는 사람 RPC뿐, 확인 풀림은 폐기 · 대체 반영 모듈뿐 (M7-13 #225 수용 기준 2, ADR-100 D2 · D3 · I1 · A11, ADR-113, 코드 구조)', () => {
+  const files = () =>
+    sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+  const using = (pattern: RegExp) =>
+    files()
+      .filter((f) => pattern.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+
+  it('확인 서비스에서 가져오는 이름은 파일마다 고정이다: 확인됨을 만드는 함수는 사람 RPC 처리기 · 사람의 제안 승인만, 폐기 · 대체 반영 모듈은 풀기 함수 하나만', () => {
+    const imports = Object.fromEntries(
+      files()
+        .map((f) => [f.rel, confirmationServiceImports(f.text)] as const)
+        .filter(([, names]) => names.length > 0),
+    );
+    expect(imports).toEqual({
+      'ipc/confirmation-handlers.ts': ['confirmByHuman', 'requireHuman'],
+      'ipc/requirement-handlers.ts': ['confirmHumanRequirementWrite'],
+      'ipc/rule-handlers.ts': ['confirmHumanRuleEdit', 'requireHuman'],
+      'norms/agent-rule.ts': ['releaseConfirmation'],
+      'proposals/proposal-service.ts': ['confirmApprovedNorm'],
+    });
+    // 이름 단위 고정을 돌아가는 가져오기가 없다: 네임스페이스 가져오기 · 다시 내보내기 · 동적 가져오기 · 큰따옴표 경로 (검토 1회차 N2)
+    expect(
+      using(
+        /import\s*\*\s*as\s+\w+\s+from\s*['"][^'"]*confirmation-service|export\s*\*[^;]*confirmation-service|export\s*\{[^}]*\}\s*from\s*['"][^'"]*confirmation-service|import\s*\(\s*['"`][^'"`]*confirmation-service|from\s*"[^"]*confirmation-service/,
+      ),
+    ).toEqual([]);
+    // 확인 서비스 모듈 이름이 나오는 파일 = 위의 가져오는 다섯 파일뿐 (다른 길로 가져오는 파일이 없다)
+    expect(using(/confirmation-service/)).toEqual([
+      'ipc/confirmation-handlers.ts',
+      'ipc/requirement-handlers.ts',
+      'ipc/rule-handlers.ts',
+      'norms/agent-rule.ts',
+      'proposals/proposal-service.ts',
+    ]);
+    // 확인됨을 만드는 함수의 호출은 확인 서비스와 사람 경로에만 있다 (오케스트레이터 · 에이전트 경로에는 없다)
+    expect(
+      using(
+        /\b(confirmByHuman|confirmHumanRequirementWrite|confirmApprovedNorm|confirmHumanRuleEdit)\(/,
+      ),
+    ).toEqual([
+      'ipc/confirmation-handlers.ts',
+      'ipc/requirement-handlers.ts',
+      'ipc/rule-handlers.ts',
+      'proposals/proposal-service.ts',
+    ]);
+    // 저장소의 확인 쓰기 · 풀기는 확인 서비스에만
+    expect(using(/\.confirmations\.confirm\(/)).toEqual(['confirmations/confirmation-service.ts']);
+    expect(using(/\.confirmations\.release\(/)).toEqual(['confirmations/confirmation-service.ts']);
+    // 풀기 함수를 부르는 곳 = 폐기 · 대체 반영 모듈뿐, 확인 풀림 기록을 쓰는 곳도 그 모듈뿐
+    expect(using(/\breleaseConfirmation\(/)).toEqual(['norms/agent-rule.ts']);
+    const appending = new Set(using(/\.normChanges\.append\(/));
+    expect(using(/'unconfirmed'/).filter((rel) => appending.has(rel))).toEqual([
+      'norms/agent-rule.ts',
+    ]);
+    // 풀기는 규칙만 받는다: 요구사항의 확인 풀림 경로가 없다 (에이전트가 요구사항을 고치는 도구가 M7에 없다, ADR-100 A11)
+    const service = files().find((f) => f.rel === 'confirmations/confirmation-service.ts');
+    expect(service?.text).toMatch(
+      /\.confirmations\.release\(\{ entity: 'Rule', id: record\.targetRef\.id \}\)/,
+    );
+    expect(service?.text.match(/\.confirmations\.release\(/g)).toHaveLength(1);
+  });
+
+  it('규칙 작성 역할에 요구사항 쓰기 도구가 없고, 저장소의 요구사항 쓰기는 사람의 요구사항 RPC 처리기 · 옛 제안 승인뿐이다', () => {
+    const ruleWriterTools = roleToolNames('rule-writer');
+    expect(ruleWriterTools.filter((name) => /requirement/i.test(name))).toEqual([]);
+    expect([...NORM_TOOL_NAMES]).toEqual(['propose_rule', 'retire_rule', 'supersede_rule']);
+    expect(
+      ruleWriterTools.filter((name) => !(FILE_TOOL_NAMES as readonly string[]).includes(name)),
+    ).toEqual([...NORM_TOOL_NAMES]);
+    expect(using(/\.requirements\.(create|update|softDelete)\(/)).toEqual([
+      'ipc/requirement-handlers.ts',
+      'proposals/proposal-service.ts',
+    ]);
+    // 에이전트 세션이 닿는 코드(도구 · 세션 · 역할)는 요구사항 처리기를 가져오지 않는다
+    for (const { rel, text } of files()) {
+      if (
+        /^(tools|agent|rule-writer|test-writer|implementer|engine|steps|runs|judge)\//.test(rel)
+      ) {
+        expect(/requirement-handlers\.js'/.test(text), rel).toBe(false);
+      }
+    }
+  });
+
+  it('테스트 변경 알림은 오케스트레이터 배선이 엔진의 저장 이벤트로 부르는 모듈 하나가 쓰고, 엔진 · 단계 · 에이전트 코드는 그 모듈을 모른다', () => {
+    // 그 종류를 적는 곳 = 기록 모듈(쓰기)과 확인할 것 목록(읽기). 규범 변경 기록을 쓰는 파일 가운데에는 기록 모듈뿐
+    expect(using(/'test_changed'/)).toEqual([
+      'confirmations/confirmation-list.ts',
+      'norms/test-change.ts',
+    ]);
+    const appending = new Set(using(/\.normChanges\.append\(/));
+    expect(using(/'test_changed'/).filter((rel) => appending.has(rel))).toEqual([
+      'norms/test-change.ts',
+    ]);
+    expect(using(/\brecordTestChanges\(/)).toEqual(['norms/test-change.ts']);
+    expect(using(/from '[./]+\/?norms\/test-change\.js'/)).toEqual(['orchestrator.ts']);
+    for (const { rel, text } of files()) {
+      if (
+        /^(engine|steps|agent|tools|rule-writer|test-writer|implementer|judge|runs)\//.test(rel)
+      ) {
+        expect(/test-change\.js'|TestChangeNotifier/.test(text), rel).toBe(false);
       }
     }
   });
@@ -818,16 +942,22 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
     // 규범 변경 기록 쓰기 = 바로 반영 모듈(신규)과 실행 자동 시작 모듈(자동 시작, M7-05). 읽기는 조회 처리기 · 규칙 작성 상태 ·
     // 엔진의 시작 근거 대조
     // 사람의 규칙 진술 편집 뒤 자동 시작 모듈(M7-03, ADR-109)도 자동 시작 항목을 쓴다
+    // 테스트 변경 알림 모듈(M7-13, ADR-113)도 그 종류를 쓰고, 확인할 것 목록(M7-13)은 읽는다
     expect(using(/\.normChanges\.append\(/)).toEqual([
       'norms/agent-rule.ts',
+      'norms/test-change.ts',
       'runs/auto-start.ts',
       'runs/rule-edit-start.ts',
     ]);
+    // 확인 서비스는 사람의 확인이 "여기까지 봤다"로 남기는 마지막 순번만 읽는다 (M7-13 검토 1회차, ADR-113)
     expect(using(/\.normChanges\./)).toEqual([
+      'confirmations/confirmation-list.ts',
+      'confirmations/confirmation-service.ts',
       'engine/start-basis.ts',
       'ipc/norm-change-handlers.ts',
       'ipc/rule-writer-handlers.ts',
       'norms/agent-rule.ts',
+      'norms/test-change.ts',
       'runs/auto-start.ts',
       'runs/rule-edit-start.ts',
     ]);
@@ -916,8 +1046,14 @@ describe('규칙 폐기 · 대체와 효력 판정의 코드 경로 (M7-09 #221,
     expect(using(/\b(retireAgentRule|supersedeAgentRule)\(/)).toEqual([
       'rule-writer/rule-writer-service.ts',
     ]);
-    // 폐기 · 대체 종류의 규범 변경 기록을 쓰는 곳 = 반영 모듈뿐
-    expect(using(/'retired'|'superseded'/)).toEqual(['norms/agent-rule.ts']);
+    // 폐기 · 대체 종류의 규범 변경 기록을 쓰는 곳 = 반영 모듈뿐 (확인할 것 목록은 그 종류를 읽어 항목을 만든다, M7-13)
+    expect(using(/'retired'|'superseded'/)).toEqual([
+      'confirmations/confirmation-list.ts',
+      'norms/agent-rule.ts',
+    ]);
+    expect(using(/kind: (?:supersede === null \? )?'retired'|kind: 'superseded'/)).toEqual([
+      'norms/agent-rule.ts',
+    ]);
     // 폐기 · 대체 도구의 콜백을 주입하는 곳 = 규칙 작성 서비스뿐 (실행 엔진의 테스트 작성 · 구현 세션은 주입하지 않는다)
     expect(using(/\b(retireRule|supersedeRule):/)).toEqual(['rule-writer/rule-writer-service.ts']);
     for (const { rel, text } of files()) {
@@ -930,6 +1066,7 @@ describe('규칙 폐기 · 대체와 효력 판정의 코드 경로 (M7-09 #221,
   it('효력 판정(규범 상태 · 삭제 · 폐기)은 효력 판정 모듈 한 곳이고, 검사 · 병합 재검사 · 승인 단계 자리 · 규범 입력 · 준수 분모 · 규칙 목록 · 엔진의 단계 사이 확인이 그것을 쓴다', () => {
     expect(using(/normState\s*[!=]==/)).toEqual(['norms/effective.ts']);
     expect(using(/from '[./]+\/?(?:norms\/)?effective\.js'/)).toEqual([
+      'confirmations/confirmation-list.ts',
       'engine/pipeline-engine.ts',
       'ipc/rule-handlers.ts',
       'norms/agent-rule.ts',

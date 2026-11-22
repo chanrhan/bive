@@ -3,7 +3,9 @@
 // - 확인됨을 쓰는 함수는 `confirm` 하나이고 확인한 사람(`HumanAuthor`)을 인자로 받는다. 사람이 아닌 주체는 스키마 ·
 //   DB CHECK가 모두 거부한다. 누가 부를 수 있는지(사람 RPC · 사람의 요구사항 저장 · 사람의 제안 승인)는 오케스트레이터의
 //   확인 서비스(`orchestrator/src/confirmations/confirmation-service.ts`)가 정한다
-// - 확인 상태를 미확인으로 되돌리는 함수(확인 풀림)는 M7-13이 더한다. 행은 지우지 않는다(트리거)
+// - 확인 상태를 미확인으로 되돌리는 함수는 `release` 하나다(확인 풀림, M7-13 #225, ADR-113). 행은 지우지 않고 상태를 미확인으로
+//   바꾸며 확인 시각 · 주체 · 근거를 비운다(0012 CHECK). 바로 앞에 그 대상의 확인 풀림 기록(`norm_changes` 종류 `unconfirmed`)이
+//   있어야 DB가 받는다(0019 트리거). 누가 부를 수 있는지는 확인 서비스가 정한다(에이전트의 폐기 · 대체를 반영하는 모듈뿐)
 import {
   Confirmation,
   ConfirmationBasis,
@@ -134,6 +136,31 @@ export class ConfirmationRepository {
       if (this.#select.get({ entity, target_id: id }) === undefined) this.#insert.run(row);
       else this.#update.run(row);
       return confirmation;
+    });
+  }
+
+  /**
+   * 확인됨인 대상을 미확인으로 되돌린다(확인 풀림). 호출한 쪽의 트랜잭션 안에서, 그 대상의 확인 풀림 기록을 남긴 바로 뒤에
+   * 부른다(0019 트리거가 확인한다).
+   * @returns 풀리기 전의 확인
+   * @throws {ZodError} 대상 형식 위반
+   * @throws {Error} 대상이 확인됨이 아님
+   * @throws {SqliteError} 바로 앞의 규범 변경 기록이 그 대상의 확인 풀림이 아님 (트리거)
+   */
+  release(target: ConfirmationTarget): Confirmation {
+    const { entity, id } = ConfirmationTarget.parse(target);
+    return withTransaction(this.#db, () => {
+      const previous = this.get({ entity, id });
+      if (previous.state !== 'confirmed') throw new Error('확인됨이 아니라 풀 확인이 없습니다');
+      this.#update.run({
+        entity,
+        target_id: id,
+        state: 'unconfirmed',
+        confirmed_at: null,
+        confirmed_by: null,
+        basis: null,
+      });
+      return previous;
     });
   }
 }

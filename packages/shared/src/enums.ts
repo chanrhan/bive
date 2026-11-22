@@ -413,6 +413,27 @@ export const CONFIRMATION_STATE_LABELS = {
   confirmed: '확인됨',
 } as const satisfies Record<ConfirmationState, string>;
 
+/**
+ * 확인할 것 목록(`confirmation.list`)의 항목 종류 (M7-13 #225, ADR-100 D3 · B⑦ · G · A7, ADR-113).
+ * - `retired` · `superseded`: 에이전트의 폐기 · 대체 (확인 여부와 무관하게 맨 위). 사람이 확인한 규칙이었으면 확인 풀림을
+ *   같은 항목에 싣는다(확인 풀림을 따로 세우지 않는다: 지금 확인 풀림의 원인은 폐기 · 대체뿐이다)
+ * - `test_changed`: 확인됨 규칙의 기존 인수 테스트를 실행이 바꿔 병합함 (확인은 그대로, 알림만)
+ * - `unconfirmed_norm`: 미확인 요구사항 · 규칙
+ */
+export const ConfirmationItemKind = z.enum([
+  'retired',
+  'superseded',
+  'test_changed',
+  'unconfirmed_norm',
+]);
+export type ConfirmationItemKind = z.infer<typeof ConfirmationItemKind>;
+export const CONFIRMATION_ITEM_KIND_LABELS = {
+  retired: '폐기',
+  superseded: '대체',
+  test_changed: '테스트 변경',
+  unconfirmed_norm: '미확인',
+} as const satisfies Record<ConfirmationItemKind, string>;
+
 /** 코드 열기 사유 (MET-01). */
 export const CodeOpenReason = z.enum(['screen_error', 'info_lacking', 'debugging']);
 export type CodeOpenReason = z.infer<typeof CodeOpenReason>;
