@@ -529,6 +529,71 @@ describe('autoStartRun: 생략 · 멱등 (ADR-107)', () => {
     expect(h.read(counts)).toEqual({ runs: 0, autoStarts: 0, approvals: 0 });
     expect(h.read((store) => store.sequences.last('EXE'))).toBe(0);
   });
+
+  it('원자성: 실행을 저장한 뒤 자동 시작 항목 쓰기만 실패하면 실행 · 표시 ID 순번 · 생략 기록이 하나도 남지 않고 엔진을 부르지 않는다', () => {
+    const h = storeHarness();
+    const session = newId();
+    makeRule(h, session, '서버 시각');
+    // 자동 시작 항목 쓰기만 막는다 (실행 저장 · 순번 증가는 그보다 먼저 일어난다)
+    h.read((store) =>
+      store.db.exec(`CREATE TRIGGER test_block_auto_start BEFORE INSERT ON norm_changes
+        WHEN NEW.kind = 'auto_start' BEGIN SELECT RAISE(ABORT, 'test: auto_start 쓰기 실패'); END;`),
+    );
+    expect(() => h.read((store) => autoStartRun(store, { sessionId: session }, clock))).toThrow(
+      /auto_start 쓰기 실패/,
+    );
+    const left = () =>
+      h.read((store) => ({
+        ...counts(store),
+        exe: store.sequences.last('EXE'),
+        skip: store.autoStartSkips.get(session),
+        steps: store.db.prepare('SELECT count(*) AS n FROM steps').get(),
+      }));
+    expect(left()).toEqual({
+      runs: 0,
+      autoStarts: 0,
+      approvals: 0,
+      exe: 0,
+      skip: null,
+      steps: { n: 0 },
+    });
+    // 창구로 불러도 같다: 로그만 남기고 엔진의 생성 뒤 처리를 부르지 않는다
+    const created: string[] = [];
+    const logs: string[] = [];
+    const starter = new AutoStarter({
+      biveHome: h.biveHome,
+      engine: { onRunCreated: (_p, runId) => created.push(runId) },
+      log: (line) => logs.push(line),
+    });
+    expect(starter.afterRuleWriterSession(h.projectId, session, 'success')).toBeNull();
+    expect(created).toEqual([]);
+    expect(logs).toEqual([expect.stringMatching(/^실행 자동 시작 실패 .*auto_start 쓰기 실패/)]);
+    expect(left()).toMatchObject({ runs: 0, autoStarts: 0, exe: 0, skip: null });
+    // 막은 것을 풀면 같은 세션으로 다시 시작할 수 있다 (실패가 중복 표시를 남기지 않았다)
+    h.read((store) => store.db.exec('DROP TRIGGER test_block_auto_start'));
+    expect(starter.afterRuleWriterSession(h.projectId, session, 'success')?.status).toBe('started');
+    expect(created).toHaveLength(1);
+  });
+
+  it('원자성: 생략 기록 쓰기가 실패하면 던지고 생략 기록 · 실행 · 자동 시작 항목이 하나도 남지 않는다', () => {
+    const h = storeHarness(COMPLETE_SETTINGS);
+    const session = newId();
+    makeRule(h, session, '서버 시각');
+    h.read((store) =>
+      store.db.exec(`CREATE TRIGGER test_block_skip BEFORE INSERT ON auto_start_skips
+        BEGIN SELECT RAISE(ABORT, 'test: 생략 기록 쓰기 실패'); END;`),
+    );
+    expect(() => h.read((store) => autoStartRun(store, { sessionId: session }, clock))).toThrow(
+      /생략 기록 쓰기 실패/,
+    );
+    expect(
+      h.read((store) => ({
+        ...counts(store),
+        exe: store.sequences.last('EXE'),
+        skips: store.db.prepare('SELECT count(*) AS n FROM auto_start_skips').get(),
+      })),
+    ).toEqual({ runs: 0, autoStarts: 0, approvals: 0, exe: 0, skips: { n: 0 } });
+  });
 });
 
 describe('AutoStarter: 세션 종료 알림 → 자동 시작 → 엔진 (ADR-107)', () => {
