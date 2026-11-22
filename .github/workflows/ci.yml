@@ -144,6 +144,7 @@ jobs:
         network.test.ts
         budget-exceeded.test.ts
         extra-mcp.test.ts
+        auto-start-per-rule.test.ts
     steps:
       - name: 체크아웃
         uses: actions/checkout@v7

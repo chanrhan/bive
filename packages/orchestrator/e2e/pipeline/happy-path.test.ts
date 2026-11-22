@@ -3,9 +3,8 @@
 // 확인 없음, M7-05 #217 · ADR-100 D1 · B⑤ · ADR-107) → 승인 단계(효력 확인, 사람 대기 없음) → 테스트 작성 → Red 확인 → 구현 →
 // 검사 → 병합. 사람의 조작은 설정 저장과 요구사항 저장뿐이다.
 // 자동 시작은 하루 한도가 채워져 있어야 한다(비어 있으면 생략, B⑤). 시나리오 `auto-start`는 happy-path와 같고 규칙이 1개다:
-// 자동 시작 실행은 세션이 만든 규칙 전부가 대상이다. happy-path 시나리오(규칙 2개)로 자동 시작하면 테스트 작성 세션이 첫 규칙
-// 폴더에만 써서 테스트 작성 3회가 모두 `missing_tests: ["RULE-002"]`로 끝나 `test_retry_limit`이 되고, 두 규칙 모두 테스트를
-// 써도 둘째 규칙은 이미 통과해 Red 확인 `not_red` 뒤 재시도 상한으로 끝난다 (ADR-107, #242).
+// 자동 시작은 규칙마다 실행 1개라(ADR-110 · ADR-111) 이 시험은 실행 1개의 완주만 본다. happy-path 시나리오(규칙 2개, 둘째는
+// 이미 통과하는 동작)로 자동 시작하는 흐름은 `auto-start-per-rule.test.ts`가 본다.
 // 사람의 [실행](run.create)이 그대로 실행을 만드는 것은 하루 한도를 비워 둔 다른 파이프라인 e2e 전부가 본다(harness.saveRequirement).
 // 판정은 실제 판정 러너(커밋의 깨끗한 체크아웃 · 설치 · next build · next start · vitest)로만 정한다.
 import { afterEach, describe, expect, it } from 'vitest';

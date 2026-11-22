@@ -1,8 +1,9 @@
-// 실행 시작 근거 대조 (NFR-01, ADR-061 · ADR-066 · ADR-100 A2 · C2, M7-05 #217, ADR-107).
+// 실행 시작 근거 대조 (NFR-01, ADR-061 · ADR-066 · ADR-100 A2 · C2, M7-05 #217 · M7-19 #244, ADR-107 · ADR-111).
 // 엔진은 실행을 구동할 때마다(승인 단계 뒤 매 단계, 실행 대기 · 재개에서 시작할 때 포함) 그 실행의 시작 근거가 정확히 1건인지
 // 본다. 근거는 둘 중 하나다:
 // - 사람의 실행 시작 확인: 승인 기록 `run_start` 1건(대상 규칙이 실행과 같음), 시작 주체 사람, 자동 시작 항목 없음
 // - 실행 자동 시작: 규범 변경 기록 `auto_start` 1건(주체 오케스트레이터, 대상 규칙이 실행과 같음), 시작 주체 오케스트레이터이고
+//   실행의 대상 규칙과 주체의 원인 순번이 각각 정확히 1개이며(규칙마다 실행 1개, ADR-110 · ADR-111),
 //   주체의 원인 순번이 그 항목의 원인 순번과 같으며, 원인 순번마다 그 순서의 대상 규칙을 만든 신규(`created`) 기록이 있고,
 //   그 원인 순번을 다른 자동 시작 항목이 쓰지 않음(같은 원인으로 두 실행이 생기지 않는다), 승인 기록 `run_start` 없음
 // 그 밖(0건 · 2건 이상 · 둘 다 · 다른 실행의 항목 · 실제 신규 기록이 아닌 원인)은 근거 없음이다 → `run_without_log`.
@@ -19,6 +20,8 @@ export type StartBasisMismatch =
   | 'both_entries'
   /** 근거의 종류가 실행의 시작 주체와 다름 */
   | 'starter_mismatch'
+  /** 오케스트레이터가 시작한 실행의 대상 규칙 또는 원인 순번이 1개가 아님 (규칙마다 실행 1개, ADR-111) */
+  | 'not_single_rule'
   /** 근거의 대상 규칙이 실행의 대상 규칙과 다름 */
   | 'rules_mismatch'
   /** 원인 순번이 시작 주체와 다르거나, 대상 규칙을 만든 실제 신규 기록이 아님 */
@@ -44,6 +47,10 @@ const autoStartMismatch = (
 ): StartBasisMismatch | null => {
   if (run.startedBy.kind !== 'orchestrator' || entry.actor.kind !== 'orchestrator') {
     return 'starter_mismatch';
+  }
+  // 자동 시작은 규칙마다 실행 1개다(ADR-110): 대상 규칙 여러 개 · 원인 여러 개인 실행(ADR-107 때의 모양 포함)은 구동하지 않는다
+  if (run.targetRuleIds.length !== 1 || run.startedBy.causeSeqs.length !== 1) {
+    return 'not_single_rule';
   }
   if (!sameList(entry.detail.ruleIds, run.targetRuleIds)) return 'rules_mismatch';
   const causeSeqs = entry.detail.causeSeqs ?? [];

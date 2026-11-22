@@ -439,8 +439,10 @@ describe('유형 A 단계 순서 · 전이 (수용 기준 1)', () => {
   });
 });
 
-describe('시작 근거 대조: 사람 run_start 1건 또는 자동 시작 항목 1건 (M7-05 #217, NFR-01, ADR-107)', () => {
+describe('시작 근거 대조: 사람 run_start 1건 또는 자동 시작 항목 1건 (M7-05 #217 · M7-19 #244, NFR-01, ADR-107 · ADR-111)', () => {
   type Starter = { kind: 'human' } | { kind: 'orchestrator'; causeSeqs: number[] };
+  /** 자동 시작이 가능한 설정 (하루 한도 채움) */
+  const AUTO_START_SETTINGS: SettingsPatch = { ...COMPLETE_SETTINGS, dailyBudgetUsd: 10 };
   const at = () => new Date().toISOString();
   /** 시작 근거 없이 실행만 저장한다 (파이프 밖 경로의 흉내). 근거는 경우마다 따로 남긴다. */
   const forgeRun = (store: ProjectStore, ruleIds: string[], startedBy: Starter): string =>
@@ -473,6 +475,26 @@ describe('시작 근거 대조: 사람 run_start 1건 또는 자동 시작 항�
       reason: null,
       detail: { causeSeqs, ruleIds },
     }).seq;
+  /** 같은 요구사항 아래의 효력 있는 규칙 하나 더 (규칙 여러 개 실행의 흉내). */
+  const anotherRule = (store: ProjectStore, rule: string): string => {
+    const base = store.rules.get(rule);
+    if (base === null) throw new Error('규칙 없음');
+    return store.rules.create({
+      id: newId(),
+      title: '헬스 체크 응답 형식',
+      statement: base.statement,
+      kind: 'business',
+      checkKinds: ['test'],
+      parentRequirementId: base.parentRequirementId,
+      builtin: false,
+      targetBlockIds: [],
+      risk: null,
+      contractId: null,
+      author: { kind: 'agent', role: 'rule-writer' },
+      normState: 'approved',
+      createdAt: at(),
+    }).id;
+  };
   const runStart = (store: ProjectStore, runId: string, ruleIds: string[]): void => {
     store.approvalLog.append({
       at: at(),
@@ -583,6 +605,44 @@ describe('시작 근거 대조: 사람 run_start 1건 또는 자동 시작 항�
       counts: [0, 2],
     },
     {
+      // ADR-107 때의 모양: 세션이 만든 규칙 전부로 실행 1개. 규칙마다 실행 1개가 된 뒤로는 구동하지 않는다 (ADR-110 · ADR-111)
+      name: '오케스트레이터: 대상 규칙 2개 · 원인 2건 (항목 · 시작 주체 · 신규 기록이 모두 맞음)',
+      build: (store, rule) => {
+        const other = anotherRule(store, rule);
+        const causes = [created(store, rule), created(store, other)];
+        const id = forgeRun(store, [rule, other], { kind: 'orchestrator', causeSeqs: causes });
+        autoStart(store, id, causes, [rule, other]);
+        return id;
+      },
+      mismatch: 'not_single_rule',
+      counts: [0, 1],
+    },
+    {
+      name: '오케스트레이터: 대상 규칙 1개인데 원인 2건',
+      build: (store, rule) => {
+        const causes = [created(store, rule), created(store, rule)];
+        const id = forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: causes });
+        // 항목은 원인과 규칙 수가 같아야 한다(스키마): 항목 쪽은 원인 1건
+        autoStart(store, id, causes.slice(0, 1), [rule]);
+        return id;
+      },
+      mismatch: 'not_single_rule',
+      counts: [0, 1],
+    },
+    {
+      name: '오케스트레이터: 대상 규칙 2개인데 원인 1건',
+      build: (store, rule) => {
+        const other = anotherRule(store, rule);
+        const cause = created(store, rule);
+        const id = forgeRun(store, [rule, other], { kind: 'orchestrator', causeSeqs: [cause] });
+        // 항목은 원인과 규칙 수가 같아야 한다(스키마): 항목 쪽은 규칙 1개
+        autoStart(store, id, [cause], [rule]);
+        return id;
+      },
+      mismatch: 'not_single_rule',
+      counts: [0, 1],
+    },
+    {
       name: '오케스트레이터: 항목의 원인 순번이 시작 주체와 다름',
       build: (store, rule) => {
         const id = forgeRun(store, [rule], {
@@ -685,7 +745,8 @@ describe('시작 근거 대조: 사람 run_start 1건 또는 자동 시작 항�
   ];
 
   it('근거가 정확히 1건이 아니거나 실행과 맞지 않으면 run_without_log: 워크트리 · 세션 없이 실패로 끝난다', async () => {
-    const h = setup();
+    // 하루 한도를 채운다: 자동 시작 실행은 시작 때 하루 한도 문을 먼저 지난다(비어 있으면 그 사유로 끝남, ADR-111)
+    const h = setup({ settings: AUTO_START_SETTINGS });
     const results: [string, unknown][] = [];
     for (const basisCase of cases) {
       h.runId = withProject(h.biveHome, h.project.id, (store) =>
@@ -718,8 +779,26 @@ describe('시작 근거 대조: 사람 run_start 1건 또는 자동 시작 항�
     expect(userGit(h.repo, 'branch', '--list', 'bive/run-*')).toBe('');
   }, 60_000);
 
-  it('자동 시작 항목 1건(원인 = 대상 규칙의 신규 기록, 승인 기록 없음)이면 대조를 지나 merged까지 간다', async () => {
+  it('사람의 [실행]은 지금처럼 규칙 여러 개를 한 실행으로 받는다: 사람 주체 · run_start 1건(대상 규칙 2개)이면 대조를 지나 merged까지 간다', async () => {
     const h = setup();
+    const ruleIds = withProject(h.biveHome, h.project.id, (store) => [
+      h.rule.id,
+      anotherRule(store, h.rule.id),
+    ]);
+    h.runId = withProject(h.biveHome, h.project.id, (store) =>
+      createRun(store, { ruleIds, author: human }, { clientId: null }, { now: Date.now, newId }),
+    ).run.id;
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'merged',
+      failureReason: null,
+      targetRuleIds: ruleIds,
+      startedBy: { kind: 'human' },
+    });
+  }, 60_000);
+
+  it('자동 시작 항목 1건(원인 = 대상 규칙의 신규 기록, 승인 기록 없음)이면 대조를 지나 merged까지 간다', async () => {
+    const h = setup({ settings: AUTO_START_SETTINGS });
     h.runId = withProject(h.biveHome, h.project.id, (store) =>
       store.transaction(() => {
         const cause = created(store, h.rule.id);
@@ -1488,6 +1567,68 @@ describe('상태 기계', () => {
     ).rejects.toThrow(/병합 완료로 끝냈습니다/);
     expect(detailOf(mergedBroken).run.status).toBe('merged');
 
+    // queued → budget_exceeded: 실행 대기에 선 자동 시작 실행이 시작할 차례에 오늘 지출이 하루 한도에 이르렀다 (ADR-111).
+    // 하루 한도 0 = 오늘 남은 USD 0. 앞 실행(사람)은 세션 없는 대역이라 한도와 무관하게 끝난다
+    const daily = setup({ settings: { ...COMPLETE_SETTINGS, dailyBudgetUsd: 0 } });
+    let releaseDaily = false;
+    const dailyExecutors = stub({
+      test_writing: (context) =>
+        waitFor(() => releaseDaily, 20_000, '앞 실행 대기').then(() => {
+          if (context.signal.aborted) throw context.signal.reason as Error;
+          return { status: 'passed' as const };
+        }),
+    });
+    const dailyEngine = engineFor(daily, dailyExecutors);
+    expect(dailyEngine.evaluateApproval(daily.project.id, daily.runId)).toBe(true);
+    const autoRunId = withProject(daily.biveHome, daily.project.id, (store) =>
+      store.transaction(() => {
+        const cause = store.normChanges.append({
+          at: new Date().toISOString(),
+          kind: 'created',
+          actor: { kind: 'agent', role: 'rule-writer' },
+          targetRef: { entity: 'Rule', id: daily.rule.id },
+          sessionId: newId(),
+          runId: null,
+          reason: '시험 근거',
+          detail: { after: { ruleId: daily.rule.id } },
+        }).seq;
+        const id = saveNewRun(
+          store,
+          store.settings.get(),
+          {
+            runId: newId(),
+            ruleIds: [daily.rule.id],
+            startedBy: { kind: 'orchestrator', causeSeqs: [cause] },
+          },
+          new Date().toISOString(),
+          newId,
+        ).run.id;
+        store.normChanges.append({
+          at: new Date().toISOString(),
+          kind: 'auto_start',
+          actor: { kind: 'orchestrator' },
+          targetRef: { entity: 'Run', id },
+          sessionId: null,
+          runId: id,
+          reason: null,
+          detail: { causeSeqs: [cause], ruleIds: [daily.rule.id] },
+        });
+        return id;
+      }),
+    );
+    expect(dailyEngine.evaluateApproval(daily.project.id, autoRunId)).toBe(true);
+    const autoRun = () =>
+      withProject(daily.biveHome, daily.project.id, (store) => store.runs.get(autoRunId));
+    expect(autoRun()?.status).toBe('queued');
+    releaseDaily = true;
+    await dailyEngine.settled();
+    expect(detailOf(daily).run.status).toBe('merged');
+    expect(autoRun()).toMatchObject({
+      status: 'budget_exceeded',
+      failureReason: 'project_daily_budget_exceeded',
+      worktreePath: null,
+    });
+
     const all = Object.entries(RUN_STATUS_TRANSITIONS).flatMap(([from, tos]) =>
       (tos as readonly string[]).map((to) => `${from}→${to}`),
     );
@@ -1743,6 +1884,13 @@ describe('실행의 종료 상태는 한 곳(runEnding)에서 정한다: #halt�
     );
     // 실행 패치(`run: { ... }`) 안의 `status: 'failed'` · `'budget_exceeded'` 리터럴이 없다 (단계 시도의 status는 대상 아님)
     expect(source.match(/run:\s*\{[^{}]*status:\s*'(failed|budget_exceeded)'/g) ?? []).toEqual([]);
+    // 실행 서비스의 실행 대기 시작(대상 규칙 재검사 · 자동 시작 실행의 하루 한도 재확인)도 같다 (ADR-111)
+    const queue = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/runs/run-service.ts'),
+      'utf8',
+    );
+    expect(queue.match(/run:\s*\{[^{}]*status:\s*'(failed|budget_exceeded)'/g) ?? []).toEqual([]);
+    expect(queue.match(/\brunEnding\(/g) ?? []).toHaveLength(2);
     // 재개 불가 종료도 runEnding을 부른다
     const body = source.slice(source.indexOf('#failUnresumable('), source.indexOf('// ── 수명'));
     expect(body).toContain('runEnding(run,');
