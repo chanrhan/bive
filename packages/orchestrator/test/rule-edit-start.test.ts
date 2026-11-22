@@ -441,6 +441,14 @@ describe('엔진 시작 근거 대조: 규칙 편집이 원인인 실행 (ADR-10
     ).toBe('cause_mismatch');
   });
 
+  it('항목의 대상 규칙이 실행과 다르면 rules_mismatch', () => {
+    const h = storeHarness();
+    const edit = humanEdit(h, { statement: NEW_STATEMENT });
+    expect(
+      mismatchOf(h, forge(h, byEdit(edit.seq), { ruleEditSeqs: [edit.seq], ruleIds: [newId()] })),
+    ).toBe('rules_mismatch');
+  });
+
   it('같은 편집을 다른 자동 시작 항목도 쓰면 cause_reused, 항목이 없으면 no_entry, 사람 주체면 starter_mismatch', () => {
     const h = storeHarness();
     const edit = humanEdit(h, { statement: NEW_STATEMENT });
@@ -493,6 +501,32 @@ describe('RuleEditAutoStarter: 편집 뒤 → 자동 시작 → 엔진 (ADR-109)
       `규칙 편집 뒤 실행 자동 시작 (EXE-001, 승인 기록 ${String(edit.seq)}, 규범 변경 기록 1)`,
     );
     expect(logs[1]).toMatch(/^규칙 편집 뒤 실행 자동 시작 실패 \(승인 기록 1\)/);
+  });
+});
+
+describe('RuleEditAutoStarter: 생략은 기록 없이 응답 · 로그로만, 결과 → 응답 값', () => {
+  it('하루 한도가 비어 있으면 엔진을 부르지 않고 생략을 돌려주며 로그 한 줄을 남긴다. 원인 아님 · 같은 편집은 null', () => {
+    const h = storeHarness(COMPLETE_SETTINGS);
+    const created: string[] = [];
+    const logs: string[] = [];
+    const starter = new RuleEditAutoStarter({
+      biveHome: h.biveHome,
+      engine: { onRunCreated: (_p, runId) => created.push(runId) },
+      log: (line) => logs.push(line),
+    });
+    const edit = humanEdit(h, { statement: NEW_STATEMENT });
+    expect(starter.afterRuleEdit(h.projectId, edit.seq)).toEqual({
+      state: 'skipped',
+      reason: 'project_daily_budget_unset',
+      missing: [],
+    });
+    const titleOnly = humanEdit(h, { title: '제목만' });
+    expect(starter.afterRuleEdit(h.projectId, titleOnly.seq)).toBeNull();
+    expect(created).toEqual([]);
+    expect(logs).toEqual([
+      `규칙 편집 뒤 실행 자동 시작 생략 (승인 기록 ${String(edit.seq)}, project_daily_budget_unset)`,
+    ]);
+    expect(h.read(counts)).toEqual({ runs: 0, autoStarts: 0, exe: 0 });
   });
 });
 

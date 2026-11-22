@@ -16,6 +16,7 @@ import {
 import { computeApprovalLogHash, type ProjectStore } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { confirmHumanRuleEdit } from '../src/confirmations/confirmation-service.js';
 import type { PipeServer } from '../src/ipc/server.js';
 import { earsStatementProblem } from '../src/tools/ears.js';
 import type { TestClient } from './helpers/client.js';
@@ -511,5 +512,25 @@ describe('rule.update: 실행 자동 시작 창구는 진술이 바뀐 편집에
       update({ id: rule.id, author: { kind: 'agent', role: 'chat' }, statement: STATEMENT }),
     ).rejects.toMatchObject({ code: ErrorCode.Unauthorized });
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe('confirmHumanRuleEdit: 규칙 편집 기록만 근거가 된다 (방어)', () => {
+  it('규칙 편집이 아닌 승인 기록(확인)을 넘기면 -32009이고 확인 상태가 바뀌지 않는다', async () => {
+    await start();
+    const requirement = await createRequirement();
+    const rule = seedRule(requirement.id);
+    const { approvalLog } = await h.client.call('confirmation.set', {
+      projectId: h.project.id,
+      target: { entity: 'Rule', id: rule.id },
+      author: human,
+    });
+    const rows = confirmationRows();
+    h.read((store) => {
+      expect(() => confirmHumanRuleEdit(store, approvalLog)).toThrow(
+        expect.objectContaining({ code: ErrorCode.StateConflict }) as Error,
+      );
+    });
+    expect(confirmationRows()).toEqual(rows);
   });
 });
