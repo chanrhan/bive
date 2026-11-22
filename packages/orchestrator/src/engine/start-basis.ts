@@ -6,7 +6,10 @@
 //   주체의 원인 순번이 그 항목의 원인 순번과 같으며, 원인 순번마다 그 순서의 대상 규칙을 만든 신규(`created`) 기록이 있고,
 //   그 원인 순번을 다른 자동 시작 항목이 쓰지 않음(같은 원인으로 두 실행이 생기지 않는다), 승인 기록 `run_start` 없음
 // 그 밖(0건 · 2건 이상 · 둘 다 · 다른 실행의 항목 · 실제 신규 기록이 아닌 원인)은 근거 없음이다 → `run_without_log`.
-import type { NormChangeEntry, Run } from '@bive/shared';
+// 사람의 규칙 진술 편집으로 시작한 실행(시작 주체 `causeLog: 'approval_log'`, M7-03 #215 · ADR-109)은 자동 시작 항목의 원인이
+// `ruleEditSeqs`(승인 기록 순번)이고, 그 순번이 대상 규칙 1개의 진술을 바꾼 사람의 `rule_edit` 기록이어야 하며 다른 자동 시작
+// 항목이 같은 편집을 쓰지 않아야 한다(`ruleEditMismatch`).
+import { type NormChangeEntry, type Run, ruleStatementEditOf } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
 /** 근거가 맞지 않는 이유 (`exitDetail.mismatch`). */
@@ -95,5 +98,43 @@ export const checkRunStartBasis = (store: ProjectStore, run: Run): StartBasisChe
   }
   const [autoStart] = autoStarts;
   if (autoStart === undefined) return result('no_entry');
-  return result(autoStartMismatch(run, autoStart, changes));
+  return result(
+    run.startedBy.kind === 'orchestrator' && run.startedBy.causeLog === 'approval_log'
+      ? ruleEditMismatch(store, run, autoStart, changes)
+      : autoStartMismatch(run, autoStart, changes),
+  );
+};
+
+/**
+ * 사람의 규칙 진술 편집으로 시작한 실행의 자동 시작 항목이 맞는지 (`null`이면 맞음, ADR-109).
+ * 대상 규칙 1개 · 원인 승인 기록 1건(그 규칙의 진술을 바꾼 사람의 `rule_edit`) · 같은 편집을 다른 항목이 쓰지 않음.
+ */
+const ruleEditMismatch = (
+  store: ProjectStore,
+  run: Run,
+  entry: NormChangeEntry,
+  all: readonly NormChangeEntry[],
+): StartBasisMismatch | null => {
+  if (run.startedBy.kind !== 'orchestrator' || entry.actor.kind !== 'orchestrator') {
+    return 'starter_mismatch';
+  }
+  const [ruleId] = run.targetRuleIds;
+  if (ruleId === undefined || run.targetRuleIds.length !== 1) return 'rules_mismatch';
+  if (!sameList(entry.detail.ruleIds, run.targetRuleIds)) return 'rules_mismatch';
+  const editSeqs = entry.detail.ruleEditSeqs ?? [];
+  if (!sameList(editSeqs, run.startedBy.causeSeqs) || editSeqs.length !== 1) {
+    return 'cause_mismatch';
+  }
+  const [editSeq] = editSeqs;
+  const edit = store.approvalLog
+    .list({ entity: 'Rule', id: ruleId })
+    .find((logEntry) => logEntry.seq === editSeq);
+  if (edit === undefined || ruleStatementEditOf(edit) === null) return 'cause_mismatch';
+  const reused = all.some(
+    (other) =>
+      other.kind === 'auto_start' &&
+      other.seq !== entry.seq &&
+      (other.detail.ruleEditSeqs ?? []).some((seq) => editSeqs.includes(seq)),
+  );
+  return reused ? 'cause_reused' : null;
 };

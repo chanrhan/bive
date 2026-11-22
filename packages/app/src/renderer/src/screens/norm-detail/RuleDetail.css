@@ -11,8 +11,11 @@
 
 .rule-detail-head {
   display: flex;
+  /* 좁은 상세(820px 창)에서 제목 · 표시 ID · 판정 · 동작 묶음이 한 줄에 들어가지 않으면 줄을 바꾼다. 제목이 글자 한두 개 폭으로
+     눌리지 않게 (M7-03: 동작 묶음에 [편집]이 더해짐) */
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
   min-width: 0;
 }
 
@@ -30,6 +33,112 @@
   font-size: var(--font-size-2);
 }
 
+/* 머리 오른쪽 동작 묶음: [편집] · 놓는 화면의 동작([실행]). 한 묶음으로 오른쪽에 붙고 줄지 않는다 (M7-03) */
+.rule-detail-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  align-self: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.rule-detail-actions .run-start-button {
+  margin-left: 0;
+}
+
+/* 머리의 [편집]은 [실행]과 같은 높이 · 안쪽 여백 (한 줄로 나란히) */
+.rule-detail-actions .rule-action {
+  height: auto;
+  padding: var(--space-1) var(--space-3);
+}
+
+.rule-action {
+  height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-2);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.rule-action[data-primary='true'] {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-bg);
+  font-weight: 600;
+}
+
+.rule-action:disabled {
+  opacity: var(--opacity-dimmed);
+  cursor: default;
+}
+
+.rule-edit-input {
+  display: block;
+  width: 100%;
+  padding: var(--space-2);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-2);
+  outline: none;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-3);
+}
+
+.rule-edit-statement {
+  min-height: 64px;
+  resize: vertical;
+}
+
+.rule-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.rule-editor-bar {
+  display: flex;
+  /* 상세가 좁으면 단축키 안내가 윗줄, [취소] · [저장]은 다음 줄 오른쪽으로 (요구사항 편집과 같다) */
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.rule-editor-buttons {
+  display: flex;
+  flex: 0 1 auto;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-left: auto;
+}
+
+.rule-editor-hint {
+  margin-right: auto;
+  word-break: keep-all;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+}
+
+.rule-edit-result {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  overflow-wrap: anywhere;
+}
+
+.rule-edit-error-detail {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-1);
+  overflow-wrap: anywhere;
+}
+
 .rule-fields {
   display: flex;
   flex-direction: column;
@@ -41,6 +150,12 @@
   display: grid;
   grid-template-columns: 96px minmax(0, 1fr);
   gap: var(--space-3);
+}
+
+/* 편집 입력: 이름 위, 입력은 상세 전체 폭 (좁은 상세에서 값 칸만큼 눌리지 않게) */
+.rule-field-stacked {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-1);
 }
 
 .rule-field dt {

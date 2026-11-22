@@ -1,7 +1,8 @@
 // 요구사항 상세 (screens.md SCR-02 상세 · SCR-06 규범 상세, 1.4, ADR-035 · ADR-078).
 // 요구사항 목록 + 상세 2단의 상세 영역에 들어간다(별도 화면 아님).
 // - 순서: 표시 ID · [편집] · [삭제] → 본문 · 생성 주체(이름) → 자식 규칙
-// - 자식 규칙을 누르면 그 자리에서 규칙 상세(RuleDetail: 진술 · 속성 · 테스트 출력 · 실행 이력)를 펼친다
+// - 자식 규칙을 누르면 그 자리에서 규칙 상세(RuleDetail: 진술 · 속성 · 테스트 출력 · 실행 이력)를 펼친다. 펼친 규칙의 [편집]으로
+//   저장하면 응답의 규칙으로 자식 규칙 줄을 바꾼다(옛 제목을 남기지 않음, M7-03 · ADR-109)
 // - 직접 편집: [편집] → 본문 입력 → [저장](⌘↵ · Ctrl+Enter) 1회 = requirement.update, [취소](Esc)는 호출 없음.
 //   저장 중에는 다시 부르지 않고, 실패하면 입력을 남긴 채 "요구사항 저장 실패"
 // - 삭제: 두 번 눌러 확인(SCR-02). 첫 클릭은 [삭제 확인]으로 바뀌기만 하고(호출 없음), 두 번째 클릭에서
@@ -12,7 +13,7 @@
 // - 값은 requirement.list 항목 · rule.list · ruleWriter.status 결과에서만 (NFR-03)
 import './RequirementDetail.css';
 
-import type { Requirement } from '@bive/shared';
+import type { Requirement, RuleWithJudgment } from '@bive/shared';
 import { ChevronRight } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 
@@ -255,7 +256,12 @@ export const RequirementDetail = ({
           {TEXT.rules}
         </h3>
         <RuleWriterStatusLine view={ruleWriterStatusView(writer)} />
-        <ChildRules projectId={projectId} requirement={requirement} load={children} />
+        <ChildRules
+          projectId={projectId}
+          requirement={requirement}
+          load={children.load}
+          onEdited={children.replace}
+        />
       </section>
     </div>
   );
@@ -312,10 +318,12 @@ const ChildRules = ({
   projectId,
   requirement,
   load,
+  onEdited,
 }: {
   projectId: string;
   requirement: Requirement;
   load: ChildRulesLoad;
+  onEdited: (item: RuleWithJudgment) => void;
 }): React.JSX.Element => {
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
 
@@ -384,6 +392,7 @@ const ChildRules = ({
                   item={item}
                   sourceScreen="SCR-02"
                   parent={requirement}
+                  onEdited={onEdited}
                 />
               </div>
             )}

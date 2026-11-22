@@ -6,12 +6,23 @@
 //   항목은 이 규칙이다 (MET-01, ADR-084). 줄이 없거나 상대 경로가 아니면 글자만 보인다
 // - 변경 이력(P1) · 변이 상태 · 대상 블록 · 위험도는 해당 이슈 전 미노출 (ADR-035)
 // - 머리 오른쪽 동작(`actions`)은 놓는 화면이 정한다: 규칙 화면은 [실행] (M1-19, ADR-076)
+// - 직접 편집 (ADR-100 B②, M7-03 · ADR-109): 놓는 화면이 `onEdited`를 주면 머리에 [편집](효력 있고 내장 구조 규칙이 아닌
+//   규칙만). [편집] → 제목 · 진술 입력 → [저장](⌘↵ · Ctrl+Enter) 1회 = rule.update(바뀐 칸만), [취소](Esc)는 호출 없음.
+//   저장 중에는 다시 부르지 않고, 실패하면 입력을 남긴 채 사유 한 줄(형식 오류면 서버 사유 한 줄 더). 성공하면 응답의 규칙을
+//   놓는 화면에 넘기고(목록의 옛 제목을 남기지 않게) 실행 자동 시작 결과 한 줄을 머리 아래에 보인다
+// - 확인 상태(확인됨 · 미확인)를 속성 줄에 보인다. 사람이 고친 규칙은 확인됨이다
 // - 요구사항 상세가 자식 규칙으로 펼칠 때는 부모(`parent`)를 넘겨 requirement.get을 다시 부르지 않는다 (ADR-078)
 // - 값은 rule.list 항목 · judgment.list · requirement.get 결과에서만 (NFR-03)
 import './RuleDetail.css';
 
-import type { JudgmentCase, Requirement, RuleWithJudgment, ScreenId } from '@bive/shared';
-import type { ReactNode } from 'react';
+import type {
+  JudgmentCase,
+  Requirement,
+  RuleEditAutoStart,
+  RuleWithJudgment,
+  ScreenId,
+} from '@bive/shared';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 
 import { AuthorMark } from '../../components/AuthorMark/AuthorMark.js';
 import { CodeLink } from '../../components/CodeLink/CodeLink.js';
@@ -32,6 +43,17 @@ import {
   ruleKindLabel,
   shortCommit,
 } from './ruleDetailView.js';
+import {
+  canEditRule,
+  canSaveRuleEdit,
+  confirmationText,
+  RULE_EDIT_TEXT as EDIT,
+  type RuleEditDraft,
+  type RuleEditError,
+  ruleEditAutoStartText,
+  ruleEditErrorText,
+  ruleEditParams,
+} from './ruleEditView.js';
 import { type RuleHistoryLoad, useRuleHistory, useRuleParent } from './useRuleDetailData.js';
 
 export interface RuleDetailProps {
@@ -45,7 +67,11 @@ export interface RuleDetailProps {
   notice?: ReactNode;
   /** 이미 가진 부모 요구사항 (요구사항 상세에서 펼칠 때). 주면 `requirement.get`을 부르지 않는다 */
   parent?: Requirement;
+  /** 직접 편집이 저장되면 응답의 규칙 · 판정을 받는다. 주면 [편집]이 생긴다 */
+  onEdited?: (item: RuleWithJudgment) => void;
 }
+
+const isMac = (): boolean => /Mac|iPhone|iPad/.test(navigator.userAgent);
 
 /** 규칙이 바뀌면 접힘 상태 · 불러온 값을 새로 시작하도록 호출하는 쪽이 `key={rule.id}`를 준다. */
 export const RuleDetail = ({
@@ -55,8 +81,84 @@ export const RuleDetail = ({
   actions,
   notice,
   parent: knownParent,
+  onEdited,
 }: RuleDetailProps): React.JSX.Element => {
   const { rule, judgment } = item;
+  const [draft, setDraft] = useState<RuleEditDraft | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState<RuleEditError | null>(null);
+  // 마지막 저장의 실행 자동 시작 결과 (저장한 규칙에서만 보인다)
+  const [saved, setSaved] = useState<{ autoStart: RuleEditAutoStart | null } | null>(null);
+  // 같은 틱에 두 번 눌러도 한 번만 부르도록 상태와 별도로 둔다
+  const savingRef = useRef(false);
+  const mounted = useRef(true);
+  const titleRef = useRef<HTMLInputElement>(null);
+  const editing = draft !== null;
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (editing) titleRef.current?.focus();
+  }, [editing]);
+
+  const startEdit = (): void => {
+    if (savingRef.current) return;
+    setDraft({ title: rule.title, statement: rule.statement });
+    setFailure(null);
+    setSaved(null);
+  };
+
+  const cancelEdit = (): void => {
+    if (savingRef.current) return;
+    setDraft(null);
+    setFailure(null);
+  };
+
+  const save = (): void => {
+    if (savingRef.current || draft === null || !canSaveRuleEdit(rule, draft)) return;
+    savingRef.current = true;
+    setSaving(true);
+    setFailure(null);
+    window.bive.invoke('rule.update', ruleEditParams(projectId, rule, draft)).then(
+      (result) => {
+        savingRef.current = false;
+        if (!mounted.current) return;
+        setSaving(false);
+        setDraft(null);
+        setSaved({ autoStart: result.autoStart });
+        onEdited?.({ rule: result.rule, judgment: result.judgment });
+      },
+      (error: unknown) => {
+        savingRef.current = false;
+        if (!mounted.current) return;
+        setSaving(false);
+        setFailure(ruleEditErrorText(error));
+      },
+    );
+  };
+
+  const editKeys = (event: React.KeyboardEvent): void => {
+    // 조합 중(isComposing, 일부 환경은 keyCode 229만 준다)의 키는 조합 확정용이다
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      save();
+    } else if (event.key === 'Enter') {
+      // 제목 · 진술은 한 줄이다 (서버도 줄바꿈을 거부)
+      event.preventDefault();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      cancelEdit();
+    }
+  };
+  const autoStartText = saved === null ? null : ruleEditAutoStartText(saved.autoStart);
+  const editable = onEdited !== undefined && canEditRule(rule);
   const latest = judgment.latest;
   const history = useRuleHistory(projectId, rule.id, latest?.id ?? null);
   const knownMatches = knownParent !== undefined && knownParent.id === rule.parentRequirementId;
@@ -76,13 +178,107 @@ export const RuleDetail = ({
           {rule.displayId}
         </span>
         <StatusBadge kind="judgment" status={judgment.status} />
-        {actions}
+        {(editable || actions !== undefined) && (
+          <div className="rule-detail-actions" data-testid="rule-detail-actions">
+            {editable && !editing && (
+              <button
+                type="button"
+                className="rule-action"
+                data-testid="rule-edit"
+                onClick={startEdit}
+              >
+                {EDIT.edit}
+              </button>
+            )}
+            {actions}
+          </div>
+        )}
       </header>
       {notice}
+      {autoStartText !== null && (
+        <p className="rule-edit-result" data-testid="rule-edit-result" role="status">
+          {autoStartText}
+        </p>
+      )}
+      {failure !== null && (
+        <div className="rule-detail-error" data-testid="rule-edit-error" role="alert">
+          <span data-testid="rule-edit-error-label">{failure.label}</span>
+          {failure.detail !== null && (
+            <p className="rule-edit-error-detail" data-testid="rule-edit-error-detail">
+              {failure.detail}
+            </p>
+          )}
+        </div>
+      )}
 
       <dl className="rule-fields">
-        <Field id="statement" label={TEXT.statement}>
-          <p className="rule-detail-text">{rule.statement}</p>
+        {draft !== null && (
+          <Field id="title" label={EDIT.title} stacked>
+            <input
+              ref={titleRef}
+              type="text"
+              className="rule-edit-input"
+              data-testid="rule-edit-title"
+              aria-label={EDIT.titleLabel}
+              value={draft.title}
+              readOnly={saving}
+              aria-busy={saving}
+              onChange={(event) => {
+                setDraft({ ...draft, title: event.target.value });
+                setFailure(null);
+              }}
+              onKeyDown={editKeys}
+            />
+          </Field>
+        )}
+        <Field id="statement" label={TEXT.statement} stacked={draft !== null}>
+          {draft === null ? (
+            <p className="rule-detail-text">{rule.statement}</p>
+          ) : (
+            <div className="rule-editor" data-testid="rule-editor">
+              <textarea
+                className="rule-edit-input rule-edit-statement"
+                data-testid="rule-edit-statement"
+                aria-label={EDIT.statementLabel}
+                rows={3}
+                value={draft.statement}
+                readOnly={saving}
+                aria-busy={saving}
+                onChange={(event) => {
+                  setDraft({ ...draft, statement: event.target.value });
+                  setFailure(null);
+                }}
+                onKeyDown={editKeys}
+              />
+              <div className="rule-editor-bar">
+                <span className="rule-editor-hint" data-testid="rule-editor-hint">
+                  {isMac() ? '⌘↵ 저장 · Esc 취소' : 'Ctrl+Enter 저장 · Esc 취소'}
+                </span>
+                <span className="rule-editor-buttons">
+                  <button
+                    type="button"
+                    className="rule-action"
+                    data-testid="rule-edit-cancel"
+                    disabled={saving}
+                    onClick={cancelEdit}
+                  >
+                    {EDIT.cancel}
+                  </button>
+                  <button
+                    type="button"
+                    className="rule-action"
+                    data-testid="rule-edit-save"
+                    data-primary="true"
+                    disabled={saving || !canSaveRuleEdit(rule, draft)}
+                    aria-busy={saving}
+                    onClick={save}
+                  >
+                    {EDIT.save}
+                  </button>
+                </span>
+              </div>
+            </div>
+          )}
         </Field>
         <Field id="kind" label={TEXT.kind}>
           {ruleKindLabel(rule.kind)}
@@ -103,6 +299,9 @@ export const RuleDetail = ({
         )}
         <Field id="author" label={TEXT.author}>
           <AuthorMark kind={rule.author.kind} showLabel name={ruleAuthorName(rule.author)} />
+        </Field>
+        <Field id="confirmation" label={EDIT.confirmation}>
+          <span data-state={rule.confirmation.state}>{confirmationText(rule)}</span>
         </Field>
       </dl>
 
@@ -158,12 +357,18 @@ const Field = ({
   id,
   label,
   children,
+  stacked = false,
 }: {
   id: string;
   label: string;
   children: React.ReactNode;
+  /** 이름을 위에, 값을 아래 전체 폭에 (편집 입력) */
+  stacked?: boolean;
 }): React.JSX.Element => (
-  <div className="rule-field" data-testid={`rule-field-${id}`}>
+  <div
+    className={stacked ? 'rule-field rule-field-stacked' : 'rule-field'}
+    data-testid={`rule-field-${id}`}
+  >
     <dt>{label}</dt>
     <dd>{children}</dd>
   </div>

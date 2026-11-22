@@ -440,12 +440,30 @@ describe('rule.list · rule.get (M1-11, ADR-060)', () => {
   const request = (method: string, params: unknown) =>
     parseRequest({ jsonrpc: '2.0', id: 1, method, params });
 
-  it('조회 메서드만 등록돼 있다 (규칙을 바꾸는 메서드 없음)', () => {
+  it('규칙을 바꾸는 메서드는 사람의 직접 편집 rule.update뿐이다 (생성 · 삭제 없음, M7-03 · ADR-109)', () => {
     expect(isMethodName('rule.list')).toBe(true);
     expect(isMethodName('rule.get')).toBe(true);
-    for (const name of ['rule.create', 'rule.update', 'rule.delete']) {
+    expect(isMethodName('rule.update')).toBe(true);
+    for (const name of ['rule.create', 'rule.delete']) {
       expect(isMethodName(name)).toBe(false);
     }
+  });
+
+  it('rule.update: 제목 · 진술 중 하나는 필수, 알 수 없는 키 · 잘못된 수정 시각은 -32602 (형식 · EARS는 처리기가 -32001)', () => {
+    const base = { projectId: PROJECT, id: PROJECT, author: { kind: 'human' } };
+    expect(request('rule.update', { ...base, title: '새 제목' }).ok).toBe(true);
+    expect(
+      request('rule.update', {
+        ...base,
+        statement: '형식은 처리기가 본다',
+        expectedUpdatedAt: '2026-10-16T00:00:00.000Z',
+      }).ok,
+    ).toBe(true);
+    expect(request('rule.update', base).ok).toBe(false);
+    expect(request('rule.update', { ...base, title: 'x', kind: 'business' }).ok).toBe(false);
+    expect(request('rule.update', { ...base, title: 'x', expectedUpdatedAt: '어제' }).ok).toBe(
+      false,
+    );
   });
 
   it.each([
@@ -680,7 +698,8 @@ describe('proposal.* · approvalLog.list (M1-09, ADR-050)', () => {
     ]) {
       expect(isMethodName(name)).toBe(true);
     }
-    for (const name of ['rule.update', 'contract.update', 'proposal.create', 'proposal.submit']) {
+    // 규칙 직접 편집(rule.update)은 M7-03에서 생겼다. 계약 편집은 M3-10
+    for (const name of ['contract.update', 'proposal.create', 'proposal.submit']) {
       expect(isMethodName(name)).toBe(false);
     }
   });

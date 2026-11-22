@@ -26,6 +26,7 @@ import {
   isAllowedIdeUrl,
   isIdeUrlTemplate,
   JudgmentResult,
+  NormChangeEntry,
   M1_RUN_TYPE,
   MissingSettingPath,
   Project,
@@ -35,6 +36,7 @@ import {
   Requirement,
   RESERVED_ENTITY_NAMES,
   Rule,
+  ruleStatementEditOf,
   Run,
   RUN_STEP_PLANS,
   ScreenId,
@@ -535,12 +537,109 @@ describe('규범', () => {
     expect(ApprovalLogEntry.safeParse({ ...confirm, actor: testWriter }).success).toBe(false);
     const diff = { before: { title: 'a' }, after: { title: 'b' } };
     expect(ApprovalLogEntry.safeParse({ ...confirm, detail: { diff } }).success).toBe(false);
-    for (const action of ['rule_edit', 'contract_edit']) {
+    // 규칙 직접 편집의 diff는 제목 · 진술 전후 (M7-03, 아래 시험). 계약 편집은 M3-10이 정한다
+    const ruleDiff = {
+      before: { title: 'a', statement: 'WHEN a THE SYSTEM SHALL b' },
+      after: { title: 'b', statement: 'WHEN a THE SYSTEM SHALL b' },
+    };
+    for (const [action, edited] of [
+      ['rule_edit', ruleDiff],
+      ['contract_edit', diff],
+    ] as const) {
       expect(ApprovalLogEntry.safeParse({ ...confirm, action }).success).toBe(false);
-      expect(ApprovalLogEntry.safeParse({ ...confirm, action, detail: { diff } }).success).toBe(
-        true,
+      expect(
+        ApprovalLogEntry.safeParse({ ...confirm, action, detail: { diff: edited } }).success,
+      ).toBe(true);
+    }
+  });
+
+  it('규칙 직접 편집(rule_edit): 대상은 규칙, diff는 제목 · 진술 전후, 반영 규범 없음. 진술이 바뀐 것만 진술 편집 (M7-03 · ADR-109)', () => {
+    const before = {
+      title: '서버 시각',
+      statement: 'WHEN 요청하면 THE SYSTEM SHALL 시각을 담는다',
+    };
+    const after = {
+      title: '서버 시각',
+      statement: 'WHEN 요청하면 THE SYSTEM SHALL UTC 시각을 담는다',
+    };
+    const edit = {
+      seq: 4,
+      at: AT,
+      action: 'rule_edit',
+      actor: human,
+      targetRef: { entity: 'Rule', id: ID.rule },
+      clientId: 'pipe-1',
+      detail: { diff: { before, after } },
+      prevHash: APPROVAL_LOG_GENESIS_HASH,
+      hash: 'f'.repeat(64),
+    };
+    const parsed = ApprovalLogEntry.parse(edit);
+    expect(ruleStatementEditOf(parsed)).toEqual({
+      seq: 4,
+      ruleId: ID.rule,
+      diff: { before, after },
+    });
+    for (const broken of [
+      { ...edit, targetRef: { entity: 'Requirement', id: ID.req } },
+      { ...edit, detail: { diff: { before: { title: 'a' }, after } } },
+      { ...edit, detail: { diff: { before, after: { ...after, extra: 1 } } } },
+      { ...edit, detail: { diff: { before, after }, appliedRef: { entity: 'Rule', id: ID.rule } } },
+      { ...edit, actor: testWriter },
+    ]) {
+      expect(ApprovalLogEntry.safeParse(broken).success, JSON.stringify(broken)).toBe(false);
+    }
+    // 제목만 바뀐 편집 · 다른 행동은 진술 편집이 아니다
+    const titleOnly = ApprovalLogEntry.parse({
+      ...edit,
+      detail: { diff: { before, after: { ...before, title: '서버 시각 (UTC)' } } },
+    });
+    expect(ruleStatementEditOf(titleOnly)).toBeNull();
+    expect(
+      ruleStatementEditOf(ApprovalLogEntry.parse({ ...edit, action: 'confirm', detail: {} })),
+    ).toBeNull();
+  });
+
+  it('규범 변경 기록 자동 시작의 원인은 신규 기록 순번(causeSeqs) 또는 규칙 편집 순번(ruleEditSeqs) 가운데 하나 (M7-03 · ADR-109)', () => {
+    const entry = {
+      seq: 2,
+      at: AT,
+      kind: 'auto_start',
+      actor: { kind: 'orchestrator' },
+      targetRef: { entity: 'Run', id: ID.run },
+      sessionId: null,
+      runId: ID.run,
+      reason: '자동 시작',
+      detail: { ruleEditSeqs: [4], ruleIds: [ID.rule] },
+      prevHash: APPROVAL_LOG_GENESIS_HASH,
+      hash: 'f'.repeat(64),
+    };
+    expect(NormChangeEntry.parse(entry)).toEqual(entry);
+    expect(
+      NormChangeEntry.safeParse({ ...entry, detail: { causeSeqs: [1], ruleIds: [ID.rule] } })
+        .success,
+    ).toBe(true);
+    for (const detail of [
+      { ruleEditSeqs: [4], causeSeqs: [1], ruleIds: [ID.rule] },
+      { ruleEditSeqs: [4, 5], ruleIds: [ID.rule] },
+      { ruleIds: [ID.rule] },
+      { ruleEditSeqs: [0], ruleIds: [ID.rule] },
+    ]) {
+      expect(NormChangeEntry.safeParse({ ...entry, detail }).success, JSON.stringify(detail)).toBe(
+        false,
       );
     }
+    // 자동 시작이 아닌 기록에는 규칙 편집 순번이 없다
+    expect(
+      NormChangeEntry.safeParse({
+        ...entry,
+        kind: 'created',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        sessionId: ID.run,
+        targetRef: { entity: 'Rule', id: ID.rule },
+        runId: null,
+        detail: { after: {}, ruleEditSeqs: [4] },
+      }).success,
+    ).toBe(false);
   });
 
   it('확인 상태: 두 값, 확인됨은 사람 · 시각 · 근거가 필수 (ADR-100 D2 · C1 · A1)', () => {
@@ -612,9 +711,18 @@ describe('실행', () => {
       { kind: 'orchestrator', causeSeqs: [1.5] },
       { kind: 'orchestrator', causeSeqs: [1], extra: true },
       { kind: 'human', causeSeqs: [1] },
+      // 규칙 편집이 원인인 실행(M7-03): 승인 기록 순번 1개만
+      { kind: 'orchestrator', causeSeqs: [1, 2], causeLog: 'approval_log' },
+      { kind: 'orchestrator', causeSeqs: [1], causeLog: 'norm_change' },
+      { kind: 'human', causeLog: 'approval_log' },
     ]) {
       expect(Run.safeParse({ ...run, startedBy }).success, JSON.stringify(startedBy)).toBe(false);
     }
+    const byEdit = {
+      ...run,
+      startedBy: { kind: 'orchestrator', causeSeqs: [7], causeLog: 'approval_log' },
+    };
+    expect(Run.parse(byEdit)).toEqual(byEdit);
   });
 
   it('워크트리 전(승인 대기)에는 브랜치 · 워크트리 · 기준 커밋 · 시작 시각이 없다 (ADR-061)', () => {

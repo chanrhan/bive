@@ -1,6 +1,7 @@
 // 승인 경로 격리 (M1-09 수용 기준, NFR-01 · NRM-04 · PRD 5.1 · ADR-027 · ADR-050).
 // - 승인은 토큰 인증된 파이프 연결에서만: 인증 전 연결의 `proposal.approve`는 -32020 후 연결 종료
-// - 승인된 규칙 · 계약을 직접 고치는 RPC는 없다: `rule.update` · `contract.update` → -32601
+// - 규칙 · 계약을 고치는 RPC는 사람의 규칙 직접 편집 `rule.update`뿐이다(M7-03, ADR-109, 시험은 rule-edit.test.ts).
+//   `contract.update`(M3-10) · 규칙 생성 · 삭제 → -32601
 // - 제안 등록도 파이프 RPC가 없다(내부 API `ProposalService.submit`만)
 // - 코드 열람 기록(`codeOpen.record`)도 인증된 파이프의 사람 요청으로만 남는다: 역할 세션 도구 · 인증 전 연결은 거부 (#43)
 // - 코드 열기 IDE 선택(`settings.update`의 `ide`)도 역할 세션 도구로는 바꿀 수 없다 (#45)
@@ -135,9 +136,8 @@ describe('토큰 없는 연결의 승인 호출', () => {
   });
 });
 
-describe('승인된 규칙 · 계약의 직접 수정 RPC 없음 (NRM-04)', () => {
+describe('규칙 · 계약 쓰기 RPC는 사람의 규칙 직접 편집뿐 (NRM-04, ADR-100 B②, ADR-109)', () => {
   it.each([
-    ['rule.update', { projectId: 'p', id: 'r', title: '바꾼 제목' }],
     ['contract.update', { projectId: 'p', id: 'c', content: '{}' }],
     ['rule.create', { projectId: 'p' }],
     ['rule.delete', { projectId: 'p', id: 'r' }],
@@ -150,11 +150,11 @@ describe('승인된 규칙 · 계약의 직접 수정 RPC 없음 (NRM-04)', () =
     await expect(h.client.call('ping')).resolves.toMatchObject({ pong: true });
   });
 
-  it('메서드 레지스트리에 규칙 · 계약 쓰기와 제안 등록 메서드가 없다', () => {
+  it('메서드 레지스트리의 규칙 · 계약 쓰기는 rule.update 하나이고 제안 등록 메서드가 없다', () => {
     const writes = METHOD_NAMES.filter(
       (name) => /^(rule|contract)\./.test(name) && !/\.(list|get)$/.test(name),
     );
-    expect(writes).toEqual([]);
+    expect(writes).toEqual(['rule.update']);
     expect(METHOD_NAMES).not.toContain('proposal.create');
     expect(METHOD_NAMES).not.toContain('proposal.submit');
     expectUntouched();

@@ -3,7 +3,8 @@
 //   (M7-02, ADR-100 D1: 같은 트랜잭션에서 규범 변경 기록 `normChanges`에 신규 항목이 남는다)
 // - 표시 ID(`RULE-NNN`)는 생성 트랜잭션 안에서 순번 테이블로 정한다
 // - 부모 요구사항이 삭제되면 규칙은 남기고 부모만 해제한다(`parentRequirementId = null`, `parentDetachedAt`)
-// - 승인된 규칙을 직접 고치는 함수는 두지 않는다. 변경은 지시 → 제안 → 승인 경로로만 (NRM-04, DSN-07)
+// - 규칙을 제자리에서 고치는 함수는 사람의 직접 편집(제목 · 진술, `update`)뿐이다 (ADR-100 B②, M7-03, ADR-109).
+//   오케스트레이터에서 이 함수를 부르는 곳은 `rule.update` 처리기 하나다(`integrity.test.ts` 구조 시험)
 // - 확인 상태(`confirmation`)는 저장 칸이 아니라 `confirmations`에서 함께 읽는다. 이 리포지토리는 쓰지 않는다 (ADR-100 D2)
 import { Rule, Timestamp, UNCONFIRMED, type Requirement } from '@bive/shared';
 
@@ -110,6 +111,9 @@ const toRow = (rule: Rule): RuleRow => ({
   deleted_at: rule.deletedAt,
 });
 
+/** 규칙 편집 값 (사람의 직접 편집, M7-03). 생략한 칸은 그대로다. */
+export type RulePatch = Partial<Pick<Rule, 'title' | 'statement'>>;
+
 /** 표시 ID는 접두가 같고 순번에 앞자리 0이 없으므로 길이 → 사전식 순서가 순번 순서다. */
 const ORDER = 'ORDER BY length(r.display_id), r.display_id';
 
@@ -122,6 +126,7 @@ export class RuleRepository {
   readonly #selectByParent;
   readonly #requirementState;
   readonly #detach;
+  readonly #update;
 
   constructor(db: SqliteDatabase, sequences: DisplayIdSequences = new DisplayIdSequences(db)) {
     this.#db = db;
@@ -142,6 +147,10 @@ export class RuleRepository {
     this.#detach = db.prepare<[{ requirement_id: string; at: string }]>(
       `UPDATE rules SET parent_requirement_id = NULL, parent_detached_at = @at, updated_at = @at
        WHERE parent_requirement_id = @requirement_id AND deleted_at IS NULL`,
+    );
+    this.#update = db.prepare<[{ id: string; title: string; statement: string; at: string }]>(
+      `UPDATE rules SET title = @title, statement = @statement, updated_at = @at
+       WHERE id = @id AND deleted_at IS NULL`,
     );
   }
 
@@ -221,6 +230,31 @@ export class RuleRepository {
   detachFromParent(requirementId: string, at: string): number {
     const when = Timestamp.parse(at);
     return this.#detach.run({ requirement_id: requirementId, at: when }).changes;
+  }
+
+  /**
+   * 제목 · 진술을 바꾸고 `updatedAt`을 `at`으로 둔다 (사람의 직접 편집, M7-03). 그 밖의 칸 · 확인 상태는 바꾸지 않는다.
+   * 형식(한 줄 · EARS 등)은 부르는 쪽이 본다. 이 함수는 스키마(빈 글 아님 · 시각 형식)만 본다.
+   * @throws {ZodError} 빈 제목 · 진술, 시각 형식 위반
+   * @throws {NotFoundError} 없는 규칙
+   * @throws {ConflictError} 이미 삭제된 규칙
+   */
+  update(id: string, patch: RulePatch, at: string): Rule {
+    return withTransaction(this.#db, () => {
+      const current = this.get(id);
+      if (current === null) throw new NotFoundError(ENTITY, id);
+      if (current.deletedAt !== null) {
+        throw new ConflictError(ENTITY, id, `삭제됐습니다 (${current.deletedAt})`);
+      }
+      const next = Rule.parse({
+        ...current,
+        ...(patch.title === undefined ? {} : { title: patch.title }),
+        ...(patch.statement === undefined ? {} : { statement: patch.statement }),
+        updatedAt: Timestamp.parse(at),
+      });
+      this.#update.run({ id, title: next.title, statement: next.statement, at: next.updatedAt });
+      return next;
+    });
   }
 
   #assertLiveParent(requirementId: string): void {

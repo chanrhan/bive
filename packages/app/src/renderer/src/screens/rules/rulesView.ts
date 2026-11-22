@@ -136,6 +136,13 @@ export const ruleSearchText = ({ rule }: RuleWithJudgment): string =>
   [rule.title, rule.displayId, whenCondition(rule.statement) ?? ''].join(' ');
 
 /** 목록에 보일 규칙: 삭제된 것은 뺀다 (`list`는 삭제되지 않은 것만 주지만 한 번 더 거른다). */
+/** 항목 하나를 같은 ID의 새 값으로 바꾼다(직접 편집 저장 뒤, M7-03). 없으면 그대로. */
+export const replaceRuleItem = (
+  items: readonly RuleWithJudgment[],
+  item: RuleWithJudgment,
+): RuleWithJudgment[] =>
+  items.map((current) => (current.rule.id === item.rule.id ? item : current));
+
 export const visibleRules = (rules: readonly RuleWithJudgment[]): RuleWithJudgment[] =>
   rules.filter(({ rule }) => rule.deletedAt === null);
 
