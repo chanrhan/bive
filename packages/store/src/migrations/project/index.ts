@@ -20,6 +20,7 @@ import { migration as m0015 } from './0015_run_queue.js';
 import { migration as m0016 } from './0016_run_auto_start.js';
 import { migration as m0017 } from './0017_session_norm_input.js';
 import { migration as m0018 } from './0018_rule_retirements.js';
+import { migration as m0019 } from './0019_confirmation_release.js';
 
 export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0001,
@@ -40,4 +41,5 @@ export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0016,
   m0017,
   m0018,
+  m0019,
 ];

@@ -620,7 +620,7 @@ describe('0012 confirmations: 확인 상태 · 승인 기록 행동 넓히기 ·
 
   it('confirmations 표: 확인한 주체는 사람만, 없는 대상 · 덮어쓰기 · 대상 변경 · 삭제는 DB가 거부한다', () => {
     withDb((db) => {
-      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 18), { now: fixedNow });
       const req = newId();
       insertRequirement(db, { id: req, seq: 1, author: chat, updatedBy: chat });
       const insert = (target: string, by: string | null, state = 'confirmed') =>
@@ -648,7 +648,7 @@ describe('0012 confirmations: 확인 상태 · 승인 기록 행동 넓히기 ·
         /대상은 바꿀 수 없/,
       );
       expect(() => db.prepare('DELETE FROM confirmations').run()).toThrow(/지울 수 없/);
-      // 상태 값 변경(확인 풀림, M7-13)은 막지 않는다
+      // 상태 값 변경(확인 풀림, M7-13)은 0012가 막지 않는다 (0019부터는 확인 풀림 기록이 있어야 한다)
       db.prepare(
         "UPDATE confirmations SET state = 'unconfirmed', confirmed_at = NULL, confirmed_by = NULL, basis = NULL",
       ).run();
@@ -1356,7 +1356,7 @@ describe('0018 rule_retirements: 규칙 폐기 기록 (M7-09 #221, ADR-100 D5 ·
       const beforeRows = db.prepare('SELECT * FROM rules ORDER BY rowid').all();
       const beforeSql = rulesSql();
       const otherSchema = schemaOf(db);
-      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([18]);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 18), { now: fixedNow }).applied).toEqual([18]);
       expect(db.prepare('SELECT * FROM rules ORDER BY rowid').all()).toEqual(beforeRows);
       expect(rulesSql()).toEqual(beforeSql);
       // 이전 스키마 객체는 모두 그대로이고 새 객체는 폐기 기록 표 · 색인 · 트리거뿐이다
@@ -1380,7 +1380,7 @@ describe('0018 rule_retirements: 규칙 폐기 기록 (M7-09 #221, ADR-100 D5 ·
       expect(db.prepare('SELECT count(*) AS n FROM rule_retirements').get()).toEqual({ n: 0 });
       // 다시 실행해도 스키마가 같다
       const schema = schemaOf(db);
-      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 18), { now: fixedNow }).applied).toEqual([]);
       expect(schemaOf(db)).toEqual(schema);
     });
   });
@@ -1462,6 +1462,197 @@ describe('0018 rule_retirements: 규칙 폐기 기록 (M7-09 #221, ADR-100 D5 ·
       ]);
       // 규칙 행은 지워지지 않는다
       expect(db.prepare('SELECT count(*) AS n FROM rules').get()).toEqual({ n: 6 });
+    });
+  });
+});
+
+describe('0019 confirmation_release: 확인 풀림 · 테스트 변경 알림의 DB 제약 (M7-13 #225, ADR-100 D3 · I1 · A11 · G, ADR-113)', () => {
+  const T = (minute: number) => `2026-11-22T05:${String(minute).padStart(2, '0')}:00.000Z`;
+  const human = '{"kind":"human"}';
+  const agent = '{"kind":"agent","role":"rule-writer"}';
+  const orchestrator = '{"kind":"orchestrator"}';
+  const HASH = (n: number) => String(n).padStart(64, '0');
+
+  const seed = (db: SqliteDatabase) => {
+    const req = newId();
+    db.prepare(
+      `INSERT INTO requirements (id, display_id, text, author, norm_state, unrulable_reason, created_at,
+       updated_at, updated_by, deleted_at) VALUES (?, 'REQ-001', '본문', ?, 'approved', NULL, ?, ?, ?, NULL)`,
+    ).run(req, human, T(0), T(0), human);
+    const rule = (seq: number) => {
+      const id = newId();
+      db.prepare(
+        `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
+         parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
+         updated_at, deleted_at) VALUES (?, ?, '제목', '진술', 'business', '["test"]', ?, NULL, 0, '[]',
+         NULL, NULL, ?, 'approved', ?, ?, NULL)`,
+      ).run(id, `RULE-${String(seq).padStart(3, '0')}`, req, agent, T(seq), T(seq));
+      return id;
+    };
+    return { req, a: rule(1), b: rule(2) };
+  };
+  let nextSeq = 1;
+  const change = (
+    db: SqliteDatabase,
+    row: { kind: string; actor?: string; target: string; entity?: string; detail?: object },
+  ): number => {
+    const seq = nextSeq;
+    nextSeq += 1;
+    db.prepare(
+      `INSERT INTO norm_changes (seq, at, kind, actor, target_ref, session_id, run_id, reason, detail,
+       prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, NULL, '사유', ?, ?, ?)`,
+    ).run(
+      seq,
+      T(seq),
+      row.kind,
+      row.actor ?? agent,
+      JSON.stringify({ entity: row.entity ?? 'Rule', id: row.target }),
+      (row.actor ?? agent) === agent ? newId() : null,
+      JSON.stringify(row.detail ?? {}),
+      HASH(seq - 1),
+      HASH(seq),
+    );
+    return seq;
+  };
+  const confirm = (db: SqliteDatabase, entity: string, id: string) =>
+    db
+      .prepare(
+        `INSERT INTO confirmations (entity, target_id, state, confirmed_at, confirmed_by, basis)
+         VALUES (?, ?, 'confirmed', ?, ?, '{"kind":"approval_log","seq":1}')`,
+      )
+      .run(entity, id, T(0), human);
+  const release = (db: SqliteDatabase, id: string) =>
+    db
+      .prepare(
+        `UPDATE confirmations SET state = 'unconfirmed', confirmed_at = NULL, confirmed_by = NULL,
+         basis = NULL WHERE target_id = ?`,
+      )
+      .run(id);
+  const unconfirm = (causeSeq: unknown) => ({ unconfirm: { causeSeq, previous: {} } });
+
+  it('0018까지의 스키마 객체는 그대로이고 트리거 3개만 더해지며, 다시 실행해도 같다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 18), { now: fixedNow });
+      const before = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([19]);
+      const after = schemaOf(db) as { name: string }[];
+      const added = new Set([
+        'confirmations_release_recorded',
+        'norm_changes_test_changed',
+        'norm_changes_unconfirmed',
+      ]);
+      expect(after.filter((item) => !added.has(item.name))).toEqual(before);
+      expect(
+        after
+          .filter((item) => added.has(item.name))
+          .map((item) => item.name)
+          .sort(),
+      ).toEqual([...added].sort());
+      const schema = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
+      expect(schemaOf(db)).toEqual(schema);
+    });
+  });
+
+  it('확인 풀림 기록: 오케스트레이터 · 규칙 대상 · 같은 규칙의 폐기 · 대체 원인 · 지금 확인됨 · 원인마다 한 번일 때만 받는다', () => {
+    withDb((db) => {
+      nextSeq = 1;
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      const { req, a, b } = seed(db);
+      const retired = change(db, { kind: 'retired', target: a });
+      const created = change(db, { kind: 'created', target: b });
+      const reject = (
+        row: Parameters<typeof change>[1],
+        message = /확인 풀림은 오케스트레이터가/,
+      ) => {
+        const seq = nextSeq;
+        expect(() => change(db, row)).toThrow(message);
+        nextSeq = seq;
+      };
+      // 미확인 규칙 (확인 행 없음)
+      reject({ kind: 'unconfirmed', actor: orchestrator, target: a, detail: unconfirm(retired) });
+      confirm(db, 'Rule', a);
+      confirm(db, 'Rule', b);
+      confirm(db, 'Requirement', req);
+      // 주체가 에이전트 (사람 · 형식 아님은 0013의 CHECK가 먼저 막는다)
+      reject({ kind: 'unconfirmed', actor: agent, target: a, detail: unconfirm(retired) });
+      for (const actor of [human, '"orchestrator"', '{}']) {
+        reject(
+          { kind: 'unconfirmed', actor, target: a, detail: unconfirm(retired) },
+          /CHECK|확인 풀림은/,
+        );
+      }
+      // 요구사항 대상 (요구사항의 확인 풀림 경로는 없다)
+      reject({
+        kind: 'unconfirmed',
+        actor: orchestrator,
+        target: req,
+        entity: 'Requirement',
+        detail: unconfirm(retired),
+      });
+      // 원인 없음 · 정수 아님 · 없는 순번 · 폐기 · 대체가 아닌 원인 · 다른 규칙의 폐기
+      for (const detail of [{}, unconfirm('1'), unconfirm(99), unconfirm(created)]) {
+        reject({ kind: 'unconfirmed', actor: orchestrator, target: a, detail });
+      }
+      reject({ kind: 'unconfirmed', actor: orchestrator, target: b, detail: unconfirm(retired) });
+      change(db, {
+        kind: 'unconfirmed',
+        actor: orchestrator,
+        target: a,
+        detail: unconfirm(retired),
+      });
+      // 같은 원인을 두 번 쓰지 않는다
+      reject({ kind: 'unconfirmed', actor: orchestrator, target: a, detail: unconfirm(retired) });
+    });
+  });
+
+  it('확인됨 → 미확인은 바로 앞 기록이 그 대상의 확인 풀림일 때만, 미확인 → 확인됨은 사람 주체만 받는다', () => {
+    withDb((db) => {
+      nextSeq = 1;
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      const { a, b } = seed(db);
+      confirm(db, 'Rule', a);
+      confirm(db, 'Rule', b);
+      // 기록이 없음
+      expect(() => release(db, a)).toThrow(/확인 풀림 기록 없이/);
+      const retiredA = change(db, { kind: 'retired', target: a });
+      // 마지막 기록이 폐기 기록 (확인 풀림 아님)
+      expect(() => release(db, a)).toThrow(/확인 풀림 기록 없이/);
+      change(db, {
+        kind: 'unconfirmed',
+        actor: orchestrator,
+        target: a,
+        detail: unconfirm(retiredA),
+      });
+      // 마지막 기록이 다른 규칙의 확인 풀림
+      expect(() => release(db, b)).toThrow(/확인 풀림 기록 없이/);
+      release(db, a);
+      // 확인 풀림 뒤 다른 기록이 끼면 그 기록으로는 풀 수 없다
+      const retiredB = change(db, { kind: 'retired', target: b });
+      change(db, {
+        kind: 'unconfirmed',
+        actor: orchestrator,
+        target: b,
+        detail: unconfirm(retiredB),
+      });
+      change(db, { kind: 'created', target: a });
+      expect(() => release(db, b)).toThrow(/확인 풀림 기록 없이/);
+      // 다시 확인됨: 주체는 사람만 (0012 CHECK)
+      expect(() =>
+        db
+          .prepare(
+            `UPDATE confirmations SET state = 'confirmed', confirmed_at = ?, confirmed_by = ?,
+             basis = '{"kind":"approval_log","seq":2}' WHERE target_id = ?`,
+          )
+          .run(T(9), agent, a),
+      ).toThrow(/CHECK/);
+      db.prepare(
+        `UPDATE confirmations SET state = 'confirmed', confirmed_at = ?, confirmed_by = ?,
+         basis = '{"kind":"approval_log","seq":2}' WHERE target_id = ?`,
+      ).run(T(9), human, a);
+      expect(db.prepare('SELECT state FROM confirmations WHERE target_id = ?').get(a)).toEqual({
+        state: 'confirmed',
+      });
     });
   });
 });

@@ -864,6 +864,90 @@ describe('판정', () => {
   });
 });
 
+describe('확인 풀림 · 테스트 변경 알림 기록 (M7-13 #225, ADR-113)', () => {
+  const RULE_A = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+  const RUN = '01ARZ3NDEKTSV4RRFFQ69G5FAX';
+  const base = {
+    seq: 4,
+    at: '2026-11-22T00:00:00.000Z',
+    actor: { kind: 'orchestrator' },
+    targetRef: { entity: 'Rule', id: RULE_A },
+    sessionId: null,
+    runId: null,
+    reason: null,
+    prevHash: NORM_CHANGE_GENESIS_HASH,
+    hash: 'a'.repeat(64),
+  } as const;
+  const previous = {
+    state: 'confirmed',
+    at: '2026-11-21T00:00:00.000Z',
+    by: { kind: 'human' },
+    basis: { kind: 'approval_log', seq: 1 },
+  } as const;
+  const testChange = {
+    files: [{ path: 'bive-acceptance/RULE-001/a.acc.ts', change: 'modified' }],
+    fileCount: 1,
+    baseCommit: 'a'.repeat(40),
+    headCommit: 'b'.repeat(40),
+  } as const;
+  const ok = (entry: Record<string, unknown>) => NormChangeEntry.safeParse(entry).success;
+
+  it('확인 풀림: 주체 오케스트레이터 · 대상 규칙 · 원인 순번 · 앞선 확인(확인됨)만, 다른 종류에는 그 칸이 없다', () => {
+    const entry = {
+      ...base,
+      kind: 'unconfirmed',
+      detail: { unconfirm: { causeSeq: 3, previous } },
+    };
+    expect(NormChangeEntry.parse(entry)).toEqual(entry);
+    // JSON 왕복해도 같다 (원인 순번은 정수)
+    expect(NormChangeEntry.parse(JSON.parse(JSON.stringify(entry)))).toEqual(entry);
+    for (const bad of [
+      { ...entry, detail: {} },
+      { ...entry, detail: { unconfirm: { causeSeq: 3, previous: { state: 'unconfirmed' } } } },
+      { ...entry, detail: { unconfirm: { causeSeq: 0, previous } } },
+      { ...entry, detail: { unconfirm: { causeSeq: 1.5, previous } } },
+      { ...entry, detail: { unconfirm: { causeSeq: 3, previous }, before: {} } },
+      { ...entry, actor: { kind: 'agent', role: 'rule-writer' }, sessionId: RUN, reason: '사유' },
+      { ...entry, targetRef: { entity: 'Requirement', id: RULE_A } },
+      { ...entry, kind: 'created', detail: { after: {}, unconfirm: { causeSeq: 3, previous } } },
+    ]) {
+      expect(ok(bad), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('테스트 변경 알림: 주체 오케스트레이터 · 대상 규칙 · 연결 실행 · 파일 1~100개(전체 수 ≥ 실은 수)', () => {
+    const entry = { ...base, kind: 'test_changed', runId: RUN, detail: { testChange } };
+    expect(NormChangeEntry.parse(entry)).toEqual(entry);
+    const many = Array.from({ length: 100 }, (_, i) => ({
+      path: `bive-acceptance/RULE-001/f${String(i)}.acc.ts`,
+      change: 'removed',
+    }));
+    expect(
+      ok({ ...entry, detail: { testChange: { ...testChange, files: many, fileCount: 150 } } }),
+    ).toBe(true);
+    for (const bad of [
+      { ...entry, runId: null },
+      { ...entry, detail: {} },
+      { ...entry, detail: { testChange: { ...testChange, files: [] } } },
+      {
+        ...entry,
+        detail: { testChange: { ...testChange, files: [...many, many[0]], fileCount: 101 } },
+      },
+      { ...entry, detail: { testChange: { ...testChange, files: many, fileCount: 99 } } },
+      { ...entry, detail: { testChange: { ...testChange, baseCommit: 'main' } } },
+      {
+        ...entry,
+        detail: { testChange: { ...testChange, files: [{ path: 'a', change: 'added' }] } },
+      },
+      { ...entry, actor: { kind: 'agent', role: 'test-writer' }, sessionId: RUN, reason: '사유' },
+      { ...entry, targetRef: { entity: 'Run', id: RUN } },
+      { ...entry, kind: 'auto_start', detail: { testChange } },
+    ]) {
+      expect(ok(bad), JSON.stringify(bad)).toBe(false);
+    }
+  });
+});
+
 describe('규칙 폐기 · 대체 기록 (M7-09 #221, ADR-112)', () => {
   const RULE_A = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
   const RULE_B = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
