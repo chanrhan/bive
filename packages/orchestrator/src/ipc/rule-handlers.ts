@@ -32,7 +32,7 @@ import {
   storedLatestJudgments,
   toRuleJudgment,
 } from '../judgments/latest-judgment.js';
-import { unretiredRules } from '../norms/effective.js';
+import { isEffectiveRule, retiredRuleSet, unretiredRules } from '../norms/effective.js';
 import { CONTROL_CHARACTERS, earsStatementProblem } from '../tools/ears.js';
 import { withProjectStore } from './project-store-access.js';
 import { RpcError, type MethodHandlers, type RequestContext } from './server.js';
@@ -145,8 +145,14 @@ const editRuleByHuman = (
     if (current.builtin) {
       throw conflict('builtin_rule', '내장 구조 규칙은 직접 편집할 수 없습니다');
     }
-    if (current.normState !== 'approved') {
-      throw conflict('rule_not_effective', `효력 없는 규칙입니다 (${current.normState})`);
+    // 효력 판정은 효력 모듈 한 곳 (잠정 · 폐기된 규칙은 효력이 없다, M7-09 · ADR-112). 폐기된 규칙의 편집도 같은 사유로 거부한다
+    if (!isEffectiveRule(current, retiredRuleSet(store))) {
+      throw conflict(
+        'rule_not_effective',
+        retiredRuleSet(store).has(current.id)
+          ? '폐기된 규칙입니다'
+          : `효력 없는 규칙입니다 (${current.normState})`,
+      );
     }
     if (input.expectedUpdatedAt !== undefined && input.expectedUpdatedAt !== current.updatedAt) {
       throw conflict(

@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { confirmHumanRuleEdit } from '../src/confirmations/confirmation-service.js';
 import type { PipeServer } from '../src/ipc/server.js';
+import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { earsStatementProblem } from '../src/tools/ears.js';
 import type { TestClient } from './helpers/client.js';
 import { cleanup } from './helpers/process.js';
@@ -380,6 +381,31 @@ describe('rule.update: 형식 검사 (EARS · 한 줄 · 길이 · 바뀐 것 �
 });
 
 describe('rule.update: 편집할 수 없는 규칙', () => {
+  it('폐기된 규칙은 사람 편집도 -32009(rule_not_effective)이고 규칙 · 승인 기록 · 확인 행이 바뀌지 않는다 (M7-09 #221, ADR-112)', async () => {
+    await start();
+    const requirement = await createRequirement();
+    const rule = seedRule(requirement.id);
+    h.read((store) =>
+      retireAgentRule(
+        store,
+        {
+          ruleId: rule.id,
+          grounds: `진술 "${STATEMENT}"은 새 요구사항과 모순`,
+          author: { kind: 'agent', role: 'rule-writer' },
+          sessionId: newId(),
+        },
+        { now: Date.now },
+      ),
+    );
+    for (const change of [{ title: NEW_TITLE }, { statement: NEW_STATEMENT }]) {
+      await expect(update({ id: rule.id, ...change })).rejects.toMatchObject({
+        code: ErrorCode.StateConflict,
+        data: { reason: 'rule_not_effective' },
+      });
+    }
+    expectUntouched(rule);
+  });
+
   it('없는 규칙 · 등록되지 않은 프로젝트는 -32004, 삭제된 규칙은 -32009(rule_deleted), 효력 없는 규칙은 -32009(rule_not_effective)', async () => {
     await start();
     const requirement = await createRequirement();

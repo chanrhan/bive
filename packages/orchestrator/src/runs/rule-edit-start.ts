@@ -23,6 +23,7 @@ import {
 import type { ProjectStore, RunDetail } from '@bive/store';
 
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
+import { isEffectiveRule, retiredRuleSet } from '../norms/effective.js';
 import { autoStartBlock } from '../settings/auto-start-gate.js';
 import { saveNewRun } from './run-service.js';
 
@@ -79,7 +80,8 @@ export const autoStartRuleEditRun = (
       rule === null ||
       rule.deletedAt !== null ||
       rule.builtin ||
-      rule.normState !== 'approved' ||
+      // 효력 판정은 효력 모듈 한 곳 (폐기된 규칙의 편집으로는 실행이 생기지 않는다, M7-09 · ADR-112)
+      !isEffectiveRule(rule, retiredRuleSet(store)) ||
       rule.statement !== edit.diff.after.statement
     ) {
       return { status: 'not_applicable' };

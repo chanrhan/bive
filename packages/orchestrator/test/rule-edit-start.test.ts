@@ -24,7 +24,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { selectAgent } from '../src/agent/select.js';
 import { checkRunStartBasis } from '../src/engine/start-basis.js';
 import type { StepExecutor } from '../src/engine/types.js';
-import { createAgentRule } from '../src/norms/agent-rule.js';
+import { createAgentRule, retireAgentRule } from '../src/norms/agent-rule.js';
 import { type Orchestrator, startOrchestrator } from '../src/orchestrator.js';
 import { autoStartRun } from '../src/runs/auto-start.js';
 import {
@@ -199,6 +199,25 @@ describe('autoStartRuleEditRun: 진술이 바뀐 사람 편집 1건 → 그 규�
         .run(new Date().toISOString(), h.ruleId),
     );
     expect(startEdit(h, second.seq)).toEqual({ status: 'not_applicable' });
+    expect(h.read(counts)).toEqual({ runs: 0, autoStarts: 0, exe: 0 });
+  });
+
+  it('편집 뒤 규칙이 폐기됐으면 그 진술 편집으로 실행이 생기지 않는다 (M7-09 #221, ADR-112)', () => {
+    const h = storeHarness();
+    const edit = humanEdit(h, { statement: NEW_STATEMENT });
+    h.read((store) =>
+      retireAgentRule(
+        store,
+        {
+          ruleId: h.ruleId,
+          grounds: '진술 "ISO 8601 서버 시각을 담는다"는 새 요구사항과 모순',
+          author: { kind: 'agent', role: 'rule-writer' },
+          sessionId: newId(),
+        },
+        clock,
+      ),
+    );
+    expect(startEdit(h, edit.seq)).toEqual({ status: 'not_applicable' });
     expect(h.read(counts)).toEqual({ runs: 0, autoStarts: 0, exe: 0 });
   });
 
