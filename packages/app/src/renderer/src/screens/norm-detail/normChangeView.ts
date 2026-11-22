@@ -4,7 +4,14 @@
 // - 사유 · 근거 · 상세의 글은 응답에 이미 표시 값(숨은 글자 표기, 상한 4000)으로 온다(ADR-089). 여기서 다시 바꾸지 않는다
 // - 대상 규칙의 표시 ID는 기록에 남은 값 그대로다(판단 · 폐기 시점의 값)
 // DOM · React에 의존하지 않는다 (test/norm-change-view.test.ts).
-import type { NormChangeKind, NormChangeView, NormJudgmentRuleRef } from '@bive/shared';
+import type {
+  NormChangeKind,
+  NormChangeView,
+  NormJudgmentRuleRef,
+  NormJudgmentSubject,
+  NormJudgmentVerdict,
+  NormUndecidedReason,
+} from '@bive/shared';
 
 import { AUTHOR_LABELS } from '../../components/AuthorMark/labels.js';
 import { formatCardTime } from '../../components/Card2Line/time.js';
@@ -19,6 +26,7 @@ export const NORM_CHANGE_TEXT = {
   orchestrator: '오케스트레이터',
   noContradiction: '모순 없음',
   contradiction: '모순',
+  undecided: '판단 없음',
   successor: '대체 규칙',
   reason: '사유',
   grounds: '근거',
@@ -36,6 +44,45 @@ export const NORM_CHANGE_KIND_TEXT = {
   auto_start: '자동 시작',
   test_changed: '테스트 변경',
 } as const satisfies Record<NormChangeKind, string>;
+
+/** 판단 주제 표시명 (shared NORM_JUDGMENT_SUBJECT_LABELS와 같음, 시험이 대조). */
+export const JUDGMENT_SUBJECT_TEXT = {
+  new_rule: '모순 판단',
+  supersede: '모순 판단',
+  objection: '이의 판단',
+} as const satisfies Record<NormJudgmentSubject, string>;
+
+/** 판단 결과 표시명 (shared NORM_JUDGMENT_VERDICT_LABELS와 같음, 시험이 대조). */
+export const JUDGMENT_VERDICT_TEXT = {
+  no_contradiction: '모순 없음',
+  contradiction: '모순',
+  upheld: '유지',
+  retired: '폐기',
+  superseded: '대체',
+} as const satisfies Record<NormJudgmentVerdict, string>;
+
+/** 판단 없이 끝난 이의의 사정 표시명 (shared NORM_UNDECIDED_REASON_LABELS와 같음, 시험이 대조). */
+export const UNDECIDED_REASON_TEXT = {
+  success: '정상 종료',
+  error_max_turns: '턴 한도 초과',
+  error_max_budget_usd: '예산 한도 초과',
+  error_during_execution: '실행 중 오류',
+  aborted: '중단',
+  guard_violation: '가드 위반',
+  objection_raised: '이의 제기',
+  project_daily_budget_exceeded: '프로젝트 하루 예산 초과',
+  budget_exhausted: '실행 예산 소진',
+  settings_incomplete: '예산 · 모델 미설정',
+  start_failed: '시작 실패',
+  not_configured: '판단 경로 없음',
+  interrupted: '오케스트레이터 재기동',
+} as const satisfies Record<NormUndecidedReason, string>;
+
+/** 모르는 값(뒤 버전이 더한 값)은 날 값 대신 이것으로 그린다. */
+const UNKNOWN_TEXT = '알 수 없음';
+
+const labelOf = <T extends string>(table: Readonly<Record<T, string>>, value: string): string =>
+  Object.hasOwn(table, value) ? table[value as T] : UNKNOWN_TEXT;
 
 /** 글의 이름: 규칙을 만들거나 고친 이유는 사유, 판단 · 폐기 · 대체 · 이의의 뒷받침은 근거. */
 const GROUNDS_KINDS: ReadonlySet<NormChangeKind> = new Set([
@@ -70,9 +117,26 @@ const actorText = (actor: NormChangeView['actor']): string =>
 const subjectOf = (entry: NormChangeView): NormChangeRow['subject'] => {
   const { judgment, retirement } = entry.detail;
   if (entry.kind === 'judgment' && judgment !== undefined) {
+    // 이의 판단 (M7-11, ADR-115): "이의 판단 · 유지 · 폐기 · 대체", 판단 없이 끝났으면 "판단 없음(사정)"을 덧붙인다
+    if (judgment.subject === 'objection') {
+      const verdict = labelOf(JUDGMENT_VERDICT_TEXT, judgment.verdict);
+      const undecided =
+        judgment.undecided === undefined
+          ? ''
+          : ` · ${NORM_CHANGE_TEXT.undecided} (${labelOf(UNDECIDED_REASON_TEXT, judgment.undecided.endReason)})`;
+      return {
+        label: `${JUDGMENT_SUBJECT_TEXT.objection} · ${verdict}${undecided}`,
+        rules: [],
+      };
+    }
+    if (!Object.hasOwn(JUDGMENT_SUBJECT_TEXT, judgment.subject)) {
+      return { label: UNKNOWN_TEXT, rules: [] };
+    }
     return judgment.verdict === 'contradiction'
       ? { label: NORM_CHANGE_TEXT.contradiction, rules: judgment.contradicts }
-      : { label: NORM_CHANGE_TEXT.noContradiction, rules: [] };
+      : judgment.verdict === 'no_contradiction'
+        ? { label: NORM_CHANGE_TEXT.noContradiction, rules: [] }
+        : { label: UNKNOWN_TEXT, rules: [] };
   }
   if (retirement !== undefined && retirement.supersededBy !== null) {
     return { label: NORM_CHANGE_TEXT.successor, rules: [retirement.supersededBy] };

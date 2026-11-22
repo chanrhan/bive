@@ -242,7 +242,10 @@ export const RISK_LABELS = {
   high: '높음',
 } as const satisfies Record<Risk, string>;
 
-/** 에이전트 세션 종료 사유 (기획서 4.5, COST-01). */
+/**
+ * 에이전트 세션 종료 사유 (기획서 4.5, COST-01). `objection_raised`는 구현 역할이 이의 제기 도구를 불러 오케스트레이터가 그
+ * 세션을 끝냈음이다(M7-11 #223, ADR-100 D4, ADR-115).
+ */
 export const SessionEndReason = z.enum([
   'success',
   'error_max_turns',
@@ -250,6 +253,7 @@ export const SessionEndReason = z.enum([
   'error_during_execution',
   'aborted',
   'guard_violation',
+  'objection_raised',
 ]);
 export type SessionEndReason = z.infer<typeof SessionEndReason>;
 export const SESSION_END_REASON_LABELS = {
@@ -259,6 +263,7 @@ export const SESSION_END_REASON_LABELS = {
   error_during_execution: '실행 중 오류',
   aborted: '중단',
   guard_violation: '가드 위반',
+  objection_raised: '이의 제기',
 } as const satisfies Record<SessionEndReason, string>;
 
 /**

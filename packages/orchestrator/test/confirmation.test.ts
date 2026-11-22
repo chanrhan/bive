@@ -425,7 +425,8 @@ const STATEMENT_C = 'WHEN 가입이 끝나면 THE SYSTEM SHALL 안내 화면을 
 const GROUNDS_A =
   '진술 "이메일 형식을 검사한다"는 새 요구사항(형식 검사 없음)과 동시에 만족될 수 없다';
 const GROUNDS_B = '진술 "비밀번호 길이를 검사한다"는 새 요구사항과 동시에 만족될 수 없다';
-const GROUNDS_C = '진술 "안내 화면을 보인다"는 더 쓰지 않는다';
+// 인용은 EARS 틀 글자 · 공백을 뺀 연속 10자 (M7-11 #223, ADR-115: "안내 화면을 보인다"만으로는 8자)
+const GROUNDS_C = '진술 "가입이 끝나면 THE SYSTEM SHALL 안내 화면을 보인다"는 더 쓰지 않는다';
 const NORM_INPUT = {
   requirements: { total: 1, included: 1, omitted: 0 },
   rules: { total: 3, included: 3, omitted: 0 },

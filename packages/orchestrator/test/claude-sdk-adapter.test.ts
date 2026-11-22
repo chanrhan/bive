@@ -1,6 +1,6 @@
 // ClaudeSdkAdapter 옵션 조립 · 스냅샷 (이슈 #39 수용 기준 1~3, NFR-02 · NFR-04 · ADR-007 · ADR-024 · ADR-059).
 // `query()`는 주입한 가짜 함수로 바꾸므로 실제 SDK 호출 · 네트워크 · API 키가 없다(ADR-016).
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -170,6 +170,7 @@ describe('buildQueryOptions 스냅샷 (수용 기준 1 · 2)', () => {
         'mcp__bive__prisma_generate',
         'mcp__bive__prisma_migrate',
         'mcp__bive__install_package',
+        'mcp__bive__raise_objection',
       ],
       permissionMode: 'dontAsk',
       canUseTool: 'function',
@@ -742,6 +743,55 @@ describe('ClaudeSdkAdapter (가짜 query)', () => {
     expect(tools.records.map((record) => [record.name, record.status])).toEqual([
       ['read_file', 'ok'],
     ]);
+  });
+
+  it('이의 제기 뒤 계약 (검토 1회차 B1): 실행기가 닫혀도 세션은 끊기지 않고, 뒤 호출은 session_closed로 돌아가며 결과 메시지의 실제 비용이 결과 이벤트로 온다', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'bive-sdk-'));
+    tempDirs.push(root);
+    const sessionRoot = path.join(root, 'work');
+    mkdirSync(sessionRoot, { recursive: true });
+    const tools = createRoleTools({
+      role: 'implementer',
+      sessionRoot,
+      biveHome: path.join(root, 'home'),
+      hooks: { raiseObjection: () => '이의 기록' },
+    });
+    const query: QueryFn = async function* (params) {
+      const { options } = params;
+      yield initMessage(options);
+      await callBiveTool(
+        options,
+        'raise_objection',
+        { ruleIds: ['RULE-001'], reason: '이유' },
+        'tu-1',
+      );
+      await callBiveTool(options, 'write_file', { path: 'a.txt', content: 'x' }, 'tu-2');
+      yield msg({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: { id: 'm1', content: [{ type: 'text', text: '세션을 끝낸다' }] },
+      });
+      yield resultMessage();
+    };
+    const adapter = new ClaudeSdkAdapter({
+      biveHome: path.join(root, 'home'),
+      env: { ANTHROPIC_API_KEY: 'test-key', PATH: '/usr/bin' },
+      query,
+    });
+    const events = await collect(
+      adapter.startSession(specFor('implementer', { workDir: sessionRoot, tools })),
+    );
+    expect(tools.closed).toBe('objection_raised');
+    expect(tools.records.map((record) => [record.name, record.reason ?? record.status])).toEqual([
+      ['raise_objection', 'ok'],
+      ['write_file', 'session_closed'],
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      type: 'result',
+      subtype: 'success',
+      total_cost_usd: 0.12,
+    });
+    expect(existsSync(path.join(sessionRoot, 'a.txt'))).toBe(false);
   });
 
   /** 테스트마다 지우는 SDK 설정 폴더. */

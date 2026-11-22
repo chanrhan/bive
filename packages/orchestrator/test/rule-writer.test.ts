@@ -62,8 +62,8 @@ const human = { kind: 'human' } as const satisfies Author;
 const RULE_WRITER_SETTINGS: RoleSettings = { model: 'test-model', maxBudgetUsd: 1, maxTurns: 20 };
 const RUN_LIMITS: RunLimits = { maxBudgetUsd: 5, maxTurns: 200 };
 
-/** 규칙 작성 역할의 도구: 규칙 생성 · 폐기 · 대체 (M7-09 #221, ADR-112). */
-const RULE_WRITER_TOOLS = ['propose_rule', 'retire_rule', 'supersede_rule'];
+/** 규칙 작성 역할의 도구: 규칙 생성 · 폐기 · 대체 (M7-09 #221, ADR-112), 이의 판단의 유지 (M7-11 #223, ADR-115). */
+const RULE_WRITER_TOOLS = ['propose_rule', 'retire_rule', 'supersede_rule', 'uphold_rule'];
 
 /** 효력 있는 규범이 없는 입력 (프롬프트 문장 시험용). */
 const NO_NORMS: NormInput = {

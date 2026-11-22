@@ -17,6 +17,11 @@
 //   끝나면(종료 상태 저장 뒤) · 실행 대기가 생기면 · 기동하면(`startQueuedRuns`) `#advanceQueue`가 저장된 상태에서 다음
 //   실행 대기를 생성 순으로 시작한다(메모리 대기열 없음). 다른 실행이 진행 중이면 재개는 -32009. 자동 시작 실행은 시작할 차례에
 //   하루 한도를 다시 보아 문에 걸리면 워크트리 없이 끝난다(실행 서비스 `startNextQueuedRun`, ADR-111)
+// - 실행 안 판단 세션(M7-11 #223, ADR-115): 단계 실행기가 `judgeNorms`로 청하면 주입받은 배선(`judgeNorms` 옵션, 오케스트레이터가
+//   규칙 작성 서비스로 잇는다)을 실행 · 단계 · 실행 잔여 한도 · 중단 신호와 함께 부른다. 엔진은 규칙 작성 서비스를 모른다. 구현
+//   세션의 이의 제기 도구가 `ok`를 돌려주면 실행기가 닫히고 세션은 스스로 끝나기를 기다린다(결과 이벤트의 실제 비용). 닫힌 뒤
+//   거부된 호출이 {@link OBJECTION_CLOSED_CALL_LIMIT}번 쌓이면 세션을 끝낸다(`SessionEndRequest`). 어느 쪽이든 종료 사유는
+//   `objection_raised`이고, 값을 모른 채 끝나면 하루 · 실행 합계에서 그 세션의 한도 전부로 센다(ADR-115 검토 1회차)
 import {
   type Author,
   CommitSha,
@@ -44,7 +49,7 @@ import {
 } from '@bive/store';
 
 import type { AgentAdapter } from '../agent/adapter.js';
-import { runGuardedSession } from '../agent/guarded-session.js';
+import { runGuardedSession, SessionEndRequest } from '../agent/guarded-session.js';
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import {
   createWorktreeManager,
@@ -72,7 +77,7 @@ import { createRedCheckExecutor } from '../steps/red-check.js';
 import { createTestWritingExecutor } from '../steps/test-writing.js';
 import { dailyBudgetReached, projectDailyBudget } from '../settings/project-budget.js';
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
-import { budgetOverrun, sessionLimits } from './session-budget.js';
+import { budgetOverrun, runRemaining, sessionLimits } from './session-budget.js';
 import { runEnding } from './run-ending.js';
 import { checkRunStartBasis } from './start-basis.js';
 import {
@@ -81,6 +86,9 @@ import {
   type EngineStepKind,
   type HaltStatus,
   MAX_TEST_RETRY_COUNT,
+  type NormJudgeLauncher,
+  type NormJudgeOutcome,
+  type NormJudgeStepRequest,
   type StepContext,
   type StepExecutor,
   type StepExecutors,
@@ -142,7 +150,18 @@ export interface PipelineEngineOptions {
   onEvent?: (event: EngineEvent) => void | Promise<void>;
   /** 진행 기록 한 줄 */
   log?: (line: string) => void;
+  /**
+   * 실행 안 판단 세션을 띄우는 배선 (M7-11 #223, ADR-115). 오케스트레이터가 규칙 작성 서비스로 주입한다. 없으면 단계 실행기의
+   * 판단 요청이 `not_opened`(`not_configured`)로 끝난다
+   */
+  judgeNorms?: NormJudgeLauncher;
 }
+
+/**
+ * 이의를 제기해 닫힌 구현 세션이 계속 도구를 부를 때 세션을 끝내는 거부 수 (`session_closed`, ADR-115 검토 1회차). 모델이 고정
+ * 문장을 따르지 않아도 세 번째 거부에서 끝난다(비용을 모르면 한도 전부로 센다).
+ */
+export const OBJECTION_CLOSED_CALL_LIMIT = 3;
 
 /** M1 변이 주입: P1(JDG-04)이라 `skipped`로 기록한다 (RUN-02 P0 범위, roadmap M1-14). */
 export const skipMutationStep: StepExecutor = () =>
@@ -275,6 +294,7 @@ export class PipelineEngine {
   readonly #newId: () => Ulid;
   readonly #onEvent: ((event: EngineEvent) => void | Promise<void>) | undefined;
   readonly #log: (line: string) => void;
+  readonly #judgeNorms: NormJudgeLauncher | undefined;
   readonly #active = new Map<string, ActiveRun>();
   readonly #pending = new Set<Promise<void>>();
   #closed = false;
@@ -290,6 +310,7 @@ export class PipelineEngine {
     this.#newId = createUlidGenerator(this.#now);
     this.#onEvent = options.onEvent;
     this.#log = options.log ?? (() => undefined);
+    this.#judgeNorms = options.judgeNorms;
   }
 
   /** 지금 구동 중인 실행 ID. */
@@ -1005,6 +1026,7 @@ export class PipelineEngine {
       signal,
       read: (fn) => this.#store(projectId, fn),
       runSession: (request) => this.#runSession(projectId, detail.run, step, request, signal),
+      judgeNorms: (request) => this.#judge(projectId, detail.run, step, request, signal),
       // 송신을 기다리는 동안 종료 · 중단 신호가 오면 바로 거부한다(엔진은 저장하지 않고 끝남 → 다음 기동 때 중단)
       notify: (topic, data) =>
         untilAborted(
@@ -1297,6 +1319,8 @@ export class PipelineEngine {
         startedAt: this.#timestamp(),
       }),
     );
+    const controller = new AbortController();
+    let closedCalls = 0;
     const tools = createRoleTools({
       role,
       sessionRoot: request.workDir,
@@ -1309,10 +1333,18 @@ export class PipelineEngine {
         : { writableRuleDirs: request.writableRuleDirs }),
       hooks: {
         ...request.hooks,
-        onToolCall: (record) => this.#recordToolCall(projectId, run.id, sessionId, record),
+        onToolCall: (record) => {
+          this.#recordToolCall(projectId, run.id, sessionId, record);
+          // 이의를 제기해 닫힌 세션은 스스로 끝나기를 기다리고, 거부가 쌓이면 끝낸다 (ADR-115 검토 1회차)
+          if (record.reason === 'session_closed' && tools.closed === 'objection_raised') {
+            closedCalls += 1;
+            if (closedCalls >= OBJECTION_CLOSED_CALL_LIMIT) {
+              controller.abort(new SessionEndRequest('objection_raised'));
+            }
+          }
+        },
       },
     });
-    const controller = new AbortController();
     const forward = (): void => controller.abort(signal.reason);
     signal.addEventListener('abort', forward, { once: true });
     let outcome;
@@ -1348,7 +1380,14 @@ export class PipelineEngine {
       signal.removeEventListener('abort', forward);
     }
     const { result } = outcome;
-    const endReason = signal.aborted ? 'aborted' : outcome.endReason;
+    // 이의를 제기해 실행기가 닫혔으면 세션이 스스로 결과로 끝났어도(주 경로) 이의 제기로 본다. 가드 위반 · 한도 subtype은 그대로
+    // (한도로 끝났으면 실행이 예산 초과로 끝난다)
+    const endReason = signal.aborted
+      ? 'aborted'
+      : tools.closed === 'objection_raised' &&
+          (outcome.endReason === 'success' || outcome.endReason === 'error_during_execution')
+        ? 'objection_raised'
+        : outcome.endReason;
     this.#store(projectId, (store) =>
       store.sessions.end(sessionId, {
         endReason,
@@ -1390,10 +1429,51 @@ export class PipelineEngine {
     return {
       sessionId,
       role,
-      endReason: endReason === 'success' ? 'success' : 'error_during_execution',
+      endReason:
+        endReason === 'success' || endReason === 'objection_raised'
+          ? endReason
+          : 'error_during_execution',
       result,
       detail: outcome.detail,
     };
+  }
+
+  /**
+   * 실행 안 판단 세션 1개 (M7-11 #223, ADR-115): 주입받은 배선에 실행 · 단계 · 실행 잔여 한도 · 중단 신호를 넘기고 끝날 때까지
+   * 기다린다. 배선이 없거나 실행 예산이 남지 않았으면 세션을 열지 않는다(`not_opened`). 판단 세션의 한도는 실행 잔여 안이다
+   * (세션 행은 실행 밖 세션이라 하루 한도 합계에 들고 실행 합계에는 들지 않는다).
+   */
+  async #judge(
+    projectId: string,
+    run: Run,
+    step: Step,
+    request: NormJudgeStepRequest,
+    signal: AbortSignal,
+  ): Promise<NormJudgeOutcome> {
+    signal.throwIfAborted();
+    const launch = this.#judgeNorms;
+    if (launch === undefined) {
+      return { status: 'not_opened', reason: 'not_configured', detail: '판단 세션 배선 없음' };
+    }
+    const runBudget = this.#store(projectId, (store) =>
+      runRemaining(run.budgetSnapshot, store.sessions.listByRun(run.id)),
+    );
+    if (runBudget === null) {
+      return { status: 'not_opened', reason: 'budget_exhausted', detail: '실행 예산 소진' };
+    }
+    this.#log(
+      `판단 세션 요청 (${run.displayId}, 원인 ${request.cause.kind} ${String(request.cause.seq)})`,
+    );
+    const outcome = await launch({
+      ...request,
+      projectId,
+      run: { id: run.id, displayId: run.displayId },
+      stepId: step.id,
+      runBudget,
+      signal,
+    });
+    signal.throwIfAborted();
+    return outcome;
   }
 
   #recordToolCall(projectId: string, runId: string, sessionId: Ulid, record: ToolCallRecord): void {

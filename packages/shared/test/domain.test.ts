@@ -29,7 +29,9 @@ import {
   M1_RUN_TYPE,
   MissingSettingPath,
   NORM_CHANGE_GENESIS_HASH,
+  NORM_OBJECTION_RULES_MAX,
   NormChangeEntry,
+  OBJECTION_VERDICTS,
   Project,
   ProjectFile,
   Proposal,
@@ -1041,6 +1043,130 @@ describe('규칙 폐기 · 대체 기록 (M7-09 #221, ADR-112)', () => {
     expect(RuleRetirement.safeParse({ ...row, normChangeSeq: 0 }).success).toBe(false);
     expect(RuleRetirement.safeParse({ ...row, supersededBy: 'x' }).success).toBe(false);
     expect(RuleRetirement.safeParse({ ...row, extra: 1 }).success).toBe(false);
+  });
+});
+
+describe('이의 · 이의 판단 기록 (M7-11 #223, ADR-100 D4 · A4, ADR-115)', () => {
+  const RULE_A = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+  const RULE_B = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
+  const RUN = '01ARZ3NDEKTSV4RRFFQ69G5FAX';
+  const SESSION = '01ARZ3NDEKTSV4RRFFQ69G5FAY';
+  const rules = [{ id: RULE_A, displayId: 'RULE-001' }];
+  const objection = {
+    seq: 1,
+    at: '2026-11-22T00:00:00.000Z',
+    kind: 'objection',
+    actor: { kind: 'agent', role: 'implementer' },
+    targetRef: { entity: 'Run', id: RUN },
+    sessionId: SESSION,
+    runId: RUN,
+    reason: '규칙이 틀렸다',
+    detail: { objection: { rules, stepId: RULE_B } },
+    prevHash: NORM_CHANGE_GENESIS_HASH,
+    hash: 'a'.repeat(64),
+  } as const;
+  const judgment = {
+    subject: 'objection',
+    verdict: 'upheld',
+    contradicts: [],
+    causeSeq: 1,
+    input: { requirements: { total: 1, included: 1 }, rules: { total: 1, included: 1 } },
+  };
+  const judged = {
+    ...objection,
+    seq: 2,
+    kind: 'judgment',
+    actor: { kind: 'agent', role: 'rule-writer' },
+    targetRef: { entity: 'Rule', id: RULE_A },
+    detail: { judgment },
+  } as const;
+  const ok = (entry: Record<string, unknown>) => NormChangeEntry.safeParse(entry).success;
+
+  it('이의: 주체 구현 역할 · 대상 그 실행(연결 실행과 같음) · 대상 규칙 1 ~ 5개 중복 없음 · 단계 시도, 다른 종류에는 이의 상세가 없다', () => {
+    expect(ok(objection)).toBe(true);
+    expect(ok({ ...objection, actor: { kind: 'agent', role: 'rule-writer' } })).toBe(false);
+    expect(ok({ ...objection, actor: { kind: 'orchestrator' } })).toBe(false);
+    expect(ok({ ...objection, targetRef: { entity: 'Rule', id: RULE_A } })).toBe(false);
+    expect(ok({ ...objection, runId: RULE_B })).toBe(false);
+    expect(ok({ ...objection, reason: null })).toBe(false);
+    expect(ok({ ...objection, detail: {} })).toBe(false);
+    expect(ok({ ...objection, detail: { objection: { rules: [], stepId: RULE_B } } })).toBe(false);
+    expect(
+      ok({ ...objection, detail: { objection: { rules: [...rules, ...rules], stepId: RULE_B } } }),
+    ).toBe(false);
+    const six = Array.from({ length: NORM_OBJECTION_RULES_MAX + 1 }, (_, i) => ({
+      id: `01ARZ3NDEKTSV4RRFFQ69G5F${String.fromCharCode(65 + i)}${String.fromCharCode(65 + i)}`,
+      displayId: `RULE-00${String(i + 1)}`,
+    }));
+    expect(
+      ok({ ...objection, detail: { objection: { rules: six.slice(0, 5), stepId: RULE_B } } }),
+    ).toBe(true);
+    expect(ok({ ...objection, detail: { objection: { rules: six, stepId: RULE_B } } })).toBe(false);
+    expect(ok({ ...objection, detail: { objection: { rules, stepId: RULE_B }, before: {} } })).toBe(
+      false,
+    );
+    expect(ok({ ...judged, detail: { judgment, objection: { rules, stepId: RULE_B } } })).toBe(
+      false,
+    );
+  });
+
+  it('이의 판단: 결과는 유지 · 폐기 · 대체만이고 원인 순번 · 연결 실행이 필요하며, 판단 없음은 유지 · 오케스트레이터만', () => {
+    expect(ok(judged)).toBe(true);
+    for (const verdict of OBJECTION_VERDICTS) {
+      expect(ok({ ...judged, detail: { judgment: { ...judgment, verdict } } }), verdict).toBe(true);
+    }
+    for (const verdict of ['no_contradiction', 'contradiction']) {
+      expect(ok({ ...judged, detail: { judgment: { ...judgment, verdict } } }), verdict).toBe(
+        false,
+      );
+    }
+    // 이의 결과 값은 다른 주제에 쓸 수 없다
+    expect(
+      ok({
+        ...judged,
+        detail: {
+          judgment: { ...judgment, subject: 'new_rule', createdSeq: 1, causeSeq: undefined },
+        },
+      }),
+    ).toBe(false);
+    expect(ok({ ...judged, detail: { judgment: { ...judgment, causeSeq: undefined } } })).toBe(
+      false,
+    );
+    expect(ok({ ...judged, runId: null })).toBe(false);
+    expect(ok({ ...judged, targetRef: { entity: 'Run', id: RUN } })).toBe(false);
+    expect(ok({ ...judged, actor: { kind: 'agent', role: 'implementer' } })).toBe(false);
+    const undecided = {
+      ...judged,
+      actor: { kind: 'orchestrator' },
+      sessionId: null,
+      detail: { judgment: { ...judgment, undecided: { endReason: 'guard_violation' } } },
+    };
+    expect(ok(undecided)).toBe(true);
+    expect(
+      ok({ ...undecided, actor: { kind: 'agent', role: 'rule-writer' }, sessionId: SESSION }),
+    ).toBe(false);
+    expect(
+      ok({
+        ...undecided,
+        detail: { judgment: { ...judgment, verdict: 'retired', undecided: { endReason: 'x' } } },
+      }),
+    ).toBe(false);
+    // 원인 순번은 이의 판단에만
+    expect(
+      ok({
+        ...judged,
+        detail: {
+          judgment: {
+            subject: 'new_rule',
+            verdict: 'no_contradiction',
+            contradicts: [],
+            createdSeq: 1,
+            causeSeq: 1,
+            input: judgment.input,
+          },
+        },
+      }),
+    ).toBe(false);
   });
 });
 

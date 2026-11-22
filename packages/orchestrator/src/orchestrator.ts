@@ -215,6 +215,9 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         log,
       ),
       ...(options.executors === undefined ? {} : { executors: options.executors }),
+      // 실행 안의 판단 세션 (M7-11 #223, ADR-100 D4 · A4, ADR-115): 구현 역할의 이의를 규칙 작성 서비스의 판단 세션으로 잇는다.
+      // 엔진 · 단계는 규칙 작성 서비스를 모르고 이 배선만 부른다. 대체로 생긴 새 규칙의 실행은 판단 세션 종료 뒤 자동 시작된다
+      judgeNorms: (request) => ruleWriter.judge(request),
     });
     // 규칙 작성 세션이 규칙을 만들고 정상 종료하면 세션 밖에서 실행을 자동 시작한다 (M7-05 #217, ADR-100 D1 · B⑤ · C2, ADR-107)
     const autoStarter = new AutoStarter({ biveHome: options.biveHome, engine, log });

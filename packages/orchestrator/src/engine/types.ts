@@ -7,6 +7,7 @@ import {
   type Project,
   type Run,
   type RunStatus,
+  type SessionEndReason,
   type SessionNormInput,
   type Step,
   type StepKind,
@@ -15,7 +16,7 @@ import {
 } from '@bive/shared';
 import type { ProjectStore, RunDetail, RunPatch } from '@bive/store';
 
-import type { SessionResultEvent } from '../agent/adapter.js';
+import type { SessionBudget, SessionResultEvent } from '../agent/adapter.js';
 import type { RunGitRef, WorktreeManager } from '../git/worktree-manager.js';
 import type { CommandContext } from '../tools/commands.js';
 import type { RoleToolsHooks } from '../tools/executor.js';
@@ -91,6 +92,11 @@ export const ENGINE_FAILURE_REASONS = [
   'error_max_turns',
   /** 세션이 끝난 뒤 역할 · 실행 사용량 합계가 한도를 넘음 (COST-01, `budget_exceeded`, ADR-067) */
   'budget_aggregate_exceeded',
+  /**
+   * 구현 역할의 이의에 규칙을 맡는 역할이 폐기 · 대체로 판단해 그 실행을 병합 없이 끝냄 ("이의 반영", M7-11 #223, ADR-100 A4,
+   * ADR-115). 구현 단계 실행기가 쓴다
+   */
+  'objection_applied',
 ] as const;
 export type EngineFailureReason = (typeof ENGINE_FAILURE_REASONS)[number];
 
@@ -133,8 +139,11 @@ export interface StepSessionRequest {
   readonly commands?: Omit<CommandContext, 'cwd' | 'guard'>;
   /** test-writer가 쓸 수 있는 규칙 폴더 (`bive-acceptance/<이름>/`, ADR-068). 생략하면 아무 규칙 폴더나 */
   readonly writableRuleDirs?: readonly string[];
-  /** 제안 도구 훅 (도구 호출 기록은 엔진이 저장한다) */
-  readonly hooks?: Pick<RoleToolsHooks, 'proposeRule'>;
+  /**
+   * 제안 · 이의 도구 훅 (도구 호출 기록은 엔진이 저장한다). `raiseObjection`이 `ok`를 돌려주면 엔진이 그 세션을 끝낸다
+   * (종료 사유 `objection_raised`, M7-11 · ADR-115)
+   */
+  readonly hooks?: Pick<RoleToolsHooks, 'proposeRule' | 'raiseObjection'>;
   /**
    * 작업 지시에 실은 규범 입력의 기록 (ADR-108). 엔진이 세션 행을 만들 때 함께 남긴다(바뀌지 않는다). 생략하면 `null`
    */
@@ -146,12 +155,68 @@ export interface StepSessionResult {
   /** 저장된 세션 ID (`sessions.id`) */
   readonly sessionId: Ulid;
   readonly role: AgentRole;
-  /** `success` 또는 `error_during_execution` (결과 없음 · 어댑터 오류 · 시작 실패 포함) */
-  readonly endReason: 'success' | 'error_during_execution';
+  /**
+   * `success` 또는 `error_during_execution` (결과 없음 · 어댑터 오류 · 시작 실패 포함), 구현 역할이 이의를 제기해 엔진이 끝냈으면
+   * `objection_raised` (M7-11, ADR-115)
+   */
+  readonly endReason: 'success' | 'error_during_execution' | 'objection_raised';
   readonly result: SessionResultEvent | null;
   /** 결과 없이 끝난 사유 문장 */
   readonly detail: string | null;
 }
+
+/**
+ * 실행 안 판단 세션의 원인 (M7-11 #223, ADR-115). 지금은 구현 역할의 이의 기록 하나다. 검사 단계의 기존 규칙 실패(M7-12)는 종류를
+ * 더한다(판단 세션을 띄우는 길은 같다).
+ */
+export interface NormJudgeCause {
+  readonly kind: 'objection';
+  /** 원인 규범 변경 기록 순번 */
+  readonly seq: number;
+}
+
+/** 단계 실행기가 판단 세션을 청하는 입력 (`StepContext.judgeNorms`). 실행 · 단계 · 한도는 엔진이 채운다. */
+export interface NormJudgeStepRequest {
+  readonly cause: NormJudgeCause;
+  /** 판단 대상 규칙 ID */
+  readonly ruleIds: readonly Ulid[];
+  /** 원인 기록의 글 원문 (다른 역할이 쓴 글. 판단 세션의 작업 지시에는 들여 쓴 표시 값으로만 실린다) */
+  readonly text: string;
+}
+
+/** 오케스트레이터 배선이 받는 판단 세션 요청 (엔진이 실행 · 단계 · 실행 잔여 한도 · 중단 신호를 더한 것). */
+export interface NormJudgeRequest extends NormJudgeStepRequest {
+  readonly projectId: Ulid;
+  readonly run: Pick<Run, 'id' | 'displayId'>;
+  /** 판단 세션을 청한 단계 시도 */
+  readonly stepId: Ulid;
+  /** 이 실행의 남은 한도 (판단 세션 한도 = min(규칙 작성 역할 설정, 프로젝트 하루 잔여, 이것)) */
+  readonly runBudget: SessionBudget;
+  /** 실행 중단 · 오케스트레이터 종료 신호. 중단되면 세션을 끝내고 그 사유로 거부한다 */
+  readonly signal: AbortSignal;
+}
+
+/**
+ * 판단 세션의 결과. 판단 내용(폐기 · 대체 · 유지)은 저장소의 판단 기록이 원천이다(이 값에 싣지 않는다).
+ * - `ended`: 세션이 열렸다가 끝났다 (종료 사유와 무관)
+ * - `not_opened`: 세션을 열지 않았다. 사유: 프로젝트 하루 한도에 이름 · 실행 예산 소진 · 규칙 작성 역할 설정 미비 · 시작 실패 ·
+ *   판단 세션 배선 없음
+ */
+export type NormJudgeOutcome =
+  | { readonly status: 'ended'; readonly sessionId: Ulid; readonly endReason: SessionEndReason }
+  | {
+      readonly status: 'not_opened';
+      readonly reason:
+        | 'project_daily_budget_exceeded'
+        | 'budget_exhausted'
+        | 'settings_incomplete'
+        | 'start_failed'
+        | 'not_configured';
+      readonly detail: string;
+    };
+
+/** 판단 세션을 띄우는 배선 (`orchestrator.ts`가 규칙 작성 서비스로 주입한다. 엔진 · 단계는 그 서비스를 모른다). */
+export type NormJudgeLauncher = (request: NormJudgeRequest) => Promise<NormJudgeOutcome>;
 
 /** 단계 실행기에 넘기는 문맥. 실행 · 단계는 단계 시작 시점의 값이다. */
 export interface StepContext {
@@ -170,6 +235,11 @@ export interface StepContext {
   read<T>(fn: (store: ProjectStore) => T): T;
   /** 이 단계 역할의 에이전트 세션을 연다 (세션 가드 · 예산 · 도구 호출 기록 · 세션 순번은 엔진이 맡는다) */
   runSession(request: StepSessionRequest): Promise<StepSessionResult>;
+  /**
+   * 규칙을 맡는 역할(규칙 작성 역할)의 판단 세션을 이 실행 안에서 한 번 연다 (M7-11, ADR-115). 끝날 때까지 기다린다. 판단 세션은
+   * 엔진에 주입된 배선이 열고, 배선이 없으면 `not_opened`(`not_configured`)다. 중단되면 거부된다
+   */
+  judgeNorms(request: NormJudgeStepRequest): Promise<NormJudgeOutcome>;
   /**
    * 알림 (`EngineEvent`의 `notify`). 화면 갱신 단계는 `screen_update`로 `event.run.updated`를 보낸다. 송신이 끝나면
    * 풀리고, 실패하거나 송신 중 `signal`이 중단되면 거부된다 (ADR-076)

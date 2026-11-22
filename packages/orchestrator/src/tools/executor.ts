@@ -16,11 +16,13 @@ import {
   type FixedToolName,
   ListFilesInput,
   ProposeRuleInput,
+  RaiseObjectionInput,
   ReadFileInput,
   RetireRuleInput,
   roleToolNames,
   SearchFilesInput,
   SupersedeRuleInput,
+  UpholdRuleInput,
   WriteFileInput,
 } from './definitions.js';
 import { listFiles, readFile, searchFiles, writeFile } from './file-tools.js';
@@ -75,9 +77,39 @@ export interface RoleToolsHooks {
     input: SupersedeRuleInput,
     context: ProposalContext,
   ) => Promise<string | ToolResult> | string | ToolResult;
+  /**
+   * `uphold_rule`(이의 판단의 유지, M7-11): 판단 기록을 남긴다. 반환 규칙은 `proposeRule`과 같다. 주입하지 않으면 호출이
+   * `error`(`not_configured`)로 끝난다.
+   */
+  upholdRule?: (
+    input: UpholdRuleInput,
+    context: ProposalContext,
+  ) => Promise<string | ToolResult> | string | ToolResult;
+  /**
+   * `raise_objection`(구현 역할의 이의 제기, M7-11 #223, ADR-115): 이의 기록 1건만 남긴다(규칙 · 인수 테스트 · 규범 저장소의 다른
+   * 표를 바꾸지 않는다). 결과가 `ok`이면 실행기가 닫히고(`close('objection_raised')`) 그 뒤 호출은 모두 `denied`
+   * (`session_closed`)다. 결과 본문 끝에 {@link OBJECTION_ACCEPTED_TEXT}를 붙인다. 주입하지 않으면 호출이
+   * `error`(`not_configured`)로 끝난다.
+   */
+  raiseObjection?: (
+    input: RaiseObjectionInput,
+    context: ProposalContext,
+  ) => Promise<string | ToolResult> | string | ToolResult;
+  /** 실행기가 닫힐 때 한 번 (이의 제기 · 판단 완료). 세션을 여는 쪽이 이것으로 세션을 끝낸다 */
+  onClose?: (reason: ToolExecutorCloseReason) => void;
   /** 도구 호출이 끝날 때마다 (거부 · 오류 포함) */
   onToolCall?: (record: ToolCallRecord) => void;
 }
+
+/** 실행기를 닫은 이유: 구현 역할의 이의 제기 · 이의 판단 세션의 판단 완료 (M7-11). */
+export type ToolExecutorCloseReason = 'objection_raised' | 'judgment_complete';
+
+/**
+ * 이의 제기가 받아들여졌을 때 도구 결과 끝에 붙이는 고정 문장 (M7-11, ADR-115 검토 1회차). 세션을 중단하지 않고 모델이 스스로
+ * 끝내게 해 결과 이벤트의 실제 비용으로 기록한다.
+ */
+export const OBJECTION_ACCEPTED_TEXT =
+  '이의가 접수됐다. 더 할 일이 없다. 도구를 더 부르지 말고 세션을 끝내라.';
 
 export interface CreateRoleToolsOptions {
   role: AgentRole;
@@ -148,6 +180,7 @@ export class FixedToolExecutor implements ToolExecutor {
   /** 이 실행기의 모든 호출 기록 (호출 순서) */
   readonly records: ToolCallRecord[] = [];
   private sessionId: string | null;
+  private closedBy: ToolExecutorCloseReason | null = null;
   private readonly hooks: RoleToolsHooks;
   private readonly commandContext: CommandContext;
   private readonly now: () => Date;
@@ -171,6 +204,21 @@ export class FixedToolExecutor implements ToolExecutor {
   /** init 이벤트의 세션 ID를 기록에 쓴다. */
   setSessionId(sessionId: string): void {
     this.sessionId = sessionId;
+  }
+
+  /** 닫혔으면 그 이유, 아니면 `null`. */
+  get closed(): ToolExecutorCloseReason | null {
+    return this.closedBy;
+  }
+
+  /**
+   * 실행기를 닫는다 (M7-11, ADR-115): 이후 모든 호출(허용 도구 포함)은 실행하지 않고 `denied`(`session_closed`)로 기록된다.
+   * 처음 닫을 때만 `onClose`를 부른다.
+   */
+  close(reason: ToolExecutorCloseReason): void {
+    if (this.closedBy !== null) return;
+    this.closedBy = reason;
+    this.hooks.onClose?.(reason);
   }
 
   async execute(name: string, args: Record<string, unknown>): Promise<ToolResult> {
@@ -204,6 +252,18 @@ export class FixedToolExecutor implements ToolExecutor {
     name: string,
     args: Record<string, unknown>,
   ): Promise<{ result: ToolResult; summary: string }> {
+    // 닫힌 실행기는 이름 · 인자와 무관하게 아무것도 하지 않는다 (이의를 부른 뒤 구현 코드를 더 쓰지 못한다, ADR-115)
+    if (this.closedBy !== null) {
+      return {
+        result: denied(
+          'session_closed',
+          this.closedBy === 'objection_raised'
+            ? '이의를 제기해 이 세션은 끝났다. 더 이상 도구를 부르지 않는다'
+            : '판단을 모두 남겨 이 세션은 끝났다. 더 이상 도구를 부르지 않는다',
+        ),
+        summary: summaryOf(name, args),
+      };
+    }
     const allowed = (this.toolNames as readonly string[]).includes(name);
     if (!allowed) {
       return {
@@ -217,6 +277,10 @@ export class FixedToolExecutor implements ToolExecutor {
       return { result: await this.proposeRule(args), summary: summarizeArgs(args) };
     if (tool === 'retire_rule' || tool === 'supersede_rule')
       return { result: await this.retirement(tool, args), summary: summarizeArgs(args) };
+    if (tool === 'uphold_rule')
+      return { result: await this.uphold(args), summary: summarizeArgs(args) };
+    if (tool === 'raise_objection')
+      return { result: await this.objection(args), summary: summarizeArgs(args) };
     return { result: await this.fileTool(tool, args), summary: summaryOf(tool, args) };
   }
 
@@ -285,6 +349,41 @@ export class FixedToolExecutor implements ToolExecutor {
     } catch (error) {
       return failed('tool_failed', error instanceof Error ? error.message : String(error));
     }
+  }
+
+  /** 이의 판단의 유지 (M7-11): 인자 검증 뒤 주입된 콜백에 넘긴다. */
+  private async uphold(args: Record<string, unknown>): Promise<ToolResult> {
+    const parsed = UpholdRuleInput.safeParse(args);
+    if (!parsed.success) return invalidArgs('uphold_rule', parsed.error);
+    const uphold = this.hooks.upholdRule;
+    if (uphold === undefined) return failed('not_configured', '이의 판단 경로가 연결되지 않음');
+    try {
+      const outcome = await uphold(parsed.data, { role: this.role, sessionId: this.sessionId });
+      return typeof outcome === 'string' ? ok(outcome) : outcome;
+    } catch (error) {
+      return failed('tool_failed', error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /**
+   * 이의 제기 (M7-11, ADR-115): 인자 검증 뒤 주입된 콜백(이의 기록 1건)에 넘긴다. 콜백이 `ok`를 돌려주면 실행기를 닫고 세션을
+   * 끝내라는 고정 문장을 붙인다. 거부 · 오류면 닫지 않는다(사유를 읽고 고쳐 다시 부를 수 있다).
+   */
+  private async objection(args: Record<string, unknown>): Promise<ToolResult> {
+    const parsed = RaiseObjectionInput.safeParse(args);
+    if (!parsed.success) return invalidArgs('raise_objection', parsed.error);
+    const raise = this.hooks.raiseObjection;
+    if (raise === undefined) return failed('not_configured', '이의 기록 경로가 연결되지 않음');
+    let result: ToolResult;
+    try {
+      const outcome = await raise(parsed.data, { role: this.role, sessionId: this.sessionId });
+      result = typeof outcome === 'string' ? ok(outcome) : outcome;
+    } catch (error) {
+      return failed('tool_failed', error instanceof Error ? error.message : String(error));
+    }
+    if (result.status !== 'ok') return result;
+    this.close('objection_raised');
+    return { ...result, content: `${result.content}\n${OBJECTION_ACCEPTED_TEXT}` };
   }
 }
 

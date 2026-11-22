@@ -11,8 +11,10 @@ export const DENIED_REASONS = [
   'path_denied',
   /** 패키지 설치 허용 목록 밖 */
   'not_allowed',
-  /** 내장 구조 규칙의 폐기 · 대체 (ADR-100 B⑨, M7-09 · ADR-112) */
+  /** 내장 구조 규칙의 폐기 · 대체 (ADR-100 B⑨, M7-09 · ADR-112) · 이의 (M7-11 · ADR-115) */
   'builtin_rule',
+  /** 이의를 제기했거나 판단을 모두 남겨 닫힌 세션의 호출 (M7-11 · ADR-115) */
+  'session_closed',
 ] as const;
 export type DeniedReason = (typeof DENIED_REASONS)[number];
 

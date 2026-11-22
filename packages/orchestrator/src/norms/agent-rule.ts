@@ -18,7 +18,12 @@
 //   (확인됨을 만드는 함수는 가져오지 않는다). 미확인 규칙이면 아무것도 더하지 않는다. 대체로 생긴 새 규칙은 미확인이다
 // - 대상 검증: 없는 규칙(다른 프로젝트 · 같은 호출이 만들 규칙 포함) · 삭제 · 폐기 · 잠정 규칙은 `invalid_args`, 내장 구조
 //   규칙은 `builtin_rule`. 근거는 대상 규칙의 진술이나 최근 판정의 인수 테스트 케이스 이름을 글자 그대로 인용해야 한다
-//   ({@link quotesRule}, 형식 검사일 뿐이다, A6)
+//   ({@link quotesRule}, 형식 검사일 뿐이다, A6). EARS 틀 글자 · 공백을 뺀 나머지로 세고, 효력 있는 다른 규칙에도 있는 조각은
+//   인용으로 치지 않는다(M7-11 #223, ADR-115)
+// - 이의 판단(M7-11 #223, ADR-100 D4 · A4, ADR-115): 실행 안의 판단 세션이 이의 대상 규칙을 폐기 · 대체하면 같은 트랜잭션에서
+//   판단 기록(주제 `objection`, 결과 `retired` · `superseded`, 원인 = 이의 기록 순번)을 폐기 쪽 쓰기({@link writeRetirement}) 바로
+//   앞에 남긴다(확인 풀림의 쓰기 순서는 그대로). 유지는 {@link upholdAgentRule}이 판단 기록 1건만 남긴다(규칙은 그대로). 같은
+//   이의의 같은 규칙에 판단은 1건이다
 import {
   type AgentAuthor,
   AgentAuthor as AgentAuthorSchema,
@@ -34,6 +39,7 @@ import type { ProjectStore } from '@bive/store';
 import { releaseConfirmation } from '../confirmations/confirmation-service.js';
 import { displayText } from '../text-limit.js';
 import { MIN_QUOTE_LENGTH } from '../tools/definitions.js';
+import { EARS_FRAME_WORDS } from '../tools/ears.js';
 import { isEffectiveRule, retiredRuleSet } from './effective.js';
 import { effectiveRules, NORM_INPUT_LIMITS, type NormInputSummary } from './norm-input.js';
 
@@ -158,6 +164,7 @@ export const createAgentRule = (
       at,
       id: clock.newId(),
       sessionId: input.sessionId,
+      runId: null,
       rationale: input.rationale,
       normInput: input.normInput,
       judgment: {
@@ -181,6 +188,8 @@ const writeAgentRule = (
     readonly at: string;
     readonly id: Ulid;
     readonly sessionId: Ulid;
+    /** 연결 실행 (실행 안의 판단 세션이면 그 실행, 아니면 `null`) */
+    readonly runId: Ulid | null;
     readonly rationale: string;
     readonly normInput: NormInputSummary;
     readonly judgment: {
@@ -214,7 +223,7 @@ const writeAgentRule = (
     actor: author,
     targetRef: { entity: 'Rule', id: rule.id },
     sessionId: input.sessionId,
-    runId: null,
+    runId: input.runId,
     reason: input.rationale,
     detail: { after: ruleContent(rule) },
   });
@@ -225,7 +234,7 @@ const writeAgentRule = (
     actor: author,
     targetRef: { entity: 'Rule', id: rule.id },
     sessionId: input.sessionId,
-    runId: null,
+    runId: input.runId,
     reason: judged.reason,
     detail: {
       judgment: {
@@ -260,23 +269,53 @@ export class NormRetirementInputError extends Error {
 export const normalizeQuoteText = (text: string): string =>
   text.normalize('NFC').replace(/\s+/gu, ' ').trim();
 
+/** EARS 틀 글자 (대문자 낱말, 앞뒤가 영문자가 아닐 때만). 모든 진술에 있어 인용으로 세지 않는다 (ADR-115). */
+const EARS_FRAME_PATTERN = new RegExp(
+  `(?<![A-Za-z])(?:${EARS_FRAME_WORDS.join('|')})(?![A-Za-z])`,
+  'gu',
+);
+
 /**
- * 근거가 대상 규칙의 글(진술 · 최근 판정의 인수 테스트 케이스 이름)을 글자 그대로 인용하는지 (ADR-100 A6, ADR-112): 정규화한
- * 근거가 정규화한 글 하나의 연속 {@link MIN_QUOTE_LENGTH}자(코드 포인트) 이상을 포함하면 인용이다. 글은 저장된 원문과 규범 입력의
- * 표시 값(ADR-089 `displayText`, 에이전트가 작업 지시에서 본 모양) 둘 다로 대조한다. 대소문자 구분.
+ * 인용으로 세는 글자 (코드 포인트 목록, ADR-115): 정규화(NFC · 공백 정리) 뒤 EARS 틀 글자(`WHEN` · `THE` · `SYSTEM` · `SHALL` 등,
+ * {@link EARS_FRAME_WORDS})와 공백을 모두 뺀 나머지. `THE SYSTEM`처럼 틀 글자만 옮긴 근거는 남는 글자가 없다.
  */
-export const quotesRule = (grounds: string, sources: readonly string[]): boolean => {
-  const haystack = normalizeQuoteText(grounds);
+export const quoteCore = (text: string): string[] =>
+  Array.from(normalizeQuoteText(text).replace(EARS_FRAME_PATTERN, '').replace(/\s+/gu, ''));
+
+/**
+ * 근거가 대상 규칙의 글(진술 · 최근 판정의 인수 테스트 케이스 이름)을 글자 그대로 인용하는지 (ADR-100 A6, ADR-112 · ADR-115).
+ * 글은 저장된 원문과 규범 입력의 표시 값(ADR-089 `displayText`, 에이전트가 작업 지시에서 본 모양) 둘 다로 대조한다. 대소문자 구분.
+ * - 센다: 근거와 글 모두 {@link quoteCore}(EARS 틀 글자 · 공백을 뺀 나머지)로 바꾼 뒤, 글의 연속 {@link MIN_QUOTE_LENGTH}
+ *   코드 포인트 조각이 근거에 있으면 인용 조각이다
+ * - 고유: `others`(효력 있는 다른 규칙의 글)의 어느 하나에라도 들어 있는 조각은 인용으로 치지 않는다(규칙끼리 겹치는 머리말로
+ *   다른 규칙을 겨누지 못하게)
+ * - 대상의 글에 고유 조각이 하나도 없으면(다른 규칙과 글이 거의 같음) 겹치는 조각의 인용도 받는다(그렇지 않으면 그 규칙은 폐기할
+ *   수 없게 된다)
+ */
+export const quotesRule = (
+  grounds: string,
+  sources: readonly string[],
+  others: readonly string[] = [],
+): boolean => {
+  const haystack = quoteCore(grounds).join('');
+  const shared = others.map((text) => quoteCore(text).join(''));
+  let uniqueExists = false;
+  let sharedQuoted = false;
   for (const source of sources) {
-    const points = Array.from(normalizeQuoteText(source));
+    const points = quoteCore(source);
     for (let start = 0; start + MIN_QUOTE_LENGTH <= points.length; start += 1) {
-      if (haystack.includes(points.slice(start, start + MIN_QUOTE_LENGTH).join(''))) return true;
+      const piece = points.slice(start, start + MIN_QUOTE_LENGTH).join('');
+      const unique = !shared.some((text) => text.includes(piece));
+      if (unique) uniqueExists = true;
+      if (!haystack.includes(piece)) continue;
+      if (unique) return true;
+      sharedQuoted = true;
     }
   }
-  return false;
+  return !uniqueExists && sharedQuoted;
 };
 
-/** 인용 대조에 쓰는 대상 규칙의 글: 진술 · 최근 판정의 케이스 이름, 각각 원문과 규범 입력의 표시 값. */
+/** 인용 대조에 쓰는 규칙의 글: 진술 · 최근 판정의 케이스 이름, 각각 원문과 규범 입력의 표시 값. */
 const quoteSources = (store: ProjectStore, rule: Rule): string[] => {
   const names = store.judgments.latestByRule(rule.id)?.cases.map((testCase) => testCase.name) ?? [];
   return [
@@ -319,10 +358,14 @@ const resolveTarget = (store: ProjectStore, given: string): Rule => {
 
 /** @throws {NormRetirementInputError} 근거가 대상 규칙의 글을 인용하지 않음 */
 const assertQuoted = (store: ProjectStore, rule: Rule, grounds: string): void => {
-  if (!quotesRule(grounds, quoteSources(store, rule))) {
+  // 고유 조각의 기준: 효력 있는 다른 규칙의 글 (ADR-115)
+  const others = effectiveRules(store)
+    .filter((other) => other.id !== rule.id)
+    .flatMap((other) => quoteSources(store, other));
+  if (!quotesRule(grounds, quoteSources(store, rule), others)) {
     throw new NormRetirementInputError(
       'invalid_args',
-      `grounds가 ${rule.displayId}의 진술이나 최근 판정의 인수 테스트 케이스 이름을 인용하지 않음 (공백 정리 뒤 연속 ${String(MIN_QUOTE_LENGTH)}자 이상을 글자 그대로 옮긴다)`,
+      `grounds가 ${rule.displayId}의 진술이나 최근 판정의 인수 테스트 케이스 이름을 인용하지 않음 (EARS 틀 글자 · 공백을 뺀 연속 ${String(MIN_QUOTE_LENGTH)}자 이상을 글자 그대로 옮긴다. 효력 있는 다른 규칙에도 있는 조각은 세지 않는다)`,
     );
   }
 };
@@ -352,6 +395,7 @@ const writeRetirement = (
     readonly author: AgentAuthor;
     readonly at: string;
     readonly sessionId: Ulid;
+    readonly runId: Ulid | null;
     readonly grounds: string;
     readonly supersede: {
       readonly rule: Rule;
@@ -367,7 +411,7 @@ const writeRetirement = (
     actor: input.author,
     targetRef: { entity: 'Rule', id: target.id },
     sessionId: input.sessionId,
-    runId: null,
+    runId: input.runId,
     reason: input.grounds,
     detail: {
       before: ruleContent(target),
@@ -412,12 +456,84 @@ export interface AgentRetireInput {
   readonly grounds: string;
   readonly author: AgentAuthor;
   readonly sessionId: Ulid;
+  /** 이의 판단이면 그 판단의 원인 · 실행 (M7-11, ADR-115). 없으면 요구사항 세션의 폐기 */
+  readonly objection?: AgentObjectionJudgment;
+}
+
+/** 실행 안 판단 세션의 이의 판단 문맥 (M7-11, ADR-115). */
+export interface AgentObjectionJudgment {
+  /** 원인 이의 기록 순번 */
+  readonly causeSeq: number;
+  /** 이의가 난 실행 (기록의 연결 실행) */
+  readonly runId: Ulid;
+  /** 판단 세션이 받은 규범 입력의 요약 */
+  readonly normInput: NormInputSummary;
 }
 
 export interface AgentRetireResult extends RetirementWrite {
   /** 폐기된 규칙 (폐기 직전 내용) */
   readonly rule: Rule;
+  /** 이의 판단 기록 (이의 판단일 때만) */
+  readonly judgment: NormChangeEntry | null;
 }
+
+/**
+ * 이의 판단 기록 (부른 쪽 트랜잭션 안): 대상 규칙 하나에 대한 폐기 · 대체 · 유지. 같은 이의의 같은 규칙에 판단이 이미 있으면 거부한다.
+ * @throws {NormRetirementInputError} 이미 판단함
+ */
+const writeObjectionJudgment = (
+  store: ProjectStore,
+  input: {
+    readonly target: Rule;
+    readonly author: AgentAuthor;
+    readonly at: string;
+    readonly sessionId: Ulid;
+    readonly grounds: string;
+    readonly verdict: 'upheld' | 'retired' | 'superseded';
+    readonly createdSeq?: number;
+    readonly objection: AgentObjectionJudgment;
+  },
+): NormChangeEntry => {
+  const { target, objection } = input;
+  const judged = store.normChanges
+    .list()
+    .some(
+      (entry) =>
+        entry.kind === 'judgment' &&
+        entry.detail.judgment?.subject === 'objection' &&
+        entry.detail.judgment.causeSeq === objection.causeSeq &&
+        entry.targetRef.id === target.id,
+    );
+  if (judged) {
+    throw new NormRetirementInputError(
+      'invalid_args',
+      `이 이의의 ${target.displayId}는 이미 판단함 (규칙마다 판단은 한 번)`,
+    );
+  }
+  const { requirements, rules } = objection.normInput;
+  return store.normChanges.append({
+    at: input.at,
+    kind: 'judgment',
+    actor: input.author,
+    targetRef: { entity: 'Rule', id: target.id },
+    sessionId: input.sessionId,
+    runId: objection.runId,
+    reason: input.grounds,
+    detail: {
+      judgment: {
+        subject: 'objection',
+        verdict: input.verdict,
+        contradicts: [],
+        ...(input.createdSeq === undefined ? {} : { createdSeq: input.createdSeq }),
+        causeSeq: objection.causeSeq,
+        input: {
+          requirements: { total: requirements.total, included: requirements.included },
+          rules: { total: rules.total, included: rules.included },
+        },
+      },
+    },
+  });
+};
 
 /**
  * 규칙을 폐기한다 (트랜잭션 1개: 규범 변경 기록 `retired` + 폐기 기록). 새 규칙 · 새 실행은 없다(ADR-100 A4).
@@ -434,15 +550,30 @@ export const retireAgentRule = (
     const rule = resolveTarget(store, input.ruleId);
     assertQuoted(store, rule, input.grounds);
     const at = new Date(clock.now()).toISOString();
+    const objection = input.objection;
+    // 이의 판단은 폐기 쪽 쓰기 앞에 둔다 (폐기 기록 → 폐기 행 → 확인 풀림의 순서 사이에 끼우지 않는다, ADR-113)
+    const judgment =
+      objection === undefined
+        ? null
+        : writeObjectionJudgment(store, {
+            target: rule,
+            author,
+            at,
+            sessionId: input.sessionId,
+            grounds: input.grounds,
+            verdict: 'retired',
+            objection,
+          });
     const written = writeRetirement(store, {
       target: rule,
       author,
       at,
       sessionId: input.sessionId,
+      runId: objection?.runId ?? null,
       grounds: input.grounds,
       supersede: null,
     });
-    return { rule, ...written };
+    return { rule, ...written, judgment };
   });
 };
 
@@ -452,6 +583,8 @@ export interface AgentSupersedeInput extends AgentRuleInput {
   readonly ruleId: string;
   /** 근거 (대상 규칙의 진술 · 케이스 이름 인용 필수, 대체 · 판단 기록의 사유) */
   readonly grounds: string;
+  /** 이의 판단이면 그 판단의 원인 · 실행 (M7-11, ADR-115) */
+  readonly objection?: AgentObjectionJudgment;
 }
 
 export interface AgentSupersedeResult extends AgentRuleResult {
@@ -459,6 +592,8 @@ export interface AgentSupersedeResult extends AgentRuleResult {
   readonly superseded: Rule;
   /** 대체 기록 (`superseded`) + 폐기 기록 */
   readonly retirement: RetirementWrite;
+  /** 이의 판단 기록 (이의 판단일 때만) */
+  readonly objectionJudgment: NormChangeEntry | null;
 }
 
 /**
@@ -484,12 +619,15 @@ export const supersedeAgentRule = (
     assertQuoted(store, target, input.grounds);
     const others = resolveContradicts(store, input.contradiction, target);
     const at = new Date(clock.now()).toISOString();
+    const objection = input.objection;
+    const runId = objection?.runId ?? null;
     const created = writeAgentRule(store, {
       payload,
       author,
       at,
       id: clock.newId(),
       sessionId: input.sessionId,
+      runId,
       rationale: input.rationale,
       normInput: input.normInput,
       judgment: {
@@ -501,11 +639,26 @@ export const supersedeAgentRule = (
             : `${input.grounds}\n${input.contradiction.grounds}`,
       },
     });
+    // 이의 판단은 새 규칙 쪽 쓰기 뒤 · 폐기 쪽 쓰기 앞 (확인 풀림의 쓰기 순서 사이에 끼우지 않는다, ADR-113)
+    const objectionJudgment =
+      objection === undefined
+        ? null
+        : writeObjectionJudgment(store, {
+            target,
+            author,
+            at,
+            sessionId: input.sessionId,
+            grounds: input.grounds,
+            verdict: 'superseded',
+            createdSeq: created.normChange.seq,
+            objection,
+          });
     const retirement = writeRetirement(store, {
       target,
       author,
       at,
       sessionId: input.sessionId,
+      runId,
       grounds: input.grounds,
       supersede: {
         rule: created.rule,
@@ -513,6 +666,44 @@ export const supersedeAgentRule = (
         judgmentSeq: created.judgment.seq,
       },
     });
-    return { ...created, superseded: target, retirement };
+    return { ...created, superseded: target, retirement, objectionJudgment };
+  });
+};
+
+/** 유지 입력 (`uphold_rule`의 인자에 주체 · 세션 · 이의 문맥을 더한 것, M7-11). */
+export interface AgentUpholdInput {
+  /** 대상 규칙의 표시 ID 또는 ID */
+  readonly ruleId: string;
+  /** 근거 (판단 기록의 사유, 구현 역할에게 전해진다) */
+  readonly grounds: string;
+  readonly author: AgentAuthor;
+  readonly sessionId: Ulid;
+  readonly objection: AgentObjectionJudgment;
+}
+
+/**
+ * 이의 대상 규칙을 유지한다고 판단한다 (트랜잭션 1개: 판단 기록 `judgment` 1건, 주제 `objection` · 결과 `upheld`). 규칙 · 인수
+ * 테스트 · 폐기 기록은 바꾸지 않는다(M7-11, ADR-115).
+ * @throws {ZodError} 주체가 에이전트가 아님 · 빈 근거
+ * @throws {NormRetirementInputError} 대상이 없음 · 효력 없음 · 내장 구조 규칙 · 이미 판단함
+ */
+export const upholdAgentRule = (
+  store: ProjectStore,
+  input: AgentUpholdInput,
+  clock: Pick<AgentRuleClock, 'now'>,
+): { readonly rule: Rule; readonly judgment: NormChangeEntry } => {
+  const author = AgentAuthorSchema.parse(input.author);
+  return store.transaction(() => {
+    const rule = resolveTarget(store, input.ruleId);
+    const judgment = writeObjectionJudgment(store, {
+      target: rule,
+      author,
+      at: new Date(clock.now()).toISOString(),
+      sessionId: input.sessionId,
+      grounds: input.grounds,
+      verdict: 'upheld',
+      objection: input.objection,
+    });
+    return { rule, judgment };
   });
 };

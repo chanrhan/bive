@@ -1,8 +1,9 @@
 // 역할별 고정 도구 목록과 도구 정의 (NFR-02 · ADR-024 · ADR-052).
 // 정의(이름 · 설명 · 입력 스키마)는 한 곳에만 두고, 실행기(FixedToolExecutor)의 인자 검증과
 // SDK MCP 서버 노출(M1-26)이 같은 스키마를 쓴다. 승인 · 잠정 승인 · 확인 표시 · 셸 도구는 없다(NFR-01 · NFR-02).
-// 규범을 쓰는 도구는 규칙 작성 역할의 규칙 생성 · 폐기 · 대체 도구(`propose_rule` · `retire_rule` · `supersede_rule`)뿐이다
-// (M7-02 · M7-09, ADR-100 D1 · D4 · D5 · D6, ADR-103 · ADR-112).
+// 규범을 쓰는 도구는 규칙 작성 역할의 규칙 생성 · 폐기 · 대체 도구(`propose_rule` · `retire_rule` · `supersede_rule`)와 이의 판단의
+// 유지 도구(`uphold_rule`)뿐이다(M7-02 · M7-09 · M7-11, ADR-100 D1 · D4 · D5 · D6, ADR-103 · ADR-112 · ADR-115). 구현 역할의 이의
+// 제기 도구(`raise_objection`)는 이의 기록만 남기고 규범을 바꾸지 않는다(M7-11, ADR-100 D4 · I2, ADR-115).
 import { type AgentRole, CheckKind, RuleKind } from '@bive/shared';
 import { z } from 'zod';
 
@@ -27,19 +28,31 @@ export const COMMAND_TOOL_NAMES = [
  * `retire_rule` · `supersede_rule`은 폐기 · 대체 도구다(M7-09, ADR-100 D5 · D6, ADR-112): 폐기는 규칙의 효력을 끝내고(행 ·
  * 판정 이력은 남음), 대체는 폐기와 새 규칙 반영을 한 트랜잭션으로 한다. 내장 구조 규칙은 폐기 · 대체할 수 없다(B⑨).
  */
-export const NORM_TOOL_NAMES = ['propose_rule', 'retire_rule', 'supersede_rule'] as const;
+export const NORM_TOOL_NAMES = [
+  'propose_rule',
+  'retire_rule',
+  'supersede_rule',
+  'uphold_rule',
+] as const;
+/**
+ * 이의 제기 도구 (M7-11 #223, ADR-100 D4 · A4 · A5, ADR-115). 구현 역할에만 둔다: 구현 역할은 자기 채점 기준을 고치지 못하고(I2)
+ * 규칙이 잘못됐다고 보면 이 도구로 규범 담당 역할에 넘긴다. 실행기는 주입된 콜백으로 이의 기록 1건만 남기고, 부르면 그 세션이
+ * 끝난다(이후 호출은 모두 거부).
+ */
+export const OBJECTION_TOOL_NAMES = ['raise_objection'] as const;
 
 export type FileToolName = (typeof FILE_TOOL_NAMES)[number];
 export type CommandToolName = (typeof COMMAND_TOOL_NAMES)[number];
 export type NormToolName = (typeof NORM_TOOL_NAMES)[number];
-export type FixedToolName = FileToolName | CommandToolName | NormToolName;
+export type ObjectionToolName = (typeof OBJECTION_TOOL_NAMES)[number];
+export type FixedToolName = FileToolName | CommandToolName | NormToolName | ObjectionToolName;
 
 /**
  * 역할별 허용 도구. 세션 init의 도구 목록은 이것과 정확히 같아야 한다(session-guard.ts).
  * planner · chat은 M1에서 도구가 없다(해당 마일스톤에서 추가, ADR-052). 규범 도구는 규칙 작성 역할에만 있다(ADR-100 D4).
  */
 export const ROLE_TOOL_NAMES = {
-  'rule-writer': ['propose_rule', 'retire_rule', 'supersede_rule'],
+  'rule-writer': ['propose_rule', 'retire_rule', 'supersede_rule', 'uphold_rule'],
   planner: [],
   'test-writer': ['read_file', 'write_file', 'list_files', 'search_files', 'run_tests'],
   implementer: [
@@ -51,6 +64,7 @@ export const ROLE_TOOL_NAMES = {
     'prisma_generate',
     'prisma_migrate',
     'install_package',
+    'raise_objection',
   ],
   chat: [],
 } as const satisfies Record<AgentRole, readonly FixedToolName[]>;
@@ -219,6 +233,48 @@ export const SupersedeRuleInput = ProposeRuleInput.extend({
 });
 export type SupersedeRuleInput = z.infer<typeof SupersedeRuleInput>;
 
+/** 판단 근거의 길이 상한 (유지, ADR-115. 폐기 · 대체 근거와 같다). */
+export const MAX_UPHOLD_GROUNDS = MAX_CONTRADICTION_GROUNDS;
+
+/**
+ * 이의 판단의 유지 입력 (M7-11 #223, ADR-115): 판단 세션의 대상 규칙 하나와 근거. 규칙 작성 역할의 판단 세션에서만 받는다(요구사항
+ * 세션에서는 거부). 규칙 · 인수 테스트는 바뀌지 않고 판단 기록만 남는다.
+ */
+export const UpholdRuleInput = z.strictObject({
+  ruleId: TargetRuleArg.describe(
+    '유지할 규칙의 표시 ID(RULE-001 형식) 또는 ID. 판단 대상 규칙 가운데',
+  ),
+  grounds: NonBlank(z.string().min(1).max(MAX_UPHOLD_GROUNDS)).describe(
+    '근거: 이의에도 불구하고 그 규칙이 요구사항에 맞고 효력을 유지해야 하는 이유 (구현 역할에게 전해진다)',
+  ),
+});
+export type UpholdRuleInput = z.infer<typeof UpholdRuleInput>;
+
+/** 이의 대상 규칙 수 상한 (ADR-115). */
+export const MAX_OBJECTION_RULES = 5;
+/** 이의 사유의 길이 상한 (ADR-100 A5, ADR-115. UTF-16 코드 단위). */
+export const MAX_OBJECTION_REASON = 2000;
+
+/**
+ * 이의 제기 입력 (M7-11 #223, ADR-100 D4 · A5, ADR-115): 잘못됐다고 보는 효력 있는 규칙(1 ~ {@link MAX_OBJECTION_RULES}개,
+ * 중복 없음, 이 실행의 대상 규칙이 아니어도 된다)과 사유(빈 글 불가, {@link MAX_OBJECTION_REASON}자 이하). 대상이 지금 효력 있는
+ * 규칙인지는 이의 기록 모듈이 저장소에서 확인한다.
+ */
+export const RaiseObjectionInput = z.strictObject({
+  ruleIds: z
+    .array(z.string().min(1).max(64))
+    .min(1)
+    .max(MAX_OBJECTION_RULES)
+    .refine((ids) => new Set(ids).size === ids.length, '대상 규칙이 중복됨')
+    .describe(
+      '잘못됐다고 보는 규칙의 표시 ID(RULE-001 형식) 또는 ID. 작업 지시의 효력 있는 규칙 가운데',
+    ),
+  reason: NonBlank(z.string().min(1).max(MAX_OBJECTION_REASON)).describe(
+    '사유: 그 규칙의 진술 · 인수 테스트가 왜 잘못됐는지(요구사항 · 다른 규칙과 어떻게 부딪히는지)',
+  ),
+});
+export type RaiseObjectionInput = z.infer<typeof RaiseObjectionInput>;
+
 /** 도구 정의. SDK MCP 서버(M1-26)는 strict 스키마에서 만든 JSON 스키마로 노출하고 인자 검증은 실행기에 맡긴다. */
 export interface ToolDefinition {
   name: FixedToolName;
@@ -283,6 +339,18 @@ const DEFINITIONS: Record<FixedToolName, ToolDefinition> = {
     name: 'supersede_rule',
     description: `효력 있는 기존 규칙을 폐기하고 그 자리를 새 규칙으로 바꾼다(폐기와 새 규칙 반영이 한 번에 일어난다). 새 규칙의 칸은 propose_rule과 같고 진술은 ${EARS_FORMAT} 형식 한 줄. 근거에 대상 규칙의 진술이나 최근 판정의 인수 테스트 케이스 이름의 일부를 글자 그대로(연속 10자 이상) 옮겨야 한다. contradiction은 새 규칙과 대상 밖의 효력 있는 규칙의 모순 판단이다. 내장 구조 규칙은 대체할 수 없다.`,
     inputSchema: SupersedeRuleInput,
+  },
+  uphold_rule: {
+    name: 'uphold_rule',
+    description:
+      '이의 판단 세션에서만 쓴다. 구현 역할이 이의를 제기한 규칙을 바꾸지 않고 유지한다고 판단해 근거와 함께 규범 변경 기록에 남긴다. 규칙과 인수 테스트는 그대로이고, 그 실행은 근거를 받아 구현을 다시 한다.',
+    inputSchema: UpholdRuleInput,
+  },
+  raise_objection: {
+    name: 'raise_objection',
+    description:
+      '규칙이 잘못됐다고 볼 때 규칙을 맡는 역할에 이의를 제기한다. 규칙 · 인수 테스트는 바뀌지 않고 이의 기록만 남는다. 부르면 이 세션은 바로 끝나고(이후 도구 호출은 모두 거부) 규칙을 맡는 역할이 폐기 · 대체 · 유지를 판단한다. 유지면 판단의 근거를 받아 구현을 다시 하고(검사 회귀와 같은 상한), 폐기 · 대체면 이 실행은 병합 없이 끝난다.',
+    inputSchema: RaiseObjectionInput,
   },
 };
 

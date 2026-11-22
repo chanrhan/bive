@@ -9,6 +9,8 @@
 //   ② 그 밖(init 뒤 결과 없음 · 비정상 종료)은 그날 값을 아는 세션 중 가장 큰 USD(그 세션에 넘긴 한도를 넘지 않게 자름)
 //   ③ 그날 아는 세션이 없으면 그 세션에 넘긴 한도 전부. 한도 기록이 없는 세션(이 변경 전의 규칙 작성 세션)은 넘긴 한도를
 //   모르므로 ③에서 하루 한도 전부를 쓴 것으로 본다(적게 세지 않는 쪽). ②는 상한이 아니다(ADR-067과 같은 성질)
+// - 이의 제기로 끝났는데(`objection_raised`) 값을 모르는 세션은 ②가 아니라 그 세션에 넘긴 한도 전부다(에이전트가 고를 수 있는
+//   경로라 덜 세지 않는다, M7-11 · ADR-115 검토 1회차)
 // - 하루 한도 `null`(비움)은 한도 없음이다: 새 세션을 막지 않고 자동 시작(M7-05)만 하지 않는다. `0`은 모든 새 세션을 막는다
 // 하루 한도는 USD만이다(턴 한도 없음).
 import { remainingUsd, type Session, type Settings, sumUsd } from '@bive/shared';
@@ -60,6 +62,11 @@ export const dailySpend = (sessions: readonly Session[], limit: number): DailySp
     // 끝났는데 init 보고가 없음: 모델 호출 전 (0)
     if (session.sdkSessionId === null) {
       estimates.push(0);
+      continue;
+    }
+    // 이의 제기로 끝났는데 값을 모름 (닫힌 뒤 계속 불러 중단됨): 넘긴 한도 전부
+    if (session.endReason === 'objection_raised') {
+      estimates.push(allotment);
       continue;
     }
     estimates.push(Math.min(maxKnown ?? allotment, allotment));

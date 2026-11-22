@@ -14,6 +14,22 @@ export const EARS_WHEN = 'WHEN';
 /** 응답 키워드 (앞뒤 공백 한 칸). */
 export const EARS_SHALL = 'THE SYSTEM SHALL';
 
+/**
+ * EARS 틀 글자 (대문자 낱말): M1이 받는 `WHEN` · `THE SYSTEM SHALL`과 뒤에 받을 상태형 · 선택형 · 비정상형의 키워드. 모든 진술에
+ * 들어 있어 폐기 · 대체 근거의 인용 검사가 세지 않는다(ADR-115). `THE SYSTEM SHALL`은 낱말마다 뺀다(`THE SYSTEM`만 옮겨도 남는
+ * 글자가 없게).
+ */
+export const EARS_FRAME_WORDS = [
+  'WHEN',
+  'WHILE',
+  'WHERE',
+  'IF',
+  'THEN',
+  'THE',
+  'SYSTEM',
+  'SHALL',
+] as const;
+
 /** 진술 형식 예시 (도구 오류 · 시스템 프롬프트에 그대로 쓴다). */
 export const EARS_FORMAT = `${EARS_WHEN} <조건> ${EARS_SHALL} <응답>`;
 
