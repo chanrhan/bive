@@ -981,6 +981,7 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
       'runs/rule-edit-start.ts',
     ]);
     // 확인 서비스는 사람의 확인이 "여기까지 봤다"로 남기는 마지막 순번만 읽는다 (M7-13 검토 1회차, ADR-113)
+    // 검증 요약은 에이전트 폐기 수를 세려고 목록만 읽는다 (M7-16, ADR-117. 쓰기 허용 목록은 위 그대로)
     expect(using(/\.normChanges\./)).toEqual([
       'confirmations/confirmation-list.ts',
       'confirmations/confirmation-service.ts',
@@ -992,6 +993,7 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
       'norms/test-change.ts',
       'runs/auto-start.ts',
       'runs/rule-edit-start.ts',
+      'verification/summary.ts',
     ]);
     // 바로 반영 모듈을 가져오는 곳 = 규칙 작성 서비스뿐 (에이전트 세션 중 규칙 작성 역할만)
     expect(using(/from '[./]+\/?norms\/agent-rule\.js'/)).toEqual([
@@ -1082,10 +1084,12 @@ describe('규칙 폐기 · 대체와 효력 판정의 코드 경로 (M7-09 #221,
     expect(using(/\b(retireAgentRule|supersedeAgentRule)\(/)).toEqual([
       'rule-writer/rule-writer-service.ts',
     ]);
-    // 폐기 · 대체 종류의 규범 변경 기록을 쓰는 곳 = 반영 모듈뿐 (확인할 것 목록은 그 종류를 읽어 항목을 만든다, M7-13)
+    // 폐기 · 대체 종류의 규범 변경 기록을 쓰는 곳 = 반영 모듈뿐 (확인할 것 목록은 그 종류를 읽어 항목을 만든다, M7-13.
+    // 검증 요약은 그 종류를 읽어 에이전트 폐기 수를 센다, M7-16 · ADR-117)
     expect(using(/'retired'|'superseded'/)).toEqual([
       'confirmations/confirmation-list.ts',
       'norms/agent-rule.ts',
+      'verification/summary.ts',
     ]);
     expect(using(/kind: (?:supersede === null \? )?'retired'|kind: 'superseded'/)).toEqual([
       'norms/agent-rule.ts',

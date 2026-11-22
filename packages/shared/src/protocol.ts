@@ -1020,8 +1020,10 @@ export type RuleWriterStatusResult = z.infer<typeof RuleWriterStatusResult>;
 // - 판정 기준 = 가장 최근에 병합된 실행의 기준 브랜치 · 병합 커밋. 병합된 실행이 없으면 `null`
 // - 판정 = 판정 기준 커밋에서 낸 규칙별 판정(기준 실행의 병합 재검사, 없으면 검사 단계). 그 커밋에서 판정되지 않은
 //   규칙과 판정 기준이 없을 때는 미판정 (screens.md SCR-05 "화면의 모든 판정이 이 커밋 기준")
-// - 준수 = 판정 가능(분모) 규칙 중 위 판정이 통과인 수 / 분모 수. 분모 = 승인된(잠정 승인 제외) 규칙 중 위 판정이
-//   격리가 아닌 것 (JDG-03)
+// - 준수 = 판정 가능(분모) 규칙 중 위 판정이 통과인 수 / 분모 수. 분모 = 효력 있는(폐기 제외) 규칙 중 위 판정이
+//   격리가 아닌 것 (JDG-03). 사람 확인 기준 = 같은 계산을 확인됨 규칙으로 좁힌 것, 효력 있는 확인됨 규칙이 없으면 `null`
+//   (ADR-100 D7, ADR-117). 확인 상태는 표시용 집계일 뿐 판정 · 병합의 조건이 아니다
+// - 에이전트 폐기 수 = 규범 변경 기록의 에이전트 폐기 · 대체 대상 규칙 수, 전체 누적 (ADR-100 B⑦, ADR-117)
 // - 실행당 비용 = 끝난 실행 중 세션 비용을 모두 아는 실행의 비용 평균. 그런 실행이 없으면 `null` ('없음', COST-02)
 // - 규칙 목록의 실행 링크 = 위 판정의 실행(판정 기준 실행)과 그 실행의 비용 합계 · 턴(값 없으면 `null`)
 // - 파이프라인 = 가장 최근에 만든 실행의 단계 순서(유형의 단계 계획)와 단계별 마지막 시도 상태. 실행이 없으면 `null`
@@ -1083,6 +1085,25 @@ export const VerificationSummaryResult = z
     }),
     /** 분모 목록: 판정 가능 규칙 ID (표시 ID 순) */
     denominator: z.array(Ulid),
+    /**
+     * 사람 확인 기준 준수 (ADR-100 D7, ADR-117): 전체 기준의 분모를 확인됨 규칙으로 좁힌 통과 수 · 판정 가능 수와, 효력 있는
+     * 확인됨 규칙 수(`confirmed`, 격리 포함). 효력 있는 확인됨 규칙이 없으면 `null`(0 / 0이 아니다). 확인됨 규칙은 있는데
+     * 판정 가능한 것이 없으면 `judgeable: 0`이고 `confirmed`는 1 이상이다
+     */
+    confirmedCompliance: z
+      .strictObject({
+        passed: z.int().nonnegative(),
+        judgeable: z.int().nonnegative(),
+        confirmed: z.int().positive(),
+      })
+      .nullable(),
+    /** 사람 확인 기준 분모 목록: 판정 가능하고 확인됨인 규칙 ID (표시 ID 순, 전체 기준 분모의 부분 집합) */
+    confirmedDenominator: z.array(Ulid),
+    /**
+     * 에이전트가 폐기한 규칙 수 (ADR-100 B⑦, ADR-117): 규범 변경 기록의 에이전트 폐기(`retired`) · 대체(`superseded`)
+     * 대상 규칙 수(전체 누적, 규칙마다 1)
+     */
+    agentRetiredRules: z.int().nonnegative(),
     costPerRunUsd: UsdOrNull,
     rules: z.array(VerificationRuleRow),
     pipeline: VerificationPipeline.nullable(),
@@ -1094,7 +1115,28 @@ export const VerificationSummaryResult = z
   .refine(({ compliance, denominator }) => compliance.judgeable === denominator.length, {
     message: '판정 가능 수가 분모 목록과 다릅니다',
     path: ['denominator'],
-  });
+  })
+  .refine(
+    ({ confirmedCompliance: c }) =>
+      c === null || (c.passed <= c.judgeable && c.judgeable <= c.confirmed),
+    { message: '사람 확인 기준의 수가 맞지 않습니다', path: ['confirmedCompliance'] },
+  )
+  .refine(
+    ({ confirmedCompliance, confirmedDenominator }) =>
+      confirmedDenominator.length === (confirmedCompliance?.judgeable ?? 0),
+    {
+      message: '사람 확인 기준 판정 가능 수가 분모 목록과 다릅니다',
+      path: ['confirmedDenominator'],
+    },
+  )
+  .refine(
+    ({ denominator, confirmedDenominator }) =>
+      confirmedDenominator.every((id) => denominator.includes(id)),
+    {
+      message: '사람 확인 기준 분모가 전체 기준 분모에 없는 규칙을 담았습니다',
+      path: ['confirmedDenominator'],
+    },
+  );
 export type VerificationSummaryResult = z.infer<typeof VerificationSummaryResult>;
 
 // ── 코드 열람 기록 (MET-01, M2-01, ADR-084) ─────────────────

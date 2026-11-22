@@ -1,5 +1,6 @@
 // SCR-05 검증 (screens.md SCR-05 · 1.1, JDG-03 · COST-02, ADR-011 · ADR-029 · ADR-035 · ADR-072).
-// - 기본: 머리줄 "판정 기준 main@커밋" · 지표 카드(준수 · 실행당 비용) · 코드 열람(사유 3종 건수, M2-02 · ADR-088) ·
+// - 기본: 머리줄 "판정 기준 main@커밋" · 지표 카드(준수의 전체 기준 · 사람 확인 기준, 에이전트 폐기 규칙, 실행당 비용, ADR-117) ·
+//   코드 열람(사유 3종 건수, M2-02 · ADR-088) ·
 //   파이프라인(최근 실행의 단계 순서 · 현재 단계) · 규칙별 최신 판정 + 실행 링크(비용 합계 · 턴, 값 없으면 '없음').
 //   잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드, 준수 추이 그래프는 미노출 (ADR-035). [재개]는 최근 실행이 중단일 때만 (ADR-011)
 // - 빈: 실행이 없으면 파이프라인 자리 "실행 없음"(ADR-029), 머리줄 "판정 기준 없음", 실행당 비용 '없음',
@@ -125,11 +126,29 @@ const rows = (items: readonly RuleWithJudgment[]): VerificationSummaryResult['ru
       : { rule, judgment: { status: 'unjudged', latest: null }, run: null },
   );
 
+/**
+ * 사람 확인 기준 분모 = 판정 가능 가운데 확인됨: RULE-001 · 003 · 005 (규칙 화면 "판정 가능 + 확인됨"과 같은 목록, ADR-117).
+ * 통과는 기준 실행에서 통과한 확인됨 규칙 RULE-001 하나 → 1 / 3.
+ */
+const CONFIRMED_DENOMINATOR = LIVE.filter(
+  ({ rule }) => rule.normState === 'approved' && rule.confirmation.state === 'confirmed',
+).map(({ rule }) => rule.id);
+
+/** 에이전트 폐기 규칙 수 = 폐기된 RULE-007 하나 (RULE-006이 대체, 테스트 전용 데이터). */
+const AGENT_RETIRED = RULES.filter(({ retirement }) => retirement !== undefined).length;
+
 /** `verification.summary` 가짜 응답: 기본 (테스트 전용 데이터, NFR-03). */
 export const SUMMARY: VerificationSummaryResult = {
   basis: { branch: 'main', commit: BASIS_COMMIT, runId: RUN_1 },
   compliance: { passed: 2, judgeable: DENOMINATOR.length },
   denominator: DENOMINATOR,
+  confirmedCompliance: {
+    passed: 1,
+    judgeable: CONFIRMED_DENOMINATOR.length,
+    confirmed: CONFIRMED_DENOMINATOR.length,
+  },
+  confirmedDenominator: CONFIRMED_DENOMINATOR,
+  agentRetiredRules: AGENT_RETIRED,
   costPerRunUsd: 0.2,
   rules: rows(LIVE),
   pipeline: { run: run(), stages: stages('implementation', 'running'), queued: 0 },
@@ -206,11 +225,25 @@ export const SCREEN_UPDATE_FAILED_SUMMARY: VerificationSummaryResult = {
   },
 };
 
-/** `verification.summary` 가짜 응답: 실행 없음 (규칙은 있고 판정 전). */
+/**
+ * `verification.summary` 가짜 응답: 사람이 확인한 효력 있는 규칙이 없음 → 사람 확인 기준 `null`('없음', 0 / 0 금지),
+ * 에이전트 폐기 0 (테스트 전용 데이터).
+ */
+export const NO_CONFIRMED_SUMMARY: VerificationSummaryResult = {
+  ...SUMMARY,
+  confirmedCompliance: null,
+  confirmedDenominator: [],
+  agentRetiredRules: 0,
+};
+
+/** `verification.summary` 가짜 응답: 실행 없음 (규칙은 있고 판정 전, RULE-001은 확인됨 · RULE-002는 미확인). */
 export const EMPTY_SUMMARY: VerificationSummaryResult = {
   basis: null,
   compliance: { passed: 0, judgeable: 2 },
   denominator: [LIVE[0]?.rule.id ?? '', LIVE[1]?.rule.id ?? ''],
+  confirmedCompliance: { passed: 0, judgeable: 1, confirmed: 1 },
+  confirmedDenominator: [LIVE[0]?.rule.id ?? ''],
+  agentRetiredRules: 0,
   costPerRunUsd: null,
   rules: LIVE.slice(0, 2).map(({ rule }) => ({
     rule,
@@ -253,17 +286,36 @@ const hidden: ElementCheck[] = [
   { label: '준수 추이 미노출', text: /추이/, absent: true },
 ];
 
-const metrics = (compliance: string, cost: string): ElementCheck[] => [
+const metrics = (
+  { all, confirmed, retired }: { all: string; confirmed: string; retired: string },
+  cost: string,
+): ElementCheck[] => [
   { label: '지표 영역', role: 'region', name: '지표' },
-  { label: '지표 카드 2개', testId: 'metric-label', count: 2 },
+  { label: '지표 카드 3개', testId: 'metric-label', count: 3 },
+  { label: '준수 카드', testId: 'metric-compliance', role: 'group', name: '준수' },
+  { label: '준수 이름', text: '준수' },
+  { label: '준수 기준 2개', testId: 'metric-part-label', count: 2 },
   {
-    label: '준수 카드',
-    testId: 'metric-compliance',
+    label: '준수 전체 기준',
+    testId: 'metric-compliance-all',
     role: 'button',
+    text: `전체 기준 ${all}`,
     attributes: { title: '통과 / 판정 가능' },
   },
-  { label: '준수 이름', text: '준수' },
-  { label: '준수 값', text: compliance },
+  {
+    label: '준수 사람 확인 기준',
+    testId: 'metric-compliance-confirmed',
+    role: 'button',
+    text: `사람 확인 기준 ${confirmed}`,
+    attributes: { title: '통과 / 판정 가능 · 확인됨 규칙만' },
+  },
+  {
+    label: '에이전트 폐기 규칙 카드',
+    testId: 'metric-agent-retired',
+    role: 'button',
+    text: `에이전트 폐기 규칙 ${retired}`,
+    attributes: { title: '폐기 · 대체 누적' },
+  },
   { label: '실행당 비용 카드', testId: 'metric-cost-per-run' },
   { label: '실행당 비용 이름', text: '실행당 비용' },
   { label: '실행당 비용 값', text: cost },
@@ -277,7 +329,7 @@ export const verificationChecklist = {
       title: 'BIVE',
       elements: [
         { label: '머리줄', testId: 'verification-basis', text: '판정 기준 main@a1f26b1' },
-        ...metrics('2 / 5', '$0.20'),
+        ...metrics({ all: '2 / 5', confirmed: '1 / 3', retired: '1' }, '$0.20'),
         { label: '코드 열람 영역', testId: 'code-open', role: 'region', name: '코드 열람' },
         { label: '코드 열람 사유 3종', testId: 'code-open-label', count: 3 },
         { label: '화면 오류 건수', text: '화면 오류 2' },
@@ -312,7 +364,7 @@ export const verificationChecklist = {
       title: 'BIVE',
       elements: [
         { label: '머리줄', testId: 'verification-basis', text: '판정 기준 없음' },
-        ...metrics('0 / 2', '없음'),
+        ...metrics({ all: '0 / 2', confirmed: '0 / 1', retired: '0' }, '없음'),
         { label: '코드 열람 영역', testId: 'code-open', role: 'region', name: '코드 열람' },
         { label: '코드 열람 값 없음', testId: 'code-open-none', text: '없음' },
         { label: '코드 열람 사유 미표시', testId: 'code-open-reason', absent: true },

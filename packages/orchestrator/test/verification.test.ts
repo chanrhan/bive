@@ -8,7 +8,9 @@ import {
   createUlidGenerator,
   ErrorCode,
   type JudgmentResult,
+  type NormChangeEntry,
   type Rule,
+  type RuleJudgment,
   RUN_STEP_PLANS,
   type Run,
   type RunStatus,
@@ -22,12 +24,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { INTERRUPTED_EXIT_DETAIL } from '../src/engine/pipeline-engine.js';
 import type { PipeServer } from '../src/ipc/server.js';
-import { retireAgentRule } from '../src/norms/agent-rule.js';
+import { retireAgentRule, supersedeAgentRule } from '../src/norms/agent-rule.js';
 import { createRun } from '../src/runs/run-service.js';
 import {
+  agentRetiredRuleCount,
   basisOf,
   type BasisOptions,
   costPerRun,
+  humanConfirmedCompliance,
   type MergeRecord,
   pipelineOf,
 } from '../src/verification/summary.js';
@@ -306,11 +310,14 @@ const judgment = (
 const UNJUDGED = { status: 'unjudged', latest: null } as const;
 
 describe('verification.summary', () => {
-  it('규칙 · 실행이 없으면 판정 기준 · 실행당 비용 · 파이프라인이 null이고 준수는 0 / 0', async () => {
+  it('규칙 · 실행이 없으면 판정 기준 · 실행당 비용 · 파이프라인 · 사람 확인 기준이 null이고 준수는 0 / 0, 에이전트 폐기 수 0', async () => {
     expect(await summary()).toEqual({
       basis: null,
       compliance: { passed: 0, judgeable: 0 },
       denominator: [],
+      confirmedCompliance: null,
+      confirmedDenominator: [],
+      agentRetiredRules: 0,
       costPerRunUsd: null,
       rules: [],
       pipeline: null,
@@ -1051,5 +1058,218 @@ describe('판정 시각이 같은 판정의 동률 (ADR-072 "판정 시각 → I
     expect(latestOf(seeded.backward)?.id).toBe(seeded.backwardLater.id);
     // 두 규칙 모두 뒤 ID의 통과 판정이므로 준수 2 / 2
     expect(result.compliance).toEqual({ passed: 2, judgeable: 2 });
+  });
+});
+
+describe('준수 두 기준 · 에이전트 폐기 수 (M7-16 #228, ADR-100 D7 · B⑦ · JDG-03, ADR-117)', () => {
+  const agent = { kind: 'agent', role: 'rule-writer' } as const;
+  const confirmRule = (rule: Rule) =>
+    h.client.call('confirmation.set', {
+      projectId: h.project.id,
+      target: { entity: 'Rule', id: rule.id },
+      author: human,
+    });
+  const grounds = (rule: Rule) => `진술 "${rule.statement}"과 새 요구사항이 모순`;
+  const retire = (rule: Rule) =>
+    h.read((store) =>
+      retireAgentRule(
+        store,
+        { ruleId: rule.id, grounds: grounds(rule), author: agent, sessionId: newId() },
+        { now: Date.now },
+      ),
+    );
+  const supersede = (rule: Rule) =>
+    h.read((store) =>
+      supersedeAgentRule(
+        store,
+        {
+          payload: {
+            title: `${rule.title} 대체`,
+            statement: `WHEN ${rule.title} 대체 THE SYSTEM SHALL 요청을 받는다`,
+            kind: 'business',
+            checkKinds: ['test'],
+            parentRequirementId: rule.parentRequirementId ?? '',
+          },
+          rationale: '새 요구사항을 옮김',
+          author: agent,
+          sessionId: newId(),
+          contradiction: { verdict: 'none' },
+          normInput: {
+            requirements: { total: 1, included: 1, omitted: 0 },
+            rules: { total: 1, included: 1, omitted: 0 },
+            truncated: false,
+          },
+          ruleId: rule.id,
+          grounds: grounds(rule),
+        },
+        { now: Date.now, newId },
+      ),
+    );
+
+  /** 병합된 기준 실행 하나가 규칙마다 주어진 판정을 낸 상태 (검사 판정). 규칙은 주어진 순서. */
+  const seedJudged = (titles: readonly (readonly [string, JudgmentResult['status']])[]) =>
+    h.read((store) => {
+      const rules = titles.map(([title]) => insertRule(store, title, 'approved'));
+      const run = seedRun(store, {
+        ruleIds: rules.map((rule) => rule.id),
+        at: T0 + 10_000,
+        status: 'merged',
+        headCommit: SHA_C,
+        mergeCommit: SHA_A,
+      });
+      store.judgments.record(
+        rules.map((rule, index) =>
+          judgment(rule, titles[index]?.[1] ?? 'pass', judgedIn(store, run), T0 + 12_000, SHA_C),
+        ),
+      );
+      return rules;
+    });
+
+  it('전체 기준과 사람 확인 기준을 각각의 분모 목록과 함께 돌려주고, 폐기된 규칙은 확인됨이어도 두 분모에서 빠진다 (수용 기준 1)', async () => {
+    const [okConfirmed, failConfirmed, quarantinedConfirmed, okUnconfirmed, retiredConfirmed] =
+      seedJudged([
+        ['확인됨 통과', 'pass'],
+        ['확인됨 실패', 'fail'],
+        ['확인됨 격리', 'quarantined'],
+        ['미확인 통과', 'pass'],
+        ['폐기 뒤 확인됨 통과', 'pass'],
+      ]) as [Rule, Rule, Rule, Rule, Rule];
+    for (const rule of [okConfirmed, failConfirmed, quarantinedConfirmed, retiredConfirmed]) {
+      await confirmRule(rule);
+    }
+    const before = await summary();
+    // 폐기 전: 확인됨 통과 · 확인됨 실패 · 폐기될 규칙이 사람 확인 기준 분모
+    expect(before.confirmedCompliance).toEqual({ passed: 2, judgeable: 3, confirmed: 4 });
+    expect(before.confirmedDenominator).toEqual([
+      okConfirmed.id,
+      failConfirmed.id,
+      retiredConfirmed.id,
+    ]);
+
+    // 에이전트가 폐기하면 확인이 풀리고(ADR-113), 사람이 "폐기를 봤다"고 다시 확인하면 폐기된 규칙이 확인됨이 된다
+    retire(retiredConfirmed);
+    await confirmRule(retiredConfirmed);
+    const got = await h.client.call('rule.get', {
+      projectId: h.project.id,
+      id: retiredConfirmed.id,
+    });
+    expect(got.rule.confirmation.state).toBe('confirmed');
+    expect(got.retirement).toBeDefined();
+
+    const result = await summary();
+    // 전체 기준: 효력 있고 격리 아닌 규칙 (확인 상태와 무관)
+    expect(result.compliance).toEqual({ passed: 2, judgeable: 3 });
+    expect(result.denominator).toEqual([okConfirmed.id, failConfirmed.id, okUnconfirmed.id]);
+    // 사람 확인 기준: 그중 확인됨인 것. 폐기 · 확인됨 규칙은 들지 않고, 확인됨 격리 규칙은 확인됨 수에만 든다
+    expect(result.confirmedCompliance).toEqual({ passed: 1, judgeable: 2, confirmed: 3 });
+    expect(result.confirmedDenominator).toEqual([okConfirmed.id, failConfirmed.id]);
+    expect(result.agentRetiredRules).toBe(1);
+    // 목록에도 폐기된 규칙은 없고, 남은 규칙의 확인 상태가 실린다
+    expect(result.rules.map((row) => [row.rule.title, row.rule.confirmation.state])).toEqual([
+      ['확인됨 통과', 'confirmed'],
+      ['확인됨 실패', 'confirmed'],
+      ['확인됨 격리', 'confirmed'],
+      ['미확인 통과', 'unconfirmed'],
+    ]);
+  });
+
+  it('효력 있는 확인됨 규칙이 없으면 사람 확인 기준은 null이다: 확인됨 규칙이 없을 때 · 확인됨이 폐기된 규칙뿐일 때 (수용 기준 2)', async () => {
+    const [kept, retired] = seedJudged([
+      ['남는 규칙', 'pass'],
+      ['폐기 규칙', 'pass'],
+    ]) as [Rule, Rule];
+    const none = await summary();
+    expect(none.compliance).toEqual({ passed: 2, judgeable: 2 });
+    expect(none.confirmedCompliance).toBeNull();
+    expect(none.confirmedDenominator).toEqual([]);
+
+    retire(retired);
+    await confirmRule(retired);
+    const onlyRetired = await summary();
+    expect(onlyRetired.compliance).toEqual({ passed: 1, judgeable: 1 });
+    expect(onlyRetired.denominator).toEqual([kept.id]);
+    expect(onlyRetired.confirmedCompliance).toBeNull();
+    expect(onlyRetired.confirmedDenominator).toEqual([]);
+  });
+
+  it('확인됨 규칙은 있는데 판정 가능한 것이 없으면(모두 격리) null이 아니라 판정 가능 0 · 확인됨 수를 돌려준다', async () => {
+    const [quarantined] = seedJudged([
+      ['확인됨 격리', 'quarantined'],
+      ['미확인 통과', 'pass'],
+    ]) as [Rule, Rule];
+    await confirmRule(quarantined);
+    const result = await summary();
+    expect(result.compliance).toEqual({ passed: 1, judgeable: 1 });
+    expect(result.confirmedCompliance).toEqual({ passed: 0, judgeable: 0, confirmed: 1 });
+    expect(result.confirmedDenominator).toEqual([]);
+  });
+
+  it('에이전트 폐기 수는 규범 변경 기록의 폐기 · 대체 대상 규칙 수이고, 대체로 생긴 새 규칙 · 신규 · 판단 기록은 세지 않는다 (수용 기준 4)', async () => {
+    const [first, second] = seedJudged([
+      ['폐기될 규칙', 'pass'],
+      ['대체될 규칙', 'pass'],
+    ]) as [Rule, Rule];
+    expect((await summary()).agentRetiredRules).toBe(0);
+    retire(first);
+    expect((await summary()).agentRetiredRules).toBe(1);
+    supersede(second);
+    const result = await summary();
+    expect(result.agentRetiredRules).toBe(2);
+    // 대체로 생긴 새 규칙은 목록에 남고(효력 있음) 폐기 수에 들지 않는다
+    expect(result.rules.map((row) => row.rule.title)).toEqual(['대체될 규칙 대체']);
+    expect(h.read((store) => store.normChanges.list().map((entry) => entry.kind))).toEqual([
+      'retired',
+      'created',
+      'judgment',
+      'superseded',
+    ]);
+  });
+});
+
+describe('사람 확인 기준 · 에이전트 폐기 수 계산 (순수 함수, ADR-117)', () => {
+  const ruleOf = (id: string, confirmed: boolean, normState: Rule['normState'] = 'approved') =>
+    ({
+      id,
+      normState,
+      deletedAt: null,
+      confirmation: confirmed
+        ? { state: 'confirmed', at: iso(T0), by: human, basis: { kind: 'approval_log', seq: 1 } }
+        : { state: 'unconfirmed' },
+    }) as unknown as Rule;
+  const pass = { status: 'pass', latest: null } as unknown as RuleJudgment;
+
+  it('확인됨 여부보다 효력을 먼저 본다: 폐기 · 잠정인 확인됨 규칙이 행에 섞여 와도 사람 확인 기준에 들지 않는다', () => {
+    const rows = [
+      { rule: ruleOf('R1', true), judgment: pass },
+      { rule: ruleOf('R2', true), judgment: pass },
+      { rule: ruleOf('R3', true, 'provisional'), judgment: pass },
+      { rule: ruleOf('R4', false), judgment: pass },
+    ];
+    expect(humanConfirmedCompliance(rows, new Set(['R2']))).toEqual({
+      compliance: { passed: 1, judgeable: 1, confirmed: 1 },
+      denominator: ['R1'],
+    });
+    // 확인됨이 폐기 · 잠정 규칙뿐이면 null
+    expect(humanConfirmedCompliance(rows.slice(1), new Set(['R2']))).toEqual({
+      compliance: null,
+      denominator: [],
+    });
+  });
+
+  it('폐기 수: 에이전트 주체의 폐기 · 대체 기록만, 규칙마다 한 번', () => {
+    const agentActor = { kind: 'agent', role: 'rule-writer' };
+    const entry = (kind: string, id: string, actor: object = agentActor) =>
+      ({ kind, actor, targetRef: { entity: 'Rule', id } }) as unknown as NormChangeEntry;
+    expect(
+      agentRetiredRuleCount([
+        entry('created', 'R1'),
+        entry('retired', 'R1'),
+        entry('superseded', 'R2'),
+        entry('superseded', 'R2'),
+        entry('judgment', 'R3'),
+        entry('unconfirmed', 'R1', { kind: 'orchestrator' }),
+        entry('retired', 'R4', { kind: 'orchestrator' }),
+      ]),
+    ).toBe(2);
   });
 });
