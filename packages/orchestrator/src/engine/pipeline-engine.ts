@@ -15,7 +15,8 @@
 //   지금 단계의 새 시도 · 새 세션으로 이어간다. `regressionCount`는 그대로 둔다 (ADR-027)
 // - 프로젝트당 동시 실행 1개 (ADR-100 B⑥, ADR-105): 승인 단계 통과 때 자리가 없으면 실행 대기(`queued`). 실행의 구동이
 //   끝나면(종료 상태 저장 뒤) · 실행 대기가 생기면 · 기동하면(`startQueuedRuns`) `#advanceQueue`가 저장된 상태에서 다음
-//   실행 대기를 생성 순으로 시작한다(메모리 대기열 없음). 다른 실행이 진행 중이면 재개는 -32009
+//   실행 대기를 생성 순으로 시작한다(메모리 대기열 없음). 다른 실행이 진행 중이면 재개는 -32009. 자동 시작 실행은 시작할 차례에
+//   하루 한도를 다시 보아 문에 걸리면 워크트리 없이 끝난다(실행 서비스 `startNextQueuedRun`, ADR-111)
 import {
   type Author,
   CommitSha,
@@ -71,6 +72,7 @@ import { createTestWritingExecutor } from '../steps/test-writing.js';
 import { dailyBudgetReached, projectDailyBudget } from '../settings/project-budget.js';
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
 import { budgetOverrun, sessionLimits } from './session-budget.js';
+import { runEnding } from './run-ending.js';
 import { checkRunStartBasis } from './start-basis.js';
 import {
   COMMIT_STEP_KINDS,
@@ -88,6 +90,9 @@ import {
   stepCommitMessage,
   UNMET_POLICY,
 } from './types.js';
+
+// 실행의 종료 상태는 `run-ending.ts`의 `runEnding()` 한 곳에서 정한다 (실행 서비스의 실행 대기 시작도 같은 함수를 쓴다)
+export { runEnding } from './run-ending.js';
 
 /** 세션 · 실행기가 실행을 끝내야 할 때 던진다 (가드 위반 · 예산 초과 · 설정 없음). */
 export class StepHaltError extends Error {
@@ -232,26 +237,6 @@ const gitRefOf = (project: Project, run: Run): RunGitRef | null =>
         worktreePath: run.worktreePath,
         baseCommit: run.baseCommit,
       };
-
-/**
- * 실행을 끝낼 때의 종료 상태 (ADR-091 · ADR-094). 엔진이 실행을 실패 쪽으로 끝내는 모든 경로(`#halt`, `#drive`의
- * `state_inconsistent`, `#failAfterError`에서 시도가 이미 끝난 경우)가 이 함수 하나로 정한다.
- * - 병합 커밋이 기록된 실행(`run.mergeCommit !== null`)은 기준 브랜치에 병합 커밋이 있으므로 `merged`(실패 사유 없음,
- *   `currentStep = null`)로 끝내고 브랜치 · 워크트리를 보존하지 않는다(`merged: true`). 실패는 그 단계 시도에만 남는다
- * - 그 밖에는 `runStatus` + 사유(`failureReason`)이고 보존한다(`merged: false`, RUN-08)
- * 조건은 저장된 `mergeCommit`뿐이다. 그 값은 병합 실행기가 기준 브랜치를 git으로 확인한 `passed`일 때만 채워지므로
- * (ADR-069 · ADR-091), 병합되지 않은 실행이 이 함수로 `merged`가 되는 일은 없다.
- */
-export const runEnding = (
-  run: Pick<Run, 'mergeCommit'>,
-  runStatus: HaltStatus,
-  reason: string,
-):
-  | { merged: true; run: { status: 'merged'; currentStep: null } }
-  | { merged: false; run: { status: HaltStatus; failureReason: string } } =>
-  run.mergeCommit !== null
-    ? { merged: true, run: { status: 'merged', currentStep: null } }
-    : { merged: false, run: { status: runStatus, failureReason: reason } };
 
 /**
  * 재개의 워크트리 되돌리기가 이 사유로 실패하면 다시 눌러도 같은 결과다(ADR-105): 워크트리 폴더가 없음
@@ -534,7 +519,8 @@ export class PipelineEngine {
 
   /**
    * 자리가 났으면 다음 실행 대기를 시작하고 구동한다 (`startNextQueuedRun`, 트랜잭션 1회 · 저장된 상태 기준, ADR-105).
-   * 시작 때 대상 규칙 재검사로 끝난 실행 대기는 저장 알림만 보낸다. 종료 중이면 아무것도 하지 않는다.
+   * 시작 전에 끝난 실행 대기(대상 규칙 재검사 · 자동 시작 실행의 하루 한도 재확인, ADR-111)는 저장 알림 · 기록만 남긴다.
+   * 끝난 것들은 같은 호출 안에서 처리되었으므로 대기열을 다시 살피지 않는다. 종료 중이면 아무것도 하지 않는다.
    */
   #advanceQueue(projectId: string): void {
     if (this.#closed) return;

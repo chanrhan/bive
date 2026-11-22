@@ -201,7 +201,8 @@ export const restartOrchestrator = async (e: PipelineE2e): Promise<void> => {
  * 이어지는 실행과 규칙 작성 세션의 쓰기가 겹치지 않는다.
  * 세션이 끝나면 오케스트레이터가 실행 자동 시작을 판단한다(M7-05, ADR-107). 시험의 설정은 하루 한도를 비워 두므로 기본은
  * 자동 시작 생략(`project_daily_budget_unset`)을 단언하고 실행이 생기지 않았음을 본다(이어지는 실행은 사람의 [실행]).
- * 하루 한도를 채운 시험은 `autoStart: 'started'`로 자동 시작된 실행을 돌려받는다.
+ * 하루 한도를 채운 시험은 `autoStart: 'started'`로 자동 시작된 실행을 돌려받는다. 자동 시작은 규칙마다 실행 1개라 실행이
+ * 규칙 수만큼 늘고, 돌려주는 실행은 상태 줄에 실리는 첫 규칙의 실행이다 (ADR-110 · ADR-111).
  */
 export const saveRequirement = async (
   e: PipelineE2e,
@@ -260,7 +261,7 @@ export const saveRequirement = async (
       `자동 시작 안 됨: ${JSON.stringify(status.autoStart)}\n${orchestratorOutput(e)}`,
     );
   }
-  expect(runs).toHaveLength(runsBefore + 1);
+  expect(runs).toHaveLength(runsBefore + count);
   return { requirement, rules, status, autoStartedRunId: status.autoStart.runId };
 };
 
