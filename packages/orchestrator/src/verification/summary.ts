@@ -13,6 +13,9 @@
 // - 준수: 분모 = 효력 있는(잠정 승인 · 폐기 제외, JDG-03 · M7-09) 규칙 중 위 판정이 격리가 아닌 것. 통과 = 분모 중 위 판정이 통과.
 //   폐기된 규칙은 규칙 목록(`rules`)에서도 빠진다(판정 이력은 지우지 않는다, ADR-112).
 //   M1에는 격리 판정이 없어 규칙 화면 필터 `준수 집계: 판정 가능`(rulesView.ts `complianceGroup`)과 같은 목록이다
+// - 사람 확인 기준 준수(ADR-100 D7, ADR-117): 위 분모를 지금 확인됨인 규칙으로 좁힌 것. 효력 있는 확인됨 규칙이 없으면 `null`.
+//   규칙 화면 필터 `준수 집계: 판정 가능` + `확인: 확인됨`(= "사람 확인" 값, rulesView.ts `complianceValues`)과 같은 정의다
+// - 에이전트 폐기 수(ADR-100 B⑦, ADR-117): 규범 변경 기록의 에이전트 폐기 · 대체 대상 규칙 수(전체 누적)
 // - 실행당 비용: 끝난 실행(병합 · 실패 · 예산 초과) 중 세션 비용을 모두 아는 실행(`usage.run.costUsd`가 있고
 //   값 모르는 세션 0개)의 비용 평균(1e-9 USD 반올림). 그런 실행이 없으면 `null`
 // - 실행 링크: 위 판정의 실행(= 기준 실행)과 그 실행의 비용 합계 · 턴(`runs.usage`, 값 없으면 `null`)
@@ -23,6 +26,8 @@
 import {
   isTerminalRunStatus,
   type JudgmentResult,
+  type NormChangeEntry,
+  type NormChangeKind,
   RUN_STEP_PLANS,
   type Rule,
   type RuleJudgment,
@@ -42,6 +47,58 @@ import { toRuleJudgment } from '../judgments/latest-judgment.js';
 import { isEffectiveRule, retiredRuleSet, unretiredRules } from '../norms/effective.js';
 
 const NANO_PER_USD = 1e9;
+
+/** 에이전트가 규칙을 폐기한 규범 변경 기록 종류: 폐기 · 대체 (ADR-100 B⑦, ADR-112). 이 모듈은 기록을 읽기만 한다. */
+const AGENT_RETIREMENT_KINDS: ReadonlySet<NormChangeKind> = new Set<NormChangeKind>([
+  'retired',
+  'superseded',
+]);
+
+/**
+ * 에이전트가 폐기한 규칙 수 (ADR-100 B⑦, ADR-117): 규범 변경 기록 가운데 에이전트 주체의 폐기 · 대체 기록이 가리키는 규칙의
+ * 수(전체 누적, 같은 규칙은 한 번). 그 뒤 사람이 규칙을 지웠어도 센다(에이전트의 폐기는 기록에서 사라지지 않는다).
+ */
+export const agentRetiredRuleCount = (entries: readonly NormChangeEntry[]): number =>
+  new Set(
+    entries
+      .filter(
+        (entry) =>
+          AGENT_RETIREMENT_KINDS.has(entry.kind) &&
+          entry.actor.kind === 'agent' &&
+          entry.targetRef.entity === 'Rule',
+      )
+      .map((entry) => entry.targetRef.id),
+  ).size;
+
+/** 사람 확인 기준 준수와 그 분모 목록 (ADR-100 D7, ADR-117). */
+export interface ConfirmedCompliance {
+  compliance: VerificationSummaryResult['confirmedCompliance'];
+  denominator: Ulid[];
+}
+
+/**
+ * 사람 확인 기준 준수: 효력 있는(폐기 제외, `norms/effective.ts`) 규칙 중 지금 확인됨인 것만 센다. 폐기된 규칙은 확인됨일 수
+ * 있으므로(사람이 폐기를 봤다고 확인, ADR-113) 확인 상태만 보지 않고 효력을 먼저 본다. 효력 있는 확인됨 규칙이 없으면 `null`.
+ * 확인 상태는 응답에 실린 규칙의 `confirmation`만 읽는다(표시용 집계, 판정 · 병합의 조건이 아니다).
+ */
+export const humanConfirmedCompliance = (
+  rows: readonly { rule: Rule; judgment: RuleJudgment }[],
+  retired: ReadonlySet<string>,
+): ConfirmedCompliance => {
+  const confirmed = rows.filter(
+    ({ rule }) => isEffectiveRule(rule, retired) && rule.confirmation.state === 'confirmed',
+  );
+  if (confirmed.length === 0) return { compliance: null, denominator: [] };
+  const judgeable = confirmed.filter(({ rule, judgment }) => isJudgeable(rule, judgment, retired));
+  return {
+    compliance: {
+      passed: judgeable.filter(({ judgment }) => judgment.status === 'pass').length,
+      judgeable: judgeable.length,
+      confirmed: confirmed.length,
+    },
+    denominator: judgeable.map(({ rule }) => rule.id),
+  };
+};
 
 /** 지금보다 이만큼 넘게 미래인 판정 기록은 쓰지 않는다 (판정 기록 저장소의 최신 판정 조회와 같은 기준). */
 const FUTURE_LIMIT_MS = 60_000;
@@ -252,7 +309,7 @@ export const verificationSummary = (
     };
   };
 
-  // 폐기된 규칙은 목록 · 분모에서 뺀다 (판정 이력은 남는다, M7-09 · ADR-112. 폐기 표시 · 폐기 수는 M7-15 · M7-16)
+  // 폐기된 규칙은 목록 · 분모에서 뺀다 (판정 이력은 남는다, M7-09 · ADR-112. 폐기 표시는 M7-15)
   const retired = retiredRuleSet(store);
   const rows = unretiredRules(store).map((rule) => {
     const judgment = toRuleJudgment(judged.get(rule.id) ?? null);
@@ -260,6 +317,7 @@ export const verificationSummary = (
   });
   const judgeable = rows.filter(({ rule, judgment }) => isJudgeable(rule, judgment, retired));
   const passed = judgeable.filter(({ judgment }) => judgment.status === 'pass').length;
+  const confirmed = humanConfirmedCompliance(rows, retired);
 
   const finished = runs
     .filter((run) => isTerminalRunStatus(run.status))
@@ -272,6 +330,9 @@ export const verificationSummary = (
     basis,
     compliance: { passed, judgeable: judgeable.length },
     denominator: judgeable.map(({ rule }) => rule.id),
+    confirmedCompliance: confirmed.compliance,
+    confirmedDenominator: confirmed.denominator,
+    agentRetiredRules: agentRetiredRuleCount(store.normChanges.list()),
     costPerRunUsd: costPerRun(finished),
     rules: rows,
     pipeline: shown === undefined ? null : pipelineOf(shown, store.runs.steps(shown.id), queued),

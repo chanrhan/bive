@@ -60,6 +60,43 @@ button.metric-card:focus-visible {
   box-shadow: var(--focus-ring);
 }
 
+/* 준수 카드: 두 기준(전체 · 사람 확인)을 나란히, 좁으면 아래로 (ADR-117) */
+.metric-parts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+}
+
+.metric-part {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-1);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.metric-part:hover .metric-value {
+  color: var(--color-accent);
+}
+
+.metric-part:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.metric-part-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  white-space: nowrap;
+}
+
 .metric-label {
   color: var(--color-text-muted);
   font-size: var(--font-size-1);

@@ -1,10 +1,11 @@
 // 검증 화면 (screens.md SCR-05): 머리줄 · 지표 카드 · 코드 열람 · 파이프라인 · 규칙별 최신 판정 목록.
 // - 값은 verification.summary · codeOpen.summary 결과에서만 그린다(NFR-03). 표시 규칙은 verificationView.ts
-// - 지표 카드는 준수 · 실행당 비용만. 잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드, 준수 추이 그래프는
-//   기능 이슈 전까지 미노출 (ADR-035)
+// - 지표 카드는 준수(전체 기준 · 사람 확인 기준) · 에이전트 폐기 규칙 · 실행당 비용 (ADR-100 D7 · B⑦, ADR-117). 잠정 · 변이 ·
+//   규칙화 불가 · 추적성 결함 카드, 준수 추이 그래프는 기능 이슈 전까지 미노출 (ADR-035)
 // - 코드 열람 = 열람 사유 분포(MET-01, M2-02 · ADR-088): 사유 3종의 건수, 기록이 없으면 '없음'. 검증 요약과 따로 불러
 //   이 영역의 로딩 · 실패는 이 영역 안에서만 보인다(로딩 = 자리 비움, 실패 = "코드 열람 불러오기 실패")
-// - 준수 카드 → 규칙 화면 `준수 집계: 판정 가능` 필터 (분모 목록, JDG-03)
+// - 준수 카드의 전체 기준 → 규칙 화면 `준수 집계: 판정 가능` 필터 (분모 목록, JDG-03), 사람 확인 기준 → `준수 집계: 판정 가능`
+//   + `확인: 확인됨`, 에이전트 폐기 규칙 카드 → [폐기 포함] (ADR-117)
 // - 파이프라인 = 보일 실행(자리를 차지한 실행, 없으면 최근 실행, ADR-105)의 단계 순서와 현재 단계, 생략 단계는 흐림 + 보이는 "생략"(#165). 중단이면 [재개] → run.resume (ADR-011)
 // - 실행 알림(event.run.updated · event.step.updated)을 받으면 요약을 다시 읽는다(useVerification, ADR-076)
 // - 상태(ADR-072, ADR-060과 같은 방식): 프로젝트 조회 중 = 비움 · 프로젝트 없음 = "프로젝트 없음" ·
@@ -19,8 +20,10 @@ import type {
 } from '@bive/shared';
 import { useCallback, useState } from 'react';
 
+import type { FilterState } from '../../components/ListView/filter.js';
 import { setListFilter } from '../../components/ListView/filterStore.js';
 import { StatusBadge } from '../../components/StatusBadge/StatusBadge.js';
+import { visibleText } from '../../components/VisibleText/visibleText.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { useNavigation } from '../../navigation/NavigationContext.js';
 import { useProject } from '../../project/ProjectContext.js';
@@ -28,11 +31,16 @@ import { RULES_LIST_ID } from '../rules/rulesView.js';
 import { type CodeOpenSummaryLoad, useCodeOpenSummary } from './useCodeOpenSummary.js';
 import { useVerification } from './useVerification.js';
 import {
+  AGENT_RETIRED_FILTER,
+  agentRetiredText,
   basisText,
   canResume,
   codeOpenRows,
   COMPLIANCE_FILTER,
   complianceText,
+  CONFIRMED_COMPLIANCE_FILTER,
+  confirmedComplianceState,
+  confirmedComplianceText,
   currentStepOf,
   formatUsd,
   isResumeUnrecoverable,
@@ -100,10 +108,14 @@ const VerificationContent = ({
   onChanged: () => void;
 }): React.JSX.Element => {
   const { navigate } = useNavigation();
-  const openDenominator = useCallback(() => {
-    setListFilter(RULES_LIST_ID, COMPLIANCE_FILTER);
-    navigate('rules');
-  }, [navigate]);
+  const openRules = useCallback(
+    (filter: FilterState) => {
+      setListFilter(RULES_LIST_ID, filter);
+      navigate('rules');
+    },
+    [navigate],
+  );
+  const confirmedState = confirmedComplianceState(summary.confirmedCompliance);
 
   return (
     <div className="verification-content">
@@ -115,18 +127,60 @@ const VerificationContent = ({
         {basisText(summary.basis)}
       </p>
       <section className="verification-metrics" aria-label={TEXT.metrics}>
+        {/* 준수 카드: 두 기준을 함께 보이고 기준마다 그 분모 목록으로 이동한다 (ADR-100 D7, ADR-117) */}
+        <div
+          className="metric-card metric-card-group"
+          data-testid="metric-compliance"
+          role="group"
+          aria-labelledby="metric-compliance-label"
+        >
+          <span className="metric-label" data-testid="metric-label" id="metric-compliance-label">
+            {TEXT.compliance}
+          </span>
+          <div className="metric-parts">
+            <button
+              type="button"
+              className="metric-part"
+              data-testid="metric-compliance-all"
+              title={TEXT.complianceHint}
+              onClick={() => openRules(COMPLIANCE_FILTER)}
+            >
+              <span className="metric-part-label" data-testid="metric-part-label">
+                {TEXT.complianceAll}
+              </span>{' '}
+              <span className="metric-value" data-testid="metric-value">
+                {complianceText(summary.compliance)}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="metric-part"
+              data-testid="metric-compliance-confirmed"
+              data-state={confirmedState}
+              title={TEXT.complianceConfirmedHint}
+              onClick={() => openRules(CONFIRMED_COMPLIANCE_FILTER)}
+            >
+              <span className="metric-part-label" data-testid="metric-part-label">
+                {TEXT.complianceConfirmed}
+              </span>{' '}
+              <span className="metric-value" data-testid="metric-value">
+                {confirmedComplianceText(summary.confirmedCompliance)}
+              </span>
+            </button>
+          </div>
+        </div>
         <button
           type="button"
           className="metric-card"
-          data-testid="metric-compliance"
-          title={TEXT.complianceHint}
-          onClick={openDenominator}
+          data-testid="metric-agent-retired"
+          title={TEXT.agentRetiredHint}
+          onClick={() => openRules(AGENT_RETIRED_FILTER)}
         >
           <span className="metric-label" data-testid="metric-label">
-            {TEXT.compliance}
-          </span>
+            {TEXT.agentRetired}
+          </span>{' '}
           <span className="metric-value" data-testid="metric-value">
-            {complianceText(summary.compliance)}
+            {agentRetiredText(summary.agentRetiredRules)}
           </span>
         </button>
         <div className="metric-card" data-testid="metric-cost-per-run">
@@ -338,8 +392,9 @@ const RuleRow = ({ row }: { row: VerificationRuleRow }): React.JSX.Element => {
   return (
     <li className="verification-rule" data-testid="verification-rule" data-rule-id={row.rule.id}>
       <StatusBadge kind="judgment" status={row.judgment.status} />
+      {/* 에이전트가 쓴 제목: 숨은 글자를 보이는 표기로 (ADR-114 · ADR-117) */}
       <span className="verification-rule-title" data-testid="verification-rule-title">
-        {row.rule.title}
+        {visibleText(row.rule.title)}
       </span>
       <span className="verification-rule-id" data-testid="verification-rule-id">
         {row.rule.displayId}

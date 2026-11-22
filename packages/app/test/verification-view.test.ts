@@ -6,17 +6,28 @@ import {
   CodeOpenSummaryResult,
   RUN_STATUS_LABELS,
   STEP_KIND_LABELS,
+  type RuleWithJudgment,
   STEP_STATUS_LABELS,
 } from '@bive/shared';
 import { describe, expect, it } from 'vitest';
 
-import { complianceGroup } from '../src/renderer/src/screens/rules/rulesView.js';
+import { type FilterState, filterEntries } from '../src/renderer/src/components/ListView/filter.js';
 import {
+  complianceGroup,
+  complianceValues,
+  RULE_CRITERIA,
+} from '../src/renderer/src/screens/rules/rulesView.js';
+import {
+  AGENT_RETIRED_FILTER,
+  agentRetiredText,
   basisText,
   canResume,
   codeOpenRows,
   COMPLIANCE_FILTER,
   complianceText,
+  CONFIRMED_COMPLIANCE_FILTER,
+  confirmedComplianceState,
+  confirmedComplianceText,
   currentStepOf,
   isResumeUnrecoverable,
   queuedText,
@@ -136,6 +147,86 @@ describe('값 표시', () => {
       judgment: { status: 'pass' },
     } as Parameters<typeof complianceGroup>[0]);
     expect(COMPLIANCE_FILTER.selected['compliance']).toEqual([value]);
+  });
+});
+
+describe('준수 두 기준 · 에이전트 폐기 규칙 카드 (M7-16 #228, ADR-100 D7 · B⑦, ADR-117)', () => {
+  it('사람 확인 기준은 확인됨 규칙이 없으면(null) "없음"이고 0 / 0으로 보이지 않는다, 판정 가능이 0이면 "없음"(상태로 구분)', () => {
+    expect(confirmedComplianceText(null)).toBe('없음');
+    expect(confirmedComplianceState(null)).toBe('none');
+    expect(confirmedComplianceText({ passed: 0, judgeable: 0, confirmed: 2 })).toBe('없음');
+    expect(confirmedComplianceState({ passed: 0, judgeable: 0, confirmed: 2 })).toBe('unjudgeable');
+    expect(confirmedComplianceText({ passed: 1, judgeable: 3, confirmed: 4 })).toBe('1 / 3');
+    expect(confirmedComplianceState({ passed: 0, judgeable: 3, confirmed: 4 })).toBe('value');
+    expect(confirmedComplianceText({ passed: 0, judgeable: 3, confirmed: 3 })).toBe('0 / 3');
+  });
+
+  it('에이전트 폐기 규칙 수는 센 값이라 0도 "0"이다', () => {
+    expect(agentRetiredText(0)).toBe('0');
+    expect(agentRetiredText(12)).toBe('12');
+  });
+
+  it('사람 확인 기준 필터(판정 가능 + 확인됨)가 고르는 규칙 = 규칙 화면의 "사람 확인" 값을 가진 규칙 (폐기 · 효력 아님 · 격리 · 미확인 제외)', () => {
+    const confirmed = { state: 'confirmed' } as const;
+    const unconfirmed = { state: 'unconfirmed' } as const;
+    const item = (
+      key: string,
+      confirmation: { state: string },
+      status: string,
+      extra: { normState?: string; retired?: boolean } = {},
+    ) =>
+      ({
+        rule: { id: key, normState: extra.normState ?? 'approved', confirmation },
+        judgment: { status },
+        ...(extra.retired === true && {
+          retirement: { retiredAt: null, supersededBy: null, normChangeSeq: null },
+        }),
+      }) as unknown as RuleWithJudgment;
+    const items = [
+      item('pass-confirmed', confirmed, 'pass'),
+      item('fail-confirmed', confirmed, 'fail'),
+      item('pass-unconfirmed', unconfirmed, 'pass'),
+      item('quarantined-confirmed', confirmed, 'quarantined'),
+      item('retired-confirmed', confirmed, 'pass', { retired: true }),
+      item('provisional-confirmed', confirmed, 'pass', { normState: 'provisional' }),
+    ];
+    const entries = items.map((value, index) => ({
+      item: value,
+      key: value.rule.id,
+      searchText: '',
+      problem: false,
+      time: null,
+      index,
+    }));
+    const picked = (filter: FilterState) =>
+      filterEntries(entries, RULE_CRITERIA, filter).map((entry) => entry.key);
+    expect(picked(CONFIRMED_COMPLIANCE_FILTER)).toEqual(['pass-confirmed', 'fail-confirmed']);
+    expect(picked(CONFIRMED_COMPLIANCE_FILTER)).toEqual(
+      items
+        .filter((value) => complianceValues(value).includes('human_confirmed'))
+        .map((value) => value.rule.id),
+    );
+    // 전체 기준 필터는 확인 상태와 무관 (폐기 · 효력 아님 · 격리 제외)
+    expect(picked(COMPLIANCE_FILTER)).toEqual([
+      'pass-confirmed',
+      'fail-confirmed',
+      'pass-unconfirmed',
+    ]);
+    expect(CONFIRMED_COMPLIANCE_FILTER).toEqual({
+      query: '',
+      selected: { compliance: ['judgeable'], confirmation: ['confirmed'] },
+      problemOnly: false,
+      includeHidden: false,
+    });
+  });
+
+  it('에이전트 폐기 규칙 카드의 필터는 [폐기 포함]만 켠다 (고른 칩 · 검색 · [문제만] 없음)', () => {
+    expect(AGENT_RETIRED_FILTER).toEqual({
+      query: '',
+      selected: {},
+      problemOnly: false,
+      includeHidden: true,
+    });
   });
 });
 
