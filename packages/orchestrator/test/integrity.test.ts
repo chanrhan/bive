@@ -99,7 +99,7 @@ const tempDir = (): string => {
  * 가져오고, 이 표에 없는 역할이 생기면 시험이 실패한다.
  */
 const EXPECTED_ROLE_TOOLS: Readonly<Record<string, readonly string[]>> = {
-  'rule-writer': ['propose_rule'],
+  'rule-writer': ['propose_rule', 'retire_rule', 'supersede_rule'],
   planner: [],
   'test-writer': ['read_file', 'write_file', 'list_files', 'search_files', 'run_tests'],
   implementer: [
@@ -126,6 +126,8 @@ const FIXED_TOOLS: readonly string[] = [
   'prisma_migrate',
   'install_package',
   'propose_rule',
+  'retire_rule',
+  'supersede_rule',
 ];
 
 /**
@@ -148,14 +150,26 @@ const OTHER_ROLE_TOOL_ARGS: Readonly<Record<string, Record<string, unknown>>> = 
     rationale: '무결성 시험',
     contradiction: { verdict: 'none' },
   },
+  retire_rule: { ruleId: 'RULE-001', grounds: '무결성 시험: 응답 JSON의 time 필드를 담는다' },
+  supersede_rule: {
+    ruleId: 'RULE-001',
+    grounds: '무결성 시험: 응답 JSON의 time 필드를 담는다',
+    parentRequirementId: 'REQ-001',
+    title: '다른 역할의 대체',
+    statement: 'WHEN 요청이 오면 THE SYSTEM SHALL 응답한다',
+    kind: 'business',
+    checkKinds: ['test'],
+    rationale: '무결성 시험',
+    contradiction: { verdict: 'none' },
+  },
 };
 
 /**
  * 규범을 쓰는 에이전트 도구 (리터럴 고정, M7-02 #214 · ADR-100 D1 · D4). 규칙 생성 도구는 호출하면 규칙을 바로 반영한다.
  * 규칙 작성 역할에만 있어야 하고 테스트 작성 · 구현 역할(자기 채점 기준을 고치면 안 되는 역할, ADR-100 I2)에는 없어야 한다.
- * 규범 도구가 늘면(M7-09 폐기 · 대체 등) 이 표와 아래 시험을 같이 고친다
+ * 규범 도구가 늘면 이 표와 아래 시험을 같이 고친다. M7-09(#221)가 폐기 · 대체 도구를 더했다(규칙 작성 역할에만, ADR-112)
  */
-const NORM_WRITE_TOOLS: readonly string[] = ['propose_rule'];
+const NORM_WRITE_TOOLS: readonly string[] = ['propose_rule', 'retire_rule', 'supersede_rule'];
 
 /** 규범 엔터티 낱말 (순서와 상관없이 쓰기 동사와 함께 나오면 규범 쓰기) */
 const NORM_ENTITY =
@@ -289,16 +303,15 @@ describe('모든 역할 세션의 도구 목록에 승인 · 잠정 승인 · �
       expect(roleToolNames(role).filter((name) => NORM_WRITE_TOOLS.includes(name))).toEqual([]);
       const root = tempDir();
       let reached = false;
+      const reach = () => {
+        reached = true;
+        return '반영';
+      };
       const executor = new FixedToolExecutor({
         role,
         sessionRoot: root,
         biveHome: tempDir(),
-        hooks: {
-          proposeRule: () => {
-            reached = true;
-            return '반영';
-          },
-        },
+        hooks: { proposeRule: reach, retireRule: reach, supersedeRule: reach },
       });
       for (const name of NORM_WRITE_TOOLS) {
         await expect(
@@ -834,6 +847,53 @@ describe('실행 자동 시작의 코드 경로 (M7-05 #217, ADR-100 C2 · D4, A
   });
 });
 
+describe('규칙 폐기 · 대체와 효력 판정의 코드 경로 (M7-09 #221, ADR-100 D4 · D6 · B⑨, ADR-112, 코드 구조)', () => {
+  const files = () =>
+    sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+  const using = (pattern: RegExp) =>
+    files()
+      .filter((f) => pattern.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+
+  it('폐기 기록 쓰기는 폐기 · 대체 모듈 한 곳이고, 그 함수를 부르는 곳은 규칙 작성 서비스뿐이다: 테스트 작성 · 구현 역할 · 실행 안 세션 · 엔진 · 단계에서 규칙을 폐기할 길이 없다', () => {
+    // 저장소의 폐기 기록에 닿는 곳: 쓰기는 반영 모듈, 읽기는 효력 판정 모듈과 반영 모듈
+    expect(using(/\.ruleRetirements\.record\(/)).toEqual(['norms/agent-rule.ts']);
+    expect(using(/\.ruleRetirements\b/)).toEqual(['norms/agent-rule.ts', 'norms/effective.ts']);
+    expect(using(/\brule_retirements\b/)).toEqual(['norms/effective.ts']);
+    // 폐기 · 대체 함수를 부르는 곳 = 규칙 작성 서비스의 도구 콜백뿐
+    expect(using(/\b(retireAgentRule|supersedeAgentRule)\(/)).toEqual([
+      'rule-writer/rule-writer-service.ts',
+    ]);
+    // 폐기 · 대체 종류의 규범 변경 기록을 쓰는 곳 = 반영 모듈뿐
+    expect(using(/'retired'|'superseded'/)).toEqual(['norms/agent-rule.ts']);
+    // 폐기 · 대체 도구의 콜백을 주입하는 곳 = 규칙 작성 서비스뿐 (실행 엔진의 테스트 작성 · 구현 세션은 주입하지 않는다)
+    expect(using(/\b(retireRule|supersedeRule):/)).toEqual(['rule-writer/rule-writer-service.ts']);
+    for (const { rel, text } of files()) {
+      if (/^(engine|steps|agent|test-writer|implementer|judge|runs)\//.test(rel)) {
+        expect(/norms\/agent-rule\.js'/.test(text), rel).toBe(false);
+      }
+    }
+  });
+
+  it('효력 판정(규범 상태 · 삭제 · 폐기)은 효력 판정 모듈 한 곳이고, 검사 · 병합 재검사 · 승인 단계 자리 · 규범 입력 · 준수 분모 · 규칙 목록 · 엔진의 단계 사이 확인이 그것을 쓴다', () => {
+    expect(using(/normState\s*[!=]==/)).toEqual(['norms/effective.ts']);
+    expect(using(/from '[./]+\/?(?:norms\/)?effective\.js'/)).toEqual([
+      'engine/pipeline-engine.ts',
+      'ipc/rule-handlers.ts',
+      'norms/agent-rule.ts',
+      'norms/norm-input.ts',
+      'runs/run-service.ts',
+      'steps/check.ts',
+      'steps/merge.ts',
+      'verification/summary.ts',
+    ]);
+  });
+});
+
 /** 규범 입력 모듈(`norms/norm-input.ts`)을 가져오는 제품 파일 (src 기준, 정렬). */
 const normInputImporters = (): string[] =>
   sourceFiles(SRC_DIR)
@@ -844,9 +904,9 @@ const normInputImporters = (): string[] =>
 describe('규칙 작성 역할의 기존 규범 입력: 도구 목록 불변 (M7-07 #219 수용 기준 4, ADR-100 K1 · D4 · NFR-02)', () => {
   it('규칙 작성 역할의 도구 목록 · MCP 목록 · 실행기에 파일 · 명령 도구가 없고, 기존 규범은 도구가 아니라 작업 지시로만 들어온다', async () => {
     const fileAndCommand: readonly string[] = [...FILE_TOOL_NAMES, ...COMMAND_TOOL_NAMES];
-    // 리터럴: 규칙 작성 역할의 도구는 규칙 생성 도구 하나뿐 (규범 입력이 도구로 늘지 않았다)
-    expect([...roleToolNames('rule-writer')]).toEqual(['propose_rule']);
-    expect(EXPECTED_ROLE_TOOLS['rule-writer']).toEqual(['propose_rule']);
+    // 리터럴: 규칙 작성 역할의 도구는 규범 도구(규칙 생성 · 폐기 · 대체, M7-09)뿐 (규범 입력이 도구로 늘지 않았다)
+    expect([...roleToolNames('rule-writer')]).toEqual(NORM_WRITE_TOOLS);
+    expect(EXPECTED_ROLE_TOOLS['rule-writer']).toEqual(NORM_WRITE_TOOLS);
     expect(roleToolNames('rule-writer').filter((name) => fileAndCommand.includes(name))).toEqual(
       [],
     );

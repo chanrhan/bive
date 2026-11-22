@@ -1,5 +1,7 @@
 // `rule.*` 조회 처리기 (NRM-02, JDG-02, M1-11, ADR-060).
 // - 규칙 테이블의 규범(승인 · 잠정 승인)만 돌려준다. 승인 전 제안은 `proposals`에만 있으므로 섞이지 않는다 (NRM-04)
+// - `rule.list`는 폐기된 규칙을 빼고 돌려준다(M7-09 #221, ADR-112. 폐기 포함 옵션 · 폐기 표시는 M7-15). `rule.get` ·
+//   `judgment.list`는 폐기된 규칙도 돌려준다(판정 이력은 지우지 않는다)
 // - 규칙마다 최신 판정을 붙인다. 판정 기록이 없으면 미판정 (judgments/latest-judgment.ts)
 // - `judgment.list`: 규칙 상세의 실행 이력. 판정 기록 테이블(`judgments`)의 기록을 최신부터, 실행 표시 ID와 함께 (ADR-073)
 // - 규칙을 만들거나 바꾸는 RPC는 없다. 규칙은 제안 승인으로만 생긴다 (NRM-04, ADR-050)
@@ -12,6 +14,7 @@ import {
   storedLatestJudgments,
   toRuleJudgment,
 } from '../judgments/latest-judgment.js';
+import { unretiredRules } from '../norms/effective.js';
 import { withProjectStore } from './project-store-access.js';
 import { RpcError, type MethodHandlers } from './server.js';
 
@@ -58,7 +61,7 @@ export const createRuleHandlers = ({
   'rule.list': ({ projectId }) =>
     withProjectStore(biveHome, projectId, (store) => {
       const lookup = latestJudgments(store);
-      return { rules: store.rules.list().map((rule) => withJudgment(rule, lookup)) };
+      return { rules: unretiredRules(store).map((rule) => withJudgment(rule, lookup)) };
     }),
   'rule.get': ({ projectId, id }) =>
     withProjectStore(biveHome, projectId, (store) => {

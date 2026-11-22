@@ -1244,7 +1244,7 @@ describe('0017 session_norm_input: 세션이 받은 규범 입력의 기록 (M7-
           )
           .all() as { name: string; sql: string }[];
       const oldTriggers = triggers();
-      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([17]);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 17), { now: fixedNow }).applied).toEqual([17]);
       expect(db.prepare('SELECT * FROM sessions').get()).toEqual({ ...before, norm_input: null });
       // 기존 트리거는 SQL 그대로이고 기록 칸의 불변 트리거 하나만 더해진다
       const after = triggers();
@@ -1273,6 +1273,195 @@ describe('0017 session_norm_input: 세션이 받은 규범 입력의 기록 (M7-
       const schema = schemaOf(db);
       expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
       expect(schemaOf(db)).toEqual(schema);
+    });
+  });
+});
+
+describe('0018 rule_retirements: 규칙 폐기 기록 (M7-09 #221, ADR-100 D5 · D6 · B⑨, ADR-112)', () => {
+  const T = (minute: number) => `2026-11-22T02:${String(minute).padStart(2, '0')}:00.000Z`;
+  const human = '{"kind":"human"}';
+  const agent = '{"kind":"agent","role":"rule-writer"}';
+  const HASH = (n: number) => String(n).padStart(64, '0');
+
+  const seedRequirement = (db: SqliteDatabase): string => {
+    const req = newId();
+    db.prepare(
+      `INSERT INTO requirements (id, display_id, text, author, norm_state, unrulable_reason, created_at,
+       updated_at, updated_by, deleted_at) VALUES (?, 'REQ-001', '본문', ?, 'approved', NULL, ?, ?, ?, NULL)`,
+    ).run(req, human, T(0), T(0), human);
+    return req;
+  };
+  const seedRule = (
+    db: SqliteDatabase,
+    seq: number,
+    row: { parent: string | null; builtin?: boolean; deletedAt?: string },
+  ): string => {
+    const id = newId();
+    db.prepare(
+      `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
+       parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
+       updated_at, deleted_at) VALUES (?, ?, '제목', '진술', 'architecture', '["structure"]', ?, NULL, ?, '[]',
+       NULL, NULL, ?, 'approved', ?, ?, ?)`,
+    ).run(
+      id,
+      `RULE-${String(seq).padStart(3, '0')}`,
+      row.parent,
+      row.builtin === true ? 1 : 0,
+      agent,
+      T(seq),
+      T(seq),
+      row.deletedAt ?? null,
+    );
+    return id;
+  };
+  const seedChange = (db: SqliteDatabase, seq: number, kind: string, ruleId: string): number => {
+    db.prepare(
+      `INSERT INTO norm_changes (seq, at, kind, actor, target_ref, session_id, run_id, reason, detail,
+       prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, NULL, '근거', '{}', ?, ?)`,
+    ).run(
+      seq,
+      T(seq),
+      kind,
+      agent,
+      JSON.stringify({ entity: 'Rule', id: ruleId }),
+      newId(),
+      HASH(seq - 1),
+      HASH(seq),
+    );
+    return seq;
+  };
+  const retire = (
+    db: SqliteDatabase,
+    row: { ruleId: string; seq: number; supersededBy?: string | null },
+  ) =>
+    db
+      .prepare(
+        `INSERT INTO rule_retirements (rule_id, retired_at, superseded_by, norm_change_seq)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(row.ruleId, T(row.seq), row.supersededBy ?? null, row.seq);
+
+  it('0017까지의 규칙 · 판정 행과 rules 표의 정의 · 트리거 · 색인은 그대로이고 폐기 기록 표만 더해진다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 17), { now: fixedNow });
+      const req = seedRequirement(db);
+      seedRule(db, 1, { parent: req });
+      seedRule(db, 2, { parent: null, builtin: true });
+      const rulesSql = () =>
+        db
+          .prepare(
+            "SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'rules' ORDER BY name",
+          )
+          .all();
+      const beforeRows = db.prepare('SELECT * FROM rules ORDER BY rowid').all();
+      const beforeSql = rulesSql();
+      const otherSchema = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([18]);
+      expect(db.prepare('SELECT * FROM rules ORDER BY rowid').all()).toEqual(beforeRows);
+      expect(rulesSql()).toEqual(beforeSql);
+      // 이전 스키마 객체는 모두 그대로이고 새 객체는 폐기 기록 표 · 색인 · 트리거뿐이다
+      const after = schemaOf(db) as { name: string; tbl_name: string }[];
+      expect(after.filter((item) => item.tbl_name !== 'rule_retirements')).toEqual(otherSchema);
+      expect(
+        after
+          .filter((item) => item.tbl_name === 'rule_retirements')
+          .map((item) => item.name)
+          .sort(),
+      ).toEqual([
+        'rule_retirements',
+        'rule_retirements_live_rule',
+        'rule_retirements_live_successor',
+        'rule_retirements_no_delete',
+        'rule_retirements_no_replace',
+        'rule_retirements_no_update',
+        'rule_retirements_norm_change',
+        'rule_retirements_superseded_by',
+      ]);
+      expect(db.prepare('SELECT count(*) AS n FROM rule_retirements').get()).toEqual({ n: 0 });
+      // 다시 실행해도 스키마가 같다
+      const schema = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
+      expect(schemaOf(db)).toEqual(schema);
+    });
+  });
+
+  it('짝 기록이 있는 폐기 · 대체만 받고, 되돌림(수정 · 삭제 · 덮어쓰기) · 내장 구조 규칙 · 삭제된 규칙 · 짝 기록 없는 폐기는 DB가 거부한다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      const req = seedRequirement(db);
+      const a = seedRule(db, 1, { parent: req });
+      const b = seedRule(db, 2, { parent: req });
+      const c = seedRule(db, 3, { parent: req });
+      const builtin = seedRule(db, 4, { parent: null, builtin: true });
+      const deleted = seedRule(db, 5, { parent: req, deletedAt: T(5) });
+      const d = seedRule(db, 6, { parent: req });
+
+      // 짝 기록 없음 · 종류가 다름 · 대상이 다름
+      expect(() => retire(db, { ruleId: a, seq: 1 })).toThrow(
+        /FOREIGN KEY|규범 변경 기록이 없습니다/,
+      );
+      seedChange(db, 1, 'created', a);
+      expect(() => retire(db, { ruleId: a, seq: 1 })).toThrow(/규범 변경 기록이 없습니다/);
+      seedChange(db, 2, 'retired', b);
+      expect(() => retire(db, { ruleId: a, seq: 2 })).toThrow(/규범 변경 기록이 없습니다/);
+      // 폐기만 = retired, 대체 = superseded (종류와 대체 칸이 맞아야 한다)
+      expect(() => retire(db, { ruleId: b, seq: 2, supersededBy: c })).toThrow(
+        /규범 변경 기록이 없습니다/,
+      );
+      retire(db, { ruleId: b, seq: 2 });
+      seedChange(db, 3, 'superseded', a);
+      expect(() => retire(db, { ruleId: a, seq: 3 })).toThrow(/규범 변경 기록이 없습니다/);
+      // 대체한 규칙: 자기 자신 · 없음 · 폐기됨은 거부
+      expect(() => retire(db, { ruleId: a, seq: 3, supersededBy: a })).toThrow(/CHECK/);
+      expect(() => retire(db, { ruleId: a, seq: 3, supersededBy: newId() })).toThrow(
+        /효력이 없습니다|FOREIGN KEY/,
+      );
+      expect(() => retire(db, { ruleId: a, seq: 3, supersededBy: b })).toThrow(/효력이 없습니다/);
+      expect(() => retire(db, { ruleId: a, seq: 3, supersededBy: deleted })).toThrow(
+        /효력이 없습니다/,
+      );
+      retire(db, { ruleId: a, seq: 3, supersededBy: c });
+
+      // 다시 폐기 · 같은 기록 재사용 · REPLACE 덮어쓰기
+      seedChange(db, 4, 'retired', a);
+      expect(() => retire(db, { ruleId: a, seq: 4 })).toThrow(/이미 폐기된 규칙입니다/);
+      seedChange(db, 5, 'retired', d);
+      expect(() => retire(db, { ruleId: d, seq: 2 })).toThrow(/이미 폐기된 규칙입니다|규범 변경/);
+      expect(() =>
+        db
+          .prepare(
+            `INSERT OR REPLACE INTO rule_retirements (rule_id, retired_at, superseded_by, norm_change_seq)
+             VALUES (?, ?, NULL, 4)`,
+          )
+          .run(a, T(9)),
+      ).toThrow(/이미 폐기된 규칙입니다/);
+      // 되돌림: 수정 · 삭제
+      expect(() =>
+        db.prepare('UPDATE rule_retirements SET superseded_by = NULL WHERE rule_id = ?').run(a),
+      ).toThrow(/되돌리거나 바꿀 수 없습니다/);
+      expect(() => db.prepare('DELETE FROM rule_retirements WHERE rule_id = ?').run(b)).toThrow(
+        /되돌리거나 바꿀 수 없습니다/,
+      );
+      // 내장 구조 규칙 · 삭제된 규칙 · 없는 규칙
+      seedChange(db, 6, 'retired', builtin);
+      expect(() => retire(db, { ruleId: builtin, seq: 6 })).toThrow(/내장 구조 규칙/);
+      seedChange(db, 7, 'retired', deleted);
+      expect(() => retire(db, { ruleId: deleted, seq: 7 })).toThrow(/삭제된 규칙/);
+      retire(db, { ruleId: d, seq: 5 });
+
+      expect(
+        db
+          .prepare(
+            'SELECT rule_id, superseded_by, norm_change_seq FROM rule_retirements ORDER BY norm_change_seq',
+          )
+          .all(),
+      ).toEqual([
+        { rule_id: b, superseded_by: null, norm_change_seq: 2 },
+        { rule_id: a, superseded_by: c, norm_change_seq: 3 },
+        { rule_id: d, superseded_by: null, norm_change_seq: 5 },
+      ]);
+      // 규칙 행은 지워지지 않는다
+      expect(db.prepare('SELECT count(*) AS n FROM rules').get()).toEqual({ n: 6 });
     });
   });
 });

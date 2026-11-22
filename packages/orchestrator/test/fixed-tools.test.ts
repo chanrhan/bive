@@ -70,7 +70,11 @@ const FORBIDDEN_TOOLS = [
 
 describe('역할별 도구 세트', () => {
   it('ADR-024 매트릭스와 같다', () => {
-    expect(ROLE_TOOL_NAMES['rule-writer']).toEqual(['propose_rule']);
+    expect(ROLE_TOOL_NAMES['rule-writer']).toEqual([
+      'propose_rule',
+      'retire_rule',
+      'supersede_rule',
+    ]);
     expect(ROLE_TOOL_NAMES['test-writer']).toEqual([...FILE_TOOL_NAMES, 'run_tests']);
     expect(ROLE_TOOL_NAMES.implementer).toEqual([...FILE_TOOL_NAMES, ...COMMAND_TOOL_NAMES]);
     expect(ROLE_TOOL_NAMES.planner).toEqual([]);

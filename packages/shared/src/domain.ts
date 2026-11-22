@@ -499,6 +499,20 @@ export const Rule = z
 export type Rule = z.infer<typeof Rule>;
 
 /**
+ * 규칙 폐기 (NRM-02 · NRM-06, ADR-100 D5 · D6, M7-09 #221, ADR-112). 규칙 1개에 많아야 1건이고 되돌릴 수 없다(DB 트리거).
+ * 기록이 있는 규칙은 효력이 없다(규칙 행 · 판정 이력은 남는다). 저장 칸이 아니라 폐기 기록(`rule_retirements`)에서 읽는다.
+ * - `supersededBy`: 대체한 새 규칙(대체), 폐기만이면 `null`
+ * - `normChangeSeq`: 같은 트랜잭션에서 남긴 규범 변경 기록(`retired` · `superseded`)의 순번
+ */
+export const RuleRetirement = z.strictObject({
+  ruleId: Ulid,
+  retiredAt: Timestamp,
+  supersededBy: Ulid.nullable(),
+  normChangeSeq: z.int().positive(),
+});
+export type RuleRetirement = z.infer<typeof RuleRetirement>;
+
+/**
  * 제안 처리 기록 (NRM-04, ADR-050). 처리 주체(사람)와 시각을 남긴다.
  * - 승인: `appliedRef`(반영된 규범)가 필수. 수정 후 승인이면 `editedPayload`(사람이 고친 본문 전체)
  * - 거절: `rejectReason`이 필수, `appliedRef` · `editedPayload` 없음
@@ -758,9 +772,11 @@ const NormChangeSeqList = z
 
 /**
  * 판단의 주제 (M7-07 #219, ADR-106). `new_rule` = 규칙 작성 역할이 새 규칙을 만들며 효력 있는 기존 규칙과의 모순을
- * 판단함. 이의(M7-11) · 검사 단계의 기존 규칙 실패(M7-12)는 그 이슈가 값을 더한다(넓히기만).
+ * 판단함. `supersede` = 규칙 작성 역할이 기존 규칙을 대체하며 새 규칙이 그 규칙(과 다른 효력 있는 규칙)과 모순이라고 판단함
+ * (M7-09 #221, ADR-112: 결과는 늘 모순이고 대체된 규칙이 `contradicts`의 첫 항목). 이의(M7-11) · 검사 단계의 기존 규칙
+ * 실패(M7-12)는 그 이슈가 값을 더한다(넓히기만).
  */
-export const NormJudgmentSubject = z.enum(['new_rule']);
+export const NormJudgmentSubject = z.enum(['new_rule', 'supersede']);
 export type NormJudgmentSubject = z.infer<typeof NormJudgmentSubject>;
 
 /** 판단 결과. 모순 없음 · 모순 (M7-11의 유지 등은 그 이슈가 더한다). */
@@ -804,15 +820,38 @@ export const NormJudgmentDetail = z
     if (new Set(judgment.contradicts.map((rule) => rule.id)).size !== judgment.contradicts.length) {
       ctx.addIssue({ code: 'custom', message: '대상 규칙이 중복됐습니다', path: ['contradicts'] });
     }
-    if (judgment.subject === 'new_rule' && judgment.createdSeq === undefined) {
+    if (
+      (judgment.subject === 'new_rule' || judgment.subject === 'supersede') &&
+      judgment.createdSeq === undefined
+    ) {
       ctx.addIssue({
         code: 'custom',
         message: '새 규칙의 판단에는 그 규칙의 신규 기록 순번이 필요합니다',
         path: ['createdSeq'],
       });
     }
+    if (judgment.subject === 'supersede' && judgment.verdict !== 'contradiction') {
+      ctx.addIssue({
+        code: 'custom',
+        message: '대체의 판단은 모순입니다 (대체된 규칙과 동시에 만족될 수 없음)',
+        path: ['verdict'],
+      });
+    }
   });
 export type NormJudgmentDetail = z.infer<typeof NormJudgmentDetail>;
+
+/**
+ * 폐기 · 대체 상세 (종류 `retired` · `superseded`, M7-09 #221, ADR-112). 근거 글은 기록의 `reason`, 폐기 직전 규칙 내용은
+ * `before`에 있다.
+ * - `supersededBy`: 대체한 새 규칙 (대체면 필수, 폐기만이면 `null`)
+ * - `createdSeq` · `judgmentSeq`: 대체면 같은 트랜잭션에서 남긴 새 규칙의 신규 · 판단 기록 순번(필수), 폐기만이면 없음
+ */
+export const NormRetirementDetail = z.strictObject({
+  supersededBy: NormJudgmentRuleRef.nullable(),
+  createdSeq: z.int().positive().optional(),
+  judgmentSeq: z.int().positive().optional(),
+});
+export type NormRetirementDetail = z.infer<typeof NormRetirementDetail>;
 
 /**
  * 종류별 상세. 신규는 `after`(만든 규범의 내용)만, 자동 시작은 `causeSeqs`(원인 = 대상 규칙의 신규 기록 순번, 대상 규칙
@@ -830,6 +869,8 @@ export const NormChangeDetail = z.strictObject({
     .optional(),
   /** 판단 (종류 `judgment`에만, M7-07) */
   judgment: NormJudgmentDetail.optional(),
+  /** 폐기 · 대체 (종류 `retired` · `superseded`에만, M7-09) */
+  retirement: NormRetirementDetail.optional(),
 });
 export type NormChangeDetail = z.infer<typeof NormChangeDetail>;
 
@@ -929,6 +970,52 @@ export const NormChangeEntry = z
         message: '판단 기록에는 이전 · 이후 내용이 없습니다',
         path: ['detail'],
       });
+    }
+    // 폐기 · 대체 상세는 폐기 · 대체 기록에만, 그 기록에는 반드시 (M7-09, ADR-112)
+    const retiring = entry.kind === 'retired' || entry.kind === 'superseded';
+    const retirement = entry.detail.retirement;
+    if (retiring !== (retirement !== undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          '폐기 · 대체 상세(retirement)는 폐기 · 대체 기록에만 있고 그 기록에는 반드시 있습니다',
+        path: ['detail', 'retirement'],
+      });
+    }
+    if (retiring) {
+      if (entry.targetRef.entity !== 'Rule') {
+        ctx.addIssue({
+          code: 'custom',
+          message: '폐기 · 대체의 대상은 규칙입니다',
+          path: ['targetRef'],
+        });
+      }
+      if (entry.detail.before === undefined || entry.detail.after !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '폐기 · 대체에는 폐기 직전 내용(before)만 있습니다',
+          path: ['detail'],
+        });
+      }
+    }
+    if (retirement !== undefined) {
+      const superseding = entry.kind === 'superseded';
+      const complete =
+        retirement.supersededBy !== null &&
+        retirement.createdSeq !== undefined &&
+        retirement.judgmentSeq !== undefined;
+      const bare =
+        retirement.supersededBy === null &&
+        retirement.createdSeq === undefined &&
+        retirement.judgmentSeq === undefined;
+      if (superseding ? !complete : !bare) {
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            '대체에는 새 규칙과 그 신규 · 판단 기록 순번이 필요하고, 폐기에는 그 칸이 없습니다',
+          path: ['detail', 'retirement'],
+        });
+      }
     }
   });
 export type NormChangeEntry = z.infer<typeof NormChangeEntry>;

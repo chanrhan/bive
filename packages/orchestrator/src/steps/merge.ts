@@ -7,6 +7,10 @@
 // - 관리자에 검사 제한 시간(`checkTimeoutMs` = 설치 + 판정 제한 + 여유)과 엔진의 중단 신호를 넘긴다(ADR-065: 관리자 기본값 없음).
 //   검사 함수는 관리자의 검사 신호로 설치 · 판정 프로세스를 멈춘다
 // - 병합 성공 → `passed`(`run.mergeCommit`), 실패 → `failed`(사유는 ADR-058 값 그대로), 브랜치 · 워크트리는 엔진이 보존
+// - 병합 직전 대상 규칙 재확인 (ADR-100 A3 · A4, M7-09, ADR-112): 단계를 열기 전에는 엔진이 대상 규칙의 폐기를 보고, 이 실행기는
+//   병합을 부르기 직전(`stage: before_merge`)과 병합 재검사의 판정 뒤(`stage: merge_recheck`)에 다시 본다. 폐기됐으면 병합하지 않고
+//   `failed`(`target_rule_retired`, 폐기된 대상 규칙의 표시 ID). 남는 틈: 관리자의 병합 안(재검사 판정 뒤 기준 브랜치 갱신까지,
+//   재검사가 없으면 병합 시작부터)에 폐기되면 병합된다(ADR-112 한계). 검사 · 재검사의 판정 대상은 효력 있는 규칙이다(폐기된 규칙의 인수 테스트 폴더는 남아 있어도 판정하지 않는다)
 // - 병합 순서 값(ADR-096): 기준 브랜치 갱신을 확인한 뒤(정상 병합 · 재개 복구 모두) 이 실행의 병합 커밋의 전체 조상 수를
 //   한 번 읽어 단계 결과 `mergeOrder`에 남긴다(판정 기준 순서, `verification/summary.ts`). 짧은 제한 시간 안에 못 읽거나
 //   실패하면 `null`(+ `mergeOrderError`)이고 병합 결과 · 단계 상태는 바뀌지 않는다
@@ -20,6 +24,7 @@ import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js'
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import type { MergeCheck } from '../git/worktree-manager.js';
 import { DEFAULT_INSTALL_TIMEOUT_MS } from '../judge/checkout.js';
+import { retiredTargetDisplayIds, TARGET_RULE_RETIRED } from '../norms/effective.js';
 import { approvedRules } from './check.js';
 import {
   createNormGuard,
@@ -231,8 +236,21 @@ export const createMergeExecutor =
       });
     }
 
+    // 병합 직전 대상 규칙 재확인 (ADR-100 A3 · A4, ADR-112): 단계를 열기 전은 엔진이 보고(`#prepare`), 여기서는 병합 재검사가
+    // 도는 동안 폐기됐는지 본다. 폐기됐으면 병합하지 않고 사유를 남긴다
+    const retiredTargets = (): string[] =>
+      context.read((store) => retiredTargetDisplayIds(store, context.run.targetRuleIds));
+    const retiredHalt = (retiredRuleIds: string[], extra: Record<string, unknown> = {}) =>
+      halt(TARGET_RULE_RETIRED, {
+        ...extra,
+        message: '병합 직전에 대상 규칙이 폐기되어 병합하지 않았습니다',
+        retiredRuleIds,
+        headCommit,
+      });
+
     const norms = createNormGuard(context);
     const rules: Rule[] = approvedRules(context);
+    let retiredDuringCheck: string[] = [];
     let integrity: { moment: 'before_judge' | 'after_judge'; mismatches: NormMismatch[] } | null =
       null;
     let recheck: Record<string, unknown> | null = null;
@@ -281,8 +299,12 @@ export const createMergeExecutor =
           commit: merge.mergeCommit,
         }),
       );
+      // 재검사가 도는 동안 대상 규칙이 폐기됐으면 통과여도 병합하지 않는다 (병합 직전, ADR-112)
+      retiredDuringCheck = retiredTargets();
       const passed =
-        judged.result.status === 'completed' && recorded.every((item) => item.status === 'pass');
+        retiredDuringCheck.length === 0 &&
+        judged.result.status === 'completed' &&
+        recorded.every((item) => item.status === 'pass');
       recheck = {
         mergeCommit: merge.mergeCommit,
         ruleIds: judged.ruleIds,
@@ -295,12 +317,16 @@ export const createMergeExecutor =
           ? {}
           : {
               detail:
-                judged.result.status === 'completed'
-                  ? `실패한 규칙: ${recorded
-                      .filter((item) => item.status !== 'pass')
-                      .map((item) => judgedRules.find((rule) => rule.id === item.ruleId)?.displayId)
-                      .join(', ')}`
-                  : `${judged.result.status}: ${judged.result.message ?? ''}`,
+                retiredDuringCheck.length > 0
+                  ? `대상 규칙 폐기: ${retiredDuringCheck.join(', ')}`
+                  : judged.result.status === 'completed'
+                    ? `실패한 규칙: ${recorded
+                        .filter((item) => item.status !== 'pass')
+                        .map(
+                          (item) => judgedRules.find((rule) => rule.id === item.ruleId)?.displayId,
+                        )
+                        .join(', ')}`
+                    : `${judged.result.status}: ${judged.result.message ?? ''}`,
             }),
       };
     };
@@ -310,6 +336,10 @@ export const createMergeExecutor =
       (options.installTimeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS) +
         (options.judgeTimeoutMs ?? DEFAULT_JUDGE_TIMEOUT_MS) +
         MERGE_CHECK_MARGIN_MS;
+    // 병합을 부르기 직전 (실행 브랜치 끝 확인 등 앞의 비동기 동안 폐기됐을 수 있다)
+    const retiredBeforeMerge = retiredTargets();
+    if (retiredBeforeMerge.length > 0)
+      return retiredHalt(retiredBeforeMerge, { stage: 'before_merge' });
     const result = await context.worktrees.merge(context.git, {
       check,
       checkTimeoutMs,
@@ -326,6 +356,14 @@ export const createMergeExecutor =
       return normHalt(tampered.moment, tampered.mismatches, {
         mergeStatus: result.status,
         ...(result.status === 'failed' ? { mergeReason: result.reason } : {}),
+      });
+    }
+    const retiredInCheck = retiredDuringCheck as string[];
+    if (retiredInCheck.length > 0 && result.status !== 'merged') {
+      return retiredHalt(retiredInCheck, {
+        stage: 'merge_recheck',
+        mergeStatus: result.status,
+        ...(checked === null ? {} : { recheck: checked }),
       });
     }
     const inputs = tamperedInputs as { changed: string[]; moment: string | null } | null;

@@ -411,6 +411,16 @@ describe('실제 CLI에 실리는 규칙 작성 작업 지시 (M7-07 #219, ADR-1
         expect(texts.some((text) => text.includes(RULE_WRITER_SYSTEM_PROMPT))).toBe(true);
         const tool = body.tools?.find((entry) => entry.name === sdkToolName('propose_rule'));
         expect((tool?.input_schema as { required?: string[] }).required).toContain('contradiction');
+        // 폐기 · 대체 도구도 실제 CLI의 요청에 그 스키마(대상 · 근거 필수)로 실린다 (M7-09, ADR-112)
+        const required = (name: string) =>
+          (
+            body.tools?.find((entry) => entry.name === sdkToolName(name))?.input_schema as
+              { required?: string[] } | undefined
+          )?.required ?? [];
+        expect(required('retire_rule')).toEqual(expect.arrayContaining(['ruleId', 'grounds']));
+        expect(required('supersede_rule')).toEqual(
+          expect.arrayContaining(['ruleId', 'grounds', 'statement', 'contradiction']),
+        );
       }
     },
     TEST_TIMEOUT_MS,

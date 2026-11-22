@@ -1,7 +1,8 @@
 // 역할 세션의 규범 입력: 지금 효력이 있는 요구사항 · 규칙을 읽기 전용 자료로 작업 지시에 싣는다
 // (ADR-100 K1 · A14 · A15, NFR-02 · NFR-03, M7-07 #219, ADR-106).
 // - 효력 있는 요구사항 = 삭제되지 않고 규범 상태가 효력(`approved`)인 것. 효력 있는 규칙 = 삭제되지 않고 규범 상태가
-//   효력인 것(부모가 해제된 규칙 · 내장 규칙 포함). 검사 단계가 판정하는 규칙(`steps/check.ts`의 `approvedRules`)과 같다
+//   효력이며 폐기되지 않은 것(부모가 해제된 규칙 · 내장 규칙 포함, M7-09). 판정은 `norms/effective.ts` 한 곳이고 검사
+//   단계가 판정하는 규칙(`steps/check.ts`의 `approvedRules`)과 같다
 // - 값(요구사항 본문, 규칙 제목 · 진술, 최근 판정의 인수 테스트 케이스 이름)은 사람 · 에이전트가 쓴 글이라 표시 값
 //   (숨은 글자 표기 · 길이 상한, ADR-089 `displayText`)으로만 싣는다. 표시 값에는 줄바꿈이 남지 않고 값은 언제나 항목 머리말
 //   뒤에 오므로, 자료 블록 안의 글은 줄 첫머리에 홀로 있는 끝 표시 줄을 만들 수 없다(자료가 블록 안에서 틀을 닫지 못한다).
@@ -12,10 +13,11 @@
 // - 수가 상한을 넘으면 A15대로 줄인다: 초점(대상 규칙, 대상 · 그 부모 요구사항)과 같은 부모 요구사항의 규칙을 먼저 넣고,
 //   나머지를 최근 변경 순으로 상한까지 넣는다. 잘린 사실과 빠진 수는 자료 머리말과 요약(`summary`)에 남는다
 // - 저장소를 읽기만 한다. 계약(M3-04)과 대상 블록으로 고르기(M3-29)는 뒤 이슈가 더한다
-import type { Requirement, Rule, SessionNormInput } from '@bive/shared';
+import type { SessionNormInput } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
 import { displayText } from '../text-limit.js';
+import { effectiveRequirements, effectiveRules } from './effective.js';
 
 /** 규범 입력의 상한 (ADR-106). 길이는 표시 값 기준 UTF-16 코드 단위. */
 export const NORM_INPUT_LIMITS = {
@@ -158,17 +160,8 @@ export interface NormInput {
   readonly summary: NormInputSummary;
 }
 
-/** 효력 있는 요구사항 (표시 ID 순). */
-export const effectiveRequirements = (store: ProjectStore): Requirement[] =>
-  store.requirements
-    .list()
-    .filter(
-      (requirement) => requirement.deletedAt === null && requirement.normState === 'approved',
-    );
-
-/** 효력 있는 규칙 (표시 ID 순). 검사 단계의 판정 대상과 같다. */
-export const effectiveRules = (store: ProjectStore): Rule[] =>
-  store.rules.list().filter((rule) => rule.deletedAt === null && rule.normState === 'approved');
+// 효력 판정은 `norms/effective.ts` 한 곳에 있다 (폐기된 규칙은 효력이 없다, M7-09 #221 · ADR-112)
+export { effectiveRequirements, effectiveRules };
 
 /** 표시 ID 비교: 저장소 정렬과 같이 길이 먼저, 그다음 문자열 (`RULE-999` < `RULE-1000`). */
 export const compareDisplayId = (a: string, b: string): number =>

@@ -57,6 +57,7 @@ import { resetRunWorktree } from '../git/worktree-reset.js';
 import { toRpcError, withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import type { RunTracker } from '../lifecycle.js';
+import { retiredTargetDisplayIds, TARGET_RULE_RETIRED } from '../norms/effective.js';
 import {
   type ApprovalStepResult,
   completeStep,
@@ -897,6 +898,26 @@ export class PipelineEngine {
             runStartEntries: basis.runStartEntries,
             autoStartEntries: basis.autoStartEntries,
             mismatch: basis.mismatch,
+          },
+        },
+      };
+    }
+    // 단계 사이에 대상 규칙이 폐기됐으면 다음 단계를 열지 않고 끝낸다 (ADR-100 A3 · A4, ADR-112): 폐기된 규칙의 테스트 작성 ·
+    // 구현 · 병합으로 예산을 쓰지 않고, 폐기 · 대체가 만든 새 실행이 그 자리를 잇는다. 병합 커밋이 기록된 뒤(화면 갱신)에는
+    // 보지 않는다(이미 병합된 실행이다)
+    const retired =
+      run.mergeCommit === null
+        ? this.#store(projectId, (store) => retiredTargetDisplayIds(store, run.targetRuleIds))
+        : [];
+    if (retired.length > 0) {
+      return {
+        halt: {
+          status: 'halt',
+          runStatus: 'failed',
+          reason: TARGET_RULE_RETIRED,
+          exitDetail: {
+            message: '실행 도중 대상 규칙이 폐기되어 다음 단계를 진행하지 않았습니다',
+            retiredRuleIds: retired,
           },
         },
       };

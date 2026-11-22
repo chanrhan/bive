@@ -209,7 +209,7 @@ describe('허용 목록과 다른 init → 세션 중단', () => {
 
     const { violation } = run.error as SessionGuardError;
     expect(violation.kind).toBe('tools_mismatch');
-    expect(violation.missingTools).toEqual(['propose_rule']);
+    expect(violation.missingTools).toEqual(['propose_rule', 'retire_rule', 'supersede_rule']);
     expect(violation.unexpectedTools).toContain('write_file');
     expect(run.manifests[0]).toMatchObject({ role: 'rule-writer', mcpServerCount: 1 });
   });

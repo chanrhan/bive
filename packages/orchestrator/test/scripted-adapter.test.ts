@@ -27,6 +27,7 @@ import { waitFor } from './helpers/process.js';
 const REQUIRED_SCENARIOS = [
   'auto-start',
   'budget-exceeded',
+  'contradiction',
   'extra-mcp',
   'fail-check',
   'false-pass',

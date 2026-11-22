@@ -28,6 +28,8 @@ import {
   JudgmentResult,
   M1_RUN_TYPE,
   MissingSettingPath,
+  NORM_CHANGE_GENESIS_HASH,
+  NormChangeEntry,
   Project,
   ProjectFile,
   Proposal,
@@ -35,6 +37,7 @@ import {
   Requirement,
   RESERVED_ENTITY_NAMES,
   Rule,
+  RuleRetirement,
   Run,
   RUN_STEP_PLANS,
   ScreenId,
@@ -751,6 +754,102 @@ describe('판정', () => {
       }).success,
     ).toBe(true);
     expect(JudgmentResult.safeParse({ ...judgment, quarantineReason: 'x' }).success).toBe(false);
+  });
+});
+
+describe('규칙 폐기 · 대체 기록 (M7-09 #221, ADR-112)', () => {
+  const RULE_A = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+  const RULE_B = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
+  const base = {
+    seq: 3,
+    at: '2026-11-22T00:00:00.000Z',
+    actor: { kind: 'agent', role: 'rule-writer' },
+    targetRef: { entity: 'Rule', id: RULE_A },
+    sessionId: RULE_B,
+    runId: null,
+    reason: '근거',
+    prevHash: NORM_CHANGE_GENESIS_HASH,
+    hash: 'a'.repeat(64),
+  } as const;
+  const supersededBy = { id: RULE_B, displayId: 'RULE-002' };
+  const ok = (entry: Record<string, unknown>) => NormChangeEntry.safeParse(entry).success;
+
+  it('폐기: before · retirement(supersededBy null)만, 대체: 새 규칙과 신규 · 판단 순번이 모두 필요하다', () => {
+    expect(
+      ok({ ...base, kind: 'retired', detail: { before: {}, retirement: { supersededBy: null } } }),
+    ).toBe(true);
+    expect(
+      ok({
+        ...base,
+        kind: 'superseded',
+        detail: { before: {}, retirement: { supersededBy, createdSeq: 1, judgmentSeq: 2 } },
+      }),
+    ).toBe(true);
+    for (const detail of [
+      // 상세 없음 · before 없음 · after 있음
+      { before: {} },
+      { retirement: { supersededBy: null } },
+      { before: {}, after: {}, retirement: { supersededBy: null } },
+      // 폐기인데 대체 칸
+      { before: {}, retirement: { supersededBy, createdSeq: 1, judgmentSeq: 2 } },
+      { before: {}, retirement: { supersededBy: null, createdSeq: 1 } },
+    ]) {
+      expect(ok({ ...base, kind: 'retired', detail }), JSON.stringify(detail)).toBe(false);
+    }
+    for (const retirement of [
+      { supersededBy: null },
+      { supersededBy, createdSeq: 1 },
+      { supersededBy, judgmentSeq: 2 },
+      { supersededBy: null, createdSeq: 1, judgmentSeq: 2 },
+    ]) {
+      expect(ok({ ...base, kind: 'superseded', detail: { before: {}, retirement } })).toBe(false);
+    }
+    // 대상은 규칙만, 다른 종류에는 retirement가 없다
+    expect(
+      ok({
+        ...base,
+        kind: 'retired',
+        targetRef: { entity: 'Requirement', id: RULE_A },
+        detail: { before: {}, retirement: { supersededBy: null } },
+      }),
+    ).toBe(false);
+    expect(
+      ok({ ...base, kind: 'created', detail: { after: {}, retirement: { supersededBy: null } } }),
+    ).toBe(false);
+  });
+
+  it('판단 주제 supersede는 결과가 모순이고 새 규칙의 신규 기록 순번이 필요하다', () => {
+    const judgment = {
+      subject: 'supersede',
+      verdict: 'contradiction',
+      contradicts: [{ id: RULE_A, displayId: 'RULE-001' }],
+      createdSeq: 1,
+      input: { requirements: { total: 1, included: 1 }, rules: { total: 1, included: 1 } },
+    };
+    expect(ok({ ...base, kind: 'judgment', detail: { judgment } })).toBe(true);
+    expect(
+      ok({
+        ...base,
+        kind: 'judgment',
+        detail: { judgment: { ...judgment, verdict: 'no_contradiction', contradicts: [] } },
+      }),
+    ).toBe(false);
+    expect(
+      ok({
+        ...base,
+        kind: 'judgment',
+        detail: { judgment: { ...judgment, createdSeq: undefined } },
+      }),
+    ).toBe(false);
+  });
+
+  it('폐기 기록 행: 대체한 규칙은 ULID 또는 null, 순번은 양의 정수', () => {
+    const row = { ruleId: RULE_A, retiredAt: base.at, supersededBy: null, normChangeSeq: 1 };
+    expect(RuleRetirement.parse(row)).toEqual(row);
+    expect(RuleRetirement.safeParse({ ...row, supersededBy: RULE_B }).success).toBe(true);
+    expect(RuleRetirement.safeParse({ ...row, normChangeSeq: 0 }).success).toBe(false);
+    expect(RuleRetirement.safeParse({ ...row, supersededBy: 'x' }).success).toBe(false);
+    expect(RuleRetirement.safeParse({ ...row, extra: 1 }).success).toBe(false);
   });
 });
 

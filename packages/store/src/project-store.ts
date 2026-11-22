@@ -18,6 +18,7 @@ import { ProjectRepository } from './repositories/project-repository.js';
 import { ProposalRepository } from './repositories/proposal-repository.js';
 import { RequirementRepository } from './repositories/requirement-repository.js';
 import { RuleRepository } from './repositories/rule-repository.js';
+import { RuleRetirementRepository } from './repositories/rule-retirement-repository.js';
 import { RuleWriterRequestRepository } from './repositories/rule-writer-request-repository.js';
 import { RunRepository } from './repositories/run-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
@@ -65,6 +66,11 @@ export class ProjectStore {
   readonly normChanges: NormChangeRepository;
   /** 실행 자동 시작 생략 기록 (규칙 작성 세션 1개에 1건, ADR-107). 시작한 실행은 `normChanges`의 자동 시작 항목이다. */
   readonly autoStartSkips: AutoStartSkipRepository;
+  /**
+   * 규칙 폐기 기록 (ADR-100 D5 · D6 · B⑨, M7-09 #221, ADR-112). 행이 있는 규칙은 효력이 없다. 추가 전용이고 되돌릴 수 없다.
+   * 쓰기는 규범 변경 기록과 같은 트랜잭션에서만 한다(오케스트레이터의 폐기 · 대체 모듈).
+   */
+  readonly ruleRetirements: RuleRetirementRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -87,6 +93,7 @@ export class ProjectStore {
     this.confirmations = new ConfirmationRepository(db);
     this.normChanges = new NormChangeRepository(db);
     this.autoStartSkips = new AutoStartSkipRepository(db);
+    this.ruleRetirements = new RuleRetirementRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

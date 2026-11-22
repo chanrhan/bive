@@ -1,7 +1,7 @@
 // 실행 생성 · 승인 단계 판정 · 단계 종료 저장 (RUN-01, RUN-02, NFR-07, NFR-01, ADR-027 · ADR-057 · ADR-061).
 // - 생성(`createRun`)은 실행 시작 확인이다. 사람만 하고(-32020), 설정 검사(-32010)를 통과해야 하며,
 //   실행 저장과 승인 기록 `run_start` 추가를 트랜잭션 1개로 한다. 하나라도 실패하면 아무것도 남지 않는다
-// - 승인 단계(`evaluateApprovalStep`)는 대상 규칙이 전부 효력 상태(`normState = approved`, 삭제 안 됨)인지만 본다
+// - 승인 단계(`evaluateApprovalStep`)는 대상 규칙이 전부 효력 상태(`normState = approved`, 삭제 · 폐기 안 됨)인지만 본다
 //   (ADR-100 A3: 승인 단계 자리 = 효력 확인). 아니면 이 함수는 아무것도 저장하지 않고 `approved = false`를 돌려주며,
 //   엔진이 그 자리에서 실행을 끝낸다(`runEnding`, 사람을 기다리지 않는다, ADR-107)
 // - 실행 저장 모양(`saveNewRun`)은 사람의 [실행](`createRun`, 승인 기록 `run_start`)과 자동 시작(`runs/auto-start.ts`,
@@ -46,6 +46,7 @@ import {
 } from '@bive/store';
 
 import { runEnding } from '../engine/run-ending.js';
+import { ineffectiveRuleIds } from '../norms/effective.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import { type AutoStartBlock, autoStartBlock } from '../settings/auto-start-gate.js';
@@ -108,12 +109,12 @@ const slotHolders = (store: ProjectStore, exceptRunId: string | null): Run[] =>
     (run) => run.id !== exceptRunId,
   );
 
-/** 대상 규칙 중 승인 상태가 아닌 것 (없음 · 삭제됨 · 승인 아님), 요청 순서. 승인 단계와 실행 대기 시작이 같은 기준을 쓴다. */
+/**
+ * 대상 규칙 중 효력이 없는 것 (없음 · 삭제됨 · 효력 아님 · 폐기됨, `norms/effective.ts`), 요청 순서. 승인 단계와 실행 대기 시작이
+ * 같은 기준을 쓴다(폐기된 규칙도 효력 없음, M7-09 · ADR-112).
+ */
 const unapprovedTargets = (store: ProjectStore, run: Run): Ulid[] =>
-  run.targetRuleIds.filter((ruleId) => {
-    const rule = store.rules.get(ruleId);
-    return rule === null || rule.deletedAt !== null || rule.normState !== 'approved';
-  });
+  ineffectiveRuleIds(store, run.targetRuleIds);
 
 /**
  * 자동 시작 실행이 지금 시작하면 안 되는 이유 (ADR-111). 사람이 시작한 실행은 늘 `null`이다(사람의 [실행]은 하루 한도가 비어도
