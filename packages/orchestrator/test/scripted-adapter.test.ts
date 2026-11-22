@@ -25,6 +25,7 @@ import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { waitFor } from './helpers/process.js';
 
 const REQUIRED_SCENARIOS = [
+  'auto-start',
   'budget-exceeded',
   'extra-mcp',
   'fail-check',

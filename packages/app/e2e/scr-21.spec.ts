@@ -692,6 +692,7 @@ test.describe('프로젝트 하루 한도 (M7-04 #216 수용 기준 4, ADR-100 B
       errorTruncated: false,
       requestedAt: '2026-11-21T00:00:00.000Z',
       endedAt: '2026-11-21T00:00:00.000Z',
+      autoStart: null,
     };
     await mockBive(page, {
       responses: {

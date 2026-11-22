@@ -8,6 +8,7 @@ import { observeStoreState, readDigests, trustStoreState } from './norm-snapshot
 import { PROJECT_MIGRATIONS } from './migrations/project/index.js';
 import { bivePaths, assertProjectId } from './paths.js';
 import { ApprovalLogRepository } from './repositories/approval-log-repository.js';
+import { AutoStartSkipRepository } from './repositories/auto-start-skip-repository.js';
 import { CodeOpenRepository } from './repositories/code-open-repository.js';
 import { ConfirmationRepository } from './repositories/confirmation-repository.js';
 import { DisplayIdSequences } from './repositories/display-id-sequences.js';
@@ -62,6 +63,8 @@ export class ProjectStore {
    * (사람 행동은 `approvalLog`).
    */
   readonly normChanges: NormChangeRepository;
+  /** 실행 자동 시작 생략 기록 (규칙 작성 세션 1개에 1건, ADR-107). 시작한 실행은 `normChanges`의 자동 시작 항목이다. */
+  readonly autoStartSkips: AutoStartSkipRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -83,6 +86,7 @@ export class ProjectStore {
     this.ruleWriterRequests = new RuleWriterRequestRepository(db);
     this.confirmations = new ConfirmationRepository(db);
     this.normChanges = new NormChangeRepository(db);
+    this.autoStartSkips = new AutoStartSkipRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

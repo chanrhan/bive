@@ -1,0 +1,204 @@
+// 실행 자동 시작 (RUN-01 · RUN-02 · NFR-07, ADR-100 D1 · B⑤ · B⑥ · A2 · A12 · C2, M7-05 #217, ADR-107).
+// - 규칙 작성 세션이 규칙을 만들고 정상 종료하면, 오케스트레이터가 세션이 끝난 뒤 그 세션이 만든 규칙들을 대상으로 실행 1개를
+//   사람 확인 없이 만든다. 에이전트 세션에는 실행을 만드는 도구가 없다: 이 모듈은 규칙 작성 서비스의 세션 종료 알림을
+//   받는 오케스트레이터 배선(`orchestrator.ts`)만 가져온다
+// - 실행 저장(`saveNewRun`, 사람의 [실행]과 같은 모양 `waiting_approval`)과 규범 변경 기록 자동 시작 항목 1건(주체
+//   오케스트레이터, 원인 = 그 규칙들의 신규 기록 순번, 실행 ID)을 트랜잭션 1개로 남긴다. 승인 기록에는 쓰지 않는다(C2: 사람 행동만)
+// - 저장 뒤 엔진의 `onRunCreated`를 부른다: 승인 단계(효력 확인) → 프로젝트에 자리가 없으면 실행 대기(B⑥, ADR-105)
+// - 만들지 않는 경우: 세션이 규칙을 하나도 만들지 못함 · 정상 종료가 아님(규칙 작성 실패 · 한도 초과 · 가드 위반 · 중단),
+//   하루 한도가 비어 있음(B⑤) · 오늘 지출이 하루 한도에 이름(A12) · 실행이 쓰는 역할의 설정 미비. 뒤의 셋은 생략 기록
+//   (`auto_start_skips`)에 남겨 요구사항 상세의 규칙 작성 상태 줄이 보인다
+// - 멱등: 같은 원인 순번을 쓰는 자동 시작 항목이 이미 있으면(또는 그 세션의 생략 기록이 있으면) 아무것도 만들지 않는다.
+//   검사와 저장이 같은 쓰기 트랜잭션이라 두 번 불려도 실행은 1개다. 엔진의 시작 근거 대조도 원인 순번의 재사용을 거부한다
+// - 멈춤 장치는 하루 예산뿐이다(ADR-100 D8 · B⑤). 실행은 규칙 작성 세션을 다시 일으키지 않으므로(규칙 작성은 사람의 요구사항
+//   저장 · 편집에서만 시작) 자동 시작이 자동 시작을 부르는 연쇄는 없다
+import {
+  type AutoStartSkipReason,
+  createUlidGenerator,
+  type MissingSetting,
+  type NormChangeEntry,
+  type SessionEndReason,
+  type Ulid,
+} from '@bive/shared';
+import type { ProjectStore, RunDetail } from '@bive/store';
+
+import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
+import { dailyBudgetReached, projectDailyBudget } from '../settings/project-budget.js';
+import { validateSettingsForAutoStart } from '../settings/settings-service.js';
+import { saveNewRun } from './run-service.js';
+
+/** 자동 시작을 부르는 규칙 작성 역할 (그 역할이 만든 신규 기록만 원인이 된다). */
+const RULE_WRITER_ROLE = 'rule-writer';
+
+/** 자동 시작 항목의 사유 (주체가 오케스트레이터라 필수는 아니지만 기록을 읽는 사람을 위해 남긴다). */
+export const AUTO_START_REASON = '규칙 작성 세션이 만든 규칙의 실행 자동 시작';
+
+export type AutoStartOutcome =
+  /** 실행을 만들고 자동 시작 항목을 남겼다 */
+  | { readonly status: 'started'; readonly detail: RunDetail; readonly normChange: NormChangeEntry }
+  /** 만들지 않고 생략 기록을 남겼다 */
+  | {
+      readonly status: 'skipped';
+      readonly reason: AutoStartSkipReason;
+      readonly missing: MissingSetting[];
+    }
+  /** 세션이 만든 규칙이 없다 (기록 없음) */
+  | { readonly status: 'no_rules' }
+  /** 같은 원인으로 이미 실행을 만들었거나 생략했다 (기록 없음) */
+  | { readonly status: 'duplicate'; readonly runId: Ulid | null };
+
+export interface AutoStartClock {
+  readonly now: () => number;
+  readonly newId: () => Ulid;
+}
+
+/** 세션이 만든 규칙의 신규 기록 (만든 순서 = 순번 순). */
+const creationsOf = (changes: readonly NormChangeEntry[], sessionId: string): NormChangeEntry[] =>
+  changes.filter(
+    (entry) =>
+      entry.kind === 'created' &&
+      entry.sessionId === sessionId &&
+      entry.actor.kind === 'agent' &&
+      entry.actor.role === RULE_WRITER_ROLE &&
+      entry.targetRef.entity === 'Rule',
+  );
+
+/**
+ * 열린 저장소에서 규칙 작성 세션 `sessionId`가 만든 규칙들로 실행 1개를 자동 시작한다 (쓰기 트랜잭션 1개).
+ * @throws {NotFoundError} 프로젝트 · 대상 규칙이 없음 (아무것도 남지 않는다)
+ * @throws {ConflictError} 대상 규칙이 삭제됨 (아무것도 남지 않는다)
+ */
+export const autoStartRun = (
+  store: ProjectStore,
+  input: { readonly sessionId: Ulid },
+  clock: AutoStartClock,
+): AutoStartOutcome =>
+  store.transaction(() => {
+    const changes = store.normChanges.list();
+    const causes = creationsOf(changes, input.sessionId);
+    if (causes.length === 0) return { status: 'no_rules' };
+    const causeSeqs = causes.map((entry) => entry.seq);
+    const existing = changes.find(
+      (entry) =>
+        entry.kind === 'auto_start' &&
+        (entry.detail.causeSeqs ?? []).some((seq) => causeSeqs.includes(seq)),
+    );
+    if (existing !== undefined) return { status: 'duplicate', runId: existing.targetRef.id };
+    if (store.autoStartSkips.get(input.sessionId) !== null) {
+      return { status: 'duplicate', runId: null };
+    }
+    const now = clock.now();
+    const at = new Date(now).toISOString();
+    const skip = (reason: AutoStartSkipReason, missing: MissingSetting[]): AutoStartOutcome => {
+      store.autoStartSkips.record({ sessionId: input.sessionId, reason, missing, skippedAt: at });
+      return { status: 'skipped', reason, missing };
+    };
+    const settings = store.settings.get();
+    // 하루 한도가 비어 있으면 자동 시작을 하지 않는다(B⑤). 사람이 한도를 비운 것은 자동 시작을 끈 것이라 설정 미비보다 먼저 본다
+    const check = validateSettingsForAutoStart(settings);
+    if (!check.ok) {
+      return check.dailyBudgetUnset
+        ? skip('project_daily_budget_unset', [])
+        : skip('settings_incomplete', check.missing);
+    }
+    // 오늘 지출이 하루 한도에 이르렀으면 실행을 만들지 않는다(A12, ADR-104: 실행 생성 뒤 첫 세션에서 막는 것과 다르다)
+    if (dailyBudgetReached(projectDailyBudget(store, settings, now))) {
+      return skip('project_daily_budget_exceeded', []);
+    }
+    const runId = clock.newId();
+    const ruleIds = causes.map((entry) => entry.targetRef.id);
+    const detail = saveNewRun(
+      store,
+      settings,
+      { runId, ruleIds, startedBy: { kind: 'orchestrator', causeSeqs } },
+      at,
+      clock.newId,
+    );
+    const normChange = store.normChanges.append({
+      at,
+      kind: 'auto_start',
+      actor: { kind: 'orchestrator' },
+      targetRef: { entity: 'Run', id: runId },
+      sessionId: null,
+      runId,
+      reason: AUTO_START_REASON,
+      detail: { causeSeqs, ruleIds: [...detail.run.targetRuleIds] },
+    });
+    return { status: 'started', detail, normChange };
+  });
+
+/** 실행 생성 뒤 엔진이 할 일 (`PipelineEngine.onRunCreated`: 승인 단계 판정 → 실행 · 실행 대기). */
+export interface AutoStartEngine {
+  onRunCreated(projectId: string, runId: string): void;
+}
+
+export interface AutoStarterOptions {
+  /** `$BIVE_HOME` 절대 경로 */
+  readonly biveHome: string;
+  readonly engine: AutoStartEngine;
+  /** 시계 (ms, 기본 `Date.now`) */
+  readonly now?: () => number;
+  /** 기록 한 줄 (기본: 버림) */
+  readonly log?: (line: string) => void;
+}
+
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+/** 규칙 작성 세션 종료 알림을 받아 실행을 자동 시작하는 창구 (오케스트레이터 배선만 쓴다). 던지지 않는다. */
+export class AutoStarter {
+  readonly #biveHome: string;
+  readonly #engine: AutoStartEngine;
+  readonly #clock: AutoStartClock;
+  readonly #log: (line: string) => void;
+
+  constructor({ biveHome, engine, now = Date.now, log }: AutoStarterOptions) {
+    this.#biveHome = biveHome;
+    this.#engine = engine;
+    this.#clock = { now, newId: createUlidGenerator(now) };
+    this.#log = (line) => {
+      try {
+        log?.(line);
+      } catch {
+        // 기록 실패는 무시한다
+      }
+    };
+  }
+
+  /**
+   * 규칙 작성 세션이 끝나고 세션 기록(비용)이 저장된 뒤 부른다. 정상 종료가 아니면 아무것도 하지 않는다(`null`).
+   * 저장 실패 · 대상 규칙 없음 같은 예외는 로그만 남기고 `null`.
+   */
+  afterRuleWriterSession(
+    projectId: string,
+    sessionId: Ulid,
+    endReason: SessionEndReason,
+  ): AutoStartOutcome | null {
+    if (endReason !== 'success') return null;
+    let outcome: AutoStartOutcome;
+    try {
+      outcome = withRegisteredProjectStore(this.#biveHome, projectId, (store) =>
+        autoStartRun(store, { sessionId }, this.#clock),
+      );
+    } catch (error) {
+      this.#log(`실행 자동 시작 실패 (세션 ${sessionId}): ${errorMessage(error)}`);
+      return null;
+    }
+    switch (outcome.status) {
+      case 'started':
+        this.#log(
+          `실행 자동 시작 (${outcome.detail.run.displayId}, 규칙 ${String(outcome.detail.run.targetRuleIds.length)}건, ` +
+            `규범 변경 기록 ${String(outcome.normChange.seq)})`,
+        );
+        this.#engine.onRunCreated(projectId, outcome.detail.run.id);
+        break;
+      case 'skipped':
+        this.#log(`실행 자동 시작 생략 (세션 ${sessionId}, ${outcome.reason})`);
+        break;
+      case 'duplicate':
+      case 'no_rules':
+        break;
+    }
+    return outcome;
+  }
+}

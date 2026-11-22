@@ -1,6 +1,12 @@
 // 파이프라인 e2e: 정상 완주 (M1-21, architecture.md 8장 "정상 완주", RUN-02 · RUN-08, roadmap M1 완료 기준 흐름 3~7).
-// 요구사항 저장 → rule-writer가 규칙 2개를 바로 반영(승인 없음, M7-02) → 사람의 [실행](첫째 규칙) → 테스트 작성 → Red 확인 →
-// 구현 → 검사 → 병합.
+// 요구사항 저장 → rule-writer가 규칙을 바로 반영(승인 없음, M7-02) → 세션이 끝나면 오케스트레이터가 실행을 자동 시작(실행 시작
+// 확인 없음, M7-05 #217 · ADR-100 D1 · B⑤ · ADR-107) → 승인 단계(효력 확인, 사람 대기 없음) → 테스트 작성 → Red 확인 → 구현 →
+// 검사 → 병합. 사람의 조작은 설정 저장과 요구사항 저장뿐이다.
+// 자동 시작은 하루 한도가 채워져 있어야 한다(비어 있으면 생략, B⑤). 시나리오 `auto-start`는 happy-path와 같고 규칙이 1개다:
+// 자동 시작 실행은 세션이 만든 규칙 전부가 대상이다. happy-path 시나리오(규칙 2개)로 자동 시작하면 테스트 작성 세션이 첫 규칙
+// 폴더에만 써서 테스트 작성 3회가 모두 `missing_tests: ["RULE-002"]`로 끝나 `test_retry_limit`이 되고, 두 규칙 모두 테스트를
+// 써도 둘째 규칙은 이미 통과해 Red 확인 `not_red` 뒤 재시도 상한으로 끝난다 (ADR-107, #242).
+// 사람의 [실행](run.create)이 그대로 실행을 만드는 것은 하루 한도를 비워 둔 다른 파이프라인 e2e 전부가 본다(harness.saveRequirement).
 // 판정은 실제 판정 러너(커밋의 깨끗한 체크아웃 · 설치 · next build · next start · vitest)로만 정한다.
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -9,40 +15,60 @@ import {
   branchExists,
   cleanupPipeline,
   git,
+  human,
   mainTip,
   mergeCount,
   parentsOf,
   readStore,
   ROUTE,
   RUN_BRANCH,
-  runToEnd,
   saveRequirement,
   startPipeline,
+  waitForRunEnd,
 } from './harness.js';
 
 afterEach(cleanupPipeline);
 
-describe('happy-path: 요구사항 저장부터 merged까지', () => {
-  it('판정 pass, main에 merge commit 1개, 병합 커밋에 구현과 인수 테스트가 들어 있다', async () => {
-    const e = await startPipeline('happy-path');
+describe('happy-path: 요구사항 저장부터 merged까지 (승인 · 실행 시작 확인 없음)', () => {
+  it('규칙 작성 뒤 실행이 자동 시작되어 판정 pass, main에 merge commit 1개, 병합 커밋에 구현과 인수 테스트가 들어 있다', async () => {
+    const e = await startPipeline('auto-start');
+    // 하루 한도를 채운다 (비어 있으면 자동 시작 없음, ADR-100 B⑤)
+    await e.client.call('settings.update', {
+      projectId: e.projectId,
+      patch: { dailyBudgetUsd: 10 },
+      author: human,
+    });
     const base = mainTip(e);
 
-    const { requirement, rules } = await saveRequirement(e, '헬스 체크 응답에 서버 시각 포함', 2);
-    // 규칙 2개가 사람의 승인 없이 바로 효력을 갖는다(M7-02, ADR-100 D1). 승인 · 거절 호출은 없다
+    const { requirement, rules, status, autoStartedRunId } = await saveRequirement(
+      e,
+      '헬스 체크 응답에 서버 시각 포함',
+      1,
+      { autoStart: 'started' },
+    );
+    // 규칙이 사람의 승인 없이 바로 효력을 갖는다(M7-02, ADR-100 D1). 승인 · 거절 호출은 없다
     const [rule] = rules;
-    if (rule === undefined) throw new Error('규칙 없음');
+    if (rule === undefined || autoStartedRunId === null) throw new Error('규칙 · 실행 없음');
     expect(rules.map((r) => [r.parentRequirementId, r.normState, r.confirmation.state])).toEqual([
       [requirement.id, 'approved', 'unconfirmed'],
-      [requirement.id, 'approved', 'unconfirmed'],
     ]);
+    expect(status.autoStart).toEqual({
+      state: 'started',
+      runId: autoStartedRunId,
+      runDisplayId: 'EXE-001',
+    });
 
-    const done = await runToEnd(e, [rule.id], 300_000);
+    // run.create를 부르지 않는다: 자동 시작된 실행이 끝날 때까지 기다리기만 한다
+    const done = await waitForRunEnd(e, autoStartedRunId, 300_000);
     expect(done.run).toMatchObject({
+      displayId: 'EXE-001',
       status: 'merged',
       failureReason: null,
       regressionCount: 0,
       branch: RUN_BRANCH,
       baseCommit: base,
+      targetRuleIds: [rule.id],
+      startedBy: { kind: 'orchestrator', causeSeqs: [1] },
     });
     expect(attempts(done)).toEqual([
       'approval#1:passed',
@@ -54,6 +80,7 @@ describe('happy-path: 요구사항 저장부터 merged까지', () => {
       'merge#1:passed',
       'screen_update#1:passed',
     ]);
+    expect((await e.client.call('run.list', { projectId: e.projectId })).runs).toHaveLength(1);
 
     // 판정 pass: 구현 판정 · 검사 판정 모두 대상 규칙 pass, 최신 판정은 검사한 커밋
     const headCommit = String(done.run.headCommit);
@@ -79,28 +106,33 @@ describe('happy-path: 요구사항 저장부터 merged까지', () => {
     // 실행 브랜치는 병합 뒤에도 남는다 (ADR-058)
     expect(branchExists(e, RUN_BRANCH)).toBe(true);
 
-    // 사람 기록(승인 기록)에는 사람의 [실행] 1건뿐이고, 에이전트의 규칙 반영은 규범 변경 기록에만 있다 (ADR-100 C2)
+    // 사람 기록(승인 기록)에는 아무것도 없다: 승인도 실행 시작 확인도 없었다 (ADR-100 C2)
     const { entries: approvals } = await e.client.call('approvalLog.list', {
       projectId: e.projectId,
     });
-    expect(approvals.map((entry) => [entry.action, entry.actor.kind])).toEqual([
-      ['run_start', 'human'],
-    ]);
+    expect(approvals).toEqual([]);
+    // 에이전트의 규칙 반영과 오케스트레이터의 자동 시작은 규범 변경 기록에만 있다
     const changes = await e.client.call('normChange.list', { projectId: e.projectId });
     expect(changes.chain.valid).toBe(true);
-    // 규칙마다 신규 · 모순 판단(모순 없음) 1쌍 (M7-07, ADR-106)
+    // 규칙마다 신규 · 모순 판단(모순 없음) 1쌍(M7-07, ADR-106), 그 뒤 오케스트레이터의 자동 시작 1건. 원인은 신규 기록의
+    // 순번이다(판단 기록이 아니다, ADR-107)
     expect(
       changes.entries.map((entry) => [
+        entry.seq,
         entry.kind,
+        entry.actor.kind,
         entry.targetRef.id,
         entry.detail.judgment?.verdict,
       ]),
-    ).toEqual(
-      rules.flatMap((r) => [
-        ['created', r.id, undefined],
-        ['judgment', r.id, 'no_contradiction'],
-      ]),
-    );
+    ).toEqual([
+      [1, 'created', 'agent', rule.id, undefined],
+      [2, 'judgment', 'agent', rule.id, 'no_contradiction'],
+      [3, 'auto_start', 'orchestrator', done.run.id, undefined],
+    ]);
+    expect(changes.entries[2]).toMatchObject({
+      runId: done.run.id,
+      detail: { causeSeqs: [1], ruleIds: [rule.id] },
+    });
     expect((await e.client.call('proposal.list', { projectId: e.projectId })).proposals).toEqual(
       [],
     );

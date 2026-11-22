@@ -17,6 +17,8 @@
 // - 규범 입력(M7-07 #219, ADR-100 K1 · A15, ADR-106): 세션을 열기 직전에 효력 있는 요구사항 · 규칙을 읽어 작업 지시에 읽기 전용
 //   자료로 싣는다(도구가 아니라 프롬프트로만). 받은 수 · 잘린 사실은 세션 기록(`normInput`)과 로그에 남긴다. 규칙 생성마다 받는
 //   모순 판단은 반영 모듈이 같은 트랜잭션에서 규범 변경 기록(판단)에 남긴다
+// - 세션 행이 있는 세션이 끝나면 종료 기록 저장 뒤 `onSessionEnded`를 부른다. 오케스트레이터가 이것으로 실행을 자동 시작한다
+//   (M7-05 #217, ADR-107). 세션 안에서는 실행을 만들 수 없다(규칙 작성 역할의 도구는 규칙 생성 하나)
 // - 다시 시도(`retry`): 사람이 요구사항을 직접 편집해 저장했을 때, 가장 최근 시도가 생략 · 실패(`success` 아닌 종료)이고
 //   그 요구사항에서 규칙 작성 역할이 만든 규칙(이 변경 전의 규칙 자동 생성 제안 포함)이 없으면 새 시도를 띄운다. 진행 중 · 대기 중이거나 성공한 요구사항은 띄우지 않는다 (ADR-099)
 import { mkdirSync, rmSync } from 'node:fs';
@@ -79,6 +81,16 @@ export type RuleWriterSkipReason = StoredSkipReason | 'duplicate';
 
 /** 요구사항 하나의 시도 기록이 저장된 뒤 부른다 (`event.ruleWriter.changed`). 던지지 않아야 한다. */
 export type RuleWriterChangeListener = (projectId: string, requirementId: string) => void;
+
+/**
+ * 세션 행이 있는 세션이 끝나 종료 기록(비용 포함)을 저장한 뒤, 그 끝남을 알리기 전에 부른다 (오케스트레이터의 실행 자동 시작,
+ * M7-05 #217, ADR-107). 세션 밖의 일이므로 세션 도구가 아니다. 던져도 세션 기록 · 알림은 그대로 간다.
+ */
+export type RuleWriterSessionEndListener = (
+  projectId: string,
+  sessionId: string,
+  endReason: SessionEndReason,
+) => void;
 
 export type RuleWriterSessionStatus = 'skipped' | 'queued' | 'running' | 'ended';
 
@@ -163,6 +175,8 @@ export interface RuleWriterServiceOptions {
   readonly closeTimeoutMs?: number;
   /** 시도 기록이 저장된 뒤 (기본: 알리지 않음) */
   readonly onChanged?: RuleWriterChangeListener;
+  /** 세션이 끝나 종료 기록을 저장한 뒤 (기본: 아무것도 하지 않음) */
+  readonly onSessionEnded?: RuleWriterSessionEndListener;
 }
 
 const DEFAULT_CLOSE_TIMEOUT_MS = 5000;
@@ -189,6 +203,7 @@ export class RuleWriterService implements RuleWriterLauncher {
   readonly #persisted = new Set<string>();
   readonly #closeTimeoutMs: number;
   readonly #onChanged: RuleWriterChangeListener | undefined;
+  readonly #onSessionEnded: RuleWriterSessionEndListener | undefined;
   /** 모든 기록 (생략 포함, 만든 순서) */
   readonly #records: RuleWriterSessionRecord[] = [];
   /** 세션을 띄운(대기열에 넣은) 요구사항 → 기록 */
@@ -217,6 +232,7 @@ export class RuleWriterService implements RuleWriterLauncher {
     };
     this.#closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
     this.#onChanged = options.onChanged;
+    this.#onSessionEnded = options.onSessionEnded;
   }
 
   /** 기록 사본 (만든 순서). */
@@ -786,6 +802,9 @@ export class RuleWriterService implements RuleWriterLauncher {
           endedAt,
         }),
       );
+      // 세션 밖의 후속(실행 자동 시작)은 종료 기록 저장 뒤 · 끝남을 알리기 전에 한다: 알림을 받고 상태를 다시 읽는 화면이
+      // 자동 시작 결과(생략 기록)까지 함께 본다
+      this.#afterSession(record, endReason);
       this.#notify(record);
     } else {
       // 세션 행을 만들기 전에 끝났다(종료 중 · 준비 실패): 시도 기록에 생략으로 남긴다
@@ -798,6 +817,16 @@ export class RuleWriterService implements RuleWriterLauncher {
         `턴 ${record.result === null ? '없음' : String(record.result.num_turns)}` +
         `${detail === null ? '' : `, ${detail}`})`,
     );
+  }
+
+  #afterSession(record: RuleWriterSessionRecord, endReason: SessionEndReason): void {
+    try {
+      this.#onSessionEnded?.(record.projectId, record.id, endReason);
+    } catch (error) {
+      this.#log(
+        `규칙 작성 세션 후속 처리 실패 (${record.requirementDisplayId}): ${errorMessage(error)}`,
+      );
+    }
   }
 
   /**

@@ -57,10 +57,11 @@ export const TERMINAL_RUN_STATUSES = [
  * 실행 상태 전이 (architecture.md 4장 상태 기계, ADR-061). 키 상태에서 갈 수 있는 상태 목록이고,
  * 종료 상태는 빈 목록이다. 생성 직후 상태는 항상 `waiting_approval`(실행 시작 확인 → 승인 단계). 승인 단계를 통과할 때
  * 프로젝트에 자리가 없으면 `queued`, 자리가 나면 생성 순으로 `running`이다. 시작 때 대상 규칙을 다시 보아 효력이 없으면
- * `failed`(ADR-105). 중단된 실행은 사람의 재개가 복구 불가 사유로 실패하면 그 자리에서 끝난다: 병합 커밋이 기록됐으면 `merged`, 아니면 `failed`(`runEnding`, ADR-105).
+ * `failed`(ADR-105). 승인 단계는 사람을 기다리지 않는다: 대상 규칙이 하나라도 효력이 없으면 그 자리에서 `failed`(ADR-107).
+ * 중단된 실행은 사람의 재개가 복구 불가 사유로 실패하면 그 자리에서 끝난다: 병합 커밋이 기록됐으면 `merged`, 아니면 `failed`(`runEnding`, ADR-105).
  */
 export const RUN_STATUS_TRANSITIONS = {
-  waiting_approval: ['running', 'queued'],
+  waiting_approval: ['running', 'queued', 'failed'],
   queued: ['running', 'failed'],
   running: ['merged', 'failed', 'budget_exceeded', 'interrupted'],
   interrupted: ['running', 'failed', 'merged'],
@@ -283,6 +284,25 @@ export const RULE_WRITER_SKIP_REASON_LABELS = {
   requirement_unavailable: '요구사항 없음',
   project_daily_budget_exceeded: '프로젝트 하루 예산 초과',
 } as const satisfies Record<RuleWriterSkipReason, string>;
+
+/**
+ * 실행 자동 시작을 하지 않은 이유 (M7-05 #217, ADR-100 B⑤ · A12, ADR-107). 규칙 작성 세션이 규칙을 만들고 정상 종료했는데
+ * 실행을 만들지 않았을 때만 남는다.
+ */
+export const AutoStartSkipReason = z.enum([
+  /** 프로젝트 하루 예산 한도가 비어 있음 (B⑤: 비어 있으면 자동 시작을 하지 않는다) */
+  'project_daily_budget_unset',
+  /** 프로젝트의 오늘 지출이 하루 예산 한도에 이름 (A12) */
+  'project_daily_budget_exceeded',
+  /** 실행이 쓰는 역할의 예산 · 모델 또는 실행 전체 한도가 비어 있음 (NFR-07) */
+  'settings_incomplete',
+]);
+export type AutoStartSkipReason = z.infer<typeof AutoStartSkipReason>;
+export const AUTO_START_SKIP_REASON_LABELS = {
+  project_daily_budget_unset: '프로젝트 하루 한도 없음',
+  project_daily_budget_exceeded: '프로젝트 하루 예산 초과',
+  settings_incomplete: '예산 · 모델 미설정',
+} as const satisfies Record<AutoStartSkipReason, string>;
 
 /** 규칙 작성 시도 하나의 상태: 대기 · 진행 중 · 끝남(종료 사유는 세션 기록) · 생략. */
 export const RuleWriterState = z.enum(['queued', 'running', 'ended', 'skipped']);

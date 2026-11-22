@@ -158,14 +158,16 @@ describe('norm_changes 리포지토리', () => {
       const second = store.normChanges.append(created({ at: T1 }));
       expect(second).toMatchObject({ seq: 2, prevHash: first.hash });
       // 오케스트레이터 주체는 세션 · 사유 없이도 받는다 (자동 시작 · 확인 풀림 등 뒤 이슈의 행동)
+      const runId = newId();
       const third = store.normChanges.append(
         created({
           kind: 'auto_start',
           actor: { kind: 'orchestrator' },
-          targetRef: { entity: 'Run', id: newId() },
+          targetRef: { entity: 'Run', id: runId },
           sessionId: null,
+          runId,
           reason: null,
-          detail: {},
+          detail: { causeSeqs: [1], ruleIds: [first.targetRef.id] },
         }),
       );
       expect(third).toMatchObject({ seq: 3, prevHash: second.hash });
@@ -253,6 +255,55 @@ describe('norm_changes 리포지토리', () => {
         detail: '{}',
       });
       expect(store.db.prepare('SELECT count(*) AS n FROM norm_changes').get()).toEqual({ n: 1 });
+    });
+  });
+
+  it('자동 시작 항목의 형식 (M7-05, ADR-107): 주체 오케스트레이터 · 대상과 연결 실행이 같은 실행 · 원인 순번과 대상 규칙이 같은 수만큼', () => {
+    withStore((store) => {
+      const rule = newId();
+      const runId = newId();
+      const autoStart = (overrides: Partial<NormChangeAppendInput> = {}) =>
+        created({
+          kind: 'auto_start',
+          actor: { kind: 'orchestrator' },
+          targetRef: { entity: 'Run', id: runId },
+          sessionId: null,
+          runId,
+          reason: null,
+          detail: { causeSeqs: [1], ruleIds: [rule] },
+          ...overrides,
+        });
+      expect(() => store.normChanges.append(autoStart({ actor: ruleWriter }))).toThrow(
+        /오케스트레이터/,
+      );
+      expect(() =>
+        store.normChanges.append(autoStart({ targetRef: { entity: 'Rule', id: runId } })),
+      ).toThrow(/그 실행/);
+      expect(() => store.normChanges.append(autoStart({ runId: newId() }))).toThrow(/그 실행/);
+      expect(() => store.normChanges.append(autoStart({ runId: null }))).toThrow(/그 실행/);
+      for (const detail of [
+        {},
+        { causeSeqs: [1] },
+        { ruleIds: [rule] },
+        { causeSeqs: [1, 2], ruleIds: [rule] },
+      ]) {
+        expect(
+          () => store.normChanges.append(autoStart({ detail })),
+          JSON.stringify(detail),
+        ).toThrow(/원인 기록 순번/);
+      }
+      for (const causeSeqs of [[], [0], [1.5], [1, 1]]) {
+        expect(() =>
+          store.normChanges.append(autoStart({ detail: { causeSeqs, ruleIds: [rule, newId()] } })),
+        ).toThrow();
+      }
+      expect(store.normChanges.list()).toEqual([]);
+      // 대조군: 맞는 모양은 받는다
+      expect(store.normChanges.append(autoStart()).detail).toEqual({
+        causeSeqs: [1],
+        ruleIds: [rule],
+      });
+      expect(store.normChanges.verify()).toEqual({ valid: true, brokenAtSeq: null, reason: null });
     });
   });
 
@@ -365,15 +416,17 @@ describe('에이전트 · 오케스트레이터 주체는 승인 기록에 생�
           store.approvalLog.append({ ...base, actor: actor as unknown as { kind: 'human' } }),
         ).toThrow();
       }
-      store.normChanges.append(created());
+      const rule = store.normChanges.append(created());
+      const runId = newId();
       store.normChanges.append(
         created({
           kind: 'auto_start',
           actor: { kind: 'orchestrator' },
-          targetRef: { entity: 'Run', id: newId() },
+          targetRef: { entity: 'Run', id: runId },
           sessionId: null,
+          runId,
           reason: null,
-          detail: {},
+          detail: { causeSeqs: [rule.seq], ruleIds: [rule.targetRef.id] },
         }),
       );
       expect(store.normChanges.list()).toHaveLength(2);
