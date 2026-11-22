@@ -31,6 +31,7 @@ import { loadScenario } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { PipeServer } from '../src/ipc/server.js';
+import { NORM_INPUT_BEGIN } from '../src/norms/norm-input.js';
 import { RuleWriterService } from '../src/rule-writer/rule-writer-service.js';
 import {
   BIVE_MCP_SERVER,
@@ -833,6 +834,13 @@ describe('실행 자동 시작의 코드 경로 (M7-05 #217, ADR-100 C2 · D4, A
   });
 });
 
+/** 규범 입력 모듈(`norms/norm-input.ts`)을 가져오는 제품 파일 (src 기준, 정렬). */
+const normInputImporters = (): string[] =>
+  sourceFiles(SRC_DIR)
+    .filter((file) => /from '[./]*(?:norms\/)?norm-input\.js'/.test(fs.readFileSync(file, 'utf8')))
+    .map((file) => path.relative(SRC_DIR, file).split(path.sep).join('/'))
+    .sort();
+
 describe('규칙 작성 역할의 기존 규범 입력: 도구 목록 불변 (M7-07 #219 수용 기준 4, ADR-100 K1 · D4 · NFR-02)', () => {
   it('규칙 작성 역할의 도구 목록 · MCP 목록 · 실행기에 파일 · 명령 도구가 없고, 기존 규범은 도구가 아니라 작업 지시로만 들어온다', async () => {
     const fileAndCommand: readonly string[] = [...FILE_TOOL_NAMES, ...COMMAND_TOOL_NAMES];
@@ -859,20 +867,81 @@ describe('규칙 작성 역할의 기존 규범 입력: 도구 목록 불변 (M7
         name,
       ).resolves.toMatchObject({ status: 'denied', reason: 'unknown_tool' });
     }
-    // 코드 구조: 규범 입력 모듈을 가져오는 곳은 규칙 작성 역할의 작업 지시 · 서비스와 반영 모듈(모순 대상 확인)뿐이고,
-    // 도구 정의 · 실행기(tools/)는 가져오지 않는다 (M7-08이 테스트 작성 · 구현 역할을 더할 때 이 목록을 고친다)
-    const importers = sourceFiles(SRC_DIR)
-      .filter((file) =>
-        /from '[./]*(?:norms\/)?norm-input\.js'/.test(fs.readFileSync(file, 'utf8')),
-      )
-      .map((file) => path.relative(SRC_DIR, file).split(path.sep).join('/'))
-      .sort();
-    expect(importers).toEqual([
+    // 코드 구조: 규범 입력 모듈을 가져오는 곳은 세 역할의 작업 지시 · 그 지시를 만드는 서비스 · 단계 실행기와 반영 모듈(모순
+    // 대상 확인)뿐이고, 도구 정의 · 실행기(tools/) · 에이전트 어댑터(agent/) · 엔진은 가져오지 않는다. M7-08이 테스트 작성 ·
+    // 구현 역할의 작업 지시(`test-writer/prompts.ts` · `implementer/prompts.ts`)와 단계 실행기(`steps/test-writing.ts` ·
+    // `steps/implementation.ts`)를 의도적으로 더했다
+    expect(normInputImporters()).toEqual([
+      'implementer/prompts.ts',
       'norms/agent-rule.ts',
       'rule-writer/prompts.ts',
       'rule-writer/rule-writer-service.ts',
+      'steps/implementation.ts',
+      'steps/test-writing.ts',
+      'test-writer/prompts.ts',
     ]);
   });
+});
+
+describe('테스트 작성 · 구현 역할의 규범 입력: 도구 목록 불변 (M7-08 #220 수용 기준 4, ADR-100 K1 · A14 · NFR-02, ADR-108)', () => {
+  const ROLE_TOOLS_BEFORE: Readonly<Record<'test-writer' | 'implementer', readonly string[]>> = {
+    'test-writer': ['read_file', 'write_file', 'list_files', 'search_files', 'run_tests'],
+    implementer: [
+      'read_file',
+      'write_file',
+      'list_files',
+      'search_files',
+      'run_tests',
+      'prisma_generate',
+      'prisma_migrate',
+      'install_package',
+    ],
+  };
+
+  it.each(['test-writer', 'implementer'] as const)(
+    '%s: 고정 도구 목록 · 실행기 · MCP tools/list · SDK 허용 목록이 이 변경 전 리터럴 그대로이고 규범을 읽거나 쓰는 도구가 없다',
+    (role) => {
+      const before = ROLE_TOOLS_BEFORE[role];
+      expect(EXPECTED_ROLE_TOOLS[role]).toEqual(before);
+      expect([...roleToolNames(role)]).toEqual(before);
+      const root = tempDir();
+      const executor = new FixedToolExecutor({ role, sessionRoot: root, biveHome: tempDir() });
+      expect([...executor.toolNames]).toEqual(before);
+      expect(biveMcpToolList(role).map((tool) => tool.name)).toEqual(before);
+      const options = buildQueryOptions(specFor(role, executor, root), {
+        env: {},
+        configDir: path.join(root, 'agent'),
+        abortController: new AbortController(),
+      });
+      expect(options.tools).toEqual([]);
+      expect(Object.keys(options.mcpServers ?? {})).toEqual([BIVE_MCP_SERVER]);
+      expect((options.allowedTools ?? []).map(normalizeToolName)).toEqual(before);
+      // 규범(요구사항 · 규칙 · 판정)을 읽거나 쓰는 이름의 도구가 없다 (규범은 작업 지시로만)
+      expect(before.filter((name) => /norm|rule|requirement|judg/i.test(name))).toEqual([]);
+    },
+  );
+
+  it('실제 엔진의 테스트 작성 · 구현 세션: 작업 지시에 규범 자료가 실려도 세션에 넘긴 도구 목록은 그대로다', async () => {
+    const h: PipelineHarness = setupPipeline({ temps, engines });
+    const done = await runToEnd(h);
+    expect(done.run.status).toBe('merged');
+    for (const role of ['test-writer', 'implementer'] as const) {
+      const specs = h.sessions.filter((spec) => spec.role === role);
+      expect(specs.length, role).toBeGreaterThan(0);
+      for (const spec of specs) {
+        expect(spec.prompt, role).toContain(NORM_INPUT_BEGIN);
+        expect([...spec.tools.toolNames], role).toEqual(ROLE_TOOLS_BEFORE[role]);
+        expect(spec.systemPrompt, role).not.toContain(NORM_INPUT_BEGIN);
+      }
+    }
+    // 저장된 도구 목록(init 보고, NFR-02)도 그대로다
+    expect(
+      done.run.toolManifest.map((entry) => [entry.role, entry.tools.map(normalizeToolName)]),
+    ).toEqual([
+      ['test-writer', ROLE_TOOLS_BEFORE['test-writer']],
+      ['implementer', ROLE_TOOLS_BEFORE.implementer],
+    ]);
+  }, 60_000);
 });
 
 // ── 네트워크 감시 자체 점검 ─────────────────────────────────

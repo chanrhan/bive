@@ -1096,6 +1096,40 @@ export const ModelUsage = z.strictObject({
 });
 export type ModelUsage = z.infer<typeof ModelUsage>;
 
+/** 규범 입력의 한 종류 수: 효력 있는 전체 · 실은 것 · 빠진 것 (ADR-106 · ADR-108). */
+export const SessionNormInputCount = z
+  .strictObject({ total: NonNegativeInt, included: NonNegativeInt, omitted: NonNegativeInt })
+  .refine((count) => count.total === count.included + count.omitted, '전체 = 실은 것 + 빠진 것');
+export type SessionNormInputCount = z.infer<typeof SessionNormInputCount>;
+
+/**
+ * 세션이 작업 지시로 받은 규범 입력의 기록 (ADR-100 K1 · A15, ADR-106 · ADR-108): 수 · 잘린 사실과 실은 항목의 표시 ID
+ * (자료에 실린 순서 = 표시 ID 순). 세션을 열 때 정해지고 바뀌지 않는다. 표시 ID는 형식이 정해진 값이라 그대로 표시 값이다.
+ */
+export const SessionNormInput = z
+  .strictObject({
+    summary: z.strictObject({
+      requirements: SessionNormInputCount,
+      rules: SessionNormInputCount,
+      truncated: z.boolean(),
+    }),
+    requirementDisplayIds: z.array(displayIdSchema('REQ')),
+    ruleDisplayIds: z.array(displayIdSchema('RULE')),
+  })
+  .refine(
+    (input) =>
+      input.summary.requirements.included === input.requirementDisplayIds.length &&
+      input.summary.rules.included === input.ruleDisplayIds.length,
+    '실은 수와 표시 ID 수가 같다',
+  )
+  .refine(
+    (input) =>
+      input.summary.truncated ===
+      (input.summary.requirements.omitted > 0 || input.summary.rules.omitted > 0),
+    '잘림은 빠진 항목이 있을 때만',
+  );
+export type SessionNormInput = z.infer<typeof SessionNormInput>;
+
 /**
  * 에이전트 세션 = SDK `query()` 1회 (기획서 3.2, RUN-04). 진행 중이면 종료 사유 · 비용 · 종료 시각이 `null`.
  * 실행 엔진(M1-14, ADR-066)이 세션을 열 때 행을 만들고 끝날 때 결과를 채운다(재기동 뒤 역할별 세션 순번의 근거).
@@ -1103,6 +1137,8 @@ export type ModelUsage = z.infer<typeof ModelUsage>;
  * `error`는 결과 없이 끝난 세션의 사유 문장(어댑터 오류 · 가드 위반 등).
  * `budget`은 세션을 열 때 어댑터에 넘긴 한도(min(역할 잔여, 실행 잔여), ADR-067). 결과 없이 끝나 비용 · 턴을 모르는
  * 세션은 잔여 한도 계산에서 이 한도를 다 쓴 것으로 본다. 한도 없이 연 세션(실행 밖 세션)은 `null`.
+ * `normInput`은 작업 지시에 실은 규범 입력의 기록(규칙 작성 · 테스트 작성 · 구현 역할, ADR-108). 규범 입력이 없는 세션
+ * (이 기록이 생기기 전 세션 포함)은 `null`.
  */
 export const Session = z
   .strictObject({
@@ -1121,6 +1157,7 @@ export const Session = z
     modelUsage: z.record(NonEmptyString, ModelUsage),
     firstTurnCacheWrite: NonNegativeInt.nullable(),
     budget: BudgetLimits.nullable(),
+    normInput: SessionNormInput.nullable(),
     tools: z.array(NonEmptyString),
     mcpServers: z.array(NonEmptyString),
     startedAt: Timestamp,

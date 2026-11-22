@@ -1,6 +1,7 @@
 // `run.*` 처리기 (RUN-01, RUN-02, NFR-07, M1-12, ADR-061).
 // - `run.create`는 실행 시작 확인이다. 사람 주체만 받고(에이전트 주체 -32020), 설정이 비면 -32010으로 거부하며
 //   실행을 만들지 않는다. 실행 저장과 승인 기록 `run_start`는 한 트랜잭션이다
+// - `run.get`은 실행 · 단계 · 비용 집계와 세션 항목(받은 규범 입력의 기록 포함, ADR-108)을 돌려준다
 // - 승인 단계 판정 · 이후 단계 진행은 엔진(M1-14, ADR-066)이 한다: `run.create` 응답 뒤 승인 단계를 판정한다.
 //   파이프에서 상태를 바꾸는 RPC는 `run.create`와 `run.resume`(사람만, `interrupted`만)뿐이다
 import {
@@ -8,6 +9,7 @@ import {
   createUlidGenerator,
   ErrorCode,
   parseDisplayId,
+  type RunSessionEntry,
   type Ulid,
 } from '@bive/shared';
 import type { ProjectStore, RunDetail } from '@bive/store';
@@ -45,6 +47,27 @@ const findRun = (store: ProjectStore, id: string): RunDetail => {
   return detail;
 };
 
+/**
+ * 실행의 세션 항목 (시작 순, ADR-108): 세션 ID · 단계 시도 · 역할 · 시각 · 종료 사유와 받은 규범 입력의 기록(표시 ID · 수 ·
+ * 잘린 사실). 실행 세션은 언제나 단계 시도가 있다(`sessions` 표 CHECK).
+ */
+const sessionEntries = (store: ProjectStore, runId: Ulid): RunSessionEntry[] =>
+  store.sessions.listByRun(runId).flatMap((session) =>
+    session.stepId === null
+      ? []
+      : [
+          {
+            id: session.id,
+            stepId: session.stepId,
+            role: session.role,
+            startedAt: session.startedAt,
+            endedAt: session.endedAt,
+            endReason: session.endReason,
+            normInput: session.normInput,
+          },
+        ],
+  );
+
 export const createRunHandlers = ({ biveHome, now, engine }: RunHandlerDeps): RunMethods => {
   const clock: RunClock = { now, newId: createUlidGenerator(now) };
 
@@ -68,7 +91,7 @@ export const createRunHandlers = ({ biveHome, now, engine }: RunHandlerDeps): Ru
         const usage = store.runs.usage(detail.run.id);
         if (usage === null)
           throw new RpcError(ErrorCode.NotFound, `실행을 찾을 수 없습니다: ${id}`);
-        return { ...detail, usage };
+        return { ...detail, usage, sessions: sessionEntries(store, detail.run.id) };
       }),
     'run.list': ({ projectId, status }) =>
       withProjectStore(biveHome, projectId, (store) => ({ runs: store.runs.list({ status }) })),

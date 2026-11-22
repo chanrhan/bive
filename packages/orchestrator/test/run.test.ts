@@ -229,6 +229,7 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
       expect(got).toEqual({
         ...detail,
         usage: h.read((store) => store.runs.usage(created.run.id)),
+        sessions: [],
       });
       expect(got.usage.run).toMatchObject({ costUsd: null, turns: null, modelUsage: null });
       expect(await h.client.call('run.get', { projectId: h.project.id, id: 'EXE-001' })).toEqual(
@@ -928,6 +929,7 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
         run: result.run,
         steps: result.steps,
         usage: h.read((store) => store.runs.usage(created.run.id)),
+        sessions: [],
       });
       // 승인 단계가 끝난 실행은 다시 판정하지 않는다
       expect(() =>
@@ -1113,6 +1115,7 @@ describe('프로세스 재시작 뒤 run.get이 같은 값 (수용 기준 4, RUN
       run: created.run,
       steps: created.steps,
       usage: withStore((store) => store.runs.usage(created.run.id)),
+      sessions: [],
     });
     expect(afterCreate.usage.run).toMatchObject({ costUsd: null, turns: null, sessionCount: 0 });
     expect(await current.client.call('run.get', { projectId: project.id, id: 'EXE-001' })).toEqual(
@@ -1181,6 +1184,18 @@ describe('프로세스 재시작 뒤 run.get이 같은 값 (수용 기준 4, RUN
       status: 'pending',
       startedAt: null,
     });
+    // 세션 항목도 저장된 세션 기록 그대로다 (규범 입력 없이 연 세션은 normInput null, ADR-108)
+    expect(afterRestart.sessions).toEqual([
+      {
+        id: sessionId,
+        stepId: stepOf(approval.steps, 'test_writing').id,
+        role: 'test-writer',
+        startedAt: iso(T0),
+        endedAt: iso(T0),
+        endReason: 'success',
+        normInput: null,
+      },
+    ]);
     await kill(current);
 
     // 3) 다시 띄워도 자동으로 이어가지 않는다
