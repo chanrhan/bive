@@ -3,10 +3,12 @@
 // 실행마다 문(gate)이 열릴 때까지 기다린 뒤 실행별 파일 하나를 쓰고, 병합은 실제 git 병합이다(앞 실행의 병합 결과 위에서
 // 뒤 실행이 도는지 본다). 저장마다(`run.saved`) 같은 프로젝트의 `running`이 2건이 되지 않는지 DB에서 센다.
 // 실행은 제품과 같은 길로 만든다: `createRun`(사람의 실행 시작 확인 + 승인 기록 `run_start`) → `engine.onRunCreated`.
+// 자동 시작 실행은 규칙 작성 역할의 규칙 생성 기록 → `autoStartRun` → `engine.onRunCreated`(M7-19 #244, ADR-111: 대기 중인 자동
+// 시작 실행의 시작 때 하루 한도 재확인).
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { ErrorCode, type RunStatus } from '@bive/shared';
+import { ErrorCode, type RunStatus, type SettingsPatch } from '@bive/shared';
 import type { ProjectStore, RunDetail } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -20,15 +22,19 @@ import {
 } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor, StepExecutors, StepOutcome } from '../src/engine/types.js';
 import { RpcError } from '../src/ipc/server.js';
+import { createAgentRule } from '../src/norms/agent-rule.js';
 import { selectAgent } from '../src/agent/select.js';
 import { startOrchestrator } from '../src/orchestrator.js';
+import { autoStartRun } from '../src/runs/auto-start.js';
 import {
   createRun,
   evaluateApprovalStep,
   QUEUED_TARGET_UNAVAILABLE,
+  startNextQueuedRun,
 } from '../src/runs/run-service.js';
 import { verificationSummary } from '../src/verification/summary.js';
 import {
+  COMPLETE_SETTINGS,
   copyFixture,
   human,
   mergeStep,
@@ -819,6 +825,332 @@ describe('재기동 · 중단 · 재개 (수용 기준 2, ADR-105)', () => {
     await restarted.resume(h.project.id, legacy, human);
     await restarted.settled();
     expect(statusOf(h, legacy)).toBe('merged');
+    expect(h.maxRunning).toBe(1);
+  }, 60_000);
+});
+
+// ── 대기 중인 자동 시작 실행의 하루 한도 재확인 (M7-19 #244 수용 기준 3, ADR-110 조율자 결정 · ADR-111) ─────────────
+
+/** 자동 시작 실행과 같은 길: 규칙 작성 역할이 규칙 1개를 만든 기록 → `autoStartRun` → (엔진이 있으면) 생성 뒤 처리. */
+const autoRun = (h: QueueHarness, engine: PipelineEngine | null = h.engine): string => {
+  const sessionId = newId();
+  const clock = { now: Date.now, newId };
+  const outcome = withProject(h.biveHome, h.project.id, (store) => {
+    createAgentRule(
+      store,
+      {
+        payload: {
+          title: `헬스 체크 ${sessionId}`,
+          statement: h.rule.statement,
+          kind: 'business',
+          checkKinds: ['test'],
+          parentRequirementId: h.rule.parentRequirementId,
+        },
+        rationale: '시험 근거',
+        author: { kind: 'agent', role: 'rule-writer' },
+        sessionId,
+        contradiction: { verdict: 'none' },
+        normInput: {
+          requirements: { total: 1, included: 1, omitted: 0 },
+          rules: { total: 0, included: 0, omitted: 0 },
+          truncated: false,
+        },
+      },
+      clock,
+    );
+    return autoStartRun(store, { sessionId }, clock);
+  });
+  if (outcome.status !== 'started') throw new Error(`자동 시작 안 됨: ${outcome.status}`);
+  const [started] = outcome.runs;
+  if (started === undefined) throw new Error('실행 없음');
+  if (engine !== null) engine.onRunCreated(h.project.id, started.detail.run.id);
+  return started.detail.run.displayId;
+};
+
+const updateSettings = (h: QueueHarness, patch: SettingsPatch): void => {
+  withProject(h.biveHome, h.project.id, (store) =>
+    store.settings.update(patch, { by: human, at: new Date().toISOString() }),
+  );
+};
+
+/** 오늘 끝난 규칙 작성 세션 하나가 `usd`를 썼다 (하루 합산의 원천은 저장된 세션 기록뿐, ADR-104). */
+const spendToday = (h: QueueHarness, usd: number): void => {
+  const id = newId();
+  const at = new Date().toISOString();
+  withProject(h.biveHome, h.project.id, (store) => {
+    store.sessions.start({
+      id,
+      runId: null,
+      stepId: null,
+      requirementId: h.rule.parentRequirementId,
+      role: 'rule-writer',
+      model: 'test-model',
+      workDir: '/w',
+      budget: { maxBudgetUsd: 1, maxTurns: 20 },
+      startedAt: at,
+    });
+    store.sessions.end(id, { endReason: 'success', totalCostUsd: usd, numTurns: 1, endedAt: at });
+  });
+};
+
+const DAILY: SettingsPatch = { ...COMPLETE_SETTINGS, dailyBudgetUsd: 0.1 };
+
+/** 시작 전에 끝난 실행 대기: 워크트리 · 브랜치 · 기준 커밋 · 시작 시각이 없고 승인 단계 뒤 단계는 대기 그대로. */
+const endedBeforeStart = (
+  h: QueueHarness,
+  displayId: string,
+  status: RunStatus,
+  reason: string,
+) => {
+  const detail = detailOf(h, displayId);
+  expect(detail.run, displayId).toMatchObject({
+    status,
+    failureReason: reason,
+    branch: null,
+    worktreePath: null,
+    baseCommit: null,
+    startedAt: null,
+  });
+  expect(detail.run.endedAt, displayId).not.toBeNull();
+  expect(attempts(detail), displayId).toEqual(QUEUED_STEPS);
+  expect(userGit(h.repo, 'branch', '--list', `bive/run-${displayId}`), displayId).toBe('');
+};
+
+describe('대기 중인 자동 시작 실행은 시작할 차례에 하루 한도를 다시 본다 (M7-19 #244 수용 기준 3, ADR-110 · ADR-111)', () => {
+  const blocks: {
+    name: string;
+    change: (h: QueueHarness) => void;
+    restore: (h: QueueHarness) => void;
+    status: RunStatus;
+    reason: string;
+  }[] = [
+    {
+      name: '하루 한도를 비움',
+      change: (h) => {
+        updateSettings(h, { dailyBudgetUsd: null });
+      },
+      restore: (h) => {
+        updateSettings(h, { dailyBudgetUsd: 10 });
+      },
+      status: 'failed',
+      reason: 'project_daily_budget_unset',
+    },
+    {
+      name: '오늘 지출이 하루 한도에 이름',
+      change: (h) => {
+        spendToday(h, 0.1);
+      },
+      restore: (h) => {
+        updateSettings(h, { dailyBudgetUsd: 10 });
+      },
+      status: 'budget_exceeded',
+      reason: 'project_daily_budget_exceeded',
+    },
+    {
+      name: '실행이 쓰는 역할의 설정 미비',
+      change: (h) => {
+        updateSettings(h, {
+          roles: { implementer: { model: null, maxBudgetUsd: 2, maxTurns: 100 } },
+        });
+      },
+      restore: (h) => {
+        updateSettings(h, { roles: COMPLETE_SETTINGS.roles });
+      },
+      status: 'failed',
+      reason: 'settings_incomplete',
+    },
+  ];
+
+  for (const block of blocks) {
+    it(`${block.name}: 자동 시작 실행 대기는 작업 폴더 · 브랜치 없이 끝나 사유가 실행 기록에 남고, 다음 대기(사람이 시작한 실행)는 지금처럼 시작한다. 한도를 다시 채워도 끝난 실행은 되살아나지 않는다`, async () => {
+      const h = setup();
+      updateSettings(h, DAILY);
+      const first = startRun(h);
+      await waitGate(h, first);
+      const auto = autoRun(h);
+      const next = startRun(h);
+      await waitFor(
+        () => statusOf(h, auto) === 'queued' && statusOf(h, next) === 'queued',
+        10_000,
+        '실행 대기',
+      );
+      block.change(h);
+      h.gates.open(first);
+      await waitGate(h, next);
+      endedBeforeStart(h, auto, block.status, block.reason);
+      expect(statusOf(h, next)).toBe('running');
+      // 자동 시작 실행의 종료 저장이 다음 대기의 시작보다 먼저다 (한 번의 판정 안에서 차례대로)
+      expect(h.saves.indexOf(`${auto}:${block.status}`)).toBeGreaterThan(-1);
+      expect(h.saves.indexOf(`${auto}:${block.status}`)).toBeLessThan(
+        h.saves.indexOf(`${next}:running`),
+      );
+      // 한도 · 설정을 다시 채우고 대기를 다시 살펴도(기동과 같은 판정) 끝난 실행은 그대로다
+      block.restore(h);
+      h.engine.startQueuedRuns();
+      h.gates.open(next);
+      await h.engine.settled();
+      expect(statuses(h)).toEqual({ [first]: 'merged', [auto]: block.status, [next]: 'merged' });
+      expect(h.maxRunning).toBe(1);
+    }, 60_000);
+  }
+
+  it('대조: 한도 안이면 자동 시작 실행 대기도 차례에 시작해 앞 실행의 병합 위에서 끝까지 간다', async () => {
+    const h = setup();
+    updateSettings(h, DAILY);
+    const first = startRun(h);
+    await waitGate(h, first);
+    const auto = autoRun(h);
+    await waitFor(() => statusOf(h, auto) === 'queued', 10_000, '실행 대기');
+    spendToday(h, 0.09);
+    h.gates.open(first);
+    await waitGate(h, auto);
+    h.gates.open(auto);
+    await h.engine.settled();
+    expect(statuses(h)).toEqual({ [first]: 'merged', [auto]: 'merged' });
+    expect(startOrder(h)).toEqual([first, auto]);
+  }, 60_000);
+
+  it('줄 선 자동 시작 실행 여럿은 한 번의 판정(startNextQueuedRun 1회) 안에서 차례대로 끝나고 그 뒤의 사람 실행이 시작한다. 다시 불러도 아무것도 하지 않는다 (되부르기 · 반복 없음)', () => {
+    const h = setup();
+    updateSettings(h, DAILY);
+    const clock = { now: Date.now };
+    const holder = withProject(h.biveHome, h.project.id, (store) => {
+      const run = createRun(
+        store,
+        { ruleIds: [h.rule.id], author: human },
+        { clientId: null },
+        { now: Date.now, newId },
+      ).run;
+      expect(evaluateApprovalStep(store, run.id, clock).run.status).toBe('running');
+      return run;
+    });
+    const autos = [autoRun(h, null), autoRun(h, null), autoRun(h, null)];
+    const human2Id = withProject(h.biveHome, h.project.id, (store) => {
+      for (const displayId of autos) {
+        const run = store.runs.getDetailByDisplayId(displayId)?.run;
+        if (run === undefined) throw new Error('실행 없음');
+        expect(evaluateApprovalStep(store, run.id, clock).run.status).toBe('queued');
+      }
+      const b = createRun(
+        store,
+        { ruleIds: [h.rule.id], author: human },
+        { clientId: null },
+        { now: Date.now, newId },
+      ).run;
+      expect(evaluateApprovalStep(store, b.id, clock).run.status).toBe('queued');
+      // 앞 실행이 끝났다 (엔진 없이 저장만)
+      store.runs.transition(holder.id, {
+        expectedStatus: 'running',
+        run: {
+          status: 'failed',
+          failureReason: 'scripted_halt',
+          endedAt: new Date().toISOString(),
+        },
+      });
+      return b.displayId;
+    });
+    spendToday(h, 0.1);
+    const advance = withProject(h.biveHome, h.project.id, (store) =>
+      startNextQueuedRun(store, clock),
+    );
+    expect(advance.failed.map((detail) => [detail.run.displayId, detail.run.status])).toEqual(
+      autos.map((id) => [id, 'budget_exceeded']),
+    );
+    expect(advance.started?.run).toMatchObject({ displayId: human2Id, status: 'running' });
+    for (const id of autos)
+      endedBeforeStart(h, id, 'budget_exceeded', 'project_daily_budget_exceeded');
+    // 다시 불러도: 자리가 찼으므로 아무것도 하지 않는다
+    expect(
+      withProject(h.biveHome, h.project.id, (store) => startNextQueuedRun(store, clock)),
+    ).toEqual({ started: null, failed: [] });
+  });
+
+  it('자동 시작 실행만 줄 서 있고 모두 문에 걸리면 모두 끝나고 시작하는 실행 없이 판정이 끝난다 (자리는 빈 채)', () => {
+    const h = setup();
+    updateSettings(h, DAILY);
+    const clock = { now: Date.now };
+    const autos = [autoRun(h, null), autoRun(h, null)];
+    // 실행은 자동 시작 둘뿐이다. 하루 한도를 비우면 첫째도 자리가 있는데 문에 걸려 바로 시작하지 않고 실행 대기로 선다
+    updateSettings(h, { dailyBudgetUsd: null });
+    withProject(h.biveHome, h.project.id, (store) => {
+      for (const displayId of autos) {
+        const run = store.runs.getDetailByDisplayId(displayId)?.run;
+        if (run === undefined) throw new Error('실행 없음');
+        expect(evaluateApprovalStep(store, run.id, clock).run.status, displayId).toBe('queued');
+      }
+    });
+    const advance = withProject(h.biveHome, h.project.id, (store) =>
+      startNextQueuedRun(store, clock),
+    );
+    expect(advance.started).toBeNull();
+    expect(advance.failed.map((detail) => detail.run.displayId)).toEqual(autos);
+    for (const id of autos) endedBeforeStart(h, id, 'failed', 'project_daily_budget_unset');
+    expect(
+      withProject(h.biveHome, h.project.id, (store) => startNextQueuedRun(store, clock)),
+    ).toEqual({ started: null, failed: [] });
+  });
+
+  it('기동 때(startQueuedRuns): 판정 전에 남은 자동 시작 승인 대기는 자리가 비어 있어도 하루 한도 문에 걸리면 진행 중이 되지 않고 실행 대기를 거쳐 작업 폴더 없이 끝난다', async () => {
+    const h = setup();
+    updateSettings(h, DAILY);
+    await h.engine.stop();
+    const waiting = autoRun(h, null);
+    updateSettings(h, { dailyBudgetUsd: null });
+    const restarted = h.newEngine();
+    restarted.startQueuedRuns();
+    await restarted.settled();
+    endedBeforeStart(h, waiting, 'failed', 'project_daily_budget_unset');
+    expect(h.saves).toEqual([`${waiting}:queued`, `${waiting}:failed`]);
+    expect(restarted.activeRunIds).toEqual([]);
+  }, 60_000);
+
+  it('기동 때(startQueuedRuns): 남은 자동 시작 실행 대기와, 판정 전에 남은 자동 시작 승인 대기 모두 하루 한도를 다시 보아 작업 폴더 없이 끝나고 사람 실행 대기는 시작한다', async () => {
+    const h = setup();
+    updateSettings(h, DAILY);
+    const first = startRun(h);
+    await waitGate(h, first);
+    const queued = autoRun(h);
+    const next = startRun(h);
+    await waitFor(
+      () => statusOf(h, queued) === 'queued' && statusOf(h, next) === 'queued',
+      10_000,
+      '실행 대기',
+    );
+    // 엔진을 멈추고, 앞 실행이 끝난 저장만 남긴다(다음 대기를 깨우기 전에 프로세스가 죽음). 자동 시작 저장 뒤 엔진에 알리기
+    // 전에 죽은 승인 대기 실행도 하나 남긴다
+    await h.engine.stop();
+    withProject(h.biveHome, h.project.id, (store) =>
+      store.runs.transition(detailOf(h, first).run.id, {
+        expectedStatus: 'running',
+        run: {
+          status: 'failed',
+          failureReason: 'scripted_halt',
+          endedAt: new Date().toISOString(),
+        },
+      }),
+    );
+    const waiting = autoRun(h, null);
+    expect(statusOf(h, waiting)).toBe('waiting_approval');
+    // 꺼져 있는 사이 오늘 지출이 한도에 이르렀다
+    spendToday(h, 0.1);
+    const restarted = h.newEngine();
+    expect(restarted.recoverInterruptedRuns()).toEqual([]);
+    restarted.startQueuedRuns();
+    await waitGate(h, next);
+    endedBeforeStart(h, queued, 'budget_exceeded', 'project_daily_budget_exceeded');
+    expect(statusOf(h, next)).toBe('running');
+    // 승인 대기로 남은 자동 시작 실행: 승인 단계(효력 확인)는 통과해 앞선 대기 뒤에 서고, 차례에 문에 걸려 끝난다
+    expect(statusOf(h, waiting)).toBe('queued');
+    h.gates.open(next);
+    await restarted.settled();
+    endedBeforeStart(h, waiting, 'budget_exceeded', 'project_daily_budget_exceeded');
+    expect(h.saves).not.toContain(`${waiting}:running`);
+    expect(statuses(h)).toEqual({
+      [first]: 'failed',
+      [queued]: 'budget_exceeded',
+      [next]: 'merged',
+      [waiting]: 'budget_exceeded',
+    });
     expect(h.maxRunning).toBe(1);
   }, 60_000);
 });

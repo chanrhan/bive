@@ -57,12 +57,13 @@ export const TERMINAL_RUN_STATUSES = [
  * 실행 상태 전이 (architecture.md 4장 상태 기계, ADR-061). 키 상태에서 갈 수 있는 상태 목록이고,
  * 종료 상태는 빈 목록이다. 생성 직후 상태는 항상 `waiting_approval`(실행 시작 확인 → 승인 단계). 승인 단계를 통과할 때
  * 프로젝트에 자리가 없으면 `queued`, 자리가 나면 생성 순으로 `running`이다. 시작 때 대상 규칙을 다시 보아 효력이 없으면
- * `failed`(ADR-105). 승인 단계는 사람을 기다리지 않는다: 대상 규칙이 하나라도 효력이 없으면 그 자리에서 `failed`(ADR-107).
+ * `failed`(ADR-105). 실행 대기에 선 자동 시작 실행이 시작할 차례에 하루 한도 문에 걸리면 `failed`(한도 비움 · 설정 미비) 또는
+ * `budget_exceeded`(오늘 지출이 한도에 이름, ADR-111). 승인 단계는 사람을 기다리지 않는다: 대상 규칙이 하나라도 효력이 없으면 그 자리에서 `failed`(ADR-107).
  * 중단된 실행은 사람의 재개가 복구 불가 사유로 실패하면 그 자리에서 끝난다: 병합 커밋이 기록됐으면 `merged`, 아니면 `failed`(`runEnding`, ADR-105).
  */
 export const RUN_STATUS_TRANSITIONS = {
   waiting_approval: ['running', 'queued', 'failed'],
-  queued: ['running', 'failed'],
+  queued: ['running', 'failed', 'budget_exceeded'],
   running: ['merged', 'failed', 'budget_exceeded', 'interrupted'],
   interrupted: ['running', 'failed', 'merged'],
   merged: [],

@@ -324,11 +324,13 @@ describe('autoStartRuleEditRun: 진술이 바뀐 사람 편집 1건 → 그 규�
     if (byEdit.status !== 'started' || bySession.status !== 'started') {
       throw new Error('둘 다 시작해야 한다');
     }
-    expect(bySession.detail.run.targetRuleIds).toEqual([created.targetRef.id]);
+    const [sessionRun] = bySession.runs;
+    if (sessionRun === undefined) throw new Error('실행 없음');
+    expect(sessionRun.detail.run.targetRuleIds).toEqual([created.targetRef.id]);
     expect(byEdit.detail.run.targetRuleIds).toEqual([h.ruleId]);
     h.read((store) => {
       expect(checkRunStartBasis(store, byEdit.detail.run).mismatch).toBeNull();
-      expect(checkRunStartBasis(store, bySession.detail.run).mismatch).toBeNull();
+      expect(checkRunStartBasis(store, sessionRun.detail.run).mismatch).toBeNull();
     });
   });
 });

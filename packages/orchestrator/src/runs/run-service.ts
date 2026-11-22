@@ -9,6 +9,9 @@
 // - 프로젝트당 동시 실행 1개 (ADR-100 B⑥ · A13, ADR-105): 승인 단계를 통과할 때 프로젝트에 자리가 없으면(진행 중 · 중단된
 //   실행이나 실행 대기가 있음) `running` 대신 `queued`(실행 대기)로 저장한다. 자리가 나면 `startNextQueuedRun`이 실행
 //   대기 중 가장 먼저 만든 것(표시 ID 순)을 시작한다. 판단과 저장은 같은 트랜잭션이라 두 요청이 겹쳐도 `running`은 1개다
+// - 자동 시작 실행(시작 주체 오케스트레이터)은 시작하는 순간에도 하루 한도를 다시 본다 (ADR-110 조율자 결정, ADR-111): 승인
+//   단계에서 문(`autoStartBlock`)에 걸리면 진행 중 대신 실행 대기로 두고, 실행 대기에서 시작할 차례에 문에 걸리면 워크트리 ·
+//   브랜치를 만들기 전에 끝낸다(`runEnding`). 사람이 시작한 실행은 문을 보지 않는다
 // - 단계 종료(`completeStep`)는 상태 저장 1회 = 트랜잭션 1회다 (RUN-01). 실패 · 회귀 · 중단 · 재개처럼 단계 순서를
 //   벗어나는 전이는 엔진(M1-14)이 `store.runs.transition`으로 직접 저장한다
 // - 엔진 · 상태 기계 · 세션 실행은 M1-14, 워크트리 · 브랜치는 M1-13이 맡는다
@@ -42,8 +45,10 @@ import {
   type RunTransition,
 } from '@bive/store';
 
+import { runEnding } from '../engine/run-ending.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
+import { type AutoStartBlock, autoStartBlock } from '../settings/auto-start-gate.js';
 import { requireRunnableSettings } from '../settings/settings-service.js';
 
 export interface RunCreateInput {
@@ -75,7 +80,10 @@ export interface ApprovalStepResult extends RunDetail {
   readonly unapprovedRuleIds: Ulid[];
 }
 
-/** `startNextQueuedRun`의 결과: 시작한 실행(없으면 `null`)과 시작 때 대상 규칙 재검사로 끝낸 실행 대기들. */
+/**
+ * `startNextQueuedRun`의 결과: 시작한 실행(없으면 `null`)과 시작 전에 끝낸 실행 대기들(대상 규칙 재검사 · 자동 시작 실행의
+ * 하루 한도 재확인, 끝낸 순서).
+ */
 export interface QueueAdvance {
   readonly started: RunDetail | null;
   readonly failed: RunDetail[];
@@ -106,6 +114,24 @@ const unapprovedTargets = (store: ProjectStore, run: Run): Ulid[] =>
     const rule = store.rules.get(ruleId);
     return rule === null || rule.deletedAt !== null || rule.normState !== 'approved';
   });
+
+/**
+ * 자동 시작 실행이 지금 시작하면 안 되는 이유 (ADR-111). 사람이 시작한 실행은 늘 `null`이다(사람의 [실행]은 하루 한도가 비어도
+ * 돌고, 한도에 이른 날에는 첫 세션에서 막힌다, ADR-104).
+ */
+const autoStartBlockOf = (store: ProjectStore, run: Run, now: number): AutoStartBlock | null =>
+  run.startedBy.kind === 'orchestrator' ? autoStartBlock(store, store.settings.get(), now) : null;
+
+/**
+ * 시작할 차례에 문에 걸린 자동 시작 실행의 종료 (ADR-111, 종료 상태는 `runEnding`): 오늘 지출이 하루 한도에 이름이면
+ * `budget_exceeded`, 하루 한도 비움 · 설정 미비면 `failed`. 사유(`failureReason`)는 생략 사유와 같은 값이다.
+ */
+const blockedEnding = (run: Run, block: AutoStartBlock) =>
+  runEnding(
+    run,
+    block.reason === 'project_daily_budget_exceeded' ? 'budget_exceeded' : 'failed',
+    block.reason,
+  );
 
 /** 단계 종료 입력 (`completeStep`). */
 export interface StepCompletion {
@@ -288,6 +314,8 @@ const requireDetail = (store: ProjectStore, runId: string): RunDetail => {
  * - 프로젝트에 자리가 있고(진행 중 · 중단된 실행 없음) 실행 대기가 없으면 다음 단계 시작 · 실행 `running`(`startedAt` = 지금)
  * - 아니면 실행 `queued`(실행 대기): 다음 단계는 대기 그대로, `startedAt`은 비운다. 시작은 `startNextQueuedRun`이 한다
  *   (실행 대기가 이미 있으면 생성 순을 지키려고 이 실행도 그 뒤에 선다. 더 먼저 만든 실행이면 먼저 시작된다)
+ * - 자동 시작 실행이 하루 한도 문(`autoStartBlock`)에 걸리면 자리가 있어도 실행 대기로 둔다. 시작할 차례에
+ *   `startNextQueuedRun`이 같은 문을 다시 보아 끝낸다(문을 보고 끝내는 곳을 한 곳으로 둔다, ADR-111)
  * 아니면 아무것도 저장하지 않고 `approved = false`.
  * @throws {NotFoundError} 실행이 없음
  * @throws {ConflictError} 실행이 `waiting_approval`이 아니거나 현재 단계가 승인이 아님
@@ -311,7 +339,9 @@ export const evaluateApprovalStep = (
     if (unapprovedRuleIds.length > 0) return { ...detail, approved: false, unapprovedRuleIds };
     const at = new Date(clock.now()).toISOString();
     const free =
-      slotHolders(store, run.id).length === 0 && store.runs.list({ status: 'queued' }).length === 0;
+      slotHolders(store, run.id).length === 0 &&
+      store.runs.list({ status: 'queued' }).length === 0 &&
+      autoStartBlockOf(store, run, clock.now()) === null;
     const passed = completionTransition(
       detail,
       {
@@ -335,6 +365,10 @@ export const evaluateApprovalStep = (
  * - 자리를 차지한 실행(진행 중 · 중단)이 있으면 아무것도 하지 않는다
  * - 시작 때 대상 규칙을 승인 단계와 같은 기준으로 다시 본다. 효력이 없는 규칙(삭제됨 등)이 있으면 그 실행은
  *   `failed`(`target_rule_unavailable`)로 끝내고(워크트리 · 브랜치를 만들기 전이라 보존할 것이 없다) 다음 실행 대기를 본다
+ * - 자동 시작 실행은 이어서 하루 한도 문(`autoStartBlock`: 하루 한도 비움 · 설정 미비 · 오늘 지출이 한도에 이름)을 다시 본다.
+ *   걸리면 같은 방식으로 끝내고(`blockedEnding`, ADR-111) 다음 실행 대기를 본다. 같은 순간의 같은 문이라 줄 선 자동 시작
+ *   실행들은 이 한 번의 호출 안에서 차례대로 판정되어 함께 끝날 수 있다(되부르기 · 반복 호출 없이 목록을 한 번 돈다).
+ *   사람이 시작한 실행 대기는 문을 보지 않고 시작한다
  * - 시작: 지금 단계(승인 뒤 첫 대기 시도)를 시작하고 실행 `running`(`startedAt` = 지금). 워크트리 · 브랜치 · 기준 커밋은
  *   엔진이 구동을 시작할 때 만든다(앞 실행의 병합 결과 위에서 돈다). 예산 · 모델 스냅샷은 생성 때(사람의 실행 시작 확인) 값이다
  * 엔진이 실행이 끝날 때 · 승인 단계가 실행 대기로 끝날 때 · 기동할 때 부른다. 여러 번 불러도 안전하다.
@@ -350,10 +384,21 @@ export const startNextQueuedRun = (
       const at = new Date(clock.now()).toISOString();
       const unavailable = unapprovedTargets(store, run);
       if (unavailable.length > 0) {
+        const ending = runEnding(run, 'failed', QUEUED_TARGET_UNAVAILABLE);
         failed.push(
           store.runs.transition(run.id, {
             expectedStatus: 'queued',
-            run: { status: 'failed', failureReason: QUEUED_TARGET_UNAVAILABLE, endedAt: at },
+            run: { ...ending.run, endedAt: at },
+          }),
+        );
+        continue;
+      }
+      const block = autoStartBlockOf(store, run, Date.parse(at));
+      if (block !== null) {
+        failed.push(
+          store.runs.transition(run.id, {
+            expectedStatus: 'queued',
+            run: { ...blockedEnding(run, block).run, endedAt: at },
           }),
         );
         continue;

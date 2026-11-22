@@ -23,8 +23,7 @@ import {
 import type { ProjectStore, RunDetail } from '@bive/store';
 
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
-import { dailyBudgetReached, projectDailyBudget } from '../settings/project-budget.js';
-import { validateSettingsForAutoStart } from '../settings/settings-service.js';
+import { autoStartBlock } from '../settings/auto-start-gate.js';
 import { saveNewRun } from './run-service.js';
 
 /** 자동 시작 항목의 사유 (주체가 오케스트레이터라 필수는 아니지만 기록을 읽는 사람을 위해 남긴다). */
@@ -93,16 +92,10 @@ export const autoStartRuleEditRun = (
     }
     const now = clock.now();
     const settings = store.settings.get();
-    // 하루 한도가 비어 있으면 자동 시작을 하지 않는다(B⑤). 설정 미비 · 오늘 지출이 한도에 이름(A12)도 규칙 작성 뒤와 같다
-    const check = validateSettingsForAutoStart(settings);
-    if (!check.ok) {
-      return check.dailyBudgetUnset
-        ? { status: 'skipped', reason: 'project_daily_budget_unset', missing: [] }
-        : { status: 'skipped', reason: 'settings_incomplete', missing: check.missing };
-    }
-    if (dailyBudgetReached(projectDailyBudget(store, settings, now))) {
-      return { status: 'skipped', reason: 'project_daily_budget_exceeded', missing: [] };
-    }
+    // 하루 한도 비움(B⑤) · 설정 미비 · 오늘 지출이 한도에 이름(A12)이면 만들지 않는다. 규칙 작성 뒤 자동 시작과 같은 문이고,
+    // 실행 대기에 선 뒤 시작할 차례에도 같은 문을 다시 지난다(ADR-111)
+    const block = autoStartBlock(store, settings, now);
+    if (block !== null) return { status: 'skipped', reason: block.reason, missing: block.missing };
     const at = new Date(now).toISOString();
     const runId = clock.newId();
     const detail = saveNewRun(

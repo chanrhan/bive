@@ -129,7 +129,7 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
   it('상태 전이는 architecture.md 4장 상태 기계 그대로이고 종료 상태에서는 나가지 않는다 (ADR-061)', () => {
     expect(RUN_STATUS_TRANSITIONS).toEqual({
       waiting_approval: ['running', 'queued', 'failed'],
-      queued: ['running', 'failed'],
+      queued: ['running', 'failed', 'budget_exceeded'],
       running: ['merged', 'failed', 'budget_exceeded', 'interrupted'],
       interrupted: ['running', 'failed', 'merged'],
       merged: [],
@@ -143,6 +143,8 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
     expect(canTransitionRun('waiting_approval', 'queued')).toBe(true);
     expect(canTransitionRun('queued', 'running')).toBe(true);
     expect(canTransitionRun('queued', 'failed')).toBe(true);
+    // 실행 대기의 자동 시작 실행이 시작할 차례에 오늘 지출이 하루 한도에 이르렀으면 예산 초과로 끝난다 (ADR-111)
+    expect(canTransitionRun('queued', 'budget_exceeded')).toBe(true);
     expect(canTransitionRun('queued', 'interrupted')).toBe(false);
     expect(canTransitionRun('running', 'queued')).toBe(false);
     expect(canTransitionRun('interrupted', 'queued')).toBe(false);
