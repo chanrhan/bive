@@ -17,6 +17,7 @@ import { migration as m0012 } from './0012_confirmations.js';
 import { migration as m0013 } from './0013_norm_changes.js';
 import { migration as m0014 } from './0014_rule_writer_daily_budget_skip.js';
 import { migration as m0015 } from './0015_run_queue.js';
+import { migration as m0016 } from './0016_run_auto_start.js';
 
 export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0001,
@@ -34,4 +35,5 @@ export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0013,
   m0014,
   m0015,
+  m0016,
 ];

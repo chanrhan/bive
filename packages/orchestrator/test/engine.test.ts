@@ -17,7 +17,7 @@ import {
   type Step,
   type StepKind,
 } from '@bive/shared';
-import type { RunDetail } from '@bive/store';
+import type { ProjectStore, RunDetail } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { AgentAdapter, SessionEvent } from '../src/agent/adapter.js';
@@ -26,7 +26,7 @@ import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { INTERRUPTED_EXIT_DETAIL, PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
 import { runPaths } from '../src/run-paths.js';
-import { createRun } from '../src/runs/run-service.js';
+import { createRun, saveNewRun } from '../src/runs/run-service.js';
 import { connect, RpcCallError, type TestClient } from './helpers/client.js';
 import {
   COMPLETE_SETTINGS,
@@ -311,16 +311,75 @@ describe('유형 A 단계 순서 · 전이 (수용 기준 1)', () => {
     ).toEqual(['run_start']);
   }, 60_000);
 
-  it('승인 단계: 대상 규칙이 승인 상태가 아니면 다음으로 가지 않고 아무것도 저장하지 않는다', async () => {
+  it('승인 단계 자리는 효력 확인: 대상 규칙이 효력 상태가 아니면 사람을 기다리지 않고 그 자리에서 실행을 끝낸다 (ADR-100 A3, ADR-107)', async () => {
     const h = setup({ normState: 'provisional' });
     const before = detailOf(h);
+    expect(before.run).toMatchObject({ status: 'waiting_approval', currentStep: 'approval' });
     expect(h.engine.evaluateApproval(h.project.id, h.runId)).toBe(false);
     await h.engine.settled();
-    expect(detailOf(h)).toEqual(before);
-    expect(before.run).toMatchObject({ status: 'waiting_approval', currentStep: 'approval' });
-    expect(h.saves).toEqual([]);
+    const after = detailOf(h);
+    // 실행은 실패(효력 없는 대상 규칙)로 끝나고 승인 단계 시도만 실패로 닫힌다. 다음 단계는 열리지 않는다
+    expect(after.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'target_rule_unavailable',
+      currentStep: 'approval',
+      lastCompletedStep: null,
+      startedAt: null,
+      branch: null,
+      worktreePath: null,
+    });
+    expect(after.run.endedAt).not.toBeNull();
+    expect(attempts(after)).toEqual([
+      'approval#1:failed',
+      'test_writing#1:pending',
+      'red_check#1:pending',
+      'implementation#1:pending',
+      'check#1:pending',
+      'mutation#1:pending',
+      'merge#1:pending',
+      'screen_update#1:pending',
+    ]);
+    expect(stepOf(after, 'approval').exitDetail).toEqual({
+      reason: 'target_rule_unavailable',
+      unavailableRuleIds: [h.rule.id],
+    });
+    // 저장 1회(종료)가 알려지고, 브랜치 · 세션이 없으며, 다시 판정해도 승인 대기로 돌아가지 않는다
+    expect(h.saves).toEqual(['failed:approval']);
     expect(userGit(h.repo, 'branch', '--list', 'bive/run-*')).toBe('');
+    expect(sessionsOf(h)).toEqual([]);
+    expect(() => h.engine.evaluateApproval(h.project.id, h.runId)).toThrow(/승인 단계가 아닙니다/);
+    expect(detailOf(h)).toEqual(after);
   });
+
+  it('승인 대기에 머무는 경로가 없다: 효력 있는 대상이면 통과, 아니면 실패. 꺼진 동안 남은 승인 대기는 기동 때 판정한다 (ADR-107)', async () => {
+    // 효력 있음 → 통과 · 구동 (승인 대기를 벗어난다)
+    const effective = setup();
+    expect(effective.engine.evaluateApproval(effective.project.id, effective.runId)).toBe(true);
+    expect(detailOf(effective).run.status).not.toBe('waiting_approval');
+    await effective.engine.settled();
+    expect(detailOf(effective).run.status).toBe('merged');
+
+    // 생성 뒤 판정 전에 엔진이 멈춘 실행 (승인 대기로 남음) → 다음 엔진의 기동 판정이 이어간다
+    const left = setup();
+    await left.engine.stop();
+    expect(left.engine.evaluateApproval(left.project.id, left.runId)).toBe(false);
+    expect(detailOf(left).run.status).toBe('waiting_approval');
+    const next = left.newEngine();
+    next.startQueuedRuns();
+    await next.settled();
+    expect(detailOf(left).run).toMatchObject({ status: 'merged', failureReason: null });
+
+    // 효력 없는 대상으로 남은 승인 대기도 기동 판정이 끝낸다
+    const stale = setup({ normState: 'provisional' });
+    await stale.engine.stop();
+    const restarted = stale.newEngine();
+    restarted.startQueuedRuns();
+    await restarted.settled();
+    expect(detailOf(stale).run).toMatchObject({
+      status: 'failed',
+      failureReason: 'target_rule_unavailable',
+    });
+  }, 60_000);
 
   it('규칙 승인 뒤(onNormsApproved) 그 프로젝트의 승인 대기 실행을 판정해 진행한다', async () => {
     const h = setup();
@@ -378,6 +437,310 @@ describe('유형 A 단계 순서 · 전이 (수용 기준 1)', () => {
     });
     expect(sessionsOf(h)).toEqual([]);
   });
+});
+
+describe('시작 근거 대조: 사람 run_start 1건 또는 자동 시작 항목 1건 (M7-05 #217, NFR-01, ADR-107)', () => {
+  type Starter = { kind: 'human' } | { kind: 'orchestrator'; causeSeqs: number[] };
+  const at = () => new Date().toISOString();
+  /** 시작 근거 없이 실행만 저장한다 (파이프 밖 경로의 흉내). 근거는 경우마다 따로 남긴다. */
+  const forgeRun = (store: ProjectStore, ruleIds: string[], startedBy: Starter): string =>
+    saveNewRun(store, store.settings.get(), { runId: newId(), ruleIds, startedBy }, at(), newId).run
+      .id;
+  const created = (store: ProjectStore, ruleId: string): number =>
+    store.normChanges.append({
+      at: at(),
+      kind: 'created',
+      actor: { kind: 'agent', role: 'rule-writer' },
+      targetRef: { entity: 'Rule', id: ruleId },
+      sessionId: newId(),
+      runId: null,
+      reason: '시험 근거',
+      detail: { after: { ruleId } },
+    }).seq;
+  const autoStart = (
+    store: ProjectStore,
+    runId: string,
+    causeSeqs: number[],
+    ruleIds: string[],
+  ): number =>
+    store.normChanges.append({
+      at: at(),
+      kind: 'auto_start',
+      actor: { kind: 'orchestrator' },
+      targetRef: { entity: 'Run', id: runId },
+      sessionId: null,
+      runId,
+      reason: null,
+      detail: { causeSeqs, ruleIds },
+    }).seq;
+  const runStart = (store: ProjectStore, runId: string, ruleIds: string[]): void => {
+    store.approvalLog.append({
+      at: at(),
+      action: 'run_start',
+      actor: human,
+      targetRef: { entity: 'Run', id: runId },
+      clientId: null,
+      detail: { ruleIds },
+    });
+  };
+
+  interface BasisCase {
+    name: string;
+    build: (store: ProjectStore, rule: string) => string;
+    mismatch: string;
+    counts: [number, number];
+  }
+  const cases: BasisCase[] = [
+    {
+      name: '사람: 근거 0건',
+      build: (store, rule) => forgeRun(store, [rule], human),
+      mismatch: 'no_entry',
+      counts: [0, 0],
+    },
+    {
+      name: '사람: run_start 2건',
+      build: (store, rule) => {
+        const id = forgeRun(store, [rule], human);
+        runStart(store, id, [rule]);
+        runStart(store, id, [rule]);
+        return id;
+      },
+      mismatch: 'multiple_entries',
+      counts: [2, 0],
+    },
+    {
+      name: '사람: run_start와 자동 시작 항목이 둘 다',
+      build: (store, rule) => {
+        const id = forgeRun(store, [rule], human);
+        runStart(store, id, [rule]);
+        autoStart(store, id, [created(store, rule)], [rule]);
+        return id;
+      },
+      mismatch: 'both_entries',
+      counts: [1, 1],
+    },
+    {
+      name: '사람: run_start의 대상 규칙이 다름',
+      build: (store, rule) => {
+        const id = forgeRun(store, [rule], human);
+        runStart(store, id, [newId()]);
+        return id;
+      },
+      mismatch: 'rules_mismatch',
+      counts: [1, 0],
+    },
+    {
+      name: '사람 주체인데 근거가 자동 시작 항목뿐',
+      build: (store, rule) => {
+        const id = forgeRun(store, [rule], human);
+        autoStart(store, id, [created(store, rule)], [rule]);
+        return id;
+      },
+      mismatch: 'starter_mismatch',
+      counts: [0, 1],
+    },
+    {
+      name: '오케스트레이터 주체인데 근거가 사람 run_start뿐',
+      build: (store, rule) => {
+        const id = forgeRun(store, [rule], {
+          kind: 'orchestrator',
+          causeSeqs: [created(store, rule)],
+        });
+        runStart(store, id, [rule]);
+        return id;
+      },
+      mismatch: 'starter_mismatch',
+      counts: [1, 0],
+    },
+    {
+      name: '오케스트레이터: 근거 0건',
+      build: (store, rule) =>
+        forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: [created(store, rule)] }),
+      mismatch: 'no_entry',
+      counts: [0, 0],
+    },
+    {
+      name: '오케스트레이터: 다른 실행의 자동 시작 항목만 있음',
+      build: (store, rule) => {
+        const cause = created(store, rule);
+        const id = forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: [cause] });
+        autoStart(store, newId(), [cause], [rule]);
+        return id;
+      },
+      mismatch: 'no_entry',
+      counts: [0, 0],
+    },
+    {
+      name: '오케스트레이터: 자동 시작 항목 2건',
+      build: (store, rule) => {
+        const cause = created(store, rule);
+        const id = forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: [cause] });
+        autoStart(store, id, [cause], [rule]);
+        autoStart(store, id, [cause], [rule]);
+        return id;
+      },
+      mismatch: 'multiple_entries',
+      counts: [0, 2],
+    },
+    {
+      name: '오케스트레이터: 항목의 원인 순번이 시작 주체와 다름',
+      build: (store, rule) => {
+        const id = forgeRun(store, [rule], {
+          kind: 'orchestrator',
+          causeSeqs: [created(store, rule)],
+        });
+        autoStart(store, id, [created(store, rule)], [rule]);
+        return id;
+      },
+      mismatch: 'cause_mismatch',
+      counts: [0, 1],
+    },
+    {
+      name: '오케스트레이터: 원인 순번이 신규 기록이 아님 (다른 자동 시작 항목의 순번)',
+      build: (store, rule) => {
+        const other = autoStart(store, newId(), [created(store, rule)], [rule]);
+        const id = forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: [other] });
+        autoStart(store, id, [other], [rule]);
+        return id;
+      },
+      mismatch: 'cause_mismatch',
+      counts: [0, 1],
+    },
+    {
+      name: '오케스트레이터: 원인 순번이 그 규칙의 모순 판단 기록 (신규 기록이 아님, M7-07)',
+      build: (store, rule) => {
+        const createdSeq = created(store, rule);
+        const judgment = store.normChanges.append({
+          at: at(),
+          kind: 'judgment',
+          actor: { kind: 'agent', role: 'rule-writer' },
+          targetRef: { entity: 'Rule', id: rule },
+          sessionId: newId(),
+          runId: null,
+          reason: '시험 판단',
+          detail: {
+            judgment: {
+              subject: 'new_rule',
+              verdict: 'no_contradiction',
+              contradicts: [],
+              createdSeq,
+              input: {
+                requirements: { total: 1, included: 1 },
+                rules: { total: 0, included: 0 },
+              },
+            },
+          },
+        }).seq;
+        const id = forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: [judgment] });
+        autoStart(store, id, [judgment], [rule]);
+        return id;
+      },
+      mismatch: 'cause_mismatch',
+      counts: [0, 1],
+    },
+    {
+      name: '오케스트레이터: 원인 순번이 없는 기록',
+      build: (store, rule) => {
+        const id = forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: [9999] });
+        autoStart(store, id, [9999], [rule]);
+        return id;
+      },
+      mismatch: 'cause_mismatch',
+      counts: [0, 1],
+    },
+    {
+      name: '오케스트레이터: 원인 순번이 다른 규칙의 신규 기록',
+      build: (store, rule) => {
+        const cause = created(store, newId());
+        const id = forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: [cause] });
+        autoStart(store, id, [cause], [rule]);
+        return id;
+      },
+      mismatch: 'cause_mismatch',
+      counts: [0, 1],
+    },
+    {
+      name: '오케스트레이터: 항목의 대상 규칙이 다름',
+      build: (store, rule) => {
+        const cause = created(store, rule);
+        const id = forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: [cause] });
+        autoStart(store, id, [cause], [newId()]);
+        return id;
+      },
+      mismatch: 'rules_mismatch',
+      counts: [0, 1],
+    },
+    {
+      name: '오케스트레이터: 같은 원인 순번을 다른 실행의 자동 시작 항목도 씀',
+      build: (store, rule) => {
+        const cause = created(store, rule);
+        const id = forgeRun(store, [rule], { kind: 'orchestrator', causeSeqs: [cause] });
+        autoStart(store, id, [cause], [rule]);
+        autoStart(store, newId(), [cause], [rule]);
+        return id;
+      },
+      mismatch: 'cause_reused',
+      counts: [0, 1],
+    },
+  ];
+
+  it('근거가 정확히 1건이 아니거나 실행과 맞지 않으면 run_without_log: 워크트리 · 세션 없이 실패로 끝난다', async () => {
+    const h = setup();
+    const results: [string, unknown][] = [];
+    for (const basisCase of cases) {
+      h.runId = withProject(h.biveHome, h.project.id, (store) =>
+        store.transaction(() => basisCase.build(store, h.rule.id)),
+      );
+      expect(h.engine.evaluateApproval(h.project.id, h.runId), basisCase.name).toBe(true);
+      await h.engine.settled();
+      const done = detailOf(h);
+      expect(done.run, basisCase.name).toMatchObject({
+        status: 'failed',
+        failureReason: 'run_without_log',
+        branch: null,
+      });
+      results.push([basisCase.name, stepOf(done, 'test_writing').exitDetail]);
+      expect(sessionsOf(h), basisCase.name).toEqual([]);
+    }
+    expect(results).toEqual(
+      cases.map((c) => [
+        c.name,
+        {
+          reason: 'run_without_log',
+          detail: {
+            runStartEntries: c.counts[0],
+            autoStartEntries: c.counts[1],
+            mismatch: c.mismatch,
+          },
+        },
+      ]),
+    );
+    expect(userGit(h.repo, 'branch', '--list', 'bive/run-*')).toBe('');
+  }, 60_000);
+
+  it('자동 시작 항목 1건(원인 = 대상 규칙의 신규 기록, 승인 기록 없음)이면 대조를 지나 merged까지 간다', async () => {
+    const h = setup();
+    h.runId = withProject(h.biveHome, h.project.id, (store) =>
+      store.transaction(() => {
+        const cause = created(store, h.rule.id);
+        const id = forgeRun(store, [h.rule.id], { kind: 'orchestrator', causeSeqs: [cause] });
+        autoStart(store, id, [cause], [h.rule.id]);
+        return id;
+      }),
+    );
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'merged',
+      failureReason: null,
+      startedBy: { kind: 'orchestrator', causeSeqs: [1] },
+    });
+    // 승인 기록에는 생성 때의 사람 실행(setup의 EXE-001) 1건뿐이고 이 실행의 항목은 없다
+    expect(
+      withProject(h.biveHome, h.project.id, (store) =>
+        store.approvalLog.list({ entity: 'Run', id: h.runId }),
+      ),
+    ).toEqual([]);
+  }, 60_000);
 });
 
 describe('종료 조건 미충족 · 회귀 (수용 기준 2)', () => {
@@ -992,6 +1355,12 @@ describe('상태 기계', () => {
     // waiting_approval → running → merged
     const merged = setup();
     expect((await drive(merged, engineFor(merged, stub({})))).run.status).toBe('merged');
+    // waiting_approval → failed (승인 단계에서 효력 없는 대상 규칙, ADR-107)
+    const unavailable = setup({ normState: 'provisional' });
+    expect(
+      engineFor(unavailable, stub({})).evaluateApproval(unavailable.project.id, unavailable.runId),
+    ).toBe(false);
+    expect(detailOf(unavailable).run.status).toBe('failed');
     // running → failed
     const failed = setup();
     const failedExecutors = stub({ check: scripted(['halt']) });

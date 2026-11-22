@@ -4,6 +4,7 @@
 // 2) 이 프로젝트의 event.ruleWriter.changed를 받으면 화면 이동 없이 ruleWriter.status를 다시 읽어 바뀐 상태가 보인다.
 //    다른 프로젝트의 알림으로는 다시 읽지 않는다
 // 3) 직접 편집 저장(다시 시도의 계기) 뒤 상태를 다시 읽는다
+// 4) 정상 종료 뒤 실행 자동 시작을 하지 않았으면 "실행 자동 시작 생략 · <사유>"(경고), 자동 시작했으면 없다 (M7-05 #217, ADR-107)
 // 화면 값은 가짜 브리지의 ruleWriter.status 응답에서만 만든다. 오케스트레이터가 시도 기록을 저장하고 알림을 보내며 실패 · 생략을
 // 다시 시도하는 것은 orchestrator/test/rule-writer.test.ts · events.test.ts(가짜 어댑터 · 설정 미비 재현)가 단언한다.
 import type { Requirement, RuleWriterStatusEntry } from '@bive/shared';
@@ -30,6 +31,7 @@ const entry = (overrides: Partial<RuleWriterStatusEntry>): RuleWriterStatusEntry
   errorTruncated: false,
   requestedAt: '2026-11-21T00:00:00.000Z',
   endedAt: '2026-11-21T00:00:01.000Z',
+  autoStart: null,
   ...overrides,
 });
 
@@ -142,6 +144,43 @@ test.describe('규칙 작성 상태 (M3-26)', () => {
     await expect(line).toHaveCount(0);
     // 화면은 그대로다
     await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'requirements');
+  });
+
+  test('정상 종료 뒤 실행 자동 시작 생략이면 자식 규칙 위에 "실행 자동 시작 생략 · 프로젝트 하루 한도 없음"(경고), 자동 시작했으면 없음 (M7-05, ADR-107)', async ({
+    page,
+  }) => {
+    const bive = await open(
+      page,
+      entry({ autoStart: { state: 'skipped', reason: 'project_daily_budget_unset', missing: [] } }),
+    );
+    const line = statusLine(page);
+    await expect(line).toHaveAttribute('data-state', 'autoStartSkipped');
+    await expect(line).toHaveAttribute('data-tone', 'warning');
+    await expect(line.getByTestId('requirement-rule-writer-label')).toHaveText(
+      '실행 자동 시작 생략 · 프로젝트 하루 한도 없음',
+    );
+    await expect(line.getByTestId('requirement-rule-writer-detail')).toHaveCount(0);
+    // 자식 규칙 영역 안에 한 줄 (새 화면 · 탭 없음)
+    await expect(
+      page.getByTestId('requirement-rules').getByTestId('requirement-rule-writer'),
+    ).toHaveCount(1);
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
+
+    await bive.setResponse('ruleWriter.status', {
+      result: {
+        entries: [
+          entry({
+            autoStart: {
+              state: 'started',
+              runId: '01JD0000000000000000000002',
+              runDisplayId: 'EXE-001',
+            },
+          }),
+        ],
+      },
+    });
+    await bive.emit('event.ruleWriter.changed', changed());
+    await expect(line).toHaveCount(0);
   });
 
   test('다른 프로젝트의 알림으로는 다시 읽지 않고, 기록 없음이면 상태 줄이 없다', async ({

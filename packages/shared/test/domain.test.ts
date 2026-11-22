@@ -600,6 +600,22 @@ describe('실행', () => {
     expect(Run.safeParse({ ...run, targetRuleIds: [ID.rule, ID.rule] }).success).toBe(false);
   });
 
+  it('시작 주체: 사람 또는 원인 기록 순번이 있는 오케스트레이터 (자동 시작, M7-05 · ADR-107)', () => {
+    const auto = { ...run, startedBy: { kind: 'orchestrator', causeSeqs: [3, 4] } };
+    expect(Run.parse(auto)).toEqual(auto);
+    for (const startedBy of [
+      { kind: 'orchestrator' },
+      { kind: 'orchestrator', causeSeqs: [] },
+      { kind: 'orchestrator', causeSeqs: [0] },
+      { kind: 'orchestrator', causeSeqs: [1, 1] },
+      { kind: 'orchestrator', causeSeqs: [1.5] },
+      { kind: 'orchestrator', causeSeqs: [1], extra: true },
+      { kind: 'human', causeSeqs: [1] },
+    ]) {
+      expect(Run.safeParse({ ...run, startedBy }).success, JSON.stringify(startedBy)).toBe(false);
+    }
+  });
+
   it('워크트리 전(승인 대기)에는 브랜치 · 워크트리 · 기준 커밋 · 시작 시각이 없다 (ADR-061)', () => {
     const waiting = {
       ...run,

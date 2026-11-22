@@ -3,7 +3,8 @@
 // 제품 CLI(`src/cli.ts`)를 `BIVE_AGENT=scripted` · `BIVE_SCENARIO=<이름>`으로 띄운다. 단계 실행기 · 의존성 설치 ·
 // 판정 러너(next build · next start · vitest) · git은 제품 기본값 그대로이고 주입하지 않는다. 시험은 앱과 같은 파이프
 // 경로로만 조작한다: project.open → settings.update → requirement.create → (rule-writer가 규칙을 바로 반영, M7-02) →
-// run.create(사람의 [실행]) → run.get.
+// run.create(사람의 [실행]) → run.get. 하루 한도를 비워 두므로 실행 자동 시작은 생략된다(M7-05, ADR-107). 자동 시작 흐름은
+// happy-path.test.ts가 하루 한도를 채워 본다.
 // 단언용 읽기(판정 기록 · 세션 기록)만 실행이 끝난 뒤 저장소를 직접 연다.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -15,6 +16,7 @@ import {
   isTerminalRunStatus,
   type Requirement,
   type Rule,
+  type RuleWriterStatusEntry,
   type Run,
   type RunGetResult,
   type StepKind,
@@ -197,18 +199,29 @@ export const restartOrchestrator = async (e: PipelineE2e): Promise<void> => {
  * 요구사항을 저장하고 rule-writer 세션이 끝나 그 요구사항의 규칙 `count`개가 바로 반영될 때까지 기다린다. 사람의 승인 단계는
  * 없다(M7-02, ADR-100 D1): 규칙은 효력 상태 · 미확인으로 생기고 승인 대기 제안은 생기지 않는다. 세션이 끝난 뒤에 돌려주므로
  * 이어지는 실행과 규칙 작성 세션의 쓰기가 겹치지 않는다.
+ * 세션이 끝나면 오케스트레이터가 실행 자동 시작을 판단한다(M7-05, ADR-107). 시험의 설정은 하루 한도를 비워 두므로 기본은
+ * 자동 시작 생략(`project_daily_budget_unset`)을 단언하고 실행이 생기지 않았음을 본다(이어지는 실행은 사람의 [실행]).
+ * 하루 한도를 채운 시험은 `autoStart: 'started'`로 자동 시작된 실행을 돌려받는다.
  */
 export const saveRequirement = async (
   e: PipelineE2e,
   text: string,
   count: number,
-): Promise<{ requirement: Requirement; rules: Rule[] }> => {
+  options: { autoStart?: 'started' | 'skipped' } = {},
+): Promise<{
+  requirement: Requirement;
+  rules: Rule[];
+  status: RuleWriterStatusEntry;
+  autoStartedRunId: string | null;
+}> => {
+  const runsBefore = (await e.client.call('run.list', { projectId: e.projectId })).runs.length;
   const { requirement } = await e.client.call('requirement.create', {
     projectId: e.projectId,
     text,
     author: human,
   });
   let rules: Rule[] = [];
+  let status: RuleWriterStatusEntry | undefined;
   await waitWithOutput(
     e,
     async () => {
@@ -217,6 +230,7 @@ export const saveRequirement = async (
         requirementId: requirement.id,
       });
       if (entries[0]?.state !== 'ended') return false;
+      status = entries[0];
       rules = (await e.client.call('rule.list', { projectId: e.projectId })).rules
         .map((entry) => entry.rule)
         .filter((rule) => rule.parentRequirementId === requirement.id);
@@ -226,10 +240,28 @@ export const saveRequirement = async (
     `rule-writer 세션 종료 (규칙 ${String(count)}개)`,
   );
   expect(rules).toHaveLength(count);
+  if (status === undefined) throw new Error('규칙 작성 시도 없음');
   // 승인 대기 제안은 생기지 않는다
   const { proposals } = await e.client.call('proposal.list', { projectId: e.projectId });
   expect(proposals).toEqual([]);
-  return { requirement, rules };
+  const { runs } = await e.client.call('run.list', { projectId: e.projectId });
+  if ((options.autoStart ?? 'skipped') === 'skipped') {
+    // 하루 한도가 비어 있어 자동 시작을 하지 않았다 (ADR-100 B⑤): 상태 줄의 생략 사유가 실리고 실행은 늘지 않는다
+    expect(status.autoStart).toEqual({
+      state: 'skipped',
+      reason: 'project_daily_budget_unset',
+      missing: [],
+    });
+    expect(runs).toHaveLength(runsBefore);
+    return { requirement, rules, status, autoStartedRunId: null };
+  }
+  if (status.autoStart?.state !== 'started') {
+    throw new Error(
+      `자동 시작 안 됨: ${JSON.stringify(status.autoStart)}\n${orchestratorOutput(e)}`,
+    );
+  }
+  expect(runs).toHaveLength(runsBefore + 1);
+  return { requirement, rules, status, autoStartedRunId: status.autoStart.runId };
 };
 
 /** 실행을 만든다 (사람). */

@@ -128,7 +128,7 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
 
   it('상태 전이는 architecture.md 4장 상태 기계 그대로이고 종료 상태에서는 나가지 않는다 (ADR-061)', () => {
     expect(RUN_STATUS_TRANSITIONS).toEqual({
-      waiting_approval: ['running', 'queued'],
+      waiting_approval: ['running', 'queued', 'failed'],
       queued: ['running', 'failed'],
       running: ['merged', 'failed', 'budget_exceeded', 'interrupted'],
       interrupted: ['running', 'failed', 'merged'],

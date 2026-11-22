@@ -767,11 +767,15 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
       'norms/agent-rule.ts',
       'proposals/proposal-service.ts',
     ]);
-    // 규범 변경 기록 쓰기 (읽기는 조회 처리기)
-    expect(using(/\.normChanges\.append\(/)).toEqual(['norms/agent-rule.ts']);
+    // 규범 변경 기록 쓰기 = 바로 반영 모듈(신규)과 실행 자동 시작 모듈(자동 시작, M7-05). 읽기는 조회 처리기 · 규칙 작성 상태 ·
+    // 엔진의 시작 근거 대조
+    expect(using(/\.normChanges\.append\(/)).toEqual(['norms/agent-rule.ts', 'runs/auto-start.ts']);
     expect(using(/\.normChanges\./)).toEqual([
+      'engine/start-basis.ts',
       'ipc/norm-change-handlers.ts',
+      'ipc/rule-writer-handlers.ts',
       'norms/agent-rule.ts',
+      'runs/auto-start.ts',
     ]);
     // 바로 반영 모듈을 가져오는 곳 = 규칙 작성 서비스뿐 (에이전트 세션 중 규칙 작성 역할만)
     expect(using(/from '[./]+\/?norms\/agent-rule\.js'/)).toEqual([
@@ -780,6 +784,52 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
     // 제안 등록(submit)을 부르는 제품 코드가 없다: 새 제안은 생기지 않는다 (ADR-100 A1)
     expect(using(/\bsubmitProposal\(|\.submit\(/)).toEqual(['proposals/proposal-service.ts']);
     expect(using(/new ProposalService\(/)).toEqual([]);
+  });
+});
+
+describe('실행 자동 시작의 코드 경로 (M7-05 #217, ADR-100 C2 · D4, ADR-107, 코드 구조)', () => {
+  const files = () =>
+    sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+  const using = (pattern: RegExp) =>
+    files()
+      .filter((f) => pattern.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+
+  it('자동 시작 항목은 오케스트레이터의 자동 시작 모듈만 쓰고, 그 모듈은 오케스트레이터 배선만 가져온다: 에이전트 도구 · 세션 · 엔진 · 단계에서 자동 시작 항목을 만들 길이 없다', () => {
+    // 규범 변경 기록에 종류 auto_start를 적는 곳 (쓰기는 위의 append 허용 목록과 함께 본다). 읽기는 엔진 대조 · 상태 조회
+    expect(using(/kind: 'auto_start'/)).toEqual(['runs/auto-start.ts']);
+    expect(using(/'auto_start'/)).toEqual([
+      'engine/start-basis.ts',
+      'ipc/rule-writer-handlers.ts',
+      'runs/auto-start.ts',
+    ]);
+    // 자동 시작 모듈을 가져오는 곳 = 오케스트레이터 배선뿐 (규칙 작성 서비스 · 도구 · 엔진 · IPC 처리기는 가져오지 않는다)
+    expect(using(/from '[./]+\/?runs\/auto-start\.js'/)).toEqual(['orchestrator.ts']);
+    // 실행 저장은 실행 서비스 한 곳, 그것을 부르는 곳은 사람의 [실행]과 자동 시작 둘뿐
+    expect(using(/\.runs\.create\(/)).toEqual(['runs/run-service.ts']);
+    expect(using(/\bsaveNewRun\(/)).toEqual(['runs/auto-start.ts', 'runs/run-service.ts']);
+    expect(using(/\bcreateRun\(/)).toEqual(['ipc/run-handlers.ts']);
+    // 에이전트 세션이 닿는 코드(도구 · 세션 · 역할)는 실행 서비스 · 자동 시작 · 엔진을 가져오지 않는다
+    for (const { rel, text } of files()) {
+      if (/^(tools|agent|rule-writer|test-writer|implementer)\//.test(rel)) {
+        expect(/from '[./]+\/?runs\//.test(text), rel).toBe(false);
+        expect(/from '[./]+\/?engine\/pipeline-engine\.js'/.test(text), rel).toBe(false);
+      }
+    }
+  });
+
+  it('자동 시작이 연쇄로 돌지 않는다: 규칙 작성 세션은 사람의 요구사항 저장 · 편집 처리기에서만 시작하고, 엔진 · 단계 · 자동 시작은 규칙 작성 서비스를 가져오지 않는다', () => {
+    expect(using(/\bruleWriter\?\.(start|retry)\(/)).toEqual(['ipc/requirement-handlers.ts']);
+    expect(using(/new RuleWriterService\(/)).toEqual(['orchestrator.ts']);
+    for (const { rel, text } of files()) {
+      if (/^(engine|steps|runs|judge|tools|agent)\//.test(rel)) {
+        expect(/rule-writer\/rule-writer-service\.js'/.test(text), rel).toBe(false);
+      }
+    }
   });
 });
 

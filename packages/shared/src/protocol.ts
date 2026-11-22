@@ -40,6 +40,7 @@ import {
 } from './domain.js';
 import {
   AgentRole,
+  AutoStartSkipReason,
   CodeOpenReason,
   JudgmentStatus,
   NormChangeKind,
@@ -733,6 +734,25 @@ export const RuleWriterStatusParams = z.strictObject({
 });
 export type RuleWriterStatusParams = z.infer<typeof RuleWriterStatusParams>;
 
+/**
+ * 규칙 작성 세션 뒤의 실행 자동 시작 결과 (M7-05 #217, ADR-107). 시작했으면 그 실행(규범 변경 기록의 자동 시작 항목에서),
+ * 하지 않았으면 저장된 생략 사유. 세션이 규칙을 만들지 못했거나 정상 종료가 아니면 결과가 없다(`null`).
+ */
+export const RuleWriterAutoStart = z.discriminatedUnion('state', [
+  z.strictObject({
+    state: z.literal('started'),
+    runId: Ulid,
+    runDisplayId: displayIdSchema('EXE'),
+  }),
+  z.strictObject({
+    state: z.literal('skipped'),
+    reason: AutoStartSkipReason,
+    /** `settings_incomplete`일 때 비어 있던 설정 항목 */
+    missing: z.array(MissingSettingPath),
+  }),
+]);
+export type RuleWriterAutoStart = z.infer<typeof RuleWriterAutoStart>;
+
 /** 요구사항 하나의 가장 최근 규칙 작성 시도. */
 export const RuleWriterStatusEntry = z.strictObject({
   requirementId: Ulid,
@@ -753,6 +773,8 @@ export const RuleWriterStatusEntry = z.strictObject({
   requestedAt: Timestamp,
   /** 끝난(생략된) 시각. 대기 · 진행 중이면 `null` */
   endedAt: Timestamp.nullable(),
+  /** 이 시도 뒤의 실행 자동 시작 결과. 없으면 `null` */
+  autoStart: RuleWriterAutoStart.nullable(),
 });
 export type RuleWriterStatusEntry = z.infer<typeof RuleWriterStatusEntry>;
 

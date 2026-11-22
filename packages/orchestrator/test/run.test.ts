@@ -1091,7 +1091,9 @@ describe('프로세스 재시작 뒤 run.get이 같은 값 (수용 기준 4, RUN
       }
     };
 
-    // 1) 생성 직후 (오케스트레이터가 꺼진 동안 저장된 값, run.create와 같은 함수). 재기동은 승인 대기를 건드리지 않는다
+    // 1) 생성 직후 (다른 연결이 저장한 값, run.create와 같은 함수). 떠 있는 오케스트레이터는 생성 알림을 받지 않았으므로
+    //    판정하지 않고 저장된 값 그대로 돌려준다. 꺼진 동안 만든 승인 대기는 기동 때 판정되므로(ADR-107) 띄운 뒤에 만든다
+    let current = await start(biveHome);
     const created = withStore((store) =>
       createRun(
         store,
@@ -1103,7 +1105,6 @@ describe('프로세스 재시작 뒤 run.get이 같은 값 (수용 기준 4, RUN
         },
       ),
     );
-    let current = await start(biveHome);
     const afterCreate = await current.client.call('run.get', {
       projectId: project.id,
       id: created.run.id,

@@ -178,7 +178,30 @@ describe('runs.create', () => {
           }),
         ),
       ).toThrow();
+      // 오케스트레이터 주체는 원인 규범 변경 기록 순번이 있어야 한다 (자동 시작, ADR-107)
+      for (const startedBy of [
+        { kind: 'orchestrator' },
+        { kind: 'orchestrator', causeSeqs: [] },
+        { kind: 'orchestrator', causeSeqs: [0] },
+        { kind: 'orchestrator', causeSeqs: ['1'] },
+      ]) {
+        expect(() =>
+          store.runs.create(runInput([rule], { startedBy: startedBy as unknown as typeof human })),
+        ).toThrow();
+      }
       expect(store.sequences.last('EXE')).toBe(0);
+    });
+  });
+
+  it('자동 시작 실행: 오케스트레이터 주체(원인 순번)를 저장하고 그대로 읽는다 (M7-05, ADR-107)', () => {
+    withStore((store) => {
+      const startedBy = { kind: 'orchestrator' as const, causeSeqs: [3, 4] };
+      const created = store.runs.create(runInput([seedRule(store)], { startedBy }));
+      expect(created.run.startedBy).toEqual(startedBy);
+      expect(store.runs.get(created.run.id)?.startedBy).toEqual(startedBy);
+      expect(
+        store.db.prepare('SELECT started_by FROM runs WHERE id = ?').get(created.run.id),
+      ).toEqual({ started_by: '{"kind":"orchestrator","causeSeqs":[3,4]}' });
     });
   });
 
@@ -294,7 +317,8 @@ describe('runs.transition (상태 저장 1회 = 트랜잭션 1회)', () => {
     withStore((store) => {
       const created = store.runs.create(runInput([seedRule(store)]));
       const approval = stepOf(created, 'approval').id;
-      for (const status of ['merged', 'failed', 'budget_exceeded', 'interrupted'] as const) {
+      // 승인 대기 → 실패는 상태 기계에 있다(승인 단계에서 효력 없는 대상 규칙, ADR-107). 그 밖의 종료 · 중단은 없다
+      for (const status of ['merged', 'budget_exceeded', 'interrupted'] as const) {
         expect(() =>
           store.runs.transition(created.run.id, {
             run: { status },
