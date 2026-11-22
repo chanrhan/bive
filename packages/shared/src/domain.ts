@@ -834,14 +834,28 @@ const NormChangeSeqList = z
 /**
  * 판단의 주제 (M7-07 #219, ADR-106). `new_rule` = 규칙 작성 역할이 새 규칙을 만들며 효력 있는 기존 규칙과의 모순을
  * 판단함. `supersede` = 규칙 작성 역할이 기존 규칙을 대체하며 새 규칙이 그 규칙(과 다른 효력 있는 규칙)과 모순이라고 판단함
- * (M7-09 #221, ADR-112: 결과는 늘 모순이고 대체된 규칙이 `contradicts`의 첫 항목). 이의(M7-11) · 검사 단계의 기존 규칙
+ * (M7-09 #221, ADR-112: 결과는 늘 모순이고 대체된 규칙이 `contradicts`의 첫 항목). `objection` = 규칙 작성 역할(또는 판단
+ * 없이 끝난 경우의 오케스트레이터)이 구현 역할의 이의(종류 `objection` 기록) 대상 규칙 하나를 폐기 · 대체 · 유지로 판단함
+ * (M7-11 #223, ADR-115: 결과는 `upheld` · `retired` · `superseded`, 원인 이의 기록 순번 `causeSeq` 필수). 검사 단계의 기존 규칙
  * 실패(M7-12)는 그 이슈가 값을 더한다(넓히기만).
  */
-export const NormJudgmentSubject = z.enum(['new_rule', 'supersede']);
+export const NormJudgmentSubject = z.enum(['new_rule', 'supersede', 'objection']);
 export type NormJudgmentSubject = z.infer<typeof NormJudgmentSubject>;
 
-/** 판단 결과. 모순 없음 · 모순 (M7-11의 유지 등은 그 이슈가 더한다). */
-export const NormJudgmentVerdict = z.enum(['no_contradiction', 'contradiction']);
+/**
+ * 판단 결과. 모순 없음 · 모순(주제 `new_rule` · `supersede`), 이의 판단의 유지 · 폐기 · 대체(주제 `objection`만, M7-11 #223,
+ * ADR-115). 넓히기만 한다.
+ */
+export const NormJudgmentVerdict = z.enum([
+  'no_contradiction',
+  'contradiction',
+  'upheld',
+  'retired',
+  'superseded',
+]);
+
+/** 이의 판단의 결과 (주제 `objection`의 `verdict`). */
+export const OBJECTION_VERDICTS = ['upheld', 'retired', 'superseded'] as const;
 export type NormJudgmentVerdict = z.infer<typeof NormJudgmentVerdict>;
 
 /** 판단이 가리키는 규칙 (판단 시점의 ID와 표시 ID). */
@@ -865,6 +879,13 @@ export const NormJudgmentDetail = z
     verdict: NormJudgmentVerdict,
     contradicts: z.array(NormJudgmentRuleRef),
     createdSeq: z.int().positive().optional(),
+    /** 원인 기록 순번 (주제 `objection`이면 그 이의 기록, 필수. M7-11) */
+    causeSeq: z.int().positive().optional(),
+    /**
+     * 판단 세션이 이 규칙을 판단하지 못하고 끝나 오케스트레이터가 유지로 본 사실 (주제 `objection` · 결과 `upheld` · 주체
+     * 오케스트레이터에만, M7-11). `endReason`은 판단 세션의 종료 사유 또는 세션을 열지 못한 사유
+     */
+    undecided: z.strictObject({ endReason: z.string().min(1).max(64) }).optional(),
     input: z.strictObject({
       requirements: NormJudgmentInputCount,
       rules: NormJudgmentInputCount,
@@ -896,6 +917,29 @@ export const NormJudgmentDetail = z
         code: 'custom',
         message: '대체의 판단은 모순입니다 (대체된 규칙과 동시에 만족될 수 없음)',
         path: ['verdict'],
+      });
+    }
+    // 이의 판단 (M7-11, ADR-115): 결과는 유지 · 폐기 · 대체만, 원인 이의 기록 필수. 그 결과 값 · 원인 · 판단 없음은 이의 판단에만
+    const objectionVerdict = (OBJECTION_VERDICTS as readonly string[]).includes(judgment.verdict);
+    if ((judgment.subject === 'objection') !== objectionVerdict) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '이의 판단의 결과는 유지 · 폐기 · 대체이고, 그 결과는 이의 판단에만 있습니다',
+        path: ['verdict'],
+      });
+    }
+    if ((judgment.subject === 'objection') !== (judgment.causeSeq !== undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '이의 판단에는 원인 이의 기록 순번이 필요하고, 다른 판단에는 없습니다',
+        path: ['causeSeq'],
+      });
+    }
+    if (judgment.undecided !== undefined && judgment.verdict !== 'upheld') {
+      ctx.addIssue({
+        code: 'custom',
+        message: '판단 없이 끝난 이의는 유지로만 남깁니다 (판단 없음을 폐기로 보지 않는다)',
+        path: ['undecided'],
       });
     }
   });
@@ -956,6 +1000,28 @@ export const NormTestChangeDetail = z
   .refine((detail) => detail.fileCount >= detail.files.length, '전체 수가 실은 수보다 작습니다');
 export type NormTestChangeDetail = z.infer<typeof NormTestChangeDetail>;
 
+/** 이의 기록에 싣는 대상 규칙 수 상한 (M7-11, ADR-115). */
+export const NORM_OBJECTION_RULES_MAX = 5;
+
+/**
+ * 이의 상세 (종류 `objection`, M7-11 #223, ADR-100 D4 · A4 · A5, ADR-115). 구현 역할이 실행 안에서 규칙이 잘못됐다고 본 사실이다.
+ * 사유 글은 기록의 `reason`(원문)에 있다.
+ * - `rules`: 이의 대상 규칙 (이의를 남긴 시점의 ID와 표시 ID, 1 ~ {@link NORM_OBJECTION_RULES_MAX}개 · 중복 없음)
+ * - `stepId`: 이의를 남긴 구현 단계 시도
+ */
+export const NormObjectionDetail = z.strictObject({
+  rules: z
+    .array(NormJudgmentRuleRef)
+    .min(1)
+    .max(NORM_OBJECTION_RULES_MAX)
+    .refine(
+      (rules) => new Set(rules.map((rule) => rule.id)).size === rules.length,
+      '대상 규칙이 중복됐습니다',
+    ),
+  stepId: Ulid,
+});
+export type NormObjectionDetail = z.infer<typeof NormObjectionDetail>;
+
 /**
  * 종류별 상세. 신규는 `after`(만든 규범의 내용)만, 자동 시작은 원인 하나와 `ruleIds`(대상 규칙, 같은 순서)다. 원인은
  * `causeSeqs`(대상 규칙의 신규 기록 순번, M7-05 #217 · ADR-107) 또는 `ruleEditSeqs`(사람의 규칙 진술 편집 = 승인 기록
@@ -982,6 +1048,8 @@ export const NormChangeDetail = z.strictObject({
   unconfirm: NormUnconfirmDetail.optional(),
   /** 테스트 변경 알림 (종류 `test_changed`에만, M7-13) */
   testChange: NormTestChangeDetail.optional(),
+  /** 이의 (종류 `objection`에만, M7-11) */
+  objection: NormObjectionDetail.optional(),
 });
 export type NormChangeDetail = z.infer<typeof NormChangeDetail>;
 
@@ -1188,6 +1256,60 @@ export const NormChangeEntry = z
         message: '테스트 변경 알림에는 그 테스트를 바꾼 실행이 필요합니다',
         path: ['runId'],
       });
+    }
+    // 이의 (M7-11, ADR-115): 상세는 이의 기록에만, 이의 기록에는 반드시. 주체는 구현 역할, 대상은 그 실행
+    if ((entry.kind === 'objection') !== (entry.detail.objection !== undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'objection 상세는 이의 기록에만 있고 그 기록에는 반드시 있습니다',
+        path: ['detail', 'objection'],
+      });
+    }
+    if (entry.kind === 'objection') {
+      if (entry.actor.kind !== 'agent' || entry.actor.role !== 'implementer') {
+        ctx.addIssue({
+          code: 'custom',
+          message: '이의의 주체는 구현 역할입니다',
+          path: ['actor'],
+        });
+      }
+      if (entry.targetRef.entity !== 'Run' || entry.runId !== entry.targetRef.id) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '이의의 대상은 그 실행이고 연결 실행과 같아야 합니다',
+          path: ['targetRef'],
+        });
+      }
+      if (entry.detail.before !== undefined || entry.detail.after !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '이의에는 이전 · 이후 내용이 없습니다',
+          path: ['detail'],
+        });
+      }
+    }
+    // 이의 판단: 대상은 판단한 규칙, 연결 실행 필수. 판단 없음은 오케스트레이터만, 판단은 규칙 작성 역할만
+    const judged = entry.detail.judgment;
+    if (entry.kind === 'judgment' && judged?.subject === 'objection') {
+      if (entry.targetRef.entity !== 'Rule' || entry.runId === null) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '이의 판단의 대상은 규칙이고 연결 실행이 필요합니다',
+          path: ['targetRef'],
+        });
+      }
+      const fallback = judged.undecided !== undefined;
+      const actorOk = fallback
+        ? entry.actor.kind === 'orchestrator'
+        : entry.actor.kind === 'agent' && entry.actor.role === 'rule-writer';
+      if (!actorOk) {
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            '이의 판단의 주체는 규칙 작성 역할이고, 판단 없이 끝난 유지는 오케스트레이터입니다',
+          path: ['actor'],
+        });
+      }
     }
   });
 export type NormChangeEntry = z.infer<typeof NormChangeEntry>;

@@ -22,6 +22,14 @@
 //   모순 판단은 반영 모듈이 같은 트랜잭션에서 규범 변경 기록(판단)에 남긴다
 // - 세션 행이 있는 세션이 끝나면 종료 기록 저장 뒤 `onSessionEnded`를 부른다. 오케스트레이터가 이것으로 실행을 자동 시작한다
 //   (M7-05 #217, ADR-107). 세션 안에서는 실행을 만들 수 없다(규칙 작성 역할의 도구는 규칙 생성 · 폐기 · 대체뿐)
+// - 실행 안의 판단 세션(`judge`, M7-11 #223, ADR-100 D4 · A4 · A5, ADR-115): 오케스트레이터 배선(`orchestrator.ts`)이 엔진의
+//   판단 요청을 이 서비스에 잇는다(엔진 · 단계는 이 서비스를 모른다). 같은 규칙 작성 역할 · 같은 도구 목록으로 원인 기록(지금은
+//   구현 역할의 이의) 대상 규칙을 폐기 · 대체 · 유지로 판단하는 세션을 한 번 연다. 원인 글은 작업 지시에 들여 쓴 표시 값으로만
+//   싣고(구현 세션의 다른 글은 넣지 않는다), 판단은 대상 규칙마다 한 번, 대상 밖 규칙 · 새 규칙 만들기는 거부한다. 판단을 모두
+//   남기면 실행기를 닫는다. 한도는 min(규칙 작성 역할 설정, 프로젝트 하루 잔여, 실행 잔여)이고 세션 행은 실행 밖 세션이다(하루
+//   합계에 들고 실행 합계에는 들지 않는다. 그 실행과의 연결은 판단 기록의 연결 실행 · 세션 ID).
+//   세션이 끝나면 요구사항 세션과 같은 `onSessionEnded`(대체로 생긴 새 규칙의 실행 자동 시작)를 부른다. 요구사항 세션의
+//   대기열 · 시도 기록과는 따로 돈다
 // - 다시 시도(`retry`): 사람이 요구사항을 직접 편집해 저장했을 때, 가장 최근 시도가 생략 · 실패(`success` 아닌 종료)이고
 //   그 요구사항에서 규칙 작성 역할이 만든 규칙(이 변경 전의 규칙 자동 생성 제안 포함)이 없으면 새 시도를 띄운다. 진행 중 · 대기 중이거나 성공한 요구사항은 띄우지 않는다 (ADR-099)
 import { mkdirSync, rmSync } from 'node:fs';
@@ -51,14 +59,17 @@ import type {
 } from '../agent/adapter.js';
 import { runGuardedSession } from '../agent/guarded-session.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
+import type { NormJudgeOutcome, NormJudgeRequest } from '../engine/types.js';
 import { RpcError } from '../ipc/server.js';
 import type { TaskTracker } from '../lifecycle.js';
 import {
+  type AgentObjectionJudgment,
   createAgentRule,
   NormJudgmentInputError,
   NormRetirementInputError,
   retireAgentRule,
   supersedeAgentRule,
+  upholdAgentRule,
 } from '../norms/agent-rule.js';
 import {
   collectNormInput,
@@ -79,10 +90,17 @@ import type {
   ProposeRuleInput,
   RetireRuleInput,
   SupersedeRuleInput,
+  UpholdRuleInput,
 } from '../tools/definitions.js';
-import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
+import { createRoleTools, type FixedToolExecutor, type ToolCallRecord } from '../tools/executor.js';
 import { denied, failed, invalidArgs, type IssueList, ok } from '../tools/result.js';
-import { RULE_WRITER_SYSTEM_PROMPT, ruleWriterTaskPrompt } from './prompts.js';
+import {
+  type JudgmentPromptRule,
+  RULE_WRITER_JUDGMENT_SYSTEM_PROMPT,
+  RULE_WRITER_SYSTEM_PROMPT,
+  ruleWriterJudgmentPrompt,
+  ruleWriterTaskPrompt,
+} from './prompts.js';
 
 /** 이 세션의 역할. 설정 검사도 이 역할만 본다 (ADR-057: 실행 전체 한도는 항상 함께 검사). */
 export const RULE_WRITER_ROLE = 'rule-writer' as const satisfies AgentRole;
@@ -206,6 +224,26 @@ const isIssueList = (error: unknown): error is Error & IssueList =>
   error.name === 'ZodError' &&
   Array.isArray((error as Partial<IssueList>).issues);
 
+/** `signal`이 중단되면 그 사유로 거부된다 (중단되지 않으면 풀리지 않는다). */
+const untilAborted = (signal: AbortSignal): Promise<never> =>
+  new Promise<never>((_resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason as Error);
+      return;
+    }
+    signal.addEventListener('abort', () => reject(signal.reason as Error), { once: true });
+  });
+
+/** 판단 세션 1개의 문맥: 대상 규칙과 판단을 남긴 규칙. */
+interface JudgmentSession {
+  readonly id: string;
+  readonly projectId: string;
+  readonly label: string;
+  readonly rules: readonly JudgmentPromptRule[];
+  readonly decided: Set<string>;
+  readonly objection: AgentObjectionJudgment;
+  tools: FixedToolExecutor | null;
+}
 export class RuleWriterService implements RuleWriterLauncher {
   readonly #biveHome: string;
   readonly #adapter: AgentAdapter;
@@ -605,6 +643,12 @@ export class RuleWriterService implements RuleWriterLauncher {
           proposeRule: (input) => this.#propose(record, norms.summary, input),
           retireRule: (input) => this.#retire(record, input),
           supersedeRule: (input) => this.#supersede(record, norms.summary, input),
+          // 유지는 실행 안의 판단 세션에서만 받는다 (요구사항 세션에는 판단할 이의가 없다)
+          upholdRule: () =>
+            denied(
+              'invalid_args',
+              'uphold_rule은 실행 안의 판단 세션에서만 쓴다 (이 세션에는 판단할 이의가 없음)',
+            ),
           onToolCall: (call) => {
             record.toolCalls.push(call);
             this.#persistToolCall(record, call);
@@ -907,7 +951,10 @@ export class RuleWriterService implements RuleWriterLauncher {
   }
 
   /** 폐기 · 대체 도구의 저장소 오류를 도구 결과로 바꾼다 (모르는 오류는 다시 던진다). */
-  #retirementError(tool: 'retire_rule' | 'supersede_rule', error: unknown): ToolResult {
+  #retirementError(
+    tool: 'retire_rule' | 'supersede_rule' | 'uphold_rule',
+    error: unknown,
+  ): ToolResult {
     if (error instanceof NormRetirementInputError) {
       return denied(
         error.code,
@@ -1000,5 +1047,390 @@ export class RuleWriterService implements RuleWriterLauncher {
     } catch (error) {
       return this.#retirementError('supersede_rule', error);
     }
+  }
+
+  // ── 실행 안의 판단 세션 (M7-11 #223, ADR-115) ─────────────────────
+
+  /**
+   * 실행 안의 판단 세션을 한 번 연다 (오케스트레이터 배선만 부른다). 끝날 때까지 기다린다. 열지 못하면 `not_opened`(하루 한도에
+   * 이름 · 규칙 작성 역할 설정 미비 · 세션 행 저장 등 시작 실패), 열었으면 종료 사유와 함께 `ended`. 판단 내용은 저장소의 판단 기록이
+   * 원천이다. 중단 신호(실행 중단 · 오케스트레이터 종료)가 오면 세션을 `aborted`로 끝내고 그 사유로 거부한다. 서비스가 닫힌 뒤에는
+   * 세션을 열지 않고 중단 신호를 기다린다(종료 중인 엔진이 곧 그 실행을 중단한다: 판단 없음을 남기지 않는다).
+   */
+  async judge(request: NormJudgeRequest): Promise<NormJudgeOutcome> {
+    const { signal } = request;
+    signal.throwIfAborted();
+    if (this.#closed) return untilAborted(signal);
+    const label = `${request.run.displayId} 원인 ${String(request.cause.seq)}`;
+    const id = this.#newId();
+    const workDir = path.join(this.#biveHome, 'work', request.projectId, 'sessions', id);
+    let prepared;
+    try {
+      prepared = withRegisteredProjectStore(this.#biveHome, request.projectId, (store) =>
+        this.#prepareJudgment(store, request, id, workDir),
+      );
+    } catch (error) {
+      this.#log(`판단 세션 시작 실패 (${label}): ${errorMessage(error)}`);
+      return { status: 'not_opened', reason: 'start_failed', detail: errorMessage(error) };
+    }
+    if (prepared.status === 'not_opened') {
+      this.#log(`판단 세션 생략 (${label}, ${prepared.reason})`);
+      return prepared;
+    }
+    const { model, budget, norms, rules } = prepared;
+    const session: JudgmentSession = {
+      id,
+      projectId: request.projectId,
+      label,
+      rules,
+      decided: new Set(),
+      objection: { causeSeq: request.cause.seq, runId: request.run.id, normInput: norms.summary },
+      tools: null,
+    };
+    const controller = new AbortController();
+    const forward = (): void => controller.abort(signal.reason);
+    signal.addEventListener('abort', forward, { once: true });
+    const task = this.#tasks?.beginTask();
+    this.#log(
+      `판단 세션 시작 (${label}, 대상 ${rules.map((rule) => rule.displayId).join(', ')}, 모델 ${model}, ` +
+        `한도 USD ${String(budget.maxBudgetUsd)} · 턴 ${String(budget.maxTurns)})`,
+    );
+    let endReason: SessionEndReason = 'error_during_execution';
+    let detail: string | null = null;
+    let result: SessionResultEvent | null = null;
+    try {
+      mkdirSync(workDir, { recursive: true, mode: 0o700 });
+      const tools = createRoleTools({
+        role: RULE_WRITER_ROLE,
+        sessionRoot: workDir,
+        biveHome: this.#biveHome,
+        now: () => new Date(this.#now()),
+        hooks: {
+          proposeRule: () =>
+            denied(
+              'invalid_args',
+              'propose_rule은 판단 세션에서 쓰지 않는다 (규칙을 바꾸려면 판단 대상 규칙의 supersede_rule)',
+            ),
+          retireRule: (input) => this.#judgeRetire(session, input),
+          supersedeRule: (input) => this.#judgeSupersede(session, input),
+          upholdRule: (input) => this.#judgeUphold(session, input),
+          onToolCall: (call) => {
+            this.#persistJudgmentToolCall(session, call);
+            const name = displayText(call.name, TOOL_CALL_NAME_DISPLAY_MAX).text;
+            this.#log(
+              `판단 세션 도구 호출 (${label}, ${name} ${call.status}` +
+                `${call.reason === undefined ? '' : ` ${call.reason}`})`,
+            );
+          },
+        },
+      });
+      session.tools = tools;
+      const outcome = await runGuardedSession({
+        adapter: this.#adapter,
+        controller,
+        spec: {
+          role: RULE_WRITER_ROLE,
+          systemPrompt: RULE_WRITER_JUDGMENT_SYSTEM_PROMPT,
+          prompt: ruleWriterJudgmentPrompt({
+            runDisplayId: request.run.displayId,
+            causeSeq: request.cause.seq,
+            rules,
+            text: request.text,
+            norms,
+          }),
+          workDir,
+          tools,
+          budget,
+          model,
+          runId: request.run.id,
+          vars: {
+            projectId: request.projectId,
+            runId: request.run.displayId,
+            judgment: request.cause.kind,
+            causeSeq: String(request.cause.seq),
+            ruleId: rules[0]?.displayId ?? '',
+            ruleIds: rules.map((rule) => rule.displayId).join(','),
+            requirementId: rules[0]?.parentRequirementId ?? '',
+          },
+        },
+        onInit: (_manifest, init) => {
+          this.#quietlyPersist(session, (store) =>
+            store.sessions.recordInit(id, {
+              sdkSessionId: init.sessionId,
+              tools: init.tools,
+              mcpServers: init.mcpServers,
+            }),
+          );
+        },
+      });
+      result = outcome.result;
+      endReason = signal.aborted ? 'aborted' : outcome.endReason;
+      detail = outcome.detail;
+    } catch (error) {
+      detail = errorMessage(error);
+    } finally {
+      signal.removeEventListener('abort', forward);
+      rmSync(workDir, { recursive: true, force: true });
+      task?.end();
+    }
+    this.#quietlyPersist(session, (store) =>
+      store.sessions.end(id, {
+        endReason,
+        error: detail,
+        totalCostUsd: result?.total_cost_usd ?? null,
+        numTurns: result?.num_turns ?? null,
+        modelUsage: Object.fromEntries(
+          Object.entries(result?.modelUsage ?? {}).map(([name, usage]) => [
+            name,
+            {
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              cacheReadInputTokens: usage.cacheReadInputTokens,
+              cacheCreationInputTokens: usage.cacheCreationInputTokens,
+              costUsd: usage.costUSD,
+            },
+          ]),
+        ),
+        endedAt: this.#timestamp(),
+      }),
+    );
+    const cost = result?.total_cost_usd;
+    this.#log(
+      `판단 세션 종료 (${label}, ${endReason}, 판단 ${String(session.decided.size)}/${String(rules.length)}건, ` +
+        `비용 ${cost === undefined || cost === null ? '없음' : `USD ${String(cost)}`}${detail === null ? '' : `, ${detail}`})`,
+    );
+    signal.throwIfAborted();
+    // 대체로 생긴 새 규칙의 실행 자동 시작 (요구사항 세션과 같은 배선, 정상 종료일 때만 만든다)
+    try {
+      this.#onSessionEnded?.(request.projectId, id, endReason);
+    } catch (error) {
+      this.#log(`판단 세션 후속 처리 실패 (${label}): ${errorMessage(error)}`);
+    }
+    return { status: 'ended', sessionId: id, endReason };
+  }
+
+  /**
+   * 판단 세션을 열기 전 (열린 저장소): 하루 한도 · 규칙 작성 역할 설정 · 실행 잔여로 한도를 정하고, 대상 규칙 · 규범 입력을 읽고,
+   * 세션 행을 만든다(세션 행은 하루 예산 합산의 원천이라 남기지 못하면 열지 않는다).
+   */
+  #prepareJudgment(
+    store: ProjectStore,
+    request: NormJudgeRequest,
+    id: string,
+    workDir: string,
+  ):
+    | Extract<NormJudgeOutcome, { status: 'not_opened' }>
+    | {
+        readonly status: 'ready';
+        readonly model: string;
+        readonly budget: SessionBudget;
+        readonly norms: NormInput;
+        readonly rules: JudgmentPromptRule[];
+      } {
+    const settings = store.settings.get();
+    const daily = projectDailyBudget(store, settings, this.#now());
+    if (dailyBudgetReached(daily)) {
+      if (daily !== null) this.#logDaily(request.run.displayId, daily);
+      return {
+        status: 'not_opened',
+        reason: 'project_daily_budget_exceeded',
+        detail: PROJECT_DAILY_BUDGET_EXCEEDED_TEXT,
+      };
+    }
+    let role;
+    try {
+      role = roleSessionSettings(
+        settings,
+        RULE_WRITER_ROLE,
+        daily === null ? {} : { maxBudgetUsd: daily.remaining },
+      );
+    } catch (error) {
+      if (error instanceof RpcError && error.code === ErrorCode.SettingsIncomplete) {
+        return { status: 'not_opened', reason: 'settings_incomplete', detail: error.message };
+      }
+      throw error;
+    }
+    const budget: SessionBudget = {
+      maxBudgetUsd: Math.min(role.budget.maxBudgetUsd, request.runBudget.maxBudgetUsd),
+      maxTurns: Math.min(role.budget.maxTurns, request.runBudget.maxTurns),
+    };
+    const rules: JudgmentPromptRule[] = request.ruleIds.flatMap((ruleId) => {
+      const rule = store.rules.get(ruleId);
+      return rule === null
+        ? []
+        : [
+            {
+              id: rule.id,
+              displayId: rule.displayId,
+              title: rule.title,
+              statement: rule.statement,
+              parentRequirementId: rule.parentRequirementId,
+            },
+          ];
+    });
+    const norms = collectNormInput(store, { requirementIds: [], ruleIds: request.ruleIds });
+    // 세션 행은 실행 밖 세션으로 남긴다: 세션 행의 단계 시도는 그 단계 역할(구현)의 세션만 받는다. 이 실행 · 단계와의 연결은
+    // 판단 기록(연결 실행 · 세션 ID)과 단계 시도 결과(`judgmentSession.sessionId`)에 있다. 재기동 때는 실행 밖 세션으로 닫힌다
+    store.sessions.start({
+      id,
+      runId: null,
+      stepId: null,
+      requirementId: null,
+      role: RULE_WRITER_ROLE,
+      model: role.model,
+      workDir,
+      budget,
+      normInput: normInputRecord(norms),
+      startedAt: this.#timestamp(),
+    });
+    return { status: 'ready', model: role.model, budget, norms, rules };
+  }
+
+  /** 판단 세션 기록 쓰기 (실패는 로그만). */
+  #quietlyPersist(session: JudgmentSession, fn: (store: ProjectStore) => unknown): void {
+    try {
+      withRegisteredProjectStore(this.#biveHome, session.projectId, fn);
+    } catch (error) {
+      this.#log(`판단 세션 기록 저장 실패 (${session.label}): ${errorMessage(error)}`);
+    }
+  }
+
+  #persistJudgmentToolCall(session: JudgmentSession, call: ToolCallRecord): void {
+    this.#quietlyPersist(session, (store) =>
+      store.sessions.appendToolCall({
+        id: this.#newId(),
+        runId: null,
+        sessionId: session.id,
+        at: call.at,
+        role: call.role,
+        name: call.name,
+        argsSummary: call.argsSummary,
+        status: call.status,
+        reason: call.reason ?? null,
+        durationMs: Math.max(0, Math.round(call.durationMs)),
+      }),
+    );
+  }
+
+  /** 판단 대상 규칙 하나 (표시 ID 또는 ID). 대상 밖 · 이미 판단한 규칙이면 거부 결과. */
+  #judgedRule(
+    session: JudgmentSession,
+    tool: 'retire_rule' | 'supersede_rule' | 'uphold_rule',
+    given: string,
+  ): JudgmentPromptRule | ToolResult {
+    const rule = session.rules.find((item) => item.id === given || item.displayId === given);
+    if (rule === undefined) {
+      return denied(
+        'invalid_args',
+        `${tool} 인자 오류: ${JSON.stringify(given)}는 판단 대상 규칙이 아님 (${session.rules.map((item) => item.displayId).join(', ')} 가운데)`,
+      );
+    }
+    if (session.decided.has(rule.id)) {
+      return denied(
+        'invalid_args',
+        `${tool} 인자 오류: ${rule.displayId}는 이미 판단함 (규칙마다 한 번)`,
+      );
+    }
+    return rule;
+  }
+
+  /** 판단을 하나 남겼다: 대상 규칙을 모두 판단했으면 실행기를 닫는다 (이후 호출은 거부). */
+  #decided(session: JudgmentSession, rule: JudgmentPromptRule): void {
+    session.decided.add(rule.id);
+    if (session.decided.size >= session.rules.length) session.tools?.close('judgment_complete');
+  }
+
+  #judgeRetire(session: JudgmentSession, input: RetireRuleInput): ToolResult {
+    const rule = this.#judgedRule(session, 'retire_rule', input.ruleId);
+    if (!('id' in rule)) return rule;
+    try {
+      withRegisteredProjectStore(this.#biveHome, session.projectId, (store) =>
+        retireAgentRule(
+          store,
+          {
+            ruleId: rule.id,
+            grounds: input.grounds,
+            author: { kind: 'agent', role: RULE_WRITER_ROLE },
+            sessionId: session.id,
+            objection: session.objection,
+          },
+          { now: this.#now },
+        ),
+      );
+    } catch (error) {
+      return this.#retirementError('retire_rule', error);
+    }
+    this.#decided(session, rule);
+    return ok(`규칙 ${rule.displayId} 폐기로 판단 (이 실행은 병합 없이 끝난다, 사람은 나중에 봄)`);
+  }
+
+  #judgeSupersede(session: JudgmentSession, input: SupersedeRuleInput): ToolResult {
+    const rule = this.#judgedRule(session, 'supersede_rule', input.ruleId);
+    if (!('id' in rule)) return rule;
+    if (
+      rule.parentRequirementId === null ||
+      input.parentRequirementId !== rule.parentRequirementId
+    ) {
+      return denied(
+        'invalid_args',
+        rule.parentRequirementId === null
+          ? `supersede_rule 인자 오류: ${rule.displayId}는 부모 요구사항이 없어 대체할 수 없음 (폐기 또는 유지)`
+          : `supersede_rule 인자 오류: parentRequirementId는 대상 규칙의 부모 요구사항 ${rule.parentRequirementId}만 쓸 수 있음`,
+      );
+    }
+    const { rationale, contradiction, ruleId, grounds, ...payload } = input;
+    let created;
+    try {
+      created = withRegisteredProjectStore(this.#biveHome, session.projectId, (store) =>
+        supersedeAgentRule(
+          store,
+          {
+            payload,
+            rationale,
+            author: { kind: 'agent', role: RULE_WRITER_ROLE },
+            sessionId: session.id,
+            contradiction,
+            normInput: session.objection.normInput,
+            // 판단 대상인지는 위에서 봤다 (표시 ID 또는 ID 그대로 넘긴다)
+            ruleId,
+            grounds,
+            objection: session.objection,
+          },
+          { now: this.#now, newId: this.#newId },
+        ),
+      );
+    } catch (error) {
+      return this.#retirementError('supersede_rule', error);
+    }
+    this.#decided(session, rule);
+    return ok(
+      `규칙 ${rule.displayId}을 폐기하고 ${created.rule.displayId}로 대체로 판단 (새 규칙의 실행이 자동으로 시작되고 이 실행은 병합 없이 끝난다)`,
+    );
+  }
+
+  #judgeUphold(session: JudgmentSession, input: UpholdRuleInput): ToolResult {
+    const rule = this.#judgedRule(session, 'uphold_rule', input.ruleId);
+    if (!('id' in rule)) return rule;
+    try {
+      withRegisteredProjectStore(this.#biveHome, session.projectId, (store) =>
+        upholdAgentRule(
+          store,
+          {
+            ruleId: rule.id,
+            grounds: input.grounds,
+            author: { kind: 'agent', role: RULE_WRITER_ROLE },
+            sessionId: session.id,
+            objection: session.objection,
+          },
+          { now: this.#now },
+        ),
+      );
+    } catch (error) {
+      return this.#retirementError('uphold_rule', error);
+    }
+    this.#decided(session, rule);
+    return ok(
+      `규칙 ${rule.displayId} 유지로 판단 (규칙 · 인수 테스트는 그대로, 근거는 구현 역할에게 전해진다)`,
+    );
   }
 }

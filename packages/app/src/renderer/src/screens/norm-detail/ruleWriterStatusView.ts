@@ -22,6 +22,7 @@ export const END_REASON_LABELS = {
   error_during_execution: '실행 중 오류',
   aborted: '중단',
   guard_violation: '가드 위반',
+  objection_raised: '이의 제기',
 } as const satisfies Record<SessionEndReason, string>;
 
 /** 생략 사유 표시명 (shared `RULE_WRITER_SKIP_REASON_LABELS`와 같음). */

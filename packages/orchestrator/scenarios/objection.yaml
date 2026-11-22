@@ -1,0 +1,155 @@
+# 구현 역할의 이의 제기 · 규범 담당 판단 (roadmap M7-11 #223, ADR-100 D4 · A4 · A5, ADR-115).
+# 형식: src/agent/scenario.ts. 요구사항마다 규칙 1개(로드맵 M7 흐름 10의 전제): REQ-001 → RULE-001(time). 규칙 작성 세션은 세션
+# vars로 고른다: 요구사항 세션은 requirementDisplayId, 실행 안의 판단 세션은 judgment(원인 종류 objection).
+# 실행 안: 테스트 작성이 time 인수 테스트를 쓰고, 구현 시도 1이 raise_objection으로 RULE-001에 이의를 제기한다(그 세션은 거기서
+# 끝나고 뒤 턴은 재생되지 않는다). 규칙 작성 역할의 판단 세션이 uphold_rule로 유지를 남기면 같은 실행이 구현으로 회귀하고(회귀 1),
+# 구현 시도 2가 판단의 근거를 받아 time을 더해 통과 → 검사 · 병합. 구현 세션은 시도 순번(실행의 구현 세션 수)으로 고른다.
+name: objection
+description: 구현 시도 1이 RULE-001에 이의를 제기하고, 규칙 작성 역할의 판단 세션이 유지로 판단해 구현 시도 2가 time을 더해 병합
+roles:
+  rule-writer:
+    sessions:
+      - description: REQ-001 - 서버 시각 포함
+        when:
+          requirementDisplayId: REQ-001
+        turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답의 서버 시각
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 time 필드에 응답 시점의 서버 시각을 ISO 8601 UTC 문자열로 담는다
+              kind: business
+              checkKinds: [test]
+              rationale: 요구사항의 '서버 시각 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+              contradiction: { verdict: none }
+          - message: 규칙 1건을 반영했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0156
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 920
+              outputTokens: 310
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 2600
+              costUSD: 0.0156
+      - description: 실행 안의 판단 세션 - 이의 대상 규칙 유지
+        when:
+          judgment: objection
+        turns:
+          - tool: uphold_rule
+            args:
+              ruleId: '{{ruleId}}'
+              grounds: 요구사항이 헬스 체크 응답에 서버 시각을 담으라고 하므로 규칙은 요구사항에 맞다. 기존 응답의 ok 값을 그대로 두고 time 필드만 더하면 된다
+          - message: 이의 대상 규칙을 유지로 판단했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0098
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 1310
+              outputTokens: 240
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 2600
+              costUSD: 0.0098
+  test-writer:
+    sessions:
+      - turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 서버 시각. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+
+                describe('GET /api/health 서버 시각', () => {
+                  it('응답 JSON의 time이 응답 시점의 ISO 8601 UTC 시각이다', async () => {
+                    const before = Date.now();
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+                    const after = Date.now();
+
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as { ok?: unknown; time?: unknown };
+                    expect(body.ok).toBe(true);
+                    expect(typeof body.time).toBe('string');
+                    const time = String(body.time);
+                    expect(time).toMatch(ISO_UTC);
+                    const at = Date.parse(time);
+                    expect(at).toBeGreaterThanOrEqual(before - 1000);
+                    expect(at).toBeLessThanOrEqual(after + 1000);
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0421
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2310
+              outputTokens: 940
+              cacheReadInputTokens: 4100
+              cacheCreationInputTokens: 6050
+              costUSD: 0.0421
+  implementer:
+    sessions:
+      - description: 구현 시도 1 - 규칙에 이의 제기 (세션은 거기서 끝난다)
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: raise_objection
+            args:
+              ruleIds: ['{{ruleId}}']
+              reason: 헬스 체크는 상태 확인용이라 서버 시각을 담으면 응답이 매번 달라진다. 이 규칙이 요구사항의 뜻과 맞는지 판단해 달라
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: '// 이의 뒤의 쓰기는 실행되지 않는다'
+          - message: 이의를 제기했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0231
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 1820
+              outputTokens: 410
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 3100
+              costUSD: 0.0231
+      - description: 구현 시도 2 - 유지 판단의 근거를 받아 time 추가
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 서버 시각을 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true, time: new Date().toISOString() });
+                }
+          - message: 헬스 체크 응답에 서버 시각(time)을 추가했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0587
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 3120
+              outputTokens: 1180
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0587

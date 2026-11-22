@@ -22,6 +22,7 @@ import {
   NormJudgmentInputError,
   NormRetirementInputError,
   normalizeQuoteText,
+  quoteCore,
   quotesRule,
   retireAgentRule,
   supersedeAgentRule,
@@ -395,12 +396,13 @@ describe('근거 인용 검사 (수용 기준 2, ADR-100 A6 · R3)', () => {
     expect(snapshot(s.store)).toEqual(before);
   });
 
-  it(`최소 길이: 공백 정리 뒤 연속 ${String(MIN_QUOTE_LENGTH)}자는 인용, ${String(MIN_QUOTE_LENGTH - 1)}자는 인용이 아니다 (경계값)`, () => {
+  it(`최소 길이: 공백 · EARS 틀 글자를 뺀 연속 ${String(MIN_QUOTE_LENGTH)}자는 인용, ${String(MIN_QUOTE_LENGTH - 1)}자는 인용이 아니다 (경계값, ADR-115)`, () => {
     const source = 'ISO 8601 UTC 문자열로 담는다';
-    const exact = Array.from(source).slice(0, MIN_QUOTE_LENGTH).join('');
-    const short = Array.from(source)
-      .slice(0, MIN_QUOTE_LENGTH - 1)
-      .join('');
+    // 공백을 빼고 센다 (M7-11 #223 전에는 공백도 셌다: "ISO 8601 U"가 10자였다)
+    const core = quoteCore(source);
+    expect(core.join('')).toBe('ISO8601UTC문자열로담는다');
+    const exact = core.slice(0, MIN_QUOTE_LENGTH).join('');
+    const short = core.slice(0, MIN_QUOTE_LENGTH - 1).join('');
     expect(quotesRule(`근거: "${exact}"`, [source])).toBe(true);
     expect(quotesRule(`근거: "${short}"`, [source])).toBe(false);
     // 한두 글자 인용 · 빈 근거로는 통과하지 못한다

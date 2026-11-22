@@ -858,7 +858,8 @@ describe('autoStartRun: 폐기 · 대체 뒤 (M7-09 #221 수용 기준 4, ADR-10
         store,
         {
           ruleId: retiredRule.targetRef.id,
-          grounds: '진술 "THE SYSTEM SHALL 지역을 담는다"는 필요 없다',
+          // 인용은 EARS 틀 글자를 빼고 다른 규칙과 겹치지 않는 조각이어야 한다 (M7-11 #223, ADR-115)
+          grounds: '진술 "를 요청하면 THE SYSTEM SHALL 지역을 담는다"는 필요 없다',
           author: { kind: 'agent', role: 'rule-writer' },
           sessionId: session,
         },

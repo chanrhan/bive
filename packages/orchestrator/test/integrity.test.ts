@@ -22,7 +22,7 @@ import path from 'node:path';
 import tls from 'node:tls';
 
 import { AgentRole, createUlidGenerator, METHOD_NAMES, type RoleSettings } from '@bive/shared';
-import { bivePaths } from '@bive/store';
+import { bivePaths, openProjectStore } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { AgentAdapter, SessionSpec } from '../src/agent/adapter.js';
@@ -32,12 +32,14 @@ import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { PipeServer } from '../src/ipc/server.js';
 import { NORM_INPUT_BEGIN } from '../src/norms/norm-input.js';
+import { recordObjection } from '../src/norms/objection.js';
 import { RuleWriterService } from '../src/rule-writer/rule-writer-service.js';
 import {
   BIVE_MCP_SERVER,
   COMMAND_TOOL_NAMES,
   FILE_TOOL_NAMES,
   NORM_TOOL_NAMES,
+  OBJECTION_TOOL_NAMES,
   roleToolNames,
 } from '../src/tools/definitions.js';
 import { FixedToolExecutor } from '../src/tools/executor.js';
@@ -99,7 +101,7 @@ const tempDir = (): string => {
  * 가져오고, 이 표에 없는 역할이 생기면 시험이 실패한다.
  */
 const EXPECTED_ROLE_TOOLS: Readonly<Record<string, readonly string[]>> = {
-  'rule-writer': ['propose_rule', 'retire_rule', 'supersede_rule'],
+  'rule-writer': ['propose_rule', 'retire_rule', 'supersede_rule', 'uphold_rule'],
   planner: [],
   'test-writer': ['read_file', 'write_file', 'list_files', 'search_files', 'run_tests'],
   implementer: [
@@ -111,6 +113,8 @@ const EXPECTED_ROLE_TOOLS: Readonly<Record<string, readonly string[]>> = {
     'prisma_generate',
     'prisma_migrate',
     'install_package',
+    // 이의 제기 (M7-11 #223, ADR-115): 이의 기록만 남기고 세션을 끝낸다. 규범 쓰기 도구가 아니다(아래 시험이 단언)
+    'raise_objection',
   ],
   chat: [],
 };
@@ -128,6 +132,8 @@ const FIXED_TOOLS: readonly string[] = [
   'propose_rule',
   'retire_rule',
   'supersede_rule',
+  'uphold_rule',
+  'raise_objection',
 ];
 
 /**
@@ -151,6 +157,8 @@ const OTHER_ROLE_TOOL_ARGS: Readonly<Record<string, Record<string, unknown>>> = 
     contradiction: { verdict: 'none' },
   },
   retire_rule: { ruleId: 'RULE-001', grounds: '무결성 시험: 응답 JSON의 time 필드를 담는다' },
+  uphold_rule: { ruleId: 'RULE-001', grounds: '무결성 시험: 유지' },
+  raise_objection: { ruleIds: ['RULE-001'], reason: '무결성 시험: 이의' },
   supersede_rule: {
     ruleId: 'RULE-001',
     grounds: '무결성 시험: 응답 JSON의 time 필드를 담는다',
@@ -169,7 +177,13 @@ const OTHER_ROLE_TOOL_ARGS: Readonly<Record<string, Record<string, unknown>>> = 
  * 규칙 작성 역할에만 있어야 하고 테스트 작성 · 구현 역할(자기 채점 기준을 고치면 안 되는 역할, ADR-100 I2)에는 없어야 한다.
  * 규범 도구가 늘면 이 표와 아래 시험을 같이 고친다. M7-09(#221)가 폐기 · 대체 도구를 더했다(규칙 작성 역할에만, ADR-112)
  */
-const NORM_WRITE_TOOLS: readonly string[] = ['propose_rule', 'retire_rule', 'supersede_rule'];
+const NORM_WRITE_TOOLS: readonly string[] = [
+  'propose_rule',
+  'retire_rule',
+  'supersede_rule',
+  // M7-11(#223): 이의 판단의 유지 (판단 기록을 쓴다, 규칙 작성 역할에만, ADR-115)
+  'uphold_rule',
+];
 
 /** 규범 엔터티 낱말 (순서와 상관없이 쓰기 동사와 함께 나오면 규범 쓰기) */
 const NORM_ENTITY =
@@ -270,7 +284,12 @@ describe('모든 역할 세션의 도구 목록에 승인 · 잠정 승인 · �
   });
 
   it('리터럴 허용 목록: 고정 도구 전체와 역할 표가 제품 정의와 정확히 같고, 표에 없는 역할이 없다', () => {
-    expect([...FILE_TOOL_NAMES, ...COMMAND_TOOL_NAMES, ...NORM_TOOL_NAMES]).toEqual(FIXED_TOOLS);
+    expect([
+      ...FILE_TOOL_NAMES,
+      ...COMMAND_TOOL_NAMES,
+      ...NORM_TOOL_NAMES,
+      ...OBJECTION_TOOL_NAMES,
+    ]).toEqual(FIXED_TOOLS);
     // 원본 역할 목록과 표의 역할이 같다 (역할이 늘면 표를 고쳐야 통과)
     expect([...ROLES].sort()).toEqual(Object.keys(EXPECTED_ROLE_TOOLS).sort());
     for (const role of ROLES) {
@@ -311,7 +330,12 @@ describe('모든 역할 세션의 도구 목록에 승인 · 잠정 승인 · �
         role,
         sessionRoot: root,
         biveHome: tempDir(),
-        hooks: { proposeRule: reach, retireRule: reach, supersedeRule: reach },
+        hooks: {
+          proposeRule: reach,
+          retireRule: reach,
+          supersedeRule: reach,
+          upholdRule: reach,
+        },
       });
       for (const name of NORM_WRITE_TOOLS) {
         await expect(
@@ -850,7 +874,12 @@ describe('확인됨을 만드는 경로는 사람 RPC뿐, 확인 풀림은 폐�
   it('규칙 작성 역할에 요구사항 쓰기 도구가 없고, 저장소의 요구사항 쓰기는 사람의 요구사항 RPC 처리기 · 옛 제안 승인뿐이다', () => {
     const ruleWriterTools = roleToolNames('rule-writer');
     expect(ruleWriterTools.filter((name) => /requirement/i.test(name))).toEqual([]);
-    expect([...NORM_TOOL_NAMES]).toEqual(['propose_rule', 'retire_rule', 'supersede_rule']);
+    expect([...NORM_TOOL_NAMES]).toEqual([
+      'propose_rule',
+      'retire_rule',
+      'supersede_rule',
+      'uphold_rule',
+    ]);
     expect(
       ruleWriterTools.filter((name) => !(FILE_TOOL_NAMES as readonly string[]).includes(name)),
     ).toEqual([...NORM_TOOL_NAMES]);
@@ -943,8 +972,10 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
     // 엔진의 시작 근거 대조
     // 사람의 규칙 진술 편집 뒤 자동 시작 모듈(M7-03, ADR-109)도 자동 시작 항목을 쓴다
     // 테스트 변경 알림 모듈(M7-13, ADR-113)도 그 종류를 쓰고, 확인할 것 목록(M7-13)은 읽는다
+    // 이의 기록 모듈(M7-11, ADR-115)은 구현 역할의 이의와 판단 없는 유지를 쓴다 (규칙 · 폐기 · 판정은 쓰지 않는다, 아래 시험)
     expect(using(/\.normChanges\.append\(/)).toEqual([
       'norms/agent-rule.ts',
+      'norms/objection.ts',
       'norms/test-change.ts',
       'runs/auto-start.ts',
       'runs/rule-edit-start.ts',
@@ -957,6 +988,7 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
       'ipc/norm-change-handlers.ts',
       'ipc/rule-writer-handlers.ts',
       'norms/agent-rule.ts',
+      'norms/objection.ts',
       'norms/test-change.ts',
       'runs/auto-start.ts',
       'runs/rule-edit-start.ts',
@@ -1014,8 +1046,12 @@ describe('실행 자동 시작의 코드 경로 (M7-05 #217, ADR-100 C2 · D4, A
     }
   });
 
-  it('자동 시작이 연쇄로 돌지 않는다: 규칙 작성 세션은 사람의 요구사항 저장 · 편집 처리기에서만 시작하고, 엔진 · 단계 · 자동 시작은 규칙 작성 서비스를 가져오지 않는다', () => {
+  it('규칙 작성 세션을 띄우는 곳: 요구사항 세션은 사람의 요구사항 저장 · 편집 처리기에서만, 실행 안의 판단 세션은 오케스트레이터 배선에서만 시작하고, 엔진 · 단계 · 자동 시작은 규칙 작성 서비스를 가져오지 않는다 (M7-11이 판단 세션 한 곳을 의도적으로 더했다)', () => {
     expect(using(/\bruleWriter\?\.(start|retry)\(/)).toEqual(['ipc/requirement-handlers.ts']);
+    // 실행 안의 판단 세션 (M7-11 #223, ADR-115): 엔진은 주입받은 배선(`judgeNorms`)만 부르고, 그 배선은 오케스트레이터 한 곳이다.
+    // 이것으로 처음 "실행 → 판단 → 대체 → 자동 시작"의 연쇄 경로가 생긴다(멈춤 장치는 하루 예산, ADR-100 D8 · ADR-115)
+    expect(using(/\bruleWriter\??\.judge\(|\.judge\(request\)/)).toEqual(['orchestrator.ts']);
+    expect(using(/\bjudgeNorms:/)).toEqual(['engine/pipeline-engine.ts', 'orchestrator.ts']);
     expect(using(/new RuleWriterService\(/)).toEqual(['orchestrator.ts']);
     for (const { rel, text } of files()) {
       if (/^(engine|steps|runs|judge|tools|agent)\//.test(rel)) {
@@ -1071,12 +1107,146 @@ describe('규칙 폐기 · 대체와 효력 판정의 코드 경로 (M7-09 #221,
       'ipc/rule-handlers.ts',
       'norms/agent-rule.ts',
       'norms/norm-input.ts',
+      'norms/objection.ts',
       'runs/rule-edit-start.ts',
       'runs/run-service.ts',
       'steps/check.ts',
       'steps/merge.ts',
       'verification/summary.ts',
     ]);
+  });
+});
+
+describe('이의 제기 도구는 이의 기록 추가만 한다 (M7-11 #223 수용 기준 3, ADR-100 D4 · I2, ADR-115)', () => {
+  const files = () =>
+    sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+  const using = (pattern: RegExp) =>
+    files()
+      .filter((f) => pattern.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+
+  it('코드 구조: 실행기의 이의 처리는 주입된 콜백 하나만 부르고, 콜백은 구현 단계 실행기만 주입하며, 이의 기록 모듈은 규칙 · 폐기 · 판정 · 확인 상태 · 파일에 닿지 않는다', () => {
+    const executor = fs.readFileSync(path.join(SRC_DIR, 'tools/executor.ts'), 'utf8');
+    const handler = /private async objection\([^]*?\n {2}\}\n/.exec(executor)?.[0] ?? '';
+    expect(handler).toContain('this.hooks.raiseObjection');
+    expect(handler).not.toMatch(/store|fs\.|writeFile|normChanges|rules\./);
+    expect(using(/\braiseObjection:/)).toEqual(['steps/implementation.ts']);
+    expect(using(/\brecordObjection\(/)).toEqual(['steps/implementation.ts']);
+    expect(using(/\bsettleObjection\(/)).toEqual(['steps/implementation.ts']);
+    expect(using(/from '[./]+\/?norms\/objection\.js'/)).toEqual(['steps/implementation.ts']);
+    const objection = fs.readFileSync(path.join(SRC_DIR, 'norms/objection.ts'), 'utf8');
+    for (const forbidden of [
+      /\.rules\.(create|update|detachFromParent)\(/,
+      /\.ruleRetirements\b/,
+      /\.judgments\.record\(/,
+      /\.confirmations\b/,
+      /\.requirements\.(create|update|softDelete)\(/,
+      /from 'node:fs'/,
+      /agent-rule\.js'/,
+    ]) {
+      expect(forbidden.test(objection), String(forbidden)).toBe(false);
+    }
+    // 규범 변경 기록 쓰기는 두 종류뿐: 구현 역할의 이의, 판단 없이 끝난 이의의 오케스트레이터 유지
+    expect(
+      objection.match(
+        /kind: '(?:created|updated|retired|superseded|judgment|objection|unconfirmed|auto_start|test_changed)'/g,
+      ),
+    ).toEqual(["kind: 'objection'", "kind: 'judgment'"]);
+    expect(objection.match(/\.normChanges\.append\(/g)).toHaveLength(2);
+  });
+
+  it('동작: 실제 저장소에 붙인 구현 역할 실행기의 이의 호출은 규범 변경 기록 1건만 더하고, 다른 모든 표 · 인수 테스트 파일은 그대로이며 실행기가 닫힌다', async () => {
+    const home = tempDir();
+    const store = openProjectStore(newUlid(), { home });
+    try {
+      const requirement = store.requirements.create({
+        id: newUlid(),
+        text: '헬스 체크 응답에 서버 시각 포함',
+        author: { kind: 'human' },
+        normState: 'approved',
+        createdAt: new Date().toISOString(),
+      });
+      const rule = store.rules.create({
+        id: newUlid(),
+        title: '서버 시각',
+        statement: 'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL time을 담는다',
+        kind: 'business',
+        checkKinds: ['test'],
+        parentRequirementId: requirement.id,
+        builtin: false,
+        targetBlockIds: [],
+        risk: null,
+        contractId: null,
+        author: { kind: 'agent', role: 'rule-writer' },
+        normState: 'approved',
+        createdAt: new Date().toISOString(),
+      });
+      const root = tempDir();
+      const acceptance = path.join(root, 'bive-acceptance', rule.displayId, 'health.acc.ts');
+      fs.mkdirSync(path.dirname(acceptance), { recursive: true });
+      fs.writeFileSync(acceptance, '// 인수 테스트\n');
+      const tables = (
+        store.db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+          )
+          .all() as { name: string }[]
+      ).map((row) => row.name);
+      const snapshot = () =>
+        Object.fromEntries(
+          tables
+            .filter((name) => name !== 'norm_changes')
+            .map((name) => [name, store.db.prepare(`SELECT * FROM "${name}"`).all()]),
+        );
+      const before = snapshot();
+      const runId = newUlid();
+      const stepId = newUlid();
+      const executor = new FixedToolExecutor({
+        role: 'implementer',
+        sessionRoot: root,
+        biveHome: home,
+        sessionId: newUlid(),
+        hooks: {
+          raiseObjection: (input, call) => {
+            recordObjection(
+              store,
+              {
+                ruleIds: input.ruleIds,
+                reason: input.reason,
+                sessionId: call.sessionId ?? '',
+                runId,
+                stepId,
+              },
+              { now: Date.now },
+            );
+            return '이의 기록';
+          },
+        },
+      });
+      await expect(
+        executor.execute('raise_objection', { ruleIds: [rule.displayId], reason: '규칙이 틀렸다' }),
+      ).resolves.toMatchObject({ status: 'ok' });
+      expect(executor.closed).toBe('objection_raised');
+      expect(snapshot()).toEqual(before);
+      expect(store.normChanges.list().map((entry) => [entry.kind, entry.actor])).toEqual([
+        ['objection', { kind: 'agent', role: 'implementer' }],
+      ]);
+      expect(fs.readFileSync(acceptance, 'utf8')).toBe('// 인수 테스트\n');
+      // 닫힌 실행기는 인수 테스트 쓰기도 (경로 가드 이전에) 거부한다
+      await expect(
+        executor.execute('write_file', {
+          path: `bive-acceptance/${rule.displayId}/health.acc.ts`,
+          content: '바꿈',
+        }),
+      ).resolves.toMatchObject({ status: 'denied', reason: 'session_closed' });
+      expect(fs.readFileSync(acceptance, 'utf8')).toBe('// 인수 테스트\n');
+    } finally {
+      store.close();
+    }
   });
 });
 
@@ -1141,6 +1311,8 @@ describe('테스트 작성 · 구현 역할의 규범 입력: 도구 목록 불�
       'prisma_generate',
       'prisma_migrate',
       'install_package',
+      // M7-11(#223)이 의도적으로 더했다: 이의 기록만 남기는 이의 제기 도구 (규범을 읽거나 쓰지 않는다, ADR-115)
+      'raise_objection',
     ],
   };
 

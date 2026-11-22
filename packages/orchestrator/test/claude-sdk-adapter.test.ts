@@ -170,6 +170,7 @@ describe('buildQueryOptions 스냅샷 (수용 기준 1 · 2)', () => {
         'mcp__bive__prisma_generate',
         'mcp__bive__prisma_migrate',
         'mcp__bive__install_package',
+        'mcp__bive__raise_objection',
       ],
       permissionMode: 'dontAsk',
       canUseTool: 'function',

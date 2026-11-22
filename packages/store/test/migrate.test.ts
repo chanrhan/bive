@@ -1541,7 +1541,7 @@ describe('0019 confirmation_release: 확인 풀림 · 테스트 변경 알림의
     withDb((db) => {
       migrate(db, PROJECT_MIGRATIONS.slice(0, 18), { now: fixedNow });
       const before = schemaOf(db);
-      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([19]);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 19), { now: fixedNow }).applied).toEqual([19]);
       const after = schemaOf(db) as { name: string }[];
       const added = new Set([
         'confirmations_release_recorded',
@@ -1556,7 +1556,7 @@ describe('0019 confirmation_release: 확인 풀림 · 테스트 변경 알림의
           .sort(),
       ).toEqual([...added].sort());
       const schema = schemaOf(db);
-      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 19), { now: fixedNow }).applied).toEqual([]);
       expect(schemaOf(db)).toEqual(schema);
     });
   });
@@ -1691,5 +1691,99 @@ describe('마이그레이션 파일 규칙', () => {
     expect(files).toEqual(
       list.map((migration) => `${String(migration.version).padStart(4, '0')}_${migration.name}.ts`),
     );
+  });
+});
+
+describe('0020 session_objection_end: 세션 종료 사유 이의 제기 (M7-11 #223, ADR-100 D4, ADR-115)', () => {
+  const insertSession = (db: SqliteDatabase, id: string) =>
+    db
+      .prepare(
+        `INSERT INTO sessions (id, role, model, work_dir, model_usage, tools, mcp_servers, started_at, budget_max_usd, budget_max_turns, norm_input)
+         VALUES (?, 'implementer', 'm', '/w', '{}', '[]', '[]', '2026-11-22T00:00:00.000Z', 1.5, 20, '{"summary":{}}')`,
+      )
+      .run(id);
+  const insertCall = (db: SqliteDatabase, session: string, seq: number) =>
+    db
+      .prepare(
+        `INSERT INTO tool_calls (id, run_id, session_id, seq, at, role, name, args_summary, status, reason, duration_ms)
+         VALUES (?, NULL, ?, ?, '2026-11-22T00:00:01.000Z', 'implementer', 'read_file', 'a', 'ok', NULL, 1)`,
+      )
+      .run(newId(), session, seq);
+  const objectSql = (db: SqliteDatabase) =>
+    db
+      .prepare(
+        "SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'sessions' AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY name",
+      )
+      .all();
+
+  it('0019까지의 세션 행 · 도구 호출 기록은 값 · 순서 그대로 옮기고, 색인 1개 · 트리거 6개는 글자까지 같으며, 새 종료 사유만 더 받는다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 19), { now: fixedNow });
+      const first = newId();
+      const second = newId();
+      insertSession(db, first);
+      insertSession(db, second);
+      insertCall(db, first, 0);
+      db.prepare(`UPDATE sessions SET end_reason = 'aborted', error = 'x' WHERE id = ?`).run(first);
+      // 0019까지는 새 종료 사유를 DB CHECK가 막는다
+      expect(() =>
+        db.prepare(`UPDATE sessions SET end_reason = 'objection_raised' WHERE id = ?`).run(second),
+      ).toThrow(/CHECK/);
+      const sessionsBefore = db.prepare('SELECT * FROM sessions ORDER BY rowid').all();
+      const callsBefore = db.prepare('SELECT * FROM tool_calls').all();
+      const sqlBefore = objectSql(db);
+      expect(sqlBefore).toHaveLength(7);
+
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 20), { now: fixedNow }).applied).toEqual([20]);
+      expect(db.prepare('SELECT * FROM sessions ORDER BY rowid').all()).toEqual(sessionsBefore);
+      expect(db.prepare('SELECT * FROM tool_calls').all()).toEqual(callsBefore);
+      expect(objectSql(db)).toEqual(sqlBefore);
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%_v20%'").all()).toEqual(
+        [],
+      );
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+
+      db.prepare(`UPDATE sessions SET end_reason = 'objection_raised' WHERE id = ?`).run(second);
+      expect(db.prepare('SELECT end_reason FROM sessions WHERE id = ?').get(second)).toEqual({
+        end_reason: 'objection_raised',
+      });
+      // 다른 값 · 트리거 · 칸 제약은 그대로다
+      const third = newId();
+      insertSession(db, third);
+      expect(() =>
+        db.prepare(`UPDATE sessions SET end_reason = 'objection' WHERE id = ?`).run(third),
+      ).toThrow(/CHECK/);
+      expect(() => insertSession(db, third)).toThrow(/덮어쓰기 금지/);
+      expect(() => db.prepare(`UPDATE sessions SET error = 'y' WHERE id = ?`).run(second)).toThrow(
+        /끝난 세션은 바꿀 수 없습니다/,
+      );
+      expect(() =>
+        db.prepare(`UPDATE sessions SET budget_max_usd = 2 WHERE id = ?`).run(third),
+      ).toThrow(/세션 한도는 바꿀 수 없습니다/);
+      expect(() =>
+        db.prepare(`UPDATE sessions SET norm_input = '{}' WHERE id = ?`).run(third),
+      ).toThrow(/규범 입력 기록은 바꿀 수 없습니다/);
+      expect(() => db.prepare('DELETE FROM sessions').run()).toThrow(/지울 수 없/);
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO sessions (id, role, model, work_dir, model_usage, tools, mcp_servers, started_at, budget_max_usd)
+             VALUES (?, 'implementer', 'm', '/w', '{}', '[]', '[]', '2026-11-22T00:00:00.000Z', 1)`,
+          )
+          .run(newId()),
+      ).toThrow(/CHECK/);
+      // 도구 호출 기록의 외래 키는 새 표를 가리킨다
+      expect(() => insertCall(db, newId(), 0)).toThrow(/FOREIGN KEY/);
+      insertCall(db, third, 0);
+    });
+  });
+
+  it('다시 실행해도 스키마가 같다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      const schema = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
+      expect(schemaOf(db)).toEqual(schema);
+    });
   });
 });

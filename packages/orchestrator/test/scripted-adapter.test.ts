@@ -36,6 +36,7 @@ const REQUIRED_SCENARIOS = [
   'merge-conflict',
   'multi-rule',
   'multi-rule-regress',
+  'objection',
   'pause-implement',
 ];
 

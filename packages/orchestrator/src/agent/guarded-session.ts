@@ -1,7 +1,8 @@
 // 세션 가드를 건 에이전트 세션 1회 실행과 종료 사유 분류 (NFR-02 · ADR-049 · ADR-052 · ADR-062 · ADR-066).
 // 규칙 작성 세션(ADR-062)과 실행 엔진의 단계 세션(ADR-066)이 같이 쓴다.
 // - 이벤트는 `guardSession`을 거쳐 읽는다: init의 도구 · MCP 서버가 역할 허용 목록과 다르면 `guard_violation`
-// - 종료 사유: 결과 이벤트가 있으면 그 subtype, 가드 위반 `guard_violation`, 중단 `aborted`, 그 밖 예외 · 결과 없음
+// - 종료 사유: 결과 이벤트가 있으면 그 subtype, 가드 위반 `guard_violation`, 오케스트레이터가 세션을 끝냄(`SessionEndRequest`,
+//   구현 역할의 이의 제기 `objection_raised`, M7-11 · ADR-115) 그 사유, 중단 `aborted`, 그 밖 예외 · 결과 없음
 //   `error_during_execution`. init 없이 결과만 오는 시작 실패는 세션 가드가 오류 결과로 넘긴다
 import type { SessionEndReason, ToolManifestEntry } from '@bive/shared';
 
@@ -48,6 +49,17 @@ export interface GuardedSessionOutcome {
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+/**
+ * 오케스트레이터가 세션을 끝낼 때 컨트롤러를 이것으로 중단한다 (M7-11, ADR-115). 종료 사유는 중단 `aborted`가 아니라 이것이 든
+ * 사유다. 지금은 구현 역할의 이의 제기 하나다.
+ */
+export class SessionEndRequest extends Error {
+  override readonly name = 'SessionEndRequest';
+  constructor(readonly endReason: Extract<SessionEndReason, 'objection_raised'>) {
+    super(`오케스트레이터가 세션을 끝냄 (${endReason})`);
+  }
+}
+
 /** 세션 하나를 끝까지 돌리고 종료 사유를 분류한다. 예외를 던지지 않는다. */
 export const runGuardedSession = async (
   options: GuardedSessionOptions,
@@ -84,8 +96,11 @@ export const runGuardedSession = async (
   } catch (error) {
     outcome.error = error;
     outcome.detail = errorMessage(error);
+    const requested: unknown = controller.signal.aborted ? controller.signal.reason : undefined;
     if (error instanceof SessionGuardError) {
       outcome.endReason = 'guard_violation';
+    } else if (requested instanceof SessionEndRequest) {
+      outcome.endReason = requested.endReason;
     } else if (controller.signal.aborted) {
       outcome.endReason = 'aborted';
     }

@@ -10,7 +10,14 @@
 // 5. 대상 규칙의 케이스가 전부 통과하면 `passed`(엔진의 커밋은 바뀐 것이 없어 같은 커밋), 아니면 `unmet` → 엔진이 구현을
 //    다시 한다(회귀 1회로 셈, ADR-026). 빌드 실패 등 러너 오류 · 체크아웃 설치 실패도 구현이 만든 문제로 보고 `unmet`이다
 //    (같은 환경에서 Red 확인이 이미 빌드 · 설치를 통과했다)
-import type { JudgmentCase, Rule, Step } from '@bive/shared';
+// 이의 제기 (M7-11 #223, ADR-100 D4 · A4, ADR-115): 세션이 `raise_objection`을 부르면 주입한 콜백이 이의 기록 1건만 남기고(규범
+// 저장소의 다른 표 · 규칙 · 인수 테스트는 그대로) 엔진이 세션을 끝낸다. 세션 뒤 규범 확인을 지난 다음 판단 세션을 한 번 청하고
+// (`judgeNorms`), 판단 기록이 없는 대상 규칙은 유지로 마무리한다(판단 없음을 폐기로 보지 않는다). 대상 규칙 가운데 하나라도
+// 폐기 · 대체면 `failed`(`objection_applied`, 병합 없음). 모두 유지면 `unmet`(`objection_upheld`) → 엔진이 구현으로 회귀하며 검사
+// 회귀와 같은 상한(`regressionCount`, 2회)을 쓴다. 다음 구현 세션은 판단의 근거를 앞 시도의 사유로 받는다. 판단 세션을 열지 못한
+// 사유가 예산(하루 한도 · 실행 예산)이면 `budget_exceeded`, 규칙 작성 역할 설정 미비면 `failed`(`settings_missing`)로 끝낸다.
+// 재기동으로 이의의 마무리가 끊겼으면 다음 시도의 시작에서 판단 없이 유지로 마무리하고 같은 규칙으로 진행한다
+import type { JudgmentCase, NormChangeEntry, Rule, Step } from '@bive/shared';
 
 import {
   type StepContext,
@@ -23,6 +30,14 @@ import { DEFAULT_INSTALL_TIMEOUT_MS, JudgeCheckoutError } from '../judge/checkou
 import { installDependencies } from '../judge/checkout.js';
 import type { JudgeRunResult } from '../judge/runner.js';
 import { collectNormInput, normInputRecord } from '../norms/norm-input.js';
+import {
+  ObjectionInputError,
+  objectionFeedback,
+  recordObjection,
+  settleObjection,
+  unsettledObjection,
+} from '../norms/objection.js';
+import { denied, failed, ok } from '../tools/result.js';
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
 import {
   caseSummary,
@@ -43,9 +58,20 @@ import {
 /** 실행 워크트리 의존성 설치가 실패했을 때의 실행 실패 사유 (`Run.failureReason`). */
 export const DEPENDENCY_INSTALL_FAILED_REASON = 'dependency_install_failed';
 
-/** 구현 단계 미충족 사유 (`exitDetail.reason`). */
+/** 구현 단계 미충족 사유 (`exitDetail.reason`). `objection_upheld`는 이의가 유지로 판단됨 (M7-11, ADR-115). */
 export type ImplementationUnmetReason =
-  'session_error' | 'not_green' | 'collect_error' | 'judge_runner_error' | 'install_error';
+  | 'session_error'
+  | 'not_green'
+  | 'collect_error'
+  | 'judge_runner_error'
+  | 'install_error'
+  | 'objection_upheld';
+
+/** 이의에 폐기 · 대체 판단이 나와 실행을 병합 없이 끝낼 때의 실패 사유 ("이의 반영", ADR-115). */
+export const OBJECTION_APPLIED_REASON = 'objection_applied';
+
+/** 재기동으로 마무리가 끊긴 이의를 판단 없이 유지로 마무리할 때의 사정 (`undecided.endReason`). */
+export const OBJECTION_INTERRUPTED = 'interrupted';
 
 export type ImplementationOptions = JudgingOptions;
 
@@ -103,17 +129,16 @@ export const describeImplementationUnmet = (exitDetail: unknown): string | null 
       return `의존성 설치 실패 (package.json과 lockfile이 맞지 않을 수 있다): ${String(exitDetail.message ?? '')}`;
     case 'session_error':
       return `세션이 정상 종료되지 않았다: ${String(exitDetail.detail ?? exitDetail.endReason ?? '')}`;
+    case 'objection_upheld':
+      return '이의 제기에 규칙을 맡는 역할이 유지로 판단했다. 규칙과 인수 테스트는 그대로다';
     default:
       return null;
   }
 };
 
-/** 이번 시도 앞의 마지막 미충족 시도(구현 · 검사, 재기동 중단 제외)의 사유 문장. */
-export const previousImplementationFeedback = (
-  steps: readonly Step[],
-  current: Step,
-): string | null => {
-  const last = steps
+/** 이번 시도 앞의 마지막 미충족 시도 (구현 · 검사, 재기동 중단 제외). */
+const lastUnmetAttempt = (steps: readonly Step[], current: Step): Step | undefined =>
+  steps
     .filter(
       (step) =>
         step.id !== current.id &&
@@ -124,10 +149,112 @@ export const previousImplementationFeedback = (
     )
     .sort((a, b) => String(a.endedAt).localeCompare(String(b.endedAt)))
     .at(-1);
+
+const clipFeedback = (text: string): string =>
+  text.length <= MAX_FEEDBACK_CHARS ? text : `${text.slice(0, MAX_FEEDBACK_CHARS)}…`;
+
+/** 이번 시도 앞의 마지막 미충족 시도(구현 · 검사, 재기동 중단 제외)의 사유 문장. */
+export const previousImplementationFeedback = (
+  steps: readonly Step[],
+  current: Step,
+): string | null => {
+  const last = lastUnmetAttempt(steps, current);
   if (last === undefined) return null;
   const text = describeImplementationUnmet(last.exitDetail);
   if (text === null) return null;
-  return text.length <= MAX_FEEDBACK_CHARS ? text : `${text.slice(0, MAX_FEEDBACK_CHARS)}…`;
+  return clipFeedback(text);
+};
+
+/** 단계 시도 결과에 실린 이의 기록 순번 (미충족은 `exitDetail.objectionSeq`, 실패는 `exitDetail.detail.objectionSeq`). */
+const objectionSeqOf = (exitDetail: unknown): number | null => {
+  if (!isRecord(exitDetail)) return null;
+  if (typeof exitDetail.objectionSeq === 'number') return exitDetail.objectionSeq;
+  const inner = exitDetail.detail;
+  return isRecord(inner) && typeof inner.objectionSeq === 'number' ? inner.objectionSeq : null;
+};
+
+/**
+ * 다음 구현 세션의 앞 시도 사유: 앞 시도가 이의 유지(`objection_upheld`)였으면 저장소의 판단 근거(규칙 작성 역할이 쓴 글, 판단 없음
+ * 표시 포함), 아니면 {@link previousImplementationFeedback}. 작업 지시는 이 글을 줄마다 들여 쓴 표시 값으로 싣는다(ADR-108).
+ */
+const implementationFeedback = (context: StepContext): string | null => {
+  const last = lastUnmetAttempt(context.steps, context.step);
+  const seq = last === undefined ? null : objectionSeqOf(last.exitDetail);
+  if (
+    last !== undefined &&
+    seq !== null &&
+    isRecord(last.exitDetail) &&
+    last.exitDetail.reason === 'objection_upheld'
+  ) {
+    const text = context.read((store) => objectionFeedback(store, seq));
+    if (text !== null) return clipFeedback(text);
+  }
+  return previousImplementationFeedback(context.steps, context.step);
+};
+
+/**
+ * 이의를 마무리하고 단계 결과를 정한다 (ADR-115). `judged`가 `null`이면 재기동으로 끊긴 이의다(판단 세션을 다시 열지 않는다).
+ */
+const finishObjection = async (
+  context: StepContext,
+  objection: NormChangeEntry,
+  sessionId: string | null,
+  resumed: boolean,
+): Promise<StepOutcome> => {
+  const rules = objection.detail.objection?.rules ?? [];
+  const judged = resumed
+    ? null
+    : await context.judgeNorms({
+        cause: { kind: 'objection', seq: objection.seq },
+        ruleIds: rules.map((rule) => rule.id),
+        text: objection.reason ?? '',
+      });
+  context.signal.throwIfAborted();
+  const endReason =
+    judged === null
+      ? OBJECTION_INTERRUPTED
+      : judged.status === 'ended'
+        ? judged.endReason
+        : judged.reason;
+  const decisions = context.read((store) =>
+    settleObjection(store, { objectionSeq: objection.seq, endReason }, { now: Date.now }),
+  );
+  const base = {
+    sessionId,
+    objectionSeq: objection.seq,
+    judgmentSession:
+      judged === null
+        ? { interrupted: true }
+        : judged.status === 'ended'
+          ? { sessionId: judged.sessionId, endReason: judged.endReason }
+          : { notOpened: judged.reason, message: judged.detail },
+    decisions: decisions.map((decision) => ({
+      ruleId: decision.rule.displayId,
+      verdict: decision.verdict,
+      judgmentSeq: decision.seq,
+      undecided: decision.undecided,
+    })),
+  };
+  if (decisions.some((decision) => decision.verdict !== 'upheld')) {
+    return halt(OBJECTION_APPLIED_REASON, {
+      ...base,
+      message: '이의에 규칙을 맡는 역할이 폐기 · 대체로 판단해 이 실행은 병합 없이 끝납니다',
+    });
+  }
+  if (judged?.status === 'not_opened') {
+    if (judged.reason === 'project_daily_budget_exceeded' || judged.reason === 'budget_exhausted') {
+      return {
+        status: 'halt',
+        runStatus: 'budget_exceeded',
+        reason: judged.reason,
+        exitDetail: base,
+      };
+    }
+    if (judged.reason === 'settings_incomplete') {
+      return halt('settings_missing', { ...base, role: 'rule-writer' });
+    }
+  }
+  return { status: 'unmet', exitDetail: { ...base, reason: 'objection_upheld' } };
 };
 
 /**
@@ -203,6 +330,15 @@ export const createImplementationExecutor =
         message: 'Red 확인 통과 기록(인수 테스트 해시)이 없습니다',
       });
     }
+    // 재기동으로 마무리가 끊긴 이의가 있으면 판단 없이 유지로 마무리한다 (판단 세션은 이의마다 한 번, ADR-115)
+    const settledSeqs = context.steps.flatMap((step) => {
+      const seq = objectionSeqOf(step.exitDetail);
+      return seq === null ? [] : [seq];
+    });
+    const unsettled = context.read((store) =>
+      unsettledObjection(store, context.run.id, settledSeqs),
+    );
+    if (unsettled !== null) return finishObjection(context, unsettled, null, true);
     // 쓰기 장부 감시 시작 (메모리에만 둔다). 단계 사이에 생긴 보고되지 않은 변경도 대상이다
     const norms = createNormGuard(context);
     const worktree = context.git.worktreePath;
@@ -236,6 +372,8 @@ export const createImplementationExecutor =
     const normInput = context.read((store) =>
       collectNormInput(store, { requirementIds: [], ruleIds: context.run.targetRuleIds }),
     );
+    // 이의 제기 도구의 콜백: 이의 기록 1건만 남긴다 (규칙 · 인수 테스트 · 규범 저장소의 다른 표는 쓰지 않는다, ADR-115)
+    const raised: { entry: NormChangeEntry | null } = { entry: null };
     let session;
     try {
       session = await context.runSession({
@@ -246,7 +384,7 @@ export const createImplementationExecutor =
           rules,
           acceptanceFiles,
           norms: normInput,
-          feedback: previousImplementationFeedback(context.steps, context.step),
+          feedback: implementationFeedback(context),
         }),
         normInput: normInputRecord(normInput),
         vars: {
@@ -255,6 +393,41 @@ export const createImplementationExecutor =
           runId: context.run.displayId,
         },
         commands: { toolchainRoot: worktree, installAllowlist },
+        hooks: {
+          raiseObjection: (input, call) => {
+            if (call.sessionId === null)
+              return failed('tool_failed', '세션 기록이 없어 이의를 남길 수 없음');
+            const sessionId = call.sessionId;
+            try {
+              const entry = context.read((store) =>
+                recordObjection(
+                  store,
+                  {
+                    ruleIds: input.ruleIds,
+                    reason: input.reason,
+                    sessionId,
+                    runId: context.run.id,
+                    stepId: context.step.id,
+                  },
+                  { now: Date.now },
+                ),
+              );
+              raised.entry = entry;
+              const targets = entry.detail.objection?.rules.map((rule) => rule.displayId) ?? [];
+              return ok(
+                `이의 기록 (${targets.join(', ')}, 규범 변경 기록 ${String(entry.seq)}). 이 세션은 여기서 끝난다. 규칙을 맡는 역할이 폐기 · 대체 · 유지를 판단한다`,
+              );
+            } catch (error) {
+              if (error instanceof ObjectionInputError) {
+                return denied(
+                  error.code,
+                  `raise_objection 인자 오류: ${error.message} (작업 지시의 효력 있는 규칙 표시 ID를 쓴다)`,
+                );
+              }
+              throw error;
+            }
+          },
+        },
       });
     } catch (error) {
       // 가드 위반 · 예산 초과로 세션이 실행을 끝내도(StepHaltError) 에이전트 코드가 돌았을 수 있으므로 먼저 대조한다
@@ -272,6 +445,10 @@ export const createImplementationExecutor =
     const afterSession = norms.verify();
     if (afterSession.length > 0) {
       return normHalt('after_session', afterSession, { sessionId: session.sessionId });
+    }
+    // 이의를 제기했으면 판정하지 않고 규칙을 맡는 역할의 판단으로 넘긴다 (세션의 코드 변경은 커밋하지 않는다)
+    if (raised.entry !== null) {
+      return finishObjection(context, raised.entry, session.sessionId, false);
     }
     if (session.endReason !== 'success') {
       return {

@@ -16,6 +16,7 @@ import { ScriptedAdapter } from '../../src/agent/scripted-adapter.js';
 import { PipelineEngine } from '../../src/engine/pipeline-engine.js';
 import type {
   EngineEvent,
+  NormJudgeLauncher,
   StepContext,
   StepExecutor,
   StepExecutors,
@@ -257,6 +258,15 @@ export interface PipelineSetupOptions {
   onEvent?: (biveHome: string) => (event: EngineEvent) => void | Promise<void>;
   /** 실제 설치 · 판정 러너 (판정 1회 제한 시간 ms). 지정하면 `decide` · `onJudge`는 쓰지 않는다 */
   realJudgeTimeoutMs?: number;
+  /**
+   * 실행 안 판단 세션 배선 (M7-11). 같은 하네스의 엔진들이 하나를 같이 쓴다. `adapter`는 하네스의 기록 어댑터, `engine`은 지금
+   * 하네스의 엔진(자동 시작 배선용)
+   */
+  judgeNorms?: (context: {
+    readonly biveHome: string;
+    readonly adapter: AgentAdapter;
+    readonly engine: () => PipelineEngine;
+  }) => NormJudgeLauncher;
   temps: string[];
   engines: PipelineEngine[];
 }
@@ -331,6 +341,15 @@ export const setupPipeline = (options: PipelineSetupOptions): PipelineHarness =>
   const executors: StepExecutors = options.executors?.(defaults) ?? defaults;
   const worktrees = options.worktrees?.(biveHome);
   const onEvent = options.onEvent?.(biveHome);
+  let latest: PipelineEngine | null = null;
+  const judgeNorms = options.judgeNorms?.({
+    biveHome,
+    adapter,
+    engine: () => {
+      if (latest === null) throw new Error('엔진 준비 전');
+      return latest;
+    },
+  });
   const newEngine = (): PipelineEngine => {
     const engine = new PipelineEngine({
       biveHome,
@@ -338,8 +357,10 @@ export const setupPipeline = (options: PipelineSetupOptions): PipelineHarness =>
       executors,
       ...(worktrees === undefined ? {} : { worktrees }),
       ...(onEvent === undefined ? {} : { onEvent }),
+      ...(judgeNorms === undefined ? {} : { judgeNorms }),
     });
     options.engines.push(engine);
+    latest = engine;
     return engine;
   };
   const engine = newEngine();

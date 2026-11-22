@@ -133,6 +133,21 @@ export const sessionLimits = (
 };
 
 /**
+ * 실행 전체 한도의 남은 USD · 턴 (역할과 무관, 계산 규칙은 {@link sessionLimits}의 실행 쪽과 같다). 하나라도 0 이하면 `null`.
+ * 실행 스냅샷에 역할이 없는 실행 안 판단 세션(규칙 작성 역할, M7-11 · ADR-115)의 한도를 묶을 때 쓴다.
+ */
+export const runRemaining = (
+  snapshot: BudgetSnapshot,
+  sessions: readonly Session[],
+): SessionBudget | null => {
+  const charged = chargeSessions(snapshot, sessions);
+  const maxBudgetUsd = remainingUsd(snapshot.run.maxBudgetUsd, totalOf(charged, 'usd').value);
+  const maxTurns = snapshot.run.maxTurns - totalOf(charged, 'turns').value;
+  if (!(maxBudgetUsd > 0) || !(maxTurns > 0)) return null;
+  return { maxBudgetUsd, maxTurns };
+};
+
+/**
  * 한도를 넘은 합계 1건 (`budget_aggregate_exceeded`의 종료 조건 결과). `spent` = `known`(보고된 값의 합) +
  * `estimated`(값을 모르는 세션 `unknownSessions`개의 추정분). 추정분이 있으면 화면이 그 사실을 함께 보일 수 있다(NFR-03).
  */

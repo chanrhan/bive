@@ -198,7 +198,7 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
     );
   });
 
-  it('세션 종료 사유 6종', () => {
+  it('세션 종료 사유 7종 (M7-11 #223: 이의 제기)', () => {
     expectEnum(
       SessionEndReason,
       [
@@ -208,6 +208,7 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
         'error_during_execution',
         'aborted',
         'guard_violation',
+        'objection_raised',
       ],
       SESSION_END_REASON_LABELS,
     );

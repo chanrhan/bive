@@ -74,9 +74,16 @@ describe('역할별 도구 세트', () => {
       'propose_rule',
       'retire_rule',
       'supersede_rule',
+      // 이의 판단의 유지 (M7-11 #223, ADR-115)
+      'uphold_rule',
     ]);
     expect(ROLE_TOOL_NAMES['test-writer']).toEqual([...FILE_TOOL_NAMES, 'run_tests']);
-    expect(ROLE_TOOL_NAMES.implementer).toEqual([...FILE_TOOL_NAMES, ...COMMAND_TOOL_NAMES]);
+    // 이의 제기 (M7-11 #223, ADR-115): 구현 역할에만
+    expect(ROLE_TOOL_NAMES.implementer).toEqual([
+      ...FILE_TOOL_NAMES,
+      ...COMMAND_TOOL_NAMES,
+      'raise_objection',
+    ]);
     expect(ROLE_TOOL_NAMES.planner).toEqual([]);
     expect(ROLE_TOOL_NAMES.chat).toEqual([]);
   });
