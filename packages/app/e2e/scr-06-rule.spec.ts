@@ -33,6 +33,7 @@ import {
   UNJUDGED_RULE,
 } from './checklists/scr-06.js';
 import type {
+  NormChangeView,
   ApprovalLogEntry,
   ConfirmationSetResult,
   RuleUpdateResult,
@@ -1034,6 +1035,89 @@ test.describe('확인 상태 · 폐기 · 변경 이력 (#227 수용 기준 3, A
     // 날 사유 값(hash_mismatch 등)은 화면에 없다
     expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
     await expect(page.getByText('hash_mismatch')).toHaveCount(0);
+  });
+
+  test('변경 이력: 이의 판단(유지 · 폐기 · 판단 없음)은 "이의 판단 · 결과"로 그리고 모순 없음으로 보이지 않으며, 판단 없음의 사정은 표시명이다 (M7-11, ADR-115)', async ({
+    page,
+  }) => {
+    const bive = await openRules(page);
+    const hash = (n: number) => String(n).repeat(64);
+    const judgment = (
+      seq: number,
+      verdict: string,
+      extra: Record<string, unknown> = {},
+    ): NormChangeView =>
+      ({
+        seq,
+        at: `2026-10-16T0${String(seq)}:00:00.000Z`,
+        kind: 'judgment',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        targetRef: { entity: 'Rule', id: FAILING_RULE.id },
+        sessionId: '01JS0000000000000000000009',
+        runId: '01JE0000000000000000000002',
+        reason: '요구사항에 맞아 유지한다',
+        detail: {
+          judgment: {
+            subject: 'objection',
+            verdict,
+            contradicts: [],
+            causeSeq: 1,
+            input: { requirements: { total: 1, included: 1 }, rules: { total: 2, included: 2 } },
+          },
+        },
+        textTruncated: false,
+        prevHash: hash(seq - 1),
+        hash: hash(seq),
+        ...extra,
+      }) as unknown as NormChangeView;
+    await bive.setResponse('normChange.list', {
+      result: {
+        entries: [
+          judgment(2, 'upheld'),
+          judgment(3, 'retired', { reason: '진술이 요구사항과 달라 폐기한다' }),
+          judgment(4, 'upheld', {
+            actor: { kind: 'orchestrator' },
+            sessionId: null,
+            reason:
+              '판단 세션이 이 규칙을 판단하지 못하고 끝나 유지로 봄. 판단 없음은 폐기가 아니다',
+            detail: {
+              judgment: {
+                subject: 'objection',
+                verdict: 'upheld',
+                contradicts: [],
+                causeSeq: 1,
+                undecided: { endReason: 'error_max_turns' },
+                input: {
+                  requirements: { total: 0, included: 0 },
+                  rules: { total: 0, included: 0 },
+                },
+              },
+            },
+          }),
+        ],
+        chain: { valid: true, brokenAtSeq: null, reason: null },
+      },
+    });
+    await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+    await page.getByRole('button', { name: '변경 이력' }).click();
+    const rows = page.getByTestId('rule-changes').getByTestId('change-row');
+    await expect(rows.getByTestId('change-kind')).toHaveText(['판단', '판단', '판단']);
+    await expect(rows.getByTestId('change-subject')).toHaveText([
+      '이의 판단 · 유지',
+      '이의 판단 · 폐기',
+      '이의 판단 · 유지 · 판단 없음 (턴 한도 초과)',
+    ]);
+    await expect(rows.getByTestId('change-actor')).toHaveText([
+      '에이전트 · 규칙 작성',
+      '에이전트 · 규칙 작성',
+      '오케스트레이터',
+    ]);
+    await expect(page.getByTestId('rule-changes').getByText('모순 없음')).toHaveCount(0);
+    // 날 값(종료 사유 · 결과 값)과 문서 번호가 화면에 없다
+    for (const raw of ['error_max_turns', 'upheld', 'retired', 'ADR-']) {
+      await expect(page.getByTestId('rule-changes').getByText(raw)).toHaveCount(0);
+    }
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
   });
 
   test('제목 · 진술 · 케이스 이름 · 실패 메시지 · [실행] 대화의 대상 줄의 방향 제어 · 영폭 글자는 보이는 표기로 그리고(카드 제목 포함), 편집 입력에는 원문을 넣는다. 편집 중에는 [확인]이 없다', async ({

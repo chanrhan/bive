@@ -19,7 +19,9 @@
 //   하루 한도를 다시 보아 문에 걸리면 워크트리 없이 끝난다(실행 서비스 `startNextQueuedRun`, ADR-111)
 // - 실행 안 판단 세션(M7-11 #223, ADR-115): 단계 실행기가 `judgeNorms`로 청하면 주입받은 배선(`judgeNorms` 옵션, 오케스트레이터가
 //   규칙 작성 서비스로 잇는다)을 실행 · 단계 · 실행 잔여 한도 · 중단 신호와 함께 부른다. 엔진은 규칙 작성 서비스를 모른다. 구현
-//   세션의 이의 제기 도구가 `ok`를 돌려주면 그 세션을 끝낸다(`SessionEndRequest`, 종료 사유 `objection_raised`)
+//   세션의 이의 제기 도구가 `ok`를 돌려주면 실행기가 닫히고 세션은 스스로 끝나기를 기다린다(결과 이벤트의 실제 비용). 닫힌 뒤
+//   거부된 호출이 {@link OBJECTION_CLOSED_CALL_LIMIT}번 쌓이면 세션을 끝낸다(`SessionEndRequest`). 어느 쪽이든 종료 사유는
+//   `objection_raised`이고, 값을 모른 채 끝나면 하루 · 실행 합계에서 그 세션의 한도 전부로 센다(ADR-115 검토 1회차)
 import {
   type Author,
   CommitSha,
@@ -154,6 +156,12 @@ export interface PipelineEngineOptions {
    */
   judgeNorms?: NormJudgeLauncher;
 }
+
+/**
+ * 이의를 제기해 닫힌 구현 세션이 계속 도구를 부를 때 세션을 끝내는 거부 수 (`session_closed`, ADR-115 검토 1회차). 모델이 고정
+ * 문장을 따르지 않아도 세 번째 거부에서 끝난다(비용을 모르면 한도 전부로 센다).
+ */
+export const OBJECTION_CLOSED_CALL_LIMIT = 3;
 
 /** M1 변이 주입: P1(JDG-04)이라 `skipped`로 기록한다 (RUN-02 P0 범위, roadmap M1-14). */
 export const skipMutationStep: StepExecutor = () =>
@@ -1312,6 +1320,7 @@ export class PipelineEngine {
       }),
     );
     const controller = new AbortController();
+    let closedCalls = 0;
     const tools = createRoleTools({
       role,
       sessionRoot: request.workDir,
@@ -1324,10 +1333,15 @@ export class PipelineEngine {
         : { writableRuleDirs: request.writableRuleDirs }),
       hooks: {
         ...request.hooks,
-        onToolCall: (record) => this.#recordToolCall(projectId, run.id, sessionId, record),
-        // 구현 역할의 이의 제기: 실행기가 닫히면 세션을 끝낸다 (ADR-115). 판단 완료로 닫히는 것은 규칙 작성 서비스의 세션뿐이다
-        onClose: (reason) => {
-          if (reason === 'objection_raised') controller.abort(new SessionEndRequest(reason));
+        onToolCall: (record) => {
+          this.#recordToolCall(projectId, run.id, sessionId, record);
+          // 이의를 제기해 닫힌 세션은 스스로 끝나기를 기다리고, 거부가 쌓이면 끝낸다 (ADR-115 검토 1회차)
+          if (record.reason === 'session_closed' && tools.closed === 'objection_raised') {
+            closedCalls += 1;
+            if (closedCalls >= OBJECTION_CLOSED_CALL_LIMIT) {
+              controller.abort(new SessionEndRequest('objection_raised'));
+            }
+          }
         },
       },
     });
@@ -1366,10 +1380,12 @@ export class PipelineEngine {
       signal.removeEventListener('abort', forward);
     }
     const { result } = outcome;
-    // 이의를 제기해 실행기가 닫혔으면 어댑터가 중단을 늦게 따라 결과로 끝났어도 이의 제기로 본다 (가드 위반은 그대로)
+    // 이의를 제기해 실행기가 닫혔으면 세션이 스스로 결과로 끝났어도(주 경로) 이의 제기로 본다. 가드 위반 · 한도 subtype은 그대로
+    // (한도로 끝났으면 실행이 예산 초과로 끝난다)
     const endReason = signal.aborted
       ? 'aborted'
-      : outcome.endReason !== 'guard_violation' && tools.closed === 'objection_raised'
+      : tools.closed === 'objection_raised' &&
+          (outcome.endReason === 'success' || outcome.endReason === 'error_during_execution')
         ? 'objection_raised'
         : outcome.endReason;
     this.#store(projectId, (store) =>

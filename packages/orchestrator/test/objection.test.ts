@@ -17,7 +17,7 @@ import { openProjectStore, type ProjectStore } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 import { stringify } from 'yaml';
 
-import type { SessionSpec } from '../src/agent/adapter.js';
+import type { AgentAdapter, SessionSpec } from '../src/agent/adapter.js';
 import { loadScenario, type Scenario } from '../src/agent/scenario.js';
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { NormJudgeLauncher } from '../src/engine/types.js';
@@ -27,6 +27,7 @@ import {
   quoteCore,
   quotesRule,
   retireAgentRule,
+  supersedeAgentRule,
   upholdAgentRule,
 } from '../src/norms/agent-rule.js';
 import { NORM_INPUT_BEGIN, NORM_INPUT_END } from '../src/norms/norm-input.js';
@@ -51,7 +52,10 @@ import {
   RaiseObjectionInput,
   roleToolNames,
 } from '../src/tools/definitions.js';
-import { FixedToolExecutor } from '../src/tools/executor.js';
+import { OBJECTION_CLOSED_CALL_LIMIT } from '../src/engine/pipeline-engine.js';
+import { chargeSessions } from '../src/engine/session-budget.js';
+import { dailySpend, projectDailyBudget } from '../src/settings/project-budget.js';
+import { FixedToolExecutor, OBJECTION_ACCEPTED_TEXT } from '../src/tools/executor.js';
 import { denied, ok } from '../src/tools/result.js';
 import {
   human,
@@ -448,8 +452,8 @@ describe('이의 기록 모듈 (수용 기준 3: 이의 기록 추가만)', () =
 // ── 실행 안의 흐름 ───────────────────────────────────────
 
 describe('시나리오 objection: 구현 시도 1의 이의 → 판단 세션의 유지 → 같은 실행이 구현으로 회귀 → 시도 2 통과 (수용 기준 1 · 2 · 4)', () => {
-  it('이의를 부른 세션은 거기서 끝나고(뒤 쓰기 없음) 판단 세션이 한 번 돌아 유지를 남기며, 회귀 1회로 병합된다', async () => {
-    const h = setup();
+  it('이의를 부른 세션은 뒤 쓰기가 거부된 채 결과로 끝나고(실제 비용, 종료 사유 objection_raised) 판단 세션이 한 번 돌아 유지를 남기며, 회귀 1회로 병합된다', async () => {
+    const h = setup({ dailyBudgetUsd: 100 });
     const detail = await runToEnd(h);
     expect(detail.run.status).toBe('merged');
     expect(detail.run.regressionCount).toBe(1);
@@ -484,13 +488,21 @@ describe('시나리오 objection: 구현 시도 1의 이의 → 판단 세션의
     expect(judgment?.budget?.maxBudgetUsd).toBeLessThanOrEqual(1);
     expect(judgment?.budget?.maxTurns).toBeLessThanOrEqual(20);
 
-    // 구현 1의 도구 호출: 읽기 → 이의(ok). 시나리오의 뒤 쓰기 턴은 재생되지 않았다(세션이 끝났다)
+    // 구현 1의 도구 호출: 읽기 → 이의(ok) → 뒤 쓰기는 닫힌 실행기가 거부. 세션은 결과로 끝나 실제 비용이 남는다 (검토 1회차 B1 ⓐ)
     const calls = toolCallsOf(h);
     const implementer1 = calls.filter((call) => call.sessionId === sessions[1]?.id);
-    expect(implementer1.map((call) => `${call.name}:${call.status}`)).toEqual([
-      'read_file:ok',
-      'raise_objection:ok',
-    ]);
+    expect(
+      implementer1.map((call) => `${call.name}:${String(call.reason ?? call.status)}`),
+    ).toEqual(['read_file:ok', 'raise_objection:ok', 'write_file:session_closed']);
+    expect(sessions[1]).toMatchObject({ totalCostUsd: 0.0231, numTurns: 3 });
+    // 실제 비용이 하루 합계 · 실행 합계에 든다 (추정 없음)
+    const daily = withProject(h.biveHome, h.project.id, (store) =>
+      projectDailyBudget(store, store.settings.get(), Date.now()),
+    );
+    expect(daily?.spend.unknownSessions).toBe(0);
+    expect(
+      chargeSessions(detail.run.budgetSnapshot, sessions).map((charged) => charged.usd),
+    ).toEqual(sessions.map((session) => session.totalCostUsd));
     const judgeCalls = withProject(h.biveHome, h.project.id, (store) =>
       store.sessions.toolCallsBySession(judgment?.id ?? ''),
     );
@@ -1316,5 +1328,312 @@ describe('인용 검사 조이기: EARS 틀 글자 · 공백을 빼고 세고, �
         CLOCK,
       ).rule.id,
     ).toBe(other.id);
+  });
+});
+
+// ── 검토 1회차 ─────────────────────────────────────────────
+
+describe('이의 뒤 세션의 비용: 스스로 끝나면 실제 값, 끝나지 않아 중단되면 한도 전부 (검토 1회차 B1)', () => {
+  it('이의 결과 본문은 세션을 끝내라는 고정 문장으로 끝난다', async () => {
+    const executor = new FixedToolExecutor({
+      role: 'implementer',
+      sessionRoot: tempDir(),
+      biveHome: tempDir(),
+      hooks: { raiseObjection: () => '이의 기록' },
+    });
+    const result = await executor.execute('raise_objection', {
+      ruleIds: ['RULE-001'],
+      reason: '이유',
+    });
+    expect(result.content).toBe(`이의 기록\n${OBJECTION_ACCEPTED_TEXT}`);
+    expect(OBJECTION_ACCEPTED_TEXT).toBe(
+      '이의가 접수됐다. 더 할 일이 없다. 도구를 더 부르지 말고 세션을 끝내라.',
+    );
+  });
+
+  it(`닫힌 뒤 거부가 ${String(OBJECTION_CLOSED_CALL_LIMIT)}번 쌓이면 엔진이 세션을 끝내고(종료 사유 objection_raised, 비용 없음), 그 세션은 한도 전부로 세어 다음 구현 세션의 역할 한도가 남지 않는다`, async () => {
+    const files = variant('objection-stuck', (scenario) => {
+      const [objecting] = implementerSessions(scenario);
+      if (objecting === undefined) throw new Error('구현 세션 없음');
+      const write = {
+        tool: 'write_file',
+        args: { path: 'src/after.ts', content: '// 이의 뒤의 쓰기' },
+      };
+      objecting.turns = [
+        ...objecting.turns.filter((turn) => !('tool' in turn) || turn.tool !== 'write_file'),
+        write,
+        write,
+        write,
+        write,
+      ];
+    });
+    const h = setup({ ...files, dailyBudgetUsd: 100 });
+    const detail = await runToEnd(h);
+    const sessions = sessionsOf(h);
+    const implementer = sessions.find((session) => session.role === 'implementer');
+    expect(implementer).toMatchObject({ endReason: 'objection_raised', totalCostUsd: null });
+    const calls = toolCallsOf(h).filter((call) => call.sessionId === implementer?.id);
+    // 세 번째 거부에서 끝났다 (네 번째 쓰기는 오지 않았다)
+    expect(calls.map((call) => String(call.reason ?? call.status))).toEqual([
+      'ok',
+      'ok',
+      'session_closed',
+      'session_closed',
+      'session_closed',
+    ]);
+    // 한도 전부로 센다: 실행 합계(역할 한도 2 USD 전부) · 하루 합계(그 세션 한도 전부)
+    const allotment = implementer?.budget?.maxBudgetUsd ?? 0;
+    expect(allotment).toBeGreaterThan(0.0421);
+    const charged = chargeSessions(detail.run.budgetSnapshot, sessions).find(
+      (entry) => entry.session.id === implementer?.id,
+    );
+    expect(charged).toMatchObject({ usd: allotment, turns: implementer?.budget?.maxTurns });
+    const daily = withProject(h.biveHome, h.project.id, (store) =>
+      projectDailyBudget(store, store.settings.get(), Date.now()),
+    );
+    expect(daily?.spend.estimated).toBeGreaterThanOrEqual(allotment);
+    // 판단(유지) 뒤 회귀한 구현 세션은 역할 한도가 남지 않아 열리지 않는다 (덜 셌다면 열렸다)
+    expect(detail.run).toMatchObject({
+      status: 'budget_exceeded',
+      failureReason: 'budget_exhausted',
+    });
+    expect(sessions.filter((session) => session.role === 'implementer')).toHaveLength(1);
+  }, 60_000);
+
+  it('세는 규칙(단위): objection_raised로 끝난 값 모르는 세션만 한도 전부, 다른 사유의 값 모르는 세션은 아는 최댓값 규칙 그대로', () => {
+    const snapshot = {
+      run: { maxBudgetUsd: 5, maxTurns: 200 },
+      roles: { implementer: { maxBudgetUsd: 2, maxTurns: 100 } },
+    };
+    const make = (endReason: Session['endReason'], totalCostUsd: number | null): Session => ({
+      id: newId(),
+      runId: RUN_ID,
+      stepId: newId(),
+      requirementId: null,
+      role: 'implementer',
+      model: 'm',
+      sdkSessionId: 'sdk',
+      workDir: '/w',
+      endReason,
+      error: null,
+      totalCostUsd,
+      numTurns: totalCostUsd === null ? null : 3,
+      modelUsage: {},
+      firstTurnCacheWrite: null,
+      budget: { maxBudgetUsd: 0.1579, maxTurns: 50 },
+      normInput: null,
+      tools: [],
+      mcpServers: [],
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
+    });
+    const known = make('success', 0.0421);
+    const objection = make('objection_raised', null);
+    const aborted = make('aborted', null);
+    // 검토자의 재현 수치: 한도 0.1579인 이의 세션이 0.0421이 아니라 0.1579로 든다
+    expect(chargeSessions(snapshot, [known, objection]).map((c) => [c.usd, c.turns])).toEqual([
+      [0.0421, 3],
+      [0.1579, 50],
+    ]);
+    expect(chargeSessions(snapshot, [known, aborted]).map((c) => [c.usd, c.turns])).toEqual([
+      [0.0421, 3],
+      [0.0421, 3],
+    ]);
+    // 실제 값이 있으면 이의 세션도 그 값
+    expect(chargeSessions(snapshot, [known, make('objection_raised', 0.03)])[1]?.usd).toBe(0.03);
+    expect(dailySpend([known, objection], 0.2)).toMatchObject({ spent: 0.2, estimated: 0.1579 });
+    expect(dailySpend([known, aborted], 0.2)).toMatchObject({ spent: 0.0842, estimated: 0.0421 });
+  });
+});
+
+describe('판단 세션의 한도 = min(규칙 작성 역할 설정, 프로젝트 하루 잔여, 실행 잔여) (검토 1회차 N1)', () => {
+  const judgeOnce = async (
+    h: PipelineHarness,
+    runBudget: { maxBudgetUsd: number; maxTurns: number },
+  ) => {
+    const ended: AgentAdapter = {
+      kind: 'scripted',
+      async *startSession(spec) {
+        yield {
+          type: 'init',
+          sessionId: 'sdk',
+          model: spec.model,
+          tools: [...spec.tools.toolNames],
+          mcpServers: ['bive'],
+        };
+        yield {
+          type: 'result',
+          subtype: 'success',
+          total_cost_usd: 0.001,
+          num_turns: 1,
+          modelUsage: {},
+        };
+      },
+    };
+    const service = new RuleWriterService({ biveHome: h.biveHome, adapter: ended });
+    services.push(service);
+    const outcome = await service.judge({
+      projectId: h.project.id,
+      run: { id: h.runId, displayId: 'EXE-001' },
+      stepId: newId(),
+      runBudget,
+      signal: new AbortController().signal,
+      cause: { kind: 'objection', seq: 1 },
+      ruleIds: [h.rule.id],
+      text: '이유',
+    });
+    if (outcome.status !== 'ended') throw new Error(`열지 못함: ${outcome.status}`);
+    return withProject(h.biveHome, h.project.id, (store) => store.sessions.get(outcome.sessionId))
+      ?.budget;
+  };
+
+  it('역할 설정 · 하루 잔여 · 실행 잔여가 각각 가장 작을 때 그 값이 한도다', async () => {
+    // 역할 설정(규칙 작성 1 USD · 20턴)이 가장 작다
+    const roleSmallest = setup({ launcher: null, dailyBudgetUsd: 100 });
+    expect(await judgeOnce(roleSmallest, { maxBudgetUsd: 5, maxTurns: 200 })).toEqual({
+      maxBudgetUsd: 1,
+      maxTurns: 20,
+    });
+    // 하루 잔여가 가장 작다
+    const dailySmallest = setup({ launcher: null, dailyBudgetUsd: 0.4 });
+    expect(await judgeOnce(dailySmallest, { maxBudgetUsd: 5, maxTurns: 200 })).toEqual({
+      maxBudgetUsd: 0.4,
+      maxTurns: 20,
+    });
+    // 실행 잔여가 가장 작다 (USD · 턴 모두)
+    const runSmallest = setup({ launcher: null, dailyBudgetUsd: 100 });
+    expect(await judgeOnce(runSmallest, { maxBudgetUsd: 0.25, maxTurns: 7 })).toEqual({
+      maxBudgetUsd: 0.25,
+      maxTurns: 7,
+    });
+  }, 60_000);
+});
+
+describe('확인됨 규칙의 이의 판단 폐기 · 대체 (검토 1회차 N2, ADR-113 쓰기 순서)', () => {
+  const confirmBoth = (store: ProjectStore, ids: readonly string[]) => {
+    for (const id of ids) {
+      store.confirmations.confirm(
+        { entity: 'Rule', id },
+        {
+          by: { kind: 'human' },
+          at: new Date(T0 + 50).toISOString(),
+          basis: { kind: 'approval_log', seq: 1 },
+        },
+      );
+    }
+  };
+
+  it('한 판단 세션이 확인됨 규칙 2개를 차례로 폐기 · 대체하면 기록 순서가 맞고(0019 통과) 둘 다 미확인이 되며, 확인 상태 쓰기만 실패하면 그 규칙의 판단 · 폐기 전체가 되돌려진다', () => {
+    const store = openStore();
+    const { target, other } = seedRules(store);
+    confirmBoth(store, [target.id, other.id]);
+    const objection = recordObjection(
+      store,
+      objectionInput([target.displayId, other.displayId]),
+      CLOCK,
+    );
+    const context = {
+      causeSeq: objection.seq,
+      runId: RUN_ID,
+      normInput: {
+        requirements: { total: 1, included: 1, omitted: 0 },
+        rules: { total: 3, included: 3, omitted: 0 },
+        truncated: false,
+      },
+    };
+    const author = { kind: 'agent', role: 'rule-writer' } as const;
+    const sessionId = newId();
+    // 확인 상태 쓰기만 실패시키면 판단 · 폐기 · 풀림 기록이 모두 남지 않는다
+    store.db.exec(
+      "CREATE TRIGGER fail_release BEFORE UPDATE ON confirmations BEGIN SELECT RAISE(ABORT, '시험: 확인 상태 쓰기 실패'); END;",
+    );
+    const before = store.normChanges.list().length;
+    expect(() =>
+      retireAgentRule(
+        store,
+        {
+          ruleId: target.id,
+          grounds: '진술 "time 필드에 응답 시점의 서버 시각을 담는다"는 틀렸다',
+          author,
+          sessionId,
+          objection: context,
+        },
+        CLOCK,
+      ),
+    ).toThrow(/확인 상태 쓰기 실패/);
+    expect(store.normChanges.list()).toHaveLength(before);
+    expect(store.ruleRetirements.list()).toEqual([]);
+    expect(store.rules.get(target.id)?.confirmation.state).toBe('confirmed');
+    store.db.exec('DROP TRIGGER fail_release');
+
+    retireAgentRule(
+      store,
+      {
+        ruleId: target.id,
+        grounds: '진술 "time 필드에 응답 시점의 서버 시각을 담는다"는 틀렸다',
+        author,
+        sessionId,
+        objection: context,
+      },
+      CLOCK,
+    );
+    supersedeAgentRule(
+      store,
+      {
+        payload: {
+          title: '상태 코드',
+          statement:
+            'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 상태 코드 204를 돌려준다',
+          kind: 'business',
+          checkKinds: ['test'],
+          parentRequirementId: other.parentRequirementId,
+        },
+        rationale: '이의를 받아 상태 코드를 바꿈',
+        author,
+        sessionId,
+        contradiction: { verdict: 'none' },
+        normInput: context.normInput,
+        ruleId: other.id,
+        grounds: '진술 "상태 코드 200을 돌려준다"는 요구사항과 다르다',
+        objection: context,
+      },
+      { now: CLOCK.now, newId },
+    );
+    const kinds = store.normChanges
+      .list()
+      .map((entry) =>
+        entry.kind === 'judgment'
+          ? `judgment(${String(entry.detail.judgment?.verdict)})`
+          : entry.kind,
+      );
+    expect(kinds).toEqual([
+      'objection',
+      'judgment(retired)',
+      'retired',
+      'unconfirmed',
+      'created',
+      'judgment(contradiction)',
+      'judgment(superseded)',
+      'superseded',
+      'unconfirmed',
+    ]);
+    expect(store.rules.get(target.id)?.confirmation.state).toBe('unconfirmed');
+    expect(store.rules.get(other.id)?.confirmation.state).toBe('unconfirmed');
+    expect(store.normChanges.verify().valid).toBe(true);
+  });
+});
+
+describe('판단 없음 기록의 저장 사유에 문서 번호 · 영문 종료 사유 값이 없다 (검토 1회차 B2)', () => {
+  it('사유는 고정 한국어 문장이고 종료 사유는 상세 칸에만 있다', () => {
+    for (const endReason of ['error_max_turns', 'guard_violation', 'interrupted']) {
+      const fresh = openStore();
+      const seeded = seedRules(fresh);
+      const entry = recordObjection(fresh, objectionInput([seeded.target.displayId]), CLOCK);
+      settleObjection(fresh, { objectionSeq: entry.seq, endReason }, CLOCK);
+      const [, judged] = fresh.normChanges.list();
+      expect(judged?.reason).toBe(UNDECIDED_REASON);
+      expect(judged?.reason).not.toMatch(/ADR-|[a-z]+_[a-z]+/);
+      expect(judged?.detail.judgment?.undecided).toEqual({ endReason });
+    }
   });
 });

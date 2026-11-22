@@ -137,9 +137,12 @@ const decisionOf = (entry: NormChangeEntry, rule: NormJudgmentRuleRef): Objectio
   return { rule, verdict, seq: entry.seq, undecided: judged?.undecided !== undefined };
 };
 
-/** 판단 없는 유지 기록의 사유 (오케스트레이터의 고정 문장). */
+/**
+ * 판단 없는 유지 기록의 사유 (오케스트레이터의 고정 문장, 화면에 그대로 보인다). 문서 번호 · 종료 사유 값을 섞지 않는다: 종료
+ * 사유는 `detail.judgment.undecided.endReason`에만 두고 화면이 표시명으로 그린다 (ADR-115 검토 1회차).
+ */
 export const UNDECIDED_REASON =
-  '판단 세션이 이 규칙을 판단하지 못하고 끝나 유지로 봄 (판단 없음을 폐기로 보지 않는다, ADR-115)';
+  '판단 세션이 이 규칙을 판단하지 못하고 끝나 유지로 봄. 판단 없음은 폐기가 아니다';
 
 /** 판단 세션을 열지 못했거나 끝난 사정 (`undecided.endReason`, 판단 세션의 종료 사유 또는 열지 못한 사유). */
 export type UndecidedReason = string;
@@ -172,7 +175,7 @@ export const settleObjection = (
         targetRef: { entity: 'Rule', id: rule.id },
         sessionId: null,
         runId: objection.runId,
-        reason: `${UNDECIDED_REASON}: ${clipText(input.endReason, 64)}`,
+        reason: UNDECIDED_REASON,
         detail: {
           judgment: {
             subject: 'objection',

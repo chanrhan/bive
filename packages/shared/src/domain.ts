@@ -22,6 +22,7 @@ import {
   RuleKind,
   RunStatus,
   RunType,
+  SESSION_END_REASON_LABELS,
   SessionEndReason,
   StepKind,
   StepStatus,
@@ -856,6 +857,46 @@ export const NormJudgmentVerdict = z.enum([
 
 /** 이의 판단의 결과 (주제 `objection`의 `verdict`). */
 export const OBJECTION_VERDICTS = ['upheld', 'retired', 'superseded'] as const;
+
+/** 판단 주제 표시명 (화면의 변경 이력, 앱이 같은 표를 다시 적고 시험이 대조한다, ADR-115 검토 1회차). */
+export const NORM_JUDGMENT_SUBJECT_LABELS = {
+  new_rule: '모순 판단',
+  supersede: '모순 판단',
+  objection: '이의 판단',
+} as const satisfies Record<NormJudgmentSubject, string>;
+
+/** 판단 결과 표시명 (화면의 변경 이력). */
+export const NORM_JUDGMENT_VERDICT_LABELS = {
+  no_contradiction: '모순 없음',
+  contradiction: '모순',
+  upheld: '유지',
+  retired: '폐기',
+  superseded: '대체',
+} as const satisfies Record<NormJudgmentVerdict, string>;
+
+/**
+ * 판단 없이 끝난 이의의 사정 (`undecided.endReason`의 값, M7-11 · ADR-115): 판단 세션의 종료 사유, 세션을 열지 못한 사유, 재기동으로
+ * 끊김. 저장 칸은 문자열 그대로 받는다(넓히기만). 화면은 이 표의 표시명으로 그리고 모르는 값은 날 값을 내지 않는다.
+ */
+export const NormUndecidedReason = z.enum([
+  ...SessionEndReason.options,
+  'project_daily_budget_exceeded',
+  'budget_exhausted',
+  'settings_incomplete',
+  'start_failed',
+  'not_configured',
+  'interrupted',
+]);
+export type NormUndecidedReason = z.infer<typeof NormUndecidedReason>;
+export const NORM_UNDECIDED_REASON_LABELS = {
+  ...SESSION_END_REASON_LABELS,
+  project_daily_budget_exceeded: '프로젝트 하루 예산 초과',
+  budget_exhausted: '실행 예산 소진',
+  settings_incomplete: '예산 · 모델 미설정',
+  start_failed: '시작 실패',
+  not_configured: '판단 경로 없음',
+  interrupted: '오케스트레이터 재기동',
+} as const satisfies Record<NormUndecidedReason, string>;
 export type NormJudgmentVerdict = z.infer<typeof NormJudgmentVerdict>;
 
 /** 판단이 가리키는 규칙 (판단 시점의 ID와 표시 ID). */

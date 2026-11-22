@@ -1,8 +1,9 @@
 # 구현 역할의 이의 제기 · 규범 담당 판단 (roadmap M7-11 #223, ADR-100 D4 · A4 · A5, ADR-115).
 # 형식: src/agent/scenario.ts. 요구사항마다 규칙 1개(로드맵 M7 흐름 10의 전제): REQ-001 → RULE-001(time). 규칙 작성 세션은 세션
 # vars로 고른다: 요구사항 세션은 requirementDisplayId, 실행 안의 판단 세션은 judgment(원인 종류 objection).
-# 실행 안: 테스트 작성이 time 인수 테스트를 쓰고, 구현 시도 1이 raise_objection으로 RULE-001에 이의를 제기한다(그 세션은 거기서
-# 끝나고 뒤 턴은 재생되지 않는다). 규칙 작성 역할의 판단 세션이 uphold_rule로 유지를 남기면 같은 실행이 구현으로 회귀하고(회귀 1),
+# 실행 안: 테스트 작성이 time 인수 테스트를 쓰고, 구현 시도 1이 raise_objection으로 RULE-001에 이의를 제기한다. 실행기가 닫혀
+# 뒤의 쓰기는 session_closed로 거부되고, 세션은 마지막 메시지 뒤 결과(실제 비용)로 스스로 끝난다(종료 사유 objection_raised,
+# ADR-115 검토 1회차). 규칙 작성 역할의 판단 세션이 uphold_rule로 유지를 남기면 같은 실행이 구현으로 회귀하고(회귀 1),
 # 구현 시도 2가 판단의 근거를 받아 time을 더해 통과 → 검사 · 병합. 구현 세션은 시도 순번(실행의 구현 세션 수)으로 고른다.
 name: objection
 description: 구현 시도 1이 RULE-001에 이의를 제기하고, 규칙 작성 역할의 판단 세션이 유지로 판단해 구현 시도 2가 time을 더해 병합
@@ -97,7 +98,7 @@ roles:
               costUSD: 0.0421
   implementer:
     sessions:
-      - description: 구현 시도 1 - 규칙에 이의 제기 (세션은 거기서 끝난다)
+      - description: 구현 시도 1 - 규칙에 이의 제기 (뒤 쓰기는 거부되고 세션은 결과로 끝난다)
         turns:
           - tool: read_file
             args:
@@ -110,7 +111,7 @@ roles:
             args:
               path: src/app/api/health/route.ts
               content: '// 이의 뒤의 쓰기는 실행되지 않는다'
-          - message: 이의를 제기했습니다.
+          - message: 이의를 제기했고 세션을 끝냅니다.
         result:
           subtype: success
           total_cost_usd: 0.0231

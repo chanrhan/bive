@@ -88,7 +88,8 @@ export interface RoleToolsHooks {
   /**
    * `raise_objection`(구현 역할의 이의 제기, M7-11 #223, ADR-115): 이의 기록 1건만 남긴다(규칙 · 인수 테스트 · 규범 저장소의 다른
    * 표를 바꾸지 않는다). 결과가 `ok`이면 실행기가 닫히고(`close('objection_raised')`) 그 뒤 호출은 모두 `denied`
-   * (`session_closed`)다. 주입하지 않으면 호출이 `error`(`not_configured`)로 끝난다.
+   * (`session_closed`)다. 결과 본문 끝에 {@link OBJECTION_ACCEPTED_TEXT}를 붙인다. 주입하지 않으면 호출이
+   * `error`(`not_configured`)로 끝난다.
    */
   raiseObjection?: (
     input: RaiseObjectionInput,
@@ -102,6 +103,13 @@ export interface RoleToolsHooks {
 
 /** 실행기를 닫은 이유: 구현 역할의 이의 제기 · 이의 판단 세션의 판단 완료 (M7-11). */
 export type ToolExecutorCloseReason = 'objection_raised' | 'judgment_complete';
+
+/**
+ * 이의 제기가 받아들여졌을 때 도구 결과 끝에 붙이는 고정 문장 (M7-11, ADR-115 검토 1회차). 세션을 중단하지 않고 모델이 스스로
+ * 끝내게 해 결과 이벤트의 실제 비용으로 기록한다.
+ */
+export const OBJECTION_ACCEPTED_TEXT =
+  '이의가 접수됐다. 더 할 일이 없다. 도구를 더 부르지 말고 세션을 끝내라.';
 
 export interface CreateRoleToolsOptions {
   role: AgentRole;
@@ -358,8 +366,8 @@ export class FixedToolExecutor implements ToolExecutor {
   }
 
   /**
-   * 이의 제기 (M7-11, ADR-115): 인자 검증 뒤 주입된 콜백(이의 기록 1건)에 넘긴다. 콜백이 `ok`를 돌려주면 실행기를 닫는다
-   * (세션이 끝난다). 거부 · 오류면 닫지 않는다(사유를 읽고 고쳐 다시 부를 수 있다).
+   * 이의 제기 (M7-11, ADR-115): 인자 검증 뒤 주입된 콜백(이의 기록 1건)에 넘긴다. 콜백이 `ok`를 돌려주면 실행기를 닫고 세션을
+   * 끝내라는 고정 문장을 붙인다. 거부 · 오류면 닫지 않는다(사유를 읽고 고쳐 다시 부를 수 있다).
    */
   private async objection(args: Record<string, unknown>): Promise<ToolResult> {
     const parsed = RaiseObjectionInput.safeParse(args);
@@ -373,8 +381,9 @@ export class FixedToolExecutor implements ToolExecutor {
     } catch (error) {
       return failed('tool_failed', error instanceof Error ? error.message : String(error));
     }
-    if (result.status === 'ok') this.close('objection_raised');
-    return result;
+    if (result.status !== 'ok') return result;
+    this.close('objection_raised');
+    return { ...result, content: `${result.content}\n${OBJECTION_ACCEPTED_TEXT}` };
   }
 }
 

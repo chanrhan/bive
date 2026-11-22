@@ -1,14 +1,20 @@
 // 규칙 상세의 변경 이력 줄 (M7-15 #227, SCR-06 · NRM-07, ADR-100 D5 · C2 · ADR-114).
 import {
   NORM_CHANGE_KIND_LABELS,
+  NORM_JUDGMENT_SUBJECT_LABELS,
+  NORM_JUDGMENT_VERDICT_LABELS,
+  NORM_UNDECIDED_REASON_LABELS,
   type NormChangeView,
   type NormJudgmentDetail,
 } from '@bive/shared';
 import { describe, expect, it } from 'vitest';
 
 import {
+  JUDGMENT_SUBJECT_TEXT,
+  JUDGMENT_VERDICT_TEXT,
   NORM_CHANGE_KIND_TEXT,
   normChangeRow,
+  UNDECIDED_REASON_TEXT,
 } from '../src/renderer/src/screens/norm-detail/normChangeView.js';
 
 const HASH = 'a'.repeat(64);
@@ -113,5 +119,66 @@ describe('normChangeRow', () => {
         }),
       ),
     ).toMatchObject({ kind: '자동 시작', actor: '오케스트레이터', text: null });
+  });
+
+  it('판단 주제 · 결과 · 판단 없음 사정의 표시명은 shared와 같다 (M7-11, ADR-115)', () => {
+    expect(JUDGMENT_SUBJECT_TEXT).toEqual(NORM_JUDGMENT_SUBJECT_LABELS);
+    expect(JUDGMENT_VERDICT_TEXT).toEqual(NORM_JUDGMENT_VERDICT_LABELS);
+    expect(UNDECIDED_REASON_TEXT).toEqual(NORM_UNDECIDED_REASON_LABELS);
+  });
+
+  it('이의 판단: 유지 · 폐기 · 대체는 "이의 판단 · 결과", 판단 없음은 사정의 표시명을 덧붙이고, 모르는 값은 날 값을 내지 않는다', () => {
+    const objection = (judgment: Partial<NormJudgmentDetail>, actor = 'agent') =>
+      normChangeRow(
+        entry({
+          kind: 'judgment',
+          ...(actor === 'agent' ? {} : { actor: { kind: 'orchestrator' }, sessionId: null }),
+          runId: '01JR0000000000000000000001',
+          reason: '근거 글',
+          detail: {
+            judgment: {
+              subject: 'objection',
+              verdict: 'upheld',
+              contradicts: [],
+              causeSeq: 3,
+              input: { requirements: { total: 1, included: 1 }, rules: { total: 1, included: 1 } },
+              ...judgment,
+            } as NormJudgmentDetail,
+          },
+        }),
+      );
+    expect(objection({}).subject).toEqual({ label: '이의 판단 · 유지', rules: [] });
+    expect(objection({ verdict: 'retired' }).subject).toEqual({
+      label: '이의 판단 · 폐기',
+      rules: [],
+    });
+    expect(objection({ verdict: 'superseded', createdSeq: 4 }).subject).toEqual({
+      label: '이의 판단 · 대체',
+      rules: [],
+    });
+    // 폐기 판단이 "모순 없음"으로 보이지 않는다
+    for (const verdict of ['upheld', 'retired', 'superseded'] as const) {
+      expect(objection({ verdict }).subject?.label).not.toContain('모순');
+    }
+    const undecided = objection({ undecided: { endReason: 'error_max_turns' } }, 'orchestrator');
+    expect(undecided).toMatchObject({
+      kind: '판단',
+      actor: '오케스트레이터',
+      subject: { label: '이의 판단 · 유지 · 판단 없음 (턴 한도 초과)', rules: [] },
+      text: { label: '근거' },
+    });
+    expect(
+      objection({ undecided: { endReason: 'interrupted' } }, 'orchestrator').subject?.label,
+    ).toBe('이의 판단 · 유지 · 판단 없음 (오케스트레이터 재기동)');
+    // 모르는 사정 · 결과 · 주제는 "알 수 없음"으로 (영문 날 값을 그리지 않는다)
+    const unknown = objection({ undecided: { endReason: 'future_reason' } }, 'orchestrator');
+    expect(unknown.subject?.label).toBe('이의 판단 · 유지 · 판단 없음 (알 수 없음)');
+    expect(unknown.subject?.label).not.toMatch(/[a-z_]{4,}/);
+    expect(objection({ verdict: 'future' as NormJudgmentDetail['verdict'] }).subject?.label).toBe(
+      '이의 판단 · 알 수 없음',
+    );
+    expect(objection({ subject: 'future' as NormJudgmentDetail['subject'] }).subject?.label).toBe(
+      '알 수 없음',
+    );
   });
 });

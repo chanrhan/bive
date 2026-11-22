@@ -22,6 +22,7 @@ import {
   ScenarioError,
 } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
+import { createRoleTools } from '../src/tools/executor.js';
 import { waitFor } from './helpers/process.js';
 
 const REQUIRED_SCENARIOS = [
@@ -722,5 +723,50 @@ describe('when 조건의 세션 고르기 (ADR-092 보강, #173)', () => {
     await expect(
       collect(onlyWhen.startSession(spec({ role: 'implementer', runId: 'r1', vars: inherited }))),
     ).rejects.toThrow(/조건에 맞는 세션 없음/);
+  });
+});
+
+describe('이의 제기 뒤 계약 (M7-11 검토 1회차 B1)', () => {
+  it('실행기가 닫혀도 재생은 끊기지 않고 뒤 호출은 session_closed, 시나리오 결과(실제 비용)로 끝난다', async () => {
+    const scenario = loadScenario('objection');
+    const adapter = new ScriptedAdapter({ scenario, biveHome: tempDir(), pollIntervalMs: 10 });
+    const workDir = tempDir();
+    const tools = createRoleTools({
+      role: 'implementer',
+      sessionRoot: workDir,
+      biveHome: tempDir(),
+      hooks: { raiseObjection: () => '이의 기록' },
+    });
+    const events: SessionEvent[] = [];
+    for await (const event of adapter.startSession({
+      role: 'implementer',
+      systemPrompt: 's',
+      prompt: 'p',
+      workDir,
+      tools,
+      budget: { maxBudgetUsd: 1, maxTurns: 10 },
+      model: 'm',
+      runId: 'run',
+      roleSessionIndex: 0,
+      vars: { ruleId: 'RULE-001' },
+    })) {
+      events.push(event);
+    }
+    expect(tools.closed).toBe('objection_raised');
+    const results = events.flatMap((event) =>
+      event.type === 'tool_result'
+        ? [`${event.name}:${String(event.result.reason ?? event.result.status)}`]
+        : [],
+    );
+    expect(results).toEqual([
+      'read_file:not_found',
+      'raise_objection:ok',
+      'write_file:session_closed',
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      type: 'result',
+      subtype: 'success',
+      total_cost_usd: 0.0231,
+    });
   });
 });

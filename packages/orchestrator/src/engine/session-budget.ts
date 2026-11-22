@@ -7,6 +7,8 @@
 //   (그 세션에 넘긴 한도를 넘지 않게 자름), 아는 세션이 없으면 그 세션에 넘긴 한도(`Session.budget`, 기록이 없으면
 //   역할 스냅샷 한도 → 실행 한도)를 다 쓴 것. 턴은 최소 1로 센다: 아는 세션이 모두 0턴이어도 이런 세션이 쌓이면
 //   턴 한도가 반드시 소진되어, 중단 · 재개 되풀이가 끝없이 이어지지 않는다
+// - 이의 제기로 끝났는데(`objection_raised`) 값을 모르는 세션: 그 세션에 넘긴 한도 전부 (에이전트가 고를 수 있는 경로라 덜 세지
+//   않는다, M7-11 · ADR-115 검토 1회차)
 // 남은 USD는 한도를 나노 달러 단위로 내리고 사용량을 올려 계산한다(`remainingUsd`). 엔진은 남은 한도가 0 이하면
 // 세션을 열지 않는다: 0을 한도로 넘기면 어댑터가 설정 미비(-32010)처럼 거부해 예산 초과가 설정 문제로 잘못 보이기
 // 때문이다. 세션이 끝난 뒤 같은 방식의 합계가 한도를 넘었으면(`budgetOverrun`) 결과 subtype이 성공이어도 실행을
@@ -49,12 +51,21 @@ export const chargeSessions = (
   return sessions.map((session) => {
     const beforeModel = session.sdkSessionId === null && session.endReason !== null;
     const allotment = sessionAllotment(session, snapshot);
+    const objection = !beforeModel && session.endReason === 'objection_raised';
     const usd =
       session.totalCostUsd ??
-      (beforeModel ? 0 : Math.min(maxUsd ?? allotment.maxBudgetUsd, allotment.maxBudgetUsd));
+      (beforeModel
+        ? 0
+        : objection
+          ? allotment.maxBudgetUsd
+          : Math.min(maxUsd ?? allotment.maxBudgetUsd, allotment.maxBudgetUsd));
     const turns =
       session.numTurns ??
-      (beforeModel ? 0 : Math.min(Math.max(maxTurns ?? allotment.maxTurns, 1), allotment.maxTurns));
+      (beforeModel
+        ? 0
+        : objection
+          ? allotment.maxTurns
+          : Math.min(Math.max(maxTurns ?? allotment.maxTurns, 1), allotment.maxTurns));
     return {
       session,
       usd,
