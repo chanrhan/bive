@@ -15,6 +15,7 @@ import {
   EMPTY_CODE_OPEN_SUMMARY,
   EMPTY_SUMMARY,
   LINK_1,
+  NO_CONFIRMED_SUMMARY,
   PROJECT,
   RULES,
   run,
@@ -36,6 +37,10 @@ import {
 import { horizontalOverflow, textClipping } from './support/overflow.js';
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
+
+/** 지표 카드 배치 스크린샷 (창 폭별). */
+const SHOT = (width: number): string =>
+  path.join(SCREENSHOT_DIR, 'SCR-05', `지표-카드-${String(width)}.png`);
 
 const openScreen = async (
   page: Page,
@@ -242,11 +247,15 @@ test.describe('파이프라인 · 목록 (수용 기준 2)', () => {
 });
 
 test.describe('미노출 · 값 없음 (수용 기준 3)', () => {
-  test('잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드가 없고 지표 카드는 준수 · 실행당 비용 2개', async ({
+  test('잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드가 없고 지표 카드는 준수 · 에이전트 폐기 규칙 · 실행당 비용 3개', async ({
     page,
   }) => {
     await openScreen(page);
-    await expect(page.getByTestId('metric-label')).toHaveText(['준수', '실행당 비용']);
+    await expect(page.getByTestId('metric-label')).toHaveText([
+      '준수',
+      '에이전트 폐기 규칙',
+      '실행당 비용',
+    ]);
     for (const text of ['잠정', '변이', '규칙화 불가', '추적성 결함']) {
       await expect(page.getByTestId('metric-label').filter({ hasText: text })).toHaveCount(0);
     }
@@ -336,8 +345,12 @@ test.describe('코드 열람 영역 (#44 수용 기준 1 · 2, MET-01 · ADR-088
     await expect(hint).toHaveAccessibleName('코드 열람');
     await expect(hint).toHaveAttribute('title', '링크 경유 열기 시도 수 · 링크 밖 열람 미집계');
     await expect(hint).toHaveAccessibleDescription('링크 경유 열기 시도 수 · 링크 밖 열람 미집계');
-    // 준수 카드 다음 Tab 한 번으로 닿는다 (실행당 비용 카드는 초점을 받지 않는다)
-    await page.getByTestId('metric-compliance').focus();
+    // 지표 카드의 버튼(준수 두 기준 → 에이전트 폐기 규칙) 다음 Tab 한 번으로 닿는다 (실행당 비용 카드는 초점을 받지 않는다)
+    await page.getByTestId('metric-compliance-all').focus();
+    await page.keyboard.press('Tab');
+    await expect(page.getByTestId('metric-compliance-confirmed')).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(page.getByTestId('metric-agent-retired')).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(hint).toBeFocused();
     // 보이는 문구는 더하지 않는다 (ADR-088: 화면 정의서에 없는 문구)
@@ -365,7 +378,11 @@ test.describe('코드 열람 영역 (#44 수용 기준 1 · 2, MET-01 · ADR-088
     await expect(area(page).getByTestId('code-open-reason')).toHaveCount(0);
     await expect(page.getByTestId('verification-screen')).toHaveAttribute('data-state', 'ready');
     await expect(page.getByTestId('verification-load-error')).toHaveCount(0);
-    await expect(page.getByTestId('metric-label')).toHaveText(['준수', '실행당 비용']);
+    await expect(page.getByTestId('metric-label')).toHaveText([
+      '준수',
+      '에이전트 폐기 규칙',
+      '실행당 비용',
+    ]);
     await expect(page.getByTestId('pipeline-stage')).toHaveCount(STAGE_LABELS.length);
     await expect(page.getByTestId('verification-rule')).toHaveCount(5);
   });
@@ -432,11 +449,11 @@ test.describe('코드 열람 영역 (#44 수용 기준 1 · 2, MET-01 · ADR-088
 });
 
 test.describe('이동 · 재개 (수용 기준 4)', () => {
-  test('준수 카드를 누르면 규칙 화면이 "준수 집계: 판정 가능" 필터로 열리고 분모 목록만 보인다', async ({
+  test('준수 카드의 전체 기준을 누르면 규칙 화면이 "준수 집계: 판정 가능" 필터로 열리고 분모 목록만 보인다', async ({
     page,
   }) => {
     await openScreen(page);
-    await page.getByTestId('metric-compliance').click();
+    await page.getByTestId('metric-compliance-all').click();
     await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
     await expect(
       page.getByTestId('filter-chip-compliance').getByTestId('filter-chip-button'),
@@ -446,6 +463,192 @@ test.describe('이동 · 재개 (수용 기준 4)', () => {
     );
     await expect(page.getByTestId('card')).toHaveCount(ids.length);
     expect((await page.getByTestId('card-id').allTextContents()).sort()).toEqual(ids.sort());
+    // 확인 칩은 고르지 않았다 (미확인 RULE-006도 전체 기준 분모)
+    await expect(
+      page.getByTestId('filter-chip-confirmation').getByTestId('filter-chip-button'),
+    ).toHaveText('확인');
+    await expect(page.getByTestId('hidden-toggle')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  test('준수 카드에 전체 기준과 사람 확인 기준이 한 카드 안에 나란히 보인다 (M7-16 수용 기준 3)', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    const card = page.getByTestId('metric-compliance');
+    await expect(card.getByTestId('metric-part-label')).toHaveText(['전체 기준', '사람 확인 기준']);
+    await expect(card.getByTestId('metric-compliance-all').getByTestId('metric-value')).toHaveText(
+      '2 / 5',
+    );
+    const confirmed = card.getByTestId('metric-compliance-confirmed');
+    await expect(confirmed.getByTestId('metric-value')).toHaveText('1 / 3');
+    await expect(confirmed).toHaveAttribute('data-state', 'value');
+    // 넓은 창(1280)에서는 같은 줄, 전체 기준이 왼쪽
+    const all = await card.getByTestId('metric-compliance-all').boundingBox();
+    const human = await confirmed.boundingBox();
+    expect(all !== null && human !== null && Math.abs(all.y - human.y) < 1).toBe(true);
+    expect(all !== null && human !== null && all.x < human.x).toBe(true);
+  });
+
+  test('사람 확인 기준을 누르면 규칙 화면이 "준수 집계: 판정 가능" + "확인: 확인됨"으로 열리고 카드 수가 사람 확인 기준 분모와 같다 (M7-16 수용 기준 3)', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    await page.getByTestId('metric-compliance-confirmed').click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(
+      page.getByTestId('filter-chip-compliance').getByTestId('filter-chip-button'),
+    ).toHaveText('준수 집계: 판정 가능');
+    await expect(
+      page.getByTestId('filter-chip-confirmation').getByTestId('filter-chip-button'),
+    ).toHaveText('확인: 확인됨');
+    await expect(page.getByTestId('hidden-toggle')).toHaveAttribute('aria-pressed', 'false');
+    const ids = SUMMARY.confirmedDenominator.map(
+      (id) => RULES.find(({ rule }) => rule.id === id)?.rule.displayId,
+    );
+    expect(ids).toEqual(['RULE-001', 'RULE-003', 'RULE-005']);
+    await expect(page.getByTestId('card')).toHaveCount(
+      SUMMARY.confirmedCompliance?.judgeable ?? -1,
+    );
+    expect((await page.getByTestId('card-id').allTextContents()).sort()).toEqual(ids.sort());
+    await expect(page.getByTestId('list-result')).toHaveText('5개 중 3개 · 초기화');
+  });
+
+  test('효력 있는 확인됨 규칙이 없으면 사람 확인 기준은 "없음"(0 / 0이 아님), 전체 기준은 그대로 (M7-16 수용 기준 2)', async ({
+    page,
+  }) => {
+    await openScreen(page, { 'verification.summary': { result: NO_CONFIRMED_SUMMARY } });
+    const confirmed = page.getByTestId('metric-compliance-confirmed');
+    await expect(confirmed.getByTestId('metric-value')).toHaveText('없음');
+    await expect(confirmed).toHaveAttribute('data-state', 'none');
+    await expect(page.getByTestId('metric-compliance').getByText('0 / 0')).toHaveCount(0);
+    await expect(page.getByTestId('metric-compliance-all').getByTestId('metric-value')).toHaveText(
+      '2 / 5',
+    );
+    // 에이전트 폐기 0은 센 값이라 "0"
+    await expect(page.getByTestId('metric-agent-retired').getByTestId('metric-value')).toHaveText(
+      '0',
+    );
+  });
+
+  test('확인됨 규칙은 있는데 판정 가능한 것이 없으면 사람 확인 기준 "없음"이고 상태로 구분된다', async ({
+    page,
+  }) => {
+    await openScreen(page, {
+      'verification.summary': {
+        result: {
+          ...SUMMARY,
+          confirmedCompliance: { passed: 0, judgeable: 0, confirmed: 2 },
+          confirmedDenominator: [],
+        },
+      },
+    });
+    const confirmed = page.getByTestId('metric-compliance-confirmed');
+    await expect(confirmed.getByTestId('metric-value')).toHaveText('없음');
+    await expect(confirmed).toHaveAttribute('data-state', 'unjudgeable');
+  });
+
+  test('에이전트 폐기 규칙 수가 보이고 누르면 규칙 화면이 [폐기 포함]으로 열려 폐기된 규칙이 함께 보인다 (M7-16 수용 기준 4)', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    const retired = page.getByTestId('metric-agent-retired');
+    await expect(retired.getByTestId('metric-label')).toHaveText('에이전트 폐기 규칙');
+    await expect(retired.getByTestId('metric-value')).toHaveText(String(SUMMARY.agentRetiredRules));
+    await expect(retired.getByTestId('metric-value')).toHaveText('1');
+    await retired.click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(page.getByTestId('hidden-toggle')).toHaveAttribute('aria-pressed', 'true');
+    // 칩은 고르지 않았다: 폐기되지 않은 5개 + 폐기된 RULE-007
+    await expect(
+      page.getByTestId('filter-chip-compliance').getByTestId('filter-chip-button'),
+    ).toHaveText('준수 집계');
+    await expect(page.getByTestId('card')).toHaveCount(6);
+    const card = page.getByTestId('card').filter({ hasText: 'RULE-007' });
+    await expect(card.getByTestId('card-exception')).toHaveText(['폐기', '미확인']);
+    await expect(page.getByTestId('list-result')).toHaveText('6개 중 6개 · 초기화');
+  });
+
+  test('준수 카드의 기준을 차례로 눌러도 앞 필터가 남지 않는다 (사람 확인 → 전체 → 폐기)', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    const back = () => page.getByRole('button', { name: '검증', exact: true }).click();
+    await page.getByTestId('metric-compliance-confirmed').click();
+    await expect(page.getByTestId('card')).toHaveCount(3);
+    await back();
+    await page.getByTestId('metric-compliance-all').click();
+    await expect(
+      page.getByTestId('filter-chip-confirmation').getByTestId('filter-chip-button'),
+    ).toHaveText('확인');
+    await expect(page.getByTestId('card')).toHaveCount(SUMMARY.denominator.length);
+    await back();
+    await page.getByTestId('metric-agent-retired').click();
+    await expect(
+      page.getByTestId('filter-chip-compliance').getByTestId('filter-chip-button'),
+    ).toHaveText('준수 집계');
+    await expect(page.getByTestId('card')).toHaveCount(6);
+  });
+
+  for (const width of [820, 1280]) {
+    test(`창 폭 ${String(width)}에서 지표 카드의 이름 · 값이 한 줄로 잘리지 않고 가로 스크롤이 없다`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      // 긴 값: 큰 수에서도 깨지지 않는지
+      await openScreen(page, {
+        'verification.summary': {
+          result: {
+            ...SUMMARY,
+            agentRetiredRules: 12_345,
+            costPerRunUsd: 1234.5,
+          },
+        },
+      });
+      await expect(page.getByTestId('metric-agent-retired')).toBeVisible();
+      const screen = page.getByTestId('verification-screen');
+      expect(await horizontalOverflow(screen, '.verification-metrics > .metric-card')).toEqual([]);
+      const problems = await page.locator('.verification-metrics').evaluate((metrics) => {
+        const out: string[] = [];
+        const area = metrics.getBoundingClientRect();
+        for (const el of metrics.querySelectorAll<HTMLElement>(
+          '.metric-label, .metric-part-label, .metric-value',
+        )) {
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          const tops = new Set(
+            [...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top)),
+          );
+          const name = el.textContent ?? '';
+          if (tops.size !== 1) out.push(`${name}: ${String(tops.size)}줄`);
+          if (el.scrollWidth > el.clientWidth + 0.5) out.push(`${name}: 잘림`);
+          const box = el.getBoundingClientRect();
+          if (box.left < area.left - 0.5 || box.right > area.right + 0.5) out.push(`${name}: 밖`);
+        }
+        return out;
+      });
+      expect(problems).toEqual([]);
+      await mkdir(path.dirname(SHOT(width)), { recursive: true });
+      await page.getByTestId('verification-screen').screenshot({ path: SHOT(width) });
+    });
+  }
+
+  test('규칙 목록의 제목은 숨은 글자를 보이는 표기로 그린다 (에이전트가 쓴 글, U+202E)', async ({
+    page,
+  }) => {
+    const tricky = `계정 잠금${String.fromCharCode(0x202e)}해제`;
+    await openScreen(page, {
+      'verification.summary': {
+        result: {
+          ...SUMMARY,
+          rules: SUMMARY.rules.map((row, index) =>
+            index === 0 ? { ...row, rule: { ...row.rule, title: tricky } } : row,
+          ),
+        },
+      },
+    });
+    await expect(page.getByTestId('verification-rule-title').first()).toHaveText(
+      '계정 잠금\\u202e해제',
+    );
   });
 
   test('최근 실행이 진행 중이면 [재개]가 없다', async ({ page }) => {

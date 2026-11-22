@@ -2,7 +2,8 @@
 // DOM · React에 의존하지 않는다 (test/verification-view.test.ts).
 // - 값은 `verification.summary` 결과에서만 만든다(NFR-03). 값이 없으면 '없음'(0 표시 금지, COST-02 · ADR-029)
 // - renderer는 shared를 import type으로만 가져오므로(architecture.md 2장) 표시명을 다시 적고 단위 테스트가 대조한다
-// - 지표 카드는 준수 · 실행당 비용만. 잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드는 기능 이슈 전까지 미노출 (ADR-035)
+// - 지표 카드는 준수(전체 기준 · 사람 확인 기준) · 에이전트 폐기 규칙 · 실행당 비용 (ADR-100 D7 · B⑦, ADR-117).
+//   잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드는 기능 이슈 전까지 미노출 (ADR-035, 잠정 카드 자리는 폐기 규칙 카드가 대신한다)
 // - 코드 열람 영역 = `codeOpen.summary`의 사유별 건수. 기록이 하나도 없으면 '없음' (MET-01, M2-02 · ADR-088)
 import type {
   CodeOpenReason,
@@ -25,6 +26,13 @@ export const TEXT = {
   metrics: '지표',
   compliance: '준수',
   complianceHint: '통과 / 판정 가능',
+  /** 준수의 두 기준 (ADR-100 D7 · 명세 변경 목록 SCR-05 "전체 기준과 사람 확인 기준", ADR-117) */
+  complianceAll: '전체 기준',
+  complianceConfirmed: '사람 확인 기준',
+  complianceConfirmedHint: '통과 / 판정 가능 · 확인됨 규칙만',
+  /** 에이전트가 폐기한 규칙 수 카드 (ADR-100 B⑦ · 명세 변경 목록 SCR-05, ADR-117) */
+  agentRetired: '에이전트 폐기 규칙',
+  agentRetiredHint: '폐기 · 대체 누적',
   costPerRun: '실행당 비용',
   pipeline: '파이프라인',
   noRun: '실행 없음',
@@ -120,12 +128,54 @@ export const runLinkParts = (
   turns: formatTurns(link.turns),
 });
 
-/** 준수 카드를 누르면 규칙 목록(`RULES_LIST_ID`)에 거는 필터: `준수 집계: 판정 가능`만 (분모 목록, JDG-03). */
+/**
+ * 사람 확인 기준 값 (ADR-117): 효력 있는 확인됨 규칙이 없으면(`null`) '없음'(0 / 0 표시 금지), 확인됨 규칙은 있는데 판정
+ * 가능한 것이 없을 때도 전체 기준과 같이 '없음'(ADR-029), 그 밖에는 "통과 / 판정 가능".
+ */
+export const confirmedComplianceText = (
+  compliance: VerificationSummaryResult['confirmedCompliance'],
+): string => (compliance === null ? TEXT.none : complianceText(compliance));
+
+/**
+ * 사람 확인 기준 값의 상태 (화면 속성 `data-state`): 확인됨 규칙 없음(`none`) · 확인됨 규칙은 있으나 판정 가능 없음
+ * (`unjudgeable`) · 값 있음(`value`). 보이는 글자는 앞의 두 상태가 같은 '없음'이다.
+ */
+export const confirmedComplianceState = (
+  compliance: VerificationSummaryResult['confirmedCompliance'],
+): 'none' | 'unjudgeable' | 'value' =>
+  compliance === null ? 'none' : compliance.judgeable === 0 ? 'unjudgeable' : 'value';
+
+/** 에이전트 폐기 규칙 수: 센 값이므로 0도 "0"이다(값 없음이 아니다, ADR-117). */
+export const agentRetiredText = (count: number): string => String(count);
+
+/** 준수 카드의 전체 기준을 누르면 규칙 목록(`RULES_LIST_ID`)에 거는 필터: `준수 집계: 판정 가능`만 (분모 목록, JDG-03). */
 export const COMPLIANCE_FILTER: FilterState = Object.freeze({
   query: '',
   selected: Object.freeze({ compliance: Object.freeze(['judgeable']) }),
   problemOnly: false,
   includeHidden: false,
+});
+
+/**
+ * 준수 카드의 사람 확인 기준을 누르면 거는 필터: `준수 집계: 판정 가능` + `확인: 확인됨` (기준끼리 AND = 사람 확인 기준 분모,
+ * 규칙 화면의 "사람 확인" 값과 같은 목록, ADR-114 · ADR-117).
+ */
+export const CONFIRMED_COMPLIANCE_FILTER: FilterState = Object.freeze({
+  query: '',
+  selected: Object.freeze({
+    compliance: Object.freeze(['judgeable']),
+    confirmation: Object.freeze(['confirmed']),
+  }),
+  problemOnly: false,
+  includeHidden: false,
+});
+
+/** 에이전트 폐기 규칙 카드를 누르면 거는 필터: [폐기 포함]만 켠다(폐기된 규칙이 목록에 함께 보인다, ADR-114 · ADR-117). */
+export const AGENT_RETIRED_FILTER: FilterState = Object.freeze({
+  query: '',
+  selected: Object.freeze({}),
+  problemOnly: false,
+  includeHidden: true,
 });
 
 /**
