@@ -1326,6 +1326,95 @@ describe('검사 실패 판단의 코드 경로 (M7-12 #224, ADR-100 B⑧ · A4 
   });
 });
 
+describe('케이스 이름을 세션 입력에 싣는 자리는 모두 같은 대조 함수를 지난다 (M3-37 #265, ADR-100 A5 · A6 · A14, ADR-121, 코드 구조)', () => {
+  const read = (rel: string) => fs.readFileSync(path.join(SRC_DIR, rel), 'utf8');
+  const files = () =>
+    sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+  const using = (pattern: RegExp) =>
+    files()
+      .filter((f) => pattern.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+  /** `name(`로 시작하는 호출 각각의 인자 글 (괄호 짝으로 자른다). */
+  const callArgs = (text: string, name: string): string[] => {
+    const found: string[] = [];
+    let from = 0;
+    for (;;) {
+      const start = text.indexOf(`${name}(`, from);
+      if (start < 0) return found;
+      let depth = 0;
+      let end = start + name.length;
+      for (; end < text.length; end += 1) {
+        if (text[end] === '(') depth += 1;
+        if (text[end] === ')') {
+          depth -= 1;
+          if (depth === 0) break;
+        }
+      }
+      found.push(text.slice(start + name.length + 1, end));
+      from = end;
+    }
+  };
+
+  it('저장된 판정 기록을 읽는 곳은 고정이고, 세션 입력을 만드는 두 곳(규범 자료 · 인용 출처)은 최근 판정 케이스 이름을 대조 함수로 거른다. 대조 함수는 선택 인자가 아니고, 폐기 · 대체 반영을 부르는 곳은 모두 세션의 기준을 넘긴다', () => {
+    // 판정 기록 읽기: 화면 응답(규칙 상세 · 최신 판정 · 검증 지표) · 엔진의 판정 수 · 케이스 이름 대조 · 세션 입력 두 곳뿐
+    expect(
+      using(/\bjudgments\s*\.\s*(?:latestForRules|latestByRule|listByRule|listByRun)\(/),
+    ).toEqual([
+      'engine/pipeline-engine.ts',
+      'ipc/rule-handlers.ts',
+      'judgments/latest-judgment.ts',
+      'norms/agent-rule.ts',
+      'norms/case-names.ts',
+      'norms/norm-input.ts',
+      'verification/summary.ts',
+    ]);
+    // 세션 입력 두 곳: 케이스 이름을 읽은 바로 그 자리에서 대조 함수로 거른다
+    expect(read('norms/norm-input.ts')).toMatch(
+      /judgment\?\.cases\.map\(\(testCase\) => testCase\.name\)[\s\S]{0,200}options\.isKnownCase\(rule\.displayId, name\)/,
+    );
+    expect(read('norms/agent-rule.ts')).toMatch(
+      /latestByRule\(rule\.id\)\?\.cases\.map\(\(testCase\) => testCase\.name\)[\s\S]{0,80}\.filter\(\(name\) => isKnownCase\(rule\.displayId, name\)\)/,
+    );
+    // 규범 자료의 대조 함수는 필수다 (빠뜨리면 형식 검사에서 막힌다)
+    expect(read('norms/norm-input.ts')).toMatch(/readonly isKnownCase: CaseNameFilter;/);
+    expect(read('norms/norm-input.ts')).not.toMatch(/isKnownCase\?/);
+    // 대조 함수를 만드는 곳: 케이스 이름 대조 모듈(최근 판정 커밋의 글)과 검사 실패 판단(판정한 체크아웃의 글)뿐
+    expect(using(/\bknownCaseMatcher\(/)).toEqual([
+      'norms/case-names.ts',
+      'steps/existing-rule.ts',
+    ]);
+    // 규범 자료를 모으는 곳은 모두 대조 함수를 넘긴다
+    const collectors = using(/\bcollectNormInput\(/).filter((rel) => rel !== 'norms/norm-input.ts');
+    expect(collectors).toEqual([
+      'rule-writer/rule-writer-service.ts',
+      'steps/implementation.ts',
+      'steps/test-writing.ts',
+    ]);
+    for (const rel of collectors) {
+      const calls = callArgs(read(rel), 'collectNormInput');
+      expect(calls.length, rel).toBeGreaterThan(0);
+      for (const args of calls) expect(args, rel).toMatch(/\{ isKnownCase \}/);
+    }
+    // 폐기 · 대체 반영을 부르는 곳은 모두 세션의 기준을 넘긴다 (없으면 케이스 이름은 인용 출처가 아니다)
+    const service = read('rule-writer/rule-writer-service.ts');
+    const retirements = [
+      ...callArgs(service, 'retireAgentRule'),
+      ...callArgs(service, 'supersedeAgentRule'),
+    ];
+    expect(retirements).toHaveLength(6);
+    for (const args of retirements) {
+      expect(args).toMatch(/isKnownCase: (?:this\.#caseFilterOf\(record\)|session\.isKnownCase),/);
+    }
+    expect(using(/\b(?:retireAgentRule|supersedeAgentRule)\(/)).toEqual([
+      'rule-writer/rule-writer-service.ts',
+    ]);
+  });
+});
+
 describe('이의 제기 도구는 이의 기록 추가만 한다 (M7-11 #223 수용 기준 3, ADR-100 D4 · I2, ADR-115)', () => {
   const files = () =>
     sourceFiles(SRC_DIR).map((file) => ({

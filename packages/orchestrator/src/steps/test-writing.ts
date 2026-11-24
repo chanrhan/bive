@@ -17,6 +17,7 @@ import { createUlidGenerator, type Step } from '@bive/shared';
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import { lintAcceptanceSource } from '../judge/acceptance-lint.js';
+import { latestJudgedCaseFilter } from '../norms/case-names.js';
 import { collectNormInput, normInputRecord } from '../norms/norm-input.js';
 import {
   applyTestWriterOutputs,
@@ -202,9 +203,15 @@ export const createTestWritingExecutor =
         rules,
         blocks: blocks?.declaration ?? null,
       });
-      // 효력 있는 규범은 작업 지시의 글로만 준다 (파일로 복사하지 않는다, ADR-100 A14)
+      // 효력 있는 규범은 작업 지시의 글로만 준다 (파일로 복사하지 않는다, ADR-100 A14). 케이스 이름은 최근 판정 커밋의 인수
+      // 테스트 파일에 적힌 것만 싣는다 (M3-37, ADR-121)
+      const isKnownCase = await latestJudgedCaseFilter(context.read, context.git.repoPath);
       const norms = context.read((store) =>
-        collectNormInput(store, { requirementIds: [], ruleIds: context.run.targetRuleIds }),
+        collectNormInput(
+          store,
+          { requirementIds: [], ruleIds: context.run.targetRuleIds },
+          { isKnownCase },
+        ),
       );
       const session = await context.runSession({
         workDir: sessionDir,

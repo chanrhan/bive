@@ -20,6 +20,7 @@ import type { BlockDeclarationRecord, SessionNormInput } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
 import { displayText } from '../text-limit.js';
+import type { CaseNameFilter } from './case-names.js';
 import { effectiveRequirements, effectiveRules } from './effective.js';
 
 /** 규범 입력의 상한 (ADR-106). 길이는 표시 값 기준 UTF-16 코드 단위. */
@@ -153,8 +154,7 @@ export interface NormInputRule {
   /** 상한 때문에 싣지 않은 케이스 수 */
   readonly casesOmitted: number;
   /**
-   * 인수 테스트 파일에서 찾지 못해 이름을 싣지 않은 케이스 수 (케이스 이름을 거를 때만, 검사 실패 판단 세션, M7-12 · ADR-118).
-   * 없으면 0
+   * 인수 테스트 파일에서 찾지 못해 이름을 싣지 않은 케이스 수 (M7-12 · ADR-118, M3-37 · ADR-121). 없으면 0
    */
   readonly casesUnknown?: number;
   /** 초점 규칙인지 */
@@ -208,10 +208,11 @@ const count = (total: number, included: number): NormInputCount => ({
 /** 규범 입력을 모을 때의 선택. */
 export interface NormInputOptions {
   /**
-   * 최근 판정 케이스 이름 가운데 실을 것 (검사 실패 판단 세션: 그 규칙의 인수 테스트 파일에 적힌 이름만, M7-12 · ADR-118). 거른
-   * 이름은 수(`casesUnknown`)로만 남는다. 없으면 모두 싣는다
+   * 최근 판정 케이스 이름 가운데 실을 것 (필수): 그 규칙의 인수 테스트 파일에 적힌 이름만(`norms/case-names.ts`의
+   * `knownCaseMatcher`, M7-12 · ADR-118, 모든 세션 입력이 같은 기준을 지난다 M3-37 · ADR-121). 거른 이름은
+   * 수(`casesUnknown`)로만 남는다
    */
-  readonly isKnownCase?: (ruleDisplayId: string, name: string) => boolean;
+  readonly isKnownCase: CaseNameFilter;
 }
 
 /**
@@ -221,7 +222,7 @@ export interface NormInputOptions {
 export const collectNormInput = (
   store: ProjectStore,
   focus: NormInputFocus,
-  options: NormInputOptions = {},
+  options: NormInputOptions,
 ): NormInput => {
   const limits = NORM_INPUT_LIMITS;
   const requirements = effectiveRequirements(store);
@@ -269,11 +270,8 @@ export const collectNormInput = (
     .map((rule): NormInputRule => {
       const judgment = latest.get(rule.id);
       const all = judgment?.cases.map((testCase) => testCase.name) ?? null;
-      const { isKnownCase } = options;
       const names =
-        all === null || isKnownCase === undefined
-          ? all
-          : all.filter((name) => isKnownCase(rule.displayId, name));
+        all === null ? null : all.filter((name) => options.isKnownCase(rule.displayId, name));
       const casesUnknown = all === null || names === null ? 0 : all.length - names.length;
       let parent: NormInputParent;
       if (rule.parentRequirementId !== null) {

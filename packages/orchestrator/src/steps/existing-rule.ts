@@ -13,10 +13,10 @@
 import type { JudgmentResult, NormJudgmentRuleRef, Rule } from '@bive/shared';
 
 import type { CheckFailureInput, StepContext, StepOutcome } from '../engine/types.js';
+import { knownCaseMatcher } from '../norms/case-names.js';
 import {
   checkJudgmentsOf,
   contradictionJudgmentsOf,
-  knownCaseMatcher,
   settleCheckFailure,
 } from '../norms/check-contradiction.js';
 

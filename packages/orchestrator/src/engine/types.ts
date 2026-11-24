@@ -19,6 +19,7 @@ import type { ProjectStore, RunDetail, RunPatch } from '@bive/store';
 import type { SessionBudget, SessionResultEvent } from '../agent/adapter.js';
 import type { RunGitRef, WorktreeManager } from '../git/worktree-manager.js';
 import type { CommandContext } from '../tools/commands.js';
+import type { CaseNameFilter } from '../norms/case-names.js';
 import type { CheckFailureInput } from '../norms/check-contradiction.js';
 import type { RoleToolsHooks } from '../tools/executor.js';
 
@@ -194,7 +195,7 @@ export type NormJudgeCause =
       /** 실패한 대상 밖 규칙마다 실패 케이스 이름 (인수 테스트 파일에 적힌 것만 원문, 나머지는 수) */
       readonly failures: readonly CheckFailureInput[];
       /** 케이스 이름이 그 규칙의 인수 테스트 파일(구현이 바꿀 수 없는 파일)에 적힌 것인지 */
-      readonly isKnownCase: (ruleDisplayId: string, name: string) => boolean;
+      readonly isKnownCase: CaseNameFilter;
     };
 
 /** 단계 실행기가 판단 세션을 청하는 입력 (`StepContext.judgeNorms`). 실행 · 단계 · 한도는 엔진이 채운다. */

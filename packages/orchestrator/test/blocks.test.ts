@@ -540,16 +540,19 @@ describe('반영 모듈: 대상 블록 · 위험도 저장과 블록 선언 대�
   });
 });
 
+/** 판정 케이스 이름을 싣지 않는 대조 (이 시험에는 판정 기록이 없다). */
+const NO_CASES = { isKnownCase: () => false };
+
 describe('세션 입력: 효력 있는 규범 자료에 블록 선언 (규칙 작성 · 테스트 작성 · 구현 역할 공통, ADR-122)', () => {
   it('선언이 있으면 자료 끝(끝 표시 줄 앞)에 지금 판의 블록이 한 줄 값으로 실리고, 없으면 블록 자료가 없다', () => {
     withStore((store) => {
       const none = renderNormInput(
-        collectNormInput(store, { requirementIds: [], ruleIds: [] }),
+        collectNormInput(store, { requirementIds: [], ruleIds: [] }, NO_CASES),
         '대상',
       );
       expect(none).not.toContain('블록 선언');
       store.blockDeclarations.set(SAMPLE, { at: iso(T0), by: human });
-      const input = collectNormInput(store, { requirementIds: [], ruleIds: [] });
+      const input = collectNormInput(store, { requirementIds: [], ruleIds: [] }, NO_CASES);
       expect(input.blocks?.version).toBe(1);
       const text = renderNormInput(input, '대상');
       const lines = text.split('\n');
