@@ -11,6 +11,7 @@ import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import { REQUIREMENTS } from './checklists/scr-02.js';
 import { RULES } from './checklists/scr-03.js';
+import { CODE_OPEN_SUMMARY, SUMMARY } from './checklists/scr-05.js';
 import {
   CONFIRMATION_FILTERS,
   FIXTURE_CHANGE_LIST,
@@ -40,7 +41,13 @@ import {
   RULE5_STATEMENT,
   SUPERSEDE_GROUNDS,
 } from './checklists/scr-17.js';
-import { type BiveMock, mockBive, type MockResponses } from './support/bive-mock.js';
+import {
+  allSettled,
+  type BiveMock,
+  mockBive,
+  type MockResponses,
+  nextFrame,
+} from './support/bive-mock.js';
 import {
   collectVisibleText,
   expectScreen,
@@ -622,6 +629,12 @@ test.describe('대상 링크 (M3-35 #263: 카드를 고른 상태로 열림)', (
     'requirement.list': { result: { requirements: REQUIREMENTS } },
   };
 
+  /** 규칙 목록 읽기가 모두 끝나고 그린 뒤까지 기다린다. */
+  const rulesSettled = async (bive: BiveMock, page: Page): Promise<void> => {
+    await allSettled(bive, 'rule.list');
+    await nextFrame(page);
+  };
+
   test('폐기된 규칙 링크: 규칙 화면이 [폐기 포함] · 그 표시 ID 검색으로 열리고 그 카드가 골라져 상세가 열린다', async ({
     page,
   }) => {
@@ -656,7 +669,7 @@ test.describe('대상 링크 (M3-35 #263: 카드를 고른 상태로 열림)', (
   test('요구사항 링크: 요구사항 화면이 그 표시 ID 검색으로 열리고 그 카드가 골라져 상세가 열린다', async ({
     page,
   }) => {
-    await setup(page, FIXTURE_LIST, links);
+    const bive = await setup(page, FIXTURE_LIST, links);
     await cardAt(page, 6).click();
     await page.getByTestId('detail-link').click();
     await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'requirements');
@@ -665,6 +678,129 @@ test.describe('대상 링크 (M3-35 #263: 카드를 고른 상태로 열림)', (
     await expect(page.getByTestId('requirement-detail')).toHaveAttribute(
       'data-selected-id',
       REQUIREMENTS.find(({ displayId }) => displayId === 'REQ-002')?.id ?? '',
+    );
+    // 고를 항목은 그 이동 한 번만: 사이드바로 다시 들어오면 고른 카드가 없다
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await page.getByRole('button', { name: '요구사항', exact: true }).click();
+    await expect(cards(page).first()).toBeVisible();
+    await allSettled(bive, 'requirement.list');
+    await nextFrame(page);
+    await expect(selectedCard(page)).toHaveCount(0);
+  });
+
+  test('목록 읽기가 실패하면 고를 항목을 버린다: 뒤의 알림으로 목록을 다시 읽어도 링크 대상이 골라지지 않는다', async ({
+    page,
+  }) => {
+    const bive = await setup(page, FIXTURE_LIST, {
+      ...links,
+      'rule.list': { error: { code: -32603, message: '내부 오류' } },
+    });
+    await cardAt(page, 0).click();
+    await page.getByTestId('detail-link').nth(1).click();
+    await expect(page.getByTestId('rules-load-error')).toBeVisible();
+    await bive.setResponse('rule.list', { result: { rules: RULES_WITH_RETIRED } });
+    await bive.emit('event.normChange.appended', { projectId: PROJECT.id, lastSeq: 13 });
+    await expect(cards(page).filter({ hasText: 'RULE-003' })).toHaveCount(1);
+    await rulesSettled(bive, page);
+    await expect(selectedCard(page)).toHaveCount(0);
+  });
+
+  test('고를 항목은 그 이동 한 번만: 다른 카드를 고른 뒤 알림으로 목록을 다시 읽어도, 사이드바로 다시 들어와도 링크 대상이 다시 골라지지 않는다', async ({
+    page,
+  }) => {
+    const bive = await setup(page, FIXTURE_LIST, links);
+    await cardAt(page, 0).click();
+    await page.getByTestId('detail-link').nth(1).click();
+    await expect(selectedCard(page)).toHaveAttribute('data-id', 'RULE-003');
+    await page.getByTestId('list-search').fill('');
+    await page
+      .getByTestId('list-items')
+      .locator('[data-testid="card"][data-id="RULE-002"]')
+      .click();
+    await expect(page.getByTestId('rule-detail')).toHaveAttribute(
+      'data-selected-id',
+      ruleIdOf('RULE-002'),
+    );
+    const listCalls = async (): Promise<number> => (await callsOf(bive, 'rule.list')).length;
+    const before = await listCalls();
+    await bive.emit('event.run.updated', {
+      projectId: PROJECT.id,
+      runId: '01JBVE00000000000000000E09',
+      displayId: 'EXE-009',
+      status: 'running',
+      currentStep: 'implementation',
+      regressionCount: 0,
+      costUsd: null,
+    });
+    await bive.emit('event.normChange.appended', { projectId: PROJECT.id, lastSeq: 13 });
+    await expect.poll(listCalls).toBeGreaterThan(before);
+    await rulesSettled(bive, page);
+    await expect(selectedCard(page)).toHaveAttribute('data-id', 'RULE-002');
+    await expect(page.getByTestId('rule-detail')).toHaveAttribute(
+      'data-selected-id',
+      ruleIdOf('RULE-002'),
+    );
+    // 사이드바로 나갔다 다시 들어오면 새로 고른 것이 없다 (링크 대상도 다시 골라지지 않는다)
+    await page.getByRole('button', { name: '요구사항', exact: true }).click();
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(cards(page).first()).toBeVisible();
+    await rulesSettled(bive, page);
+    await expect(selectedCard(page)).toHaveCount(0);
+    await expect(page.getByTestId('rule-detail').getByTestId('empty-state')).toHaveText(
+      '선택 항목 없음',
+    );
+  });
+
+  test('링크를 누른 뒤 목록 읽기가 끝나기 전에 프로젝트가 바뀌면 새 프로젝트의 규칙 화면에서 아무 카드도 골라지지 않는다 (같은 표시 ID가 있어도)', async ({
+    page,
+  }) => {
+    const bive = await setup(page, FIXTURE_LIST, links);
+    await bive.setResponse('rule.list', { result: { rules: RULES_WITH_RETIRED }, delayMs: 1500 });
+    await cardAt(page, 0).click();
+    await page.getByTestId('detail-link').nth(1).click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await bive.setResponse('rule.list', { result: { rules: RULES } });
+    const other = {
+      ...PROJECT,
+      id: '01JAAAAAAAAAAAAAAAAAAAAAAB',
+      name: 'other-app',
+      rootPath: '/work/other-app',
+    };
+    await bive.emit('project.opened', { project: other, created: false, empty: false });
+    await expect(page.getByTestId('sidebar-project')).toHaveText('other-app');
+    // 새 프로젝트를 열면 요구사항 화면으로 간다. 사이드바로 규칙 화면을 연다
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await expect(cards(page).filter({ hasText: 'RULE-003' })).toHaveCount(1);
+    await rulesSettled(bive, page);
+    await expect(selectedCard(page)).toHaveCount(0);
+    await expect(page.getByTestId('rule-detail').getByTestId('empty-state')).toHaveText(
+      '선택 항목 없음',
+    );
+  });
+
+  test('링크를 누른 뒤 목록 읽기 전에 다른 화면으로 갔다가 검증 화면 카드로 규칙 화면에 들어오면 링크 대상이 골라지지 않는다', async ({
+    page,
+  }) => {
+    const bive = await setup(page, FIXTURE_LIST, {
+      ...links,
+      'verification.summary': { result: SUMMARY },
+      'codeOpen.summary': { result: CODE_OPEN_SUMMARY },
+    });
+    await bive.setResponse('rule.list', { result: { rules: RULES_WITH_RETIRED }, delayMs: 1500 });
+    await cardAt(page, 0).click();
+    await page.getByTestId('detail-link').nth(1).click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await page.getByRole('button', { name: '검증', exact: true }).click();
+    await bive.setResponse('rule.list', { result: { rules: RULES_WITH_RETIRED } });
+    await page.getByTestId('metric-agent-retired').click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(page.getByTestId('hidden-toggle')).toHaveAttribute('aria-pressed', 'true');
+    await expect(cards(page).filter({ hasText: 'RULE-003' })).toHaveCount(1);
+    await rulesSettled(bive, page);
+    await expect(selectedCard(page)).toHaveCount(0);
+    await expect(page.getByTestId('rule-detail').getByTestId('empty-state')).toHaveText(
+      '선택 항목 없음',
     );
   });
 
@@ -711,19 +847,20 @@ test.describe('상세 다시 읽기 횟수 (M3-35 #263)', () => {
     // RULE-005(미확인 규칙): 판단 대상이 그 규칙 하나다
     await cardAt(page, 5).click();
     await expect(page.getByTestId('judgment-card')).toHaveCount(2);
-    await page.waitForTimeout(300);
     const changes = async (): Promise<number> => (await callsOf(bive, 'normChange.list')).length;
-    const lists = async (): Promise<number> => (await callsOf(bive, 'confirmation.list')).length;
+    // 처음 읽기가 모두 끝난 뒤의 수에서 센다
+    await allSettled(bive, 'normChange.list');
     const before = await changes();
-    const listBefore = await lists();
     await bive.setResponse('normChange.list', { result: FIXTURE_CHANGE_LIST_MORE });
-    // 목록 다시 읽기는 상세 읽기보다 늦게 끝나게 한다(새 항목 객체가 상세 읽기 뒤에 들어와도 다시 부르지 않는지 본다)
-    await bive.setResponse('confirmation.list', { result: FIXTURE_LIST, delayMs: 300 });
+    // 목록 다시 읽기는 상세 읽기보다 늦게 끝나고(새 항목 객체가 상세 읽기 뒤에 들어온다) 카드 수가 바뀐다(그려진 것을 확인)
+    await bive.setResponse('confirmation.list', { result: FIXTURE_LIST_AFTER_RULE4, delayMs: 300 });
     await bive.emit('event.normChange.appended', { projectId: PROJECT.id, lastSeq: 12 });
     await expect(page.getByTestId('judgment-card')).toHaveCount(3);
-    // 확인할 것 목록(= 배지)도 그 알림으로 다시 읽혔다: 항목 객체가 바뀌어도 상세는 다시 부르지 않는다
-    await expect.poll(lists).toBeGreaterThan(listBefore);
-    await page.waitForTimeout(500);
+    await expect(cards(page)).toHaveCount(FIXTURE_LIST_AFTER_RULE4.items.length);
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'RULE-005');
+    // 그린 뒤의 효과가 돌고(다음 프레임) 그 사이 나간 읽기도 끝날 때까지 기다린 뒤 센다
+    await nextFrame(page);
+    await allSettled(bive, 'normChange.list');
     expect(await changes()).toBe(before + 1);
     expect((await callsOf(bive, 'normChange.list')).at(-1)).toEqual({
       projectId: PROJECT.id,

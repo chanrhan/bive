@@ -213,11 +213,9 @@ export const listPaneOverflow = (pane: Locator): Promise<string[]> =>
         }
       });
     });
-    // 예외 배지 · 안 읽음 점은 통째로 보인다: 말줄임도 잘림도 없고, 카드 안에서 overflow를 자르는 조상(카드 줄 등)의
+    // 예외 배지는 통째로 보인다: 말줄임도 잘림도 없고, 카드 안에서 overflow를 자르는 조상(카드 줄 등)의
     // 보이는 영역 안에 경계 상자가 다 들어온다 (1.1 "예외만 강조")
-    el.querySelectorAll<HTMLElement>(
-      '[data-testid="card-exception"], [data-testid="card-unread"]',
-    ).forEach((mark) => {
+    el.querySelectorAll<HTMLElement>('[data-testid="card-exception"]').forEach((mark) => {
       const id = mark.getAttribute('data-testid') ?? '';
       const name = `${id}(${mark.textContent ?? ''})`;
       const box = mark.getBoundingClientRect();

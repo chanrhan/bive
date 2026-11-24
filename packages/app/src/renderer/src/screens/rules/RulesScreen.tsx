@@ -20,7 +20,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useListFilter } from '../../components/ListView/filterStore.js';
 import { ListView } from '../../components/ListView/ListView.js';
 import { EmptyState } from '../../layout/EmptyState.js';
-import { takePendingSelection } from '../../navigation/pendingSelection.js';
+import { clearPendingSelection, peekPendingSelection } from '../../navigation/pendingSelection.js';
 import { useProject } from '../../project/ProjectContext.js';
 import { RuleDetail } from '../norm-detail/RuleDetail.js';
 import { CreatedRunStatus } from './CreatedRunStatus.js';
@@ -67,14 +67,19 @@ const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => 
   const found = items.find((item) => item.rule.id === selectedId) ?? null;
   const selected = found !== null && isRetiredRule(found) && !filter.includeHidden ? null : found;
   const select = useCallback((item: RuleWithJudgment) => setSelectedId(item.rule.id), []);
-  // 다른 화면의 대상 링크로 열렸으면 목록을 다 읽은 뒤 그 표시 ID의 카드를 한 번 고른다. 목록에 없으면(지워진 규칙) 고르지 않는다
-  // (ADR-123). 폐기된 규칙이면 링크가 [폐기 포함]을 켜 두었다
+  // 다른 화면의 대상 링크로 열렸으면(이 이동 한 번만) 목록을 다 읽은 뒤 그 표시 ID의 카드를 고른다. 목록에 없으면(지워진 규칙)
+  // 고르지 않고, 읽기가 실패하거나 화면을 떠나면 버린다(ADR-123). 폐기된 규칙이면 링크가 [폐기 포함]을 켜 두었다
+  const [wanted, setWanted] = useState(() => peekPendingSelection(RULES_LIST_ID));
   useEffect(() => {
-    if (load.state !== 'ready') return;
-    const wanted = takePendingSelection(RULES_LIST_ID);
-    if (wanted === null) return;
-    setSelectedId(load.items.find((item) => item.rule.displayId === wanted)?.rule.id ?? null);
-  }, [load]);
+    clearPendingSelection(RULES_LIST_ID);
+  }, []);
+  useEffect(() => {
+    if (wanted === null || load.state === 'loading') return;
+    if (load.state === 'ready') {
+      setSelectedId(load.items.find((item) => item.rule.displayId === wanted)?.rule.id ?? null);
+    }
+    setWanted(null);
+  }, [load, wanted]);
   const openRule = useCallback(
     (ruleId: string) => {
       const target = items.find((item) => item.rule.id === ruleId);

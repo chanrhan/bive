@@ -42,7 +42,14 @@ import type {
   RuleWithJudgment,
 } from '@bive/shared';
 
-import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
+import {
+  allSettled,
+  type BiveMock,
+  type MockCall,
+  mockBive,
+  type MockResponses,
+  nextFrame,
+} from './support/bive-mock.js';
 import {
   collectVisibleText,
   expectScreen,
@@ -533,7 +540,7 @@ test.describe('규칙 직접 편집 (#215 수용 기준 3, ADR-100 B② · ADR-1
     });
     const changeCalls = async (): Promise<MockCall[]> => callsOf(bive, 'normChange.list');
     await expect.poll(async () => (await changeCalls()).length).toBeGreaterThan(0);
-    await page.waitForTimeout(300);
+    await allSettled(bive, 'normChange.list');
     const before = (await changeCalls()).length;
     await page.getByTestId('rule-edit').click();
     await titleInput(page).fill(NEW_TITLE);
@@ -541,13 +548,16 @@ test.describe('규칙 직접 편집 (#215 수용 기준 3, ADR-100 B② · ADR-1
     await expect(page.getByTestId('rule-detail-title')).toHaveText(NEW_TITLE);
     // 같은 규칙의 상세가 남아 있고(다시 고르지 않음) 변경 이력을 그 규칙으로 다시 읽는다
     await expect(detail(page)).toHaveAttribute('data-selected-id', FAILING_RULE.id);
-    await expect.poll(async () => (await changeCalls()).length).toBe(before + 1);
+    await expect.poll(async () => (await changeCalls()).length).toBeGreaterThan(before);
+    // 저장 응답이 그려진 뒤의 효과가 돌고 그 읽기들이 끝날 때까지 기다린 뒤 센다
+    await allSettled(bive, 'rule.update');
+    await nextFrame(page);
+    await allSettled(bive, 'normChange.list');
+    expect(await changeCalls()).toHaveLength(before + 1);
     expect((await changeCalls()).at(-1)?.params).toEqual({
       projectId: PROJECT.id,
       targetRef: { entity: 'Rule', id: FAILING_RULE.id },
     });
-    await page.waitForTimeout(500);
-    expect(await changeCalls()).toHaveLength(before + 1);
   });
 
   test('속성 줄의 확인 상태: 이름 · 값 · 버튼에 같은 낱말이 겹치지 않는다 (M3-35 #263)', async ({
@@ -1435,8 +1445,7 @@ test.describe('실행 이력: 실행 하나가 한 줄 · 실행 종료 사유 (
       attempt: 1,
       status: 'failed',
     });
-    await page.waitForTimeout(400);
-    expect(await callsOf(bive, 'run.list')).toHaveLength(before);
+    // 단계 알림 뒤 실행 알림을 보내 그 결과가 그려지면 센다: 단계 알림이 다시 읽었다면 하나 더 많다
     await bive.setResponse('run.list', {
       result: {
         runs: RUN_HISTORY_RUNS.map((run) =>
@@ -1456,7 +1465,40 @@ test.describe('실행 이력: 실행 하나가 한 줄 · 실행 종료 사유 (
     await expect(rows(page).first().getByTestId('history-run-status')).toHaveText(
       '실패 · 대상 규칙 폐기',
     );
+    await allSettled(bive, 'run.list');
     expect(await callsOf(bive, 'run.list')).toHaveLength(before + 1);
+  });
+
+  test('늦게 온 옛 실행 목록 응답은 먼저 온 새 응답을 덮지 않는다', async ({ page }) => {
+    // 처음 읽기(옛 값)는 늦게, 실행 알림 뒤 읽기(새 값)는 바로 온다
+    const bive = await openHistory(page, {
+      'run.list': { result: { runs: RUN_HISTORY_RUNS }, delayMs: 1500 },
+    });
+    await bive.setResponse('run.list', {
+      result: {
+        runs: RUN_HISTORY_RUNS.map((run) =>
+          run.displayId === 'EXE-005' ? { ...run, failureReason: 'target_rule_retired' } : run,
+        ),
+      },
+    });
+    await bive.emit('event.run.updated', {
+      projectId: PROJECT.id,
+      runId: RUN_HISTORY_RUNS[4]?.id,
+      displayId: 'EXE-005',
+      status: 'failed',
+      currentStep: null,
+      regressionCount: 0,
+      costUsd: 0.05,
+    });
+    await expect(rows(page).first().getByTestId('history-run-status')).toHaveText(
+      '실패 · 대상 규칙 폐기',
+    );
+    // 옛 응답이 모두 도착해 그린 뒤에도 새 값 그대로다
+    await allSettled(bive, 'run.list');
+    await nextFrame(page);
+    await expect(rows(page).first().getByTestId('history-run-status')).toHaveText(
+      '실패 · 대상 규칙 폐기',
+    );
   });
 
   for (const width of [820, 1100, 1280, 1440] as const) {
@@ -1464,12 +1506,32 @@ test.describe('실행 이력: 실행 하나가 한 줄 · 실행 종료 사유 (
       page,
     }) => {
       await page.setViewportSize({ width, height: 800 });
-      await openHistory(page);
+      // 가장 긴 사유 표시명(기준 브랜치 다른 작업 트리 사용 중)을 첫 줄에 둔다
+      await openHistory(page, {
+        'run.list': {
+          result: {
+            runs: RUN_HISTORY_RUNS.map((run) =>
+              run.displayId === 'EXE-005'
+                ? { ...run, failureReason: 'base_checked_out_elsewhere' }
+                : run,
+            ),
+          },
+        },
+      });
       await expect(rows(page)).toHaveCount(5);
+      await expect(rows(page).first().getByTestId('history-run-status')).toHaveText(
+        '실패 · 기준 브랜치 다른 작업 트리 사용 중',
+      );
       const pane = page.getByTestId('rule-detail');
       expect(await horizontalOverflow(pane, '[data-testid="history-row"]')).toEqual([]);
       await rows(page).first().scrollIntoViewIfNeeded();
-      expect(await textClipping(pane, ['history-run', 'history-run-status'])).toEqual([]);
+      expect(await textClipping(pane, ['history-run'])).toEqual([]);
+      // 상태 · 사유 칸: 좁은 상세에서는 낱말 단위로 접힐 수 있지만 가로로 잘리거나 넘치지 않는다
+      const status = rows(page).first().getByTestId('history-run-status');
+      expect(
+        await status.evaluate((el) => el.scrollWidth <= el.clientWidth + 0.5),
+        '상태 · 사유 가로 잘림',
+      ).toBe(true);
       expect(await rowOverlaps(pane)).toEqual([]);
       await page.screenshot({
         path: `${SCREENSHOT_DIR}SCR-06/실행-이력-${String(width)}.png`,
