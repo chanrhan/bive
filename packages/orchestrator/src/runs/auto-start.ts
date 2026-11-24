@@ -20,7 +20,8 @@
 // - 기존 규칙 모순으로 끝난 실행의 대상 규칙 다시 시작(M7-12 #224, ADR-100 B⑧ · A4, ADR-118, {@link restartAfterContradiction}):
 //   검사 단계 · 병합 재검사에서 대상 밖 규칙이 모순으로 판단돼 폐기 · 대체되면 그 실행은 병합 없이 끝난다. 그 실행의 대상 규칙(아직
 //   병합되지 못한 새 규칙)은 실행이 끝난 뒤 대상 규칙마다 실행 1개로 다시 시작한다(원인 = 그 실행의 첫 모순 판단 기록 순번, 대상 규칙
-//   1개). 대체로 생긴 규칙의 실행은 판단 세션 종료 뒤 위의 기존 경로가 만든다(신규 기록이 원인). 하루 한도 문 · 멱등(같은 원인 ·
+//   1개). 이의 판단이 대상 밖 규칙을 폐기 · 대체해 이의 반영으로 끝난 실행도 같다(원인 = 첫 폐기 · 대체 판단, 검토 1회차 N6).
+//   대체로 생긴 규칙의 실행은 판단 세션 종료 뒤 위의 기존 경로가 만든다(신규 기록이 원인). 하루 한도 문 · 멱등(같은 원인 ·
 //   같은 대상 규칙은 한 번)은 같고, 생략은 기록하지 않는다(로그만). 실행 종료 저장 이벤트를 받는 오케스트레이터 배선이 부른다
 import {
   type AutoStartSkipReason,
@@ -34,7 +35,7 @@ import type { ProjectStore, RunDetail } from '@bive/store';
 
 import type { EngineEvent } from '../engine/types.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
-import { contradictionJudgmentsOf } from '../norms/check-contradiction.js';
+import { RESTART_FAILURE_REASONS, restartCauseOf } from '../norms/check-contradiction.js';
 import { isEffectiveRule, retiredRuleSet } from '../norms/effective.js';
 import { autoStartBlock } from '../settings/auto-start-gate.js';
 import { saveNewRun } from './run-service.js';
@@ -155,9 +156,6 @@ export const autoStartRun = (
 export const CONTRADICTION_RESTART_REASON =
   '기존 규칙 모순으로 병합 없이 끝난 실행의 대상 규칙 실행 다시 시작';
 
-/** 기존 규칙 모순으로 끝난 실행의 실패 사유 (`steps/existing-rule.ts`와 같은 값). */
-const EXISTING_RULE_CONTRADICTION = 'existing_rule_contradiction';
-
 export type ContradictionRestartOutcome =
   /** 대상 규칙마다 실행을 만들었다 (대상 규칙 순) */
   | { readonly status: 'started'; readonly runs: readonly AutoStartedRun[] }
@@ -169,8 +167,9 @@ export type ContradictionRestartOutcome =
   | { readonly status: 'not_applicable' };
 
 /**
- * 기존 규칙 모순으로 끝난 실행 `runId`의 대상 규칙마다 실행 1개를 다시 시작한다 (쓰기 트랜잭션 1개). 원인은 그 실행의 첫 모순 판단
- * 기록(검사 실패 판단, 결과 모순)이고 대상 규칙마다 한 번만 쓴다. 효력이 없어진 대상 규칙은 건너뛴다.
+ * 기존 규칙 모순 · 이의 반영으로 끝난 실행 `runId`의 대상 규칙마다 실행 1개를 다시 시작한다 (쓰기 트랜잭션 1개). 원인은 그 실행의
+ * 첫 모순 판단(검사 실패 판단) · 첫 폐기 · 대체 판단(이의 판단)이고 대상 규칙마다 한 번만 쓴다. 효력이 없어진 대상 규칙(이의 판단이
+ * 대상 규칙 자체를 폐기 · 대체한 경우 포함)은 건너뛴다.
  */
 export const restartAfterContradiction = (
   store: ProjectStore,
@@ -179,15 +178,9 @@ export const restartAfterContradiction = (
 ): ContradictionRestartOutcome =>
   store.transaction(() => {
     const ended = store.runs.get(input.runId);
-    if (
-      ended === null ||
-      ended.status !== 'failed' ||
-      ended.failureReason !== EXISTING_RULE_CONTRADICTION
-    ) {
-      return { status: 'not_applicable' };
-    }
-    const [cause] = contradictionJudgmentsOf(store, ended.id);
-    if (cause === undefined) return { status: 'not_applicable' };
+    // 원인: 기존 규칙 모순이면 첫 모순 판단, 이의 반영이면 첫 폐기 · 대체 판단 (검토 1회차 N6)
+    const cause = ended === null ? null : restartCauseOf(store, ended);
+    if (ended === null || cause === null) return { status: 'not_applicable' };
     const changes = store.normChanges.list();
     const retired = retiredRuleSet(store);
     const ruleIds = ended.targetRuleIds.filter((ruleId) => {
@@ -303,13 +296,15 @@ export class AutoStarter {
   }
 
   /**
-   * 엔진의 저장 이벤트 하나 (오케스트레이터 배선이 넘긴다). 기존 규칙 모순으로 끝난 실행을 처음 보면 그 대상 규칙의 실행을 다시
+   * 엔진의 저장 이벤트 하나 (오케스트레이터 배선이 넘긴다). 기존 규칙 모순 · 이의 반영으로 끝난 실행을 처음 보면 그 대상 규칙의 실행을 다시
    * 시작한다(M7-12, ADR-118). 엔진의 종료 처리가 끝난 다음 차례에 하고 기다리지 않는다. 던지지 않는다.
    */
   observe(event: EngineEvent): void {
     if (event.type !== 'run.saved') return;
     const { run } = event.detail;
-    if (run.status !== 'failed' || run.failureReason !== EXISTING_RULE_CONTRADICTION) return;
+    if (run.status !== 'failed' || !RESTART_FAILURE_REASONS.includes(String(run.failureReason))) {
+      return;
+    }
     if (this.#restarted.has(run.id)) return;
     this.#restarted.add(run.id);
     const task = Promise.resolve().then(() => {

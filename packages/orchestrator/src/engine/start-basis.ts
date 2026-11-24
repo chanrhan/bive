@@ -10,11 +10,13 @@
 // 사람의 규칙 진술 편집으로 시작한 실행(시작 주체 `causeLog: 'approval_log'`, M7-03 #215 · ADR-109)은 자동 시작 항목의 원인이
 // `ruleEditSeqs`(승인 기록 순번)이고, 그 순번이 대상 규칙 1개의 진술을 바꾼 사람의 `rule_edit` 기록이어야 하며 다른 자동 시작
 // 항목이 같은 편집을 쓰지 않아야 한다(`ruleEditMismatch`).
-// 기존 규칙 모순으로 끝난 실행의 대상 규칙을 다시 시작한 실행(M7-12 #224, ADR-118)은 원인이 그 실행의 검사 실패 판단 기록(결과 모순,
-// 모순 대상에 이 실행의 대상 규칙)이고, 그 판단의 연결 실행이 기존 규칙 모순으로 끝난 다른 실행이어야 한다. 이 원인은 끝난 실행의 대상
-// 규칙마다 한 번씩 쓰이므로 재사용은 "같은 원인 · 같은 대상 규칙"을 다른 항목이 쓸 때만이다.
+// 기존 규칙 모순 · 이의 반영으로 끝난 실행의 대상 규칙을 다시 시작한 실행(M7-12 #224, ADR-118)은 원인이 그 끝난 실행의 첫 모순 판단
+// (검사 실패 판단) · 첫 폐기 · 대체 판단(이의 판단)이고 대상 규칙이 그 끝난 실행의 대상 규칙이어야 한다. 원인은 끝난 실행마다 하나라
+// 재사용은 "같은 원인 · 같은 대상 규칙" = "같은 끝난 실행 · 같은 대상 규칙"을 다른 항목이 쓸 때다.
 import { type NormChangeEntry, type Run, ruleStatementEditOf } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
+
+import { restartCauseOf } from '../norms/check-contradiction.js';
 
 /** 근거가 맞지 않는 이유 (`exitDetail.mismatch`). */
 export type StartBasisMismatch =
@@ -48,37 +50,22 @@ export interface StartBasisCheck {
 const sameList = <T>(a: readonly T[] | undefined, b: readonly T[]): boolean =>
   a !== undefined && a.length === b.length && a.every((value, index) => value === b[index]);
 
-/** 기존 규칙 모순으로 끝난 실행의 실패 사유 (`steps/existing-rule.ts`와 같은 값). */
-const EXISTING_RULE_CONTRADICTION = 'existing_rule_contradiction';
-
 /**
- * 원인이 기존 규칙 모순 판단인지 (M7-12, ADR-118): 검사 실패 판단 · 결과 모순 · 모순 대상에 `ruleId`, 연결 실행이 기존 규칙 모순으로
- * 끝난 다른 실행.
+ * 원인이 끝난 실행의 대상 규칙 다시 시작의 원인인지 (M7-12 · 검토 1회차 N4 · N6, ADR-118): 원인 기록이 연결 실행(이 실행이 아닌 끝난
+ * 실행)의 다시 시작 원인(`restartCauseOf`: 기존 규칙 모순이면 첫 모순 판단, 이의 반영이면 첫 폐기 · 대체 판단)과 같은 순번이고, `ruleId`가
+ * 그 끝난 실행의 대상 규칙이며 그 판단이 겨눈 규칙이 아니다.
  */
-const isContradictionCause = (
+const isRestartCause = (
   store: ProjectStore,
   run: Run,
   cause: NormChangeEntry,
   ruleId: string | undefined,
 ): boolean => {
-  const judged = cause.detail.judgment;
-  if (
-    cause.kind !== 'judgment' ||
-    judged?.subject !== 'check_failure' ||
-    judged.verdict !== 'contradiction' ||
-    ruleId === undefined ||
-    !judged.contradicts.some((rule) => rule.id === ruleId) ||
-    cause.runId === null ||
-    cause.runId === run.id
-  ) {
-    return false;
-  }
+  if (cause.kind !== 'judgment' || ruleId === undefined || cause.runId === null) return false;
+  if (cause.runId === run.id || cause.targetRef.id === ruleId) return false;
   const ended = store.runs.get(cause.runId);
-  return (
-    ended !== null &&
-    ended.status === 'failed' &&
-    ended.failureReason === EXISTING_RULE_CONTRADICTION
-  );
+  if (ended === null || !ended.targetRuleIds.includes(ruleId)) return false;
+  return restartCauseOf(store, ended)?.seq === cause.seq;
 };
 
 /** 실행 자동 시작 항목의 원인이 맞는지 (`null`이면 맞음). */
@@ -105,7 +92,7 @@ const autoStartMismatch = (
   const [ruleId] = run.targetRuleIds;
   if (cause.kind === 'judgment') {
     // 기존 규칙 모순으로 끝난 실행의 대상 규칙 다시 시작: 같은 원인 · 같은 대상 규칙을 다른 항목이 쓰면 재사용
-    if (!isContradictionCause(store, run, cause, ruleId)) return 'cause_mismatch';
+    if (!isRestartCause(store, run, cause, ruleId)) return 'cause_mismatch';
     const reused = all.some(
       (other) =>
         other.kind === 'auto_start' &&

@@ -4,9 +4,10 @@
 //   규칙이 모순인지 판단한다. 판단(모순 없음 = 유지 · 모순 = 폐기 · 대체)은 `norms/agent-rule.ts`가 그 쓰기와 같은 트랜잭션에서
 //   남기고, 이 모듈은 판단 기록이 없는 규칙을 오케스트레이터 주체의 "모순 없음(판단 없음)"으로 마무리한다({@link settleCheckFailure}).
 //   판단 없음을 모순으로 보지 않는다
-// - 판단 입력은 실패한 규칙 ID와 케이스 이름뿐이다(A5). 케이스 이름은 테스트 작성 역할이 고른 글이지만 인수 테스트가 앱 코드를
-//   가져오면 구현 코드가 임의 이름의 케이스를 등록할 수 있다. 그래서 그 규칙의 인수 테스트 파일(Red 확인 뒤 해시로 잠겨 구현이 바꿀
-//   수 없는 파일)에 글자 그대로 적힌 이름만 싣고 나머지는 수로만 싣는다({@link knownCaseMatcher})
+// - 판단 입력은 실패한 규칙 ID와 케이스 이름뿐이다(A5). 케이스 이름은 판정 러너가 보고한 글이고, 인수 테스트는 앱 코드를 가져오지
+//   못하지만(`judge/acceptance-lint.ts`) 테스트 작성 역할이 이름을 실행 값(`it.each` · 보간)으로 만들어 두면 판정 때 정해진다. 그래서
+//   그 규칙의 인수 테스트 파일(Red 확인 뒤 해시로 잠겨 구현이 바꿀 수 없는 파일)의 문자열 리터럴 값과 조각마다 같은 이름만 싣고
+//   나머지는 수로만 싣는다({@link knownCaseMatcher})
 // - 원인은 규범 변경 기록이 아니라 그 단계 시도의 판정이다: 판단 기록의 `detail.judgment.check`(단계 · 단계 시도 · 실행의 대상 규칙 ·
 //   케이스 이름 · 모르는 케이스 수)와 연결 실행에 싣는다. 판단은 실행 · 실패한 규칙마다 한 번이다
 // 규칙 · 인수 테스트 · 폐기 기록 · 판정 · 확인 상태에 닿지 않는다(규범 변경 기록의 판단 없음 기록만 쓴다).
@@ -16,6 +17,7 @@ import {
   type NormChangeEntry,
   type NormCheckFailureCause,
   type NormJudgmentRuleRef,
+  type Run,
   type Ulid,
 } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
@@ -40,23 +42,65 @@ export interface CheckJudgmentContext {
   readonly failures: readonly CheckFailureInput[];
 }
 
-/**
- * 케이스 이름이 그 규칙의 인수 테스트 파일에 적혀 있는지 보는 함수. 이름(판정 러너의 `상위 묶음 > 케이스`)을 ` > `로 나눈 조각마다
- * 그 규칙 폴더(`bive-acceptance/<표시 ID>/`)의 파일 내용 어딘가에 글자 그대로 있어야 한다. 이스케이프 · 문자열 이어 붙이기 · 실행
- * 값으로 만든 이름은 찾지 못한다(덜 싣는 쪽: 모르는 케이스로 센다). 이름 없음(`(이름 없음)`)도 모르는 케이스다.
- */
-export const knownCaseMatcher =
-  (acceptanceTexts: Readonly<Record<string, string>>) =>
-  (ruleDisplayId: string, name: string): boolean => {
-    const prefix = `bive-acceptance/${ruleDisplayId}/`;
-    const texts = Object.entries(acceptanceTexts)
-      .filter(([file]) => file.startsWith(prefix))
-      .map(([, text]) => text);
-    if (texts.length === 0) return false;
-    const parts = name.split(' > ').filter((part) => part.length > 0);
-    if (parts.length === 0) return false;
-    return parts.every((part) => texts.some((text) => text.includes(part)));
+/** 문자열 리터럴 (작은따옴표 · 큰따옴표 한 줄, 백틱). 값은 따옴표 안의 글자 그대로(이스케이프를 풀지 않는다). */
+const STRING_LITERAL = /'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)"|`((?:[^`\\]|\\.)*)`/gu;
+
+/** 파일 글의 문자열 리터럴 값 (보간이 든 템플릿은 뺀다: 값이 판정 때 정해진다). */
+export const stringLiterals = (text: string): Set<string> => {
+  const values = new Set<string>();
+  for (const match of text.matchAll(STRING_LITERAL)) {
+    const template = match[3];
+    if (template !== undefined && template.includes('${')) continue;
+    const value = match[1] ?? match[2] ?? template;
+    if (value !== undefined && value.length > 0) values.add(value);
+  }
+  return values;
+};
+
+/** 이름이 리터럴 값들을 ` > `로 이은 것으로 남김없이 나뉘는지 (리터럴 값 안에 ` > `가 있어도 된다). */
+const coveredBy = (name: string, literals: ReadonlySet<string>): boolean => {
+  const memo = new Map<number, boolean>();
+  const from = (start: number): boolean => {
+    const cached = memo.get(start);
+    if (cached !== undefined) return cached;
+    let found = false;
+    for (const literal of literals) {
+      if (!name.startsWith(literal, start)) continue;
+      const end = start + literal.length;
+      if (end === name.length || (name.startsWith(' > ', end) && from(end + 3))) {
+        found = true;
+        break;
+      }
+    }
+    memo.set(start, found);
+    return found;
   };
+  return name.length > 0 && from(0);
+};
+
+/**
+ * 케이스 이름이 그 규칙의 인수 테스트 파일에 적혀 있는지 보는 함수. 이름(판정 러너의 `상위 묶음 > 케이스`)을 ` > `로 이은 조각마다
+ * 그 규칙 폴더(`bive-acceptance/<표시 ID>/`) 파일의 문자열 리터럴 값 하나와 전체가 같아야 한다(부분 문자열 · 주석 · 코드 조각은
+ * 알려진 이름이 아니다). 보간이 든 템플릿 · 이스케이프 · 이어 붙이기 · 실행 값으로 만든 이름은 찾지 못한다(덜 싣는 쪽: 모르는 케이스로
+ * 센다). 이름 없음(`(이름 없음)`)도 모르는 케이스다.
+ */
+export const knownCaseMatcher = (acceptanceTexts: Readonly<Record<string, string>>) => {
+  const byRule = new Map<string, Set<string>>();
+  const literalsOf = (ruleDisplayId: string): Set<string> => {
+    const cached = byRule.get(ruleDisplayId);
+    if (cached !== undefined) return cached;
+    const prefix = `bive-acceptance/${ruleDisplayId}/`;
+    const literals = new Set<string>();
+    for (const [file, text] of Object.entries(acceptanceTexts)) {
+      if (!file.startsWith(prefix)) continue;
+      for (const value of stringLiterals(text)) literals.add(value);
+    }
+    byRule.set(ruleDisplayId, literals);
+    return literals;
+  };
+  return (ruleDisplayId: string, name: string): boolean =>
+    coveredBy(name, literalsOf(ruleDisplayId));
+};
 
 /** 판단 기록의 원인 칸 (규칙 하나). 케이스 이름은 원문을 상한에서 자르고 수의 상한을 넘으면 빠진 수를 남긴다. */
 export const checkFailureCause = (
@@ -93,6 +137,43 @@ export const contradictionJudgmentsOf = (store: ProjectStore, runId: Ulid): Norm
   checkJudgmentsOf(store, runId).filter(
     (entry) => entry.detail.judgment?.verdict === 'contradiction',
   );
+
+/**
+ * 대상 규칙을 다시 시작하는 실패 사유 (M7-12, ADR-118): 검사 · 병합 재검사의 기존 규칙 모순, 이의 반영(이의 판단이 규칙을 폐기 ·
+ * 대체해 끝난 실행, 검토 1회차 N6). 둘 다 그 실행의 대상 규칙이 병합되지 못한 채 남는다.
+ */
+export const RESTART_FAILURE_REASONS: readonly string[] = [
+  'existing_rule_contradiction',
+  'objection_applied',
+];
+
+/**
+ * 끝난 실행의 대상 규칙을 다시 시작하는 원인 기록: 기존 규칙 모순이면 그 실행의 첫 모순 판단(검사 실패 판단), 이의 반영이면 그 실행의
+ * 첫 폐기 · 대체 판단(이의 판단). 다시 시작할 실행이 아니면 `null`. 다시 시작과 엔진의 시작 근거 대조가 같은 함수를 쓴다(원인은
+ * 끝난 실행마다 하나뿐이다).
+ */
+export const restartCauseOf = (
+  store: ProjectStore,
+  ended: Pick<Run, 'id' | 'status' | 'failureReason'>,
+): NormChangeEntry | null => {
+  if (ended.status !== 'failed') return null;
+  if (ended.failureReason === 'existing_rule_contradiction') {
+    return contradictionJudgmentsOf(store, ended.id)[0] ?? null;
+  }
+  if (ended.failureReason === 'objection_applied') {
+    return (
+      store.normChanges.list().find(
+        (entry) =>
+          entry.kind === 'judgment' &&
+          entry.runId === ended.id &&
+          entry.detail.judgment?.subject === 'objection' &&
+          // 이의 판단의 결과는 유지 · 폐기 · 대체뿐이다: 유지가 아니면 폐기 · 대체
+          entry.detail.judgment.verdict !== 'upheld',
+      ) ?? null
+    );
+  }
+  return null;
+};
 
 /** 검사 실패 판단 하나의 결과. */
 export interface CheckFailureDecision {

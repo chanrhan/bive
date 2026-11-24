@@ -26,9 +26,10 @@ import { loadScenario, type Scenario } from '../src/agent/scenario.js';
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import { chargeSessions } from '../src/engine/session-budget.js';
 import { checkRunStartBasis } from '../src/engine/start-basis.js';
+import { openProjectStore } from '@bive/store';
 import type { NormJudgeLauncher, NormJudgeOutcome, NormJudgeRequest } from '../src/engine/types.js';
 import { readNormChanges } from '../src/ipc/norm-change-handlers.js';
-import { retireAgentRule, upholdAgentRule } from '../src/norms/agent-rule.js';
+import { retireAgentRule, supersedeAgentRule, upholdAgentRule } from '../src/norms/agent-rule.js';
 import {
   CHECK_UNDECIDED_REASON,
   knownCaseMatcher,
@@ -46,7 +47,14 @@ import { RuleWriterService } from '../src/rule-writer/rule-writer-service.js';
 import { AutoStarter, restartAfterContradiction } from '../src/runs/auto-start.js';
 import { createRun, saveNewRun } from '../src/runs/run-service.js';
 import { EXISTING_RULE_CONTRADICTION } from '../src/steps/existing-rule.js';
-import { human, newId as harnessId, userGit, withProject } from './helpers/engine-harness.js';
+import {
+  human,
+  newId as harnessId,
+  seedNormRequirement,
+  seedNormRule,
+  userGit,
+  withProject,
+} from './helpers/engine-harness.js';
 import {
   attempts,
   contentJudge,
@@ -160,6 +168,8 @@ interface Harness extends PipelineHarness {
   starter: () => AutoStarter;
   /** 판단 배선에 넘어온 요청 */
   requests: NormJudgeRequest[];
+  /** 자동 시작 · 다시 시작 배선의 로그 */
+  logs: string[];
 }
 
 const setup = (
@@ -171,6 +181,8 @@ const setup = (
     caseNames?: readonly string[];
     fails?: (kind: JudgeCall['kind'], index: number) => boolean;
     rule1Fails?: () => boolean;
+    /** 실행 종료 저장 이벤트로 대상 규칙을 다시 시작한다 (기본 켬). 끄면 시험이 직접 부른다 */
+    restarts?: boolean;
   } = {},
 ): Harness => {
   const holder: { starter: AutoStarter | null } = { starter: null };
@@ -181,8 +193,10 @@ const setup = (
     caseNames = ['케이스 1', '케이스 2'],
     fails = (kind, index) => kind === 'check' && index === 0,
     rule1Fails,
+    restarts = true,
     ...rest
   } = options;
+  const logs: string[] = [];
   const decide = decideWith(fails, rule1Fails)();
   const h = setupPipeline({
     secondRule: true,
@@ -192,12 +206,13 @@ const setup = (
     temps,
     engines,
     onEvent: () => (event) => {
-      holder.starter?.observe(event);
+      if (restarts) holder.starter?.observe(event);
     },
     judgeNorms: ({ biveHome, adapter, engine }) => {
       const starter = new AutoStarter({
         biveHome,
         engine: { onRunCreated: (projectId, runId) => engine().onRunCreated(projectId, runId) },
+        log: (line) => logs.push(line),
       });
       holder.starter = starter;
       const record =
@@ -226,6 +241,7 @@ const setup = (
   return {
     ...h,
     requests,
+    logs,
     starter: () => {
       if (holder.starter === null) throw new Error('자동 시작 배선 없음');
       return holder.starter;
@@ -487,6 +503,8 @@ describe('판단 없음 · 세션 실패 · 열지 못함은 모순 없음이다
     ['error_max_turns', ended('error_max_turns')],
     ['error_during_execution', ended('error_during_execution')],
     ['guard_violation', ended('guard_violation')],
+    ['aborted', ended('aborted')],
+    ['error_max_budget_usd', ended('error_max_budget_usd')],
     [
       'start_failed',
       { status: 'not_opened', reason: 'start_failed', detail: '시작 실패' } as const,
@@ -788,6 +806,9 @@ describe('모순: 폐기 · 대체를 반영하고 그 실행은 병합 없이 �
       detail: { failedRuleIds: ['RULE-002'], resumed: true },
     });
     expect(mergeCount(h)).toBe(0);
+    // 하루 한도가 비어 있어 대상 규칙의 다시 시작도 없다 (실행 1개, 자동 시작 기록 0건)
+    expect(withProject(h.biveHome, h.project.id, (store) => store.runs.list())).toHaveLength(1);
+    expect(changesOf(h).filter((entry) => entry.kind === 'auto_start')).toEqual([]);
     // 재개한 검사는 판정하지 않았다 (판정 호출은 첫 검사 1회)
     expect(h.judgeCalls.filter((call) => call.kind === 'check')).toHaveLength(1);
   }, 120_000);
@@ -818,7 +839,7 @@ describe('판단 입력은 실패한 규칙 ID와 인수 테스트 파일에 적
     expect(norms).toContain('알 수 없는 케이스 1건');
   }, 90_000);
 
-  it('대조: 이름을 " > "로 나눈 조각이 모두 그 규칙 폴더의 파일에 있어야 하고, 다른 규칙 폴더 · 이름 없음은 모른다', () => {
+  it('대조: 이름을 " > "로 나눈 조각이 모두 그 규칙 폴더 파일의 문자열 리터럴 값이어야 하고, 다른 규칙 폴더 · 이름 없음은 모른다', () => {
     const known = knownCaseMatcher({
       'bive-acceptance/RULE-002/a.acc.ts': "describe('묶음', () => { it('케이스 1', f) })",
       'bive-acceptance/RULE-003/b.acc.ts': "it('케이스 9', f)",
@@ -829,6 +850,43 @@ describe('판단 입력은 실패한 규칙 ID와 인수 테스트 파일에 적
     expect(known('RULE-004', '케이스 1')).toBe(false);
     expect(known('RULE-002', ' > ')).toBe(false);
     expect(known('RULE-02', '케이스 1')).toBe(false);
+  });
+
+  it('대조는 문자열 리터럴 값 전체와만 한다: 부분 문자열 · 주석 · 코드 조각 · 보간 템플릿은 모르는 이름이고, 작은 · 큰따옴표 · 백틱 리터럴과 값 안의 " > "는 받는다 (검토 1회차 N1)', () => {
+    const file = [
+      '// RULE-002: time 필드 > ISO > 문자열이다',
+      "import { describe, expect, inject, it } from 'vitest';",
+      "describe('GET /api/health 서버 시각', () => {",
+      '  it("응답 JSON의 time이 ISO 문자열이다", async () => {',
+      "    const res = await fetch(new URL('/api/health', inject('baseUrl')));",
+      '    expect(res.status).toBe(200);',
+      '  });',
+      '  it(`백틱 케이스`, () => undefined);',
+      '  it(`보간 ${String(1)}`, () => undefined);',
+      "  it('a > b', () => undefined);",
+      '});',
+    ].join('\n');
+    const known = knownCaseMatcher({ 'bive-acceptance/RULE-002/a.acc.ts': file });
+    for (const name of [
+      'GET /api/health 서버 시각 > 응답 JSON의 time이 ISO 문자열이다',
+      'GET /api/health 서버 시각 > 백틱 케이스',
+      'GET /api/health 서버 시각 > a > b',
+    ]) {
+      expect(known('RULE-002', name), name).toBe(true);
+    }
+    for (const name of [
+      'it',
+      'GET',
+      'e > t',
+      'time 필드 > ISO > 문자열이다',
+      'GET /api/health 서버 시각 > 응답 JSON의 time',
+      'expect(res.status).toBe(200);\n  });',
+      '보간 1',
+      '보간 ${String(1)}',
+      'GET /api/health 서버 시각 > 백틱 케이스 > ',
+    ]) {
+      expect(known('RULE-002', name), name).toBe(false);
+    }
   });
 
   it('작업 지시 스냅샷: 시스템 프롬프트의 고정 문장, 케이스 이름은 틀 안의 머리말 뒤 표시 값 한 줄(줄 나눔 · 가짜 표시 줄 · 방향 제어 글자 표기, 수 · 길이 상한)', () => {
@@ -1129,6 +1187,438 @@ describe('검사 실패 판단 기록: 실행 · 규칙마다 한 번, 판단 �
     // 이의 판단의 결과(유지 · 폐기 · 대체)는 쓸 수 없다
     expect(NormJudgmentDetail.safeParse({ ...base, verdict: 'upheld' }).success).toBe(false);
   });
+});
+
+// ── 검토 1회차: 다시 시작의 하루 한도 문 · 여러 규칙 · 확인됨 규칙 · 원인 위조 · 이의 반영 ─────────
+
+const NORM_INPUT_SUMMARY = {
+  requirements: { total: 1, included: 1, omitted: 0 },
+  rules: { total: 3, included: 3, omitted: 0 },
+  truncated: false,
+};
+
+/** 검사 실패 판단 문맥 (판단 배선이 받은 요청에서). */
+const checkContextOf = (
+  store: Parameters<typeof retireAgentRule>[0],
+  request: NormJudgeRequest,
+) => {
+  const { cause } = request;
+  if (cause.kind !== 'check_failure') throw new Error('검사 실패 판단이 아님');
+  return {
+    runId: request.run.id,
+    stage: cause.stage,
+    stepId: request.stepId,
+    targets: (store.runs.get(request.run.id)?.targetRuleIds ?? []).map((id) => ({
+      id,
+      displayId: store.rules.get(id)?.displayId ?? id,
+    })),
+    failures: cause.failures,
+    normInput: NORM_INPUT_SUMMARY,
+  };
+};
+
+const runsOf = (h: PipelineHarness) =>
+  withProject(h.biveHome, h.project.id, (store) => store.runs.list());
+
+const setDailyBudget = (h: PipelineHarness, dailyBudgetUsd: number | null) =>
+  withProject(h.biveHome, h.project.id, (store) =>
+    store.settings.update({ dailyBudgetUsd }, { by: human, at: new Date().toISOString() }),
+  );
+
+const RESTART_CLOCK = { now: Date.now, newId: harnessId };
+
+describe('다시 시작의 하루 한도 문: 비었거나 한도에 이르면 실행 · 기록 없이 생략하고, 한도를 채운 뒤 다시 부르면 시작한다 (검토 1회차 B1, ADR-100 D8 · B⑤)', () => {
+  const retireTurn = [
+    { tool: 'retire_rule', args: { ruleId: '{{ruleId}}', grounds: RETIRE_GROUNDS } },
+  ] as ScenarioTurn[];
+
+  it('하루 한도가 비어 있으면 실행 종료 뒤 다시 시작을 생략하고(로그 한 줄, 실행 · 자동 시작 기록 0건), 한도를 채운 뒤 같은 끝난 실행을 다시 부르면 시작되어 병합된다', async () => {
+    const h = setup(scenarioWith('restart-unset', retireTurn));
+    const first = await runToEnd(h);
+    await h.starter().idle();
+    expect(first.run).toMatchObject({
+      status: 'failed',
+      failureReason: EXISTING_RULE_CONTRADICTION,
+    });
+    expect(runsOf(h)).toHaveLength(1);
+    expect(changesOf(h).filter((entry) => entry.kind === 'auto_start')).toEqual([]);
+    expect(h.logs.filter((line) => line.startsWith('대상 규칙 다시 시작 생략'))).toEqual([
+      `대상 규칙 다시 시작 생략 (실행 ${h.runId}, project_daily_budget_unset)`,
+    ]);
+    // 생략은 멱등 키를 쓰지 않는다: 한도를 채우고 다시 부르면 시작한다
+    setDailyBudget(h, 100);
+    const started = h.starter().afterContradiction(h.project.id, h.runId);
+    expect(started?.status).toBe('started');
+    await h.engine.settled();
+    expect(runsOf(h).map((run) => [run.displayId, run.status])).toEqual([
+      ['EXE-001', 'failed'],
+      ['EXE-002', 'merged'],
+    ]);
+  }, 120_000);
+
+  it('오늘 지출이 하루 한도에 이르렀으면 생략하고(project_daily_budget_exceeded), 한도를 올린 뒤 다시 부르면 시작한다. 같은 끝난 실행을 두 번 시작하지 않고, 원인 위조(둘째 모순 판단 순번)는 근거 없음이다 (N4)', async () => {
+    const h = setup({
+      ...scenarioWith('restart-reached', retireTurn),
+      dailyBudgetUsd: 100,
+      restarts: false,
+    });
+    await runToEnd(h);
+    setDailyBudget(h, 0.01);
+    withProject(h.biveHome, h.project.id, (store) => {
+      expect(restartAfterContradiction(store, { runId: h.runId }, RESTART_CLOCK)).toEqual({
+        status: 'skipped',
+        reason: 'project_daily_budget_exceeded',
+      });
+      expect(store.runs.list()).toHaveLength(1);
+      expect(store.normChanges.list().filter((entry) => entry.kind === 'auto_start')).toEqual([]);
+    });
+    setDailyBudget(h, 100);
+    const restarted = withProject(h.biveHome, h.project.id, (store) => {
+      const outcome = restartAfterContradiction(store, { runId: h.runId }, RESTART_CLOCK);
+      if (outcome.status !== 'started') throw new Error(`다시 시작 안 됨: ${outcome.status}`);
+      expect(restartAfterContradiction(store, { runId: h.runId }, RESTART_CLOCK)).toEqual({
+        status: 'duplicate',
+      });
+      return outcome.runs[0]?.detail.run;
+    });
+    withProject(h.biveHome, h.project.id, (store) => {
+      expect(checkRunStartBasis(store, restarted as never).mismatch).toBeNull();
+      // 같은 끝난 실행의 둘째 모순 판단(위조)을 원인으로 같은 대상 규칙을 또 시작하면 근거 없음이다
+      const [first] = store.normChanges
+        .list()
+        .filter((entry) => entry.detail.judgment?.subject === 'check_failure');
+      const other = seedNormRule(store, {
+        title: '다른 기존 규칙',
+        statement:
+          'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON에 uptime 필드를 담는다',
+        parent: store.requirements.list()[0] ?? null,
+        at: Date.now(),
+      });
+      const forgedJudgment = store.normChanges.append({
+        at: new Date().toISOString(),
+        kind: 'judgment',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        targetRef: { entity: 'Rule', id: other.id },
+        sessionId: harnessId(),
+        runId: h.runId,
+        reason: '위조한 둘째 판단',
+        detail: { judgment: structuredClone(first?.detail.judgment) },
+      });
+      const runId = harnessId();
+      const at = new Date().toISOString();
+      const forged = store.transaction(() => {
+        const made = saveNewRun(
+          store,
+          store.settings.get(),
+          {
+            runId,
+            ruleIds: [h.rule.id],
+            startedBy: { kind: 'orchestrator', causeSeqs: [forgedJudgment.seq] },
+          },
+          at,
+          harnessId,
+        );
+        store.normChanges.append({
+          at,
+          kind: 'auto_start',
+          actor: { kind: 'orchestrator' },
+          targetRef: { entity: 'Run', id: runId },
+          sessionId: null,
+          runId,
+          reason: '위조',
+          detail: { causeSeqs: [forgedJudgment.seq], ruleIds: [h.rule.id] },
+        });
+        return made.run;
+      });
+      expect(checkRunStartBasis(store, forged).mismatch).toBe('cause_mismatch');
+    });
+  }, 120_000);
+
+  it('다시 시작한 실행이 실행 대기에서 차례가 왔을 때 하루 한도에 이르렀으면 시작 때 재확인으로 budget_exceeded(project_daily_budget_exceeded)로 끝난다 (ADR-111)', async () => {
+    const h = setup({
+      ...scenarioWith('restart-queue-gate', retireTurn),
+      dailyBudgetUsd: 100,
+      restarts: false,
+    });
+    await runToEnd(h);
+    const runId = withProject(h.biveHome, h.project.id, (store) => {
+      const outcome = restartAfterContradiction(store, { runId: h.runId }, RESTART_CLOCK);
+      if (outcome.status !== 'started') throw new Error(`다시 시작 안 됨: ${outcome.status}`);
+      return outcome.runs[0]?.detail.run.id ?? '';
+    });
+    setDailyBudget(h, 0.01);
+    h.engine.onRunCreated(h.project.id, runId);
+    await waitFor(
+      () =>
+        withProject(h.biveHome, h.project.id, (store) => store.runs.get(runId)?.status) ===
+        'budget_exceeded',
+      30_000,
+      '다시 시작한 실행의 시작 때 하루 한도 재확인',
+    );
+    await h.engine.settled();
+    expect(withProject(h.biveHome, h.project.id, (store) => store.runs.get(runId))).toMatchObject({
+      status: 'budget_exceeded',
+      failureReason: 'project_daily_budget_exceeded',
+      worktreePath: null,
+    });
+  }, 120_000);
+});
+
+describe('실패 규칙이 둘 이상: 하나라도 모순이면 병합 없이 끝난다 (검토 1회차 N2)', () => {
+  it('RULE-002는 폐기 · RULE-003은 유지로 판단되면 실행은 failed(existing_rule_contradiction, 실패 규칙 RULE-002만)이고 RULE-003은 효력 그대로다', async () => {
+    const home = { value: '' };
+    const twoRules = (repo: string): void => {
+      rule2Acceptance(['케이스 1', '케이스 2'])(repo);
+      fs.mkdirSync(path.join(repo, 'bive-acceptance', 'RULE-003'), { recursive: true });
+      fs.writeFileSync(
+        path.join(repo, 'bive-acceptance', 'RULE-003', 'health-x.acc.ts'),
+        "import { describe, it } from 'vitest';\ndescribe('RULE-003', () => {\n  it('케이스 1', () => undefined);\n});\n",
+      );
+    };
+    const h = setup({
+      ...scenarioWith('check-two-rules', []),
+      prepareRepo: twoRules,
+      decide: (call) => {
+        const base = contentJudge(call);
+        if (typeof base === 'string' || call.kind !== 'check') return base;
+        return { ...base, 'RULE-002': ['failed'], 'RULE-003': ['failed'] };
+      },
+      launcher: (request) =>
+        Promise.resolve(
+          withProject(home.value, request.projectId, (store) => {
+            const check = checkContextOf(store, request);
+            const author = { kind: 'agent', role: 'rule-writer' } as const;
+            const [first, second] = request.ruleIds;
+            retireAgentRule(
+              store,
+              {
+                ruleId: first ?? '',
+                grounds: RETIRE_GROUNDS,
+                author,
+                sessionId: harnessId(),
+                check,
+              },
+              { now: Date.now },
+            );
+            upholdAgentRule(
+              store,
+              {
+                ruleId: second ?? '',
+                grounds: UPHOLD_GROUNDS,
+                author,
+                sessionId: harnessId(),
+                check,
+              },
+              { now: Date.now },
+            );
+            return { status: 'ended', sessionId: harnessId(), endReason: 'success' } as const;
+          }),
+        ),
+    });
+    home.value = h.biveHome;
+    const third = withProject(h.biveHome, h.project.id, (store) =>
+      store.rules.create({
+        ...h.rule,
+        id: harnessId(),
+        title: '헬스 체크 세 번째',
+        statement:
+          'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON에 region 필드를 담는다',
+        createdAt: new Date().toISOString(),
+      } as never),
+    );
+    const detail = await runToEnd(h);
+    expect(h.requests[0]?.ruleIds).toEqual([rule2Of(h).id, third.id]);
+    expect(detail.run).toMatchObject({
+      status: 'failed',
+      failureReason: EXISTING_RULE_CONTRADICTION,
+      mergeCommit: null,
+    });
+    expect(stepOf(detail, 'check', 1).exitDetail).toMatchObject({
+      detail: {
+        failedRuleIds: ['RULE-002'],
+        existingRuleJudgment: {
+          decisions: [
+            { ruleId: 'RULE-002', verdict: 'contradiction' },
+            { ruleId: 'RULE-003', verdict: 'no_contradiction' },
+          ],
+        },
+      },
+    });
+    expect(mergeCount(h)).toBe(0);
+    withProject(h.biveHome, h.project.id, (store) => {
+      expect(store.ruleRetirements.get(rule2Of(h).id)).not.toBeNull();
+      expect(store.ruleRetirements.get(third.id)).toBeNull();
+    });
+  }, 90_000);
+});
+
+describe('확인됨 기존 규칙의 검사 실패 판단 폐기 · 대체 (검토 1회차 N3, ADR-113 쓰기 순서)', () => {
+  it('대체하면 기록 순서는 신규 → 판단(대체) → 판단(검사 실패) → 대체 → 확인 풀림이고(0019 통과) 확인이 풀린다. 확인 상태 쓰기만 실패하면 전체가 되돌려진다', () => {
+    const store = openProjectStore(harnessId(), { home: tempDir() });
+    try {
+      const t0 = Date.now();
+      const req = seedNormRequirement(store, '헬스 체크 응답에 서버 시각 포함', t0);
+      const target = seedNormRule(store, {
+        title: '서버 시각 없음',
+        statement:
+          'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON에 time 필드를 담지 않는다',
+        parent: req,
+        at: t0 + 1,
+      });
+      const existing = seedNormRule(store, {
+        title: '서버 시각',
+        statement:
+          'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 time 필드에 응답 시점의 서버 시각을 담는다',
+        parent: req,
+        at: t0 + 2,
+      });
+      store.confirmations.confirm(
+        { entity: 'Rule', id: existing.id },
+        {
+          by: { kind: 'human' },
+          at: new Date(t0 + 3).toISOString(),
+          basis: { kind: 'approval_log', seq: 1 },
+        },
+      );
+      const check = {
+        runId: harnessId(),
+        stage: 'check' as const,
+        stepId: harnessId(),
+        targets: [{ id: target.id, displayId: target.displayId }],
+        failures: [{ ruleId: existing.id, cases: ['서버 시각 > time이 있다'], unknownCases: 0 }],
+        normInput: NORM_INPUT_SUMMARY,
+      };
+      const input = {
+        payload: {
+          title: '헬스 체크 응답 헤더의 서버 시각',
+          statement:
+            'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 헤더 X-Server-Time에 서버 시각을 담는다',
+          kind: 'business',
+          checkKinds: ['test'],
+          parentRequirementId: req.id,
+        },
+        rationale: '서버 시각을 헤더로 옮김',
+        author: { kind: 'agent', role: 'rule-writer' } as const,
+        sessionId: harnessId(),
+        contradiction: { verdict: 'none' } as const,
+        normInput: NORM_INPUT_SUMMARY,
+        ruleId: existing.id,
+        grounds:
+          '진술 "time 필드에 응답 시점의 서버 시각을 담는다"는 새 규칙과 동시에 만족될 수 없다',
+        check,
+      };
+      store.db.exec(
+        "CREATE TRIGGER fail_release BEFORE UPDATE ON confirmations BEGIN SELECT RAISE(ABORT, '시험: 확인 상태 쓰기 실패'); END;",
+      );
+      const before = store.normChanges.list().length;
+      expect(() => supersedeAgentRule(store, input, RESTART_CLOCK)).toThrow(/확인 상태 쓰기 실패/);
+      expect(store.normChanges.list()).toHaveLength(before);
+      expect(store.ruleRetirements.list()).toEqual([]);
+      expect(store.rules.get(existing.id)?.confirmation.state).toBe('confirmed');
+      store.db.exec('DROP TRIGGER fail_release');
+
+      supersedeAgentRule(store, input, RESTART_CLOCK);
+      const written = store.normChanges.list().slice(before);
+      expect(written.map((entry) => [entry.kind, entry.detail.judgment?.subject ?? null])).toEqual([
+        ['created', null],
+        ['judgment', 'supersede'],
+        ['judgment', 'check_failure'],
+        ['superseded', null],
+        ['unconfirmed', null],
+      ]);
+      expect(written[2]?.detail.judgment).toMatchObject({
+        verdict: 'contradiction',
+        contradicts: [{ id: target.id }],
+        createdSeq: written[0]?.seq,
+      });
+      expect(store.rules.get(existing.id)?.confirmation.state).toBe('unconfirmed');
+      expect(store.normChanges.verify().valid).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('이의 반영으로 끝난 실행도 대상 규칙이 여전히 효력이면 다시 시작한다 (검토 1회차 N6, 조율자 결정)', () => {
+  /** `objection` 시나리오: 실행 1의 구현이 `objected`에 이의, 판단 세션이 그 규칙을 폐기, 실행 2(다시 시작)의 구현은 통과 */
+  const objectionScenario = (name: string, objected: string, grounds: string) => {
+    const scenario = structuredClone(loadScenario('objection'));
+    scenario.name = name;
+    const judge = scenario.roles['rule-writer']?.sessions.find(
+      (session) => session.when?.judgment === 'objection',
+    );
+    const implementer = scenario.roles.implementer;
+    const [objecting, passing] = implementer?.sessions ?? [];
+    if (
+      judge === undefined ||
+      implementer === undefined ||
+      objecting === undefined ||
+      passing === undefined
+    ) {
+      throw new Error('시나리오 세션 없음');
+    }
+    judge.turns = [
+      { tool: 'retire_rule', args: { ruleId: '{{ruleId}}', grounds } },
+      { message: '이의 대상 규칙을 폐기했습니다.' },
+    ];
+    objecting.when = { runId: 'EXE-001' };
+    passing.when = { runId: 'EXE-002' };
+    objecting.turns = objecting.turns.map((turn) =>
+      'tool' in turn && turn.tool === 'raise_objection'
+        ? { ...turn, args: { ...turn.args, ruleIds: [objected] } }
+        : turn,
+    );
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, `${name}.yaml`), stringify(scenario));
+    return { scenario: name, scenariosDir: dir };
+  };
+
+  it('이의 판단이 대상 밖 RULE-002를 폐기해 objection_applied로 끝나면 RULE-001이 원인 = 그 폐기 판단으로 다시 시작되어 병합된다', async () => {
+    const h = setup({
+      ...objectionScenario('objection-restart', 'RULE-002', RETIRE_GROUNDS),
+      dailyBudgetUsd: 100,
+      fails: () => false,
+    });
+    const first = await runAll(h);
+    expect(first.run).toMatchObject({ status: 'failed', failureReason: 'objection_applied' });
+    const judgment = changesOf(h).find(
+      (entry) => entry.kind === 'judgment' && entry.detail.judgment?.subject === 'objection',
+    );
+    expect(judgment?.detail.judgment?.verdict).toBe('retired');
+    const runs = runsOf(h);
+    expect(runs.map((run) => [run.displayId, run.status])).toEqual([
+      ['EXE-001', 'failed'],
+      ['EXE-002', 'merged'],
+    ]);
+    expect(runs[1]).toMatchObject({
+      targetRuleIds: [h.rule.id],
+      startedBy: { kind: 'orchestrator', causeSeqs: [judgment?.seq] },
+    });
+    withProject(h.biveHome, h.project.id, (store) => {
+      expect(checkRunStartBasis(store, runs[1] as never).mismatch).toBeNull();
+    });
+  }, 120_000);
+
+  it('이의 판단이 대상 규칙 자체를 폐기했으면 다시 시작하지 않는다 (효력 없음)', async () => {
+    const h = setup({
+      ...objectionScenario(
+        'objection-target-retired',
+        'RULE-001',
+        '진술 "time 필드에 서버 시각을 담는다"는 요구사항과 맞지 않아 더는 효력을 가지면 안 된다',
+      ),
+      dailyBudgetUsd: 100,
+      fails: () => false,
+    });
+    const first = await runAll(h);
+    expect(first.run).toMatchObject({ status: 'failed', failureReason: 'objection_applied' });
+    expect(runsOf(h)).toHaveLength(1);
+    expect(changesOf(h).filter((entry) => entry.kind === 'auto_start')).toEqual([]);
+    withProject(h.biveHome, h.project.id, (store) => {
+      expect(restartAfterContradiction(store, { runId: h.runId }, RESTART_CLOCK)).toEqual({
+        status: 'no_rules',
+      });
+    });
+  }, 120_000);
 });
 
 // 병합 재검사 쪽은 test/pipeline-merge.test.ts가 단언한다(수용 기준 3).
