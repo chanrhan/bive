@@ -140,7 +140,7 @@ describe('시나리오 파일 스키마', () => {
     expect(toolsOf(missedJudge)).toEqual(['supersede_rule']);
     expect(
       (missed.roles.implementer?.sessions ?? []).map((session) => session.when?.ruleId),
-    ).toEqual(['RULE-001', 'RULE-002', 'RULE-002', 'RULE-003']);
+    ).toEqual(['RULE-001', 'RULE-002', 'RULE-003']);
 
     const broken = loadScenario('accidental-break');
     const brokenJudge = broken.roles['rule-writer']?.sessions.find(

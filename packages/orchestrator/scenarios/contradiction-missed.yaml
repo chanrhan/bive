@@ -5,8 +5,9 @@
 # RULE-002(time 없음)만 만든다(contradiction none). 실행 2(RULE-002)의 구현이 time을 빼면 검사 단계에서 대상 밖 RULE-001이
 # 실패하고, 판단 세션이 모순으로 판단해 supersede_rule로 RULE-001을 RULE-003(응답 헤더 X-Server-Time의 서버 시각, REQ-001의 뜻을
 # 응답 본문 밖에서 지킨다)으로 대체한다 → 실행 2는 병합 없이 끝난다(기존 규칙 모순). 대체로 생긴 RULE-003의 실행(실행 3, 판단 세션
-# 종료 뒤 자동 시작)과 실행 2의 대상 규칙 RULE-002의 다시 시작(실행 4, 실행 2가 끝난 뒤)이 차례로 병합된다. 같은 규칙의 구현 세션은
-# 조건에 맞는 세션끼리 순서를 센다: RULE-002의 첫 구현은 실행 2(time만 뺌), 둘째는 실행 4(실행 3의 헤더를 유지하고 time을 뺌).
+# 종료 뒤 자동 시작)과 실행 2의 대상 규칙 RULE-002의 다시 시작(실행 4, 실행 2가 끝난 뒤)이 차례로 병합된다. 세션 순번은 실행마다
+# 세므로 RULE-002의 구현 세션은 하나다: 실행 2 · 실행 4 모두 본문의 time을 빼고 서버 시각을 응답 헤더에 둔다(실행 2는 RULE-001이
+# 실패해 병합되지 않고, 실행 4는 실행 3이 병합한 헤더 규칙 RULE-003과 함께 통과한다).
 # 파이프라인 e2e는 M7-17이 만든다.
 name: contradiction-missed
 description: 둘째 요구사항의 규칙 작성이 RULE-001과의 모순을 보지 못해 실행 2의 검사에서 RULE-001이 실패하고, 판단 세션이 모순으로 RULE-001을 대체해 실행 2는 병합 없이 끝나며 대체 규칙과 RULE-002의 실행이 병합
@@ -241,40 +242,7 @@ roles:
               cacheReadInputTokens: 9800
               cacheCreationInputTokens: 7400
               costUSD: 0.0587
-      - description: RULE-002 첫 구현 (실행 2) - 실행 1이 더한 time을 뺌 (검사에서 RULE-001이 실패한다)
-        when:
-          ruleId: RULE-002
-        turns:
-          - tool: read_file
-            args:
-              path: src/app/api/health/route.ts
-          - tool: write_file
-            args:
-              path: src/app/api/health/route.ts
-              content: |
-                import { getDb } from '@/lib/db';
-
-                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
-                export const dynamic = 'force-dynamic';
-
-                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태를 돌려준다. */
-                export async function GET(): Promise<Response> {
-                  await getDb().item.count();
-                  return Response.json({ ok: true });
-                }
-          - message: 헬스 체크 응답에서 서버 시각(time)을 뺐습니다.
-        result:
-          subtype: success
-          total_cost_usd: 0.0541
-          num_turns: 3
-          modelUsage:
-            model-a:
-              inputTokens: 2980
-              outputTokens: 1010
-              cacheReadInputTokens: 9800
-              cacheCreationInputTokens: 7400
-              costUSD: 0.0541
-      - description: RULE-002 둘째 구현 (실행 4, 다시 시작) - 실행 3의 헤더를 유지하고 time을 뺌
+      - description: RULE-002 - 본문의 time을 빼고 서버 시각은 응답 헤더에 둠 (실행 2에서는 검사에서 RULE-001이 실패하고, 다시 시작한 실행 4에서는 실행 3의 헤더 규칙과 함께 통과한다)
         when:
           ruleId: RULE-002
         turns:
@@ -295,7 +263,7 @@ roles:
                   await getDb().item.count();
                   return Response.json({ ok: true }, { headers: { 'X-Server-Time': new Date().toISOString() } });
                 }
-          - message: 헬스 체크 응답 본문에서 time을 빼고 헤더의 서버 시각은 유지했습니다.
+          - message: 헬스 체크 응답 본문에서 time을 빼고 서버 시각은 응답 헤더에 두었습니다.
         result:
           subtype: success
           total_cost_usd: 0.0533
