@@ -5,14 +5,16 @@
 // - 글은 모두 응답의 표시 값을 `visibleDisplayText`로 한 번 더 거친 것이다(confirmationView.ts)
 // - 대상 링크: 규칙 · 요구사항 화면으로 가서 그 표시 ID로 검색한 목록을 연다. 폐기된 규칙은 [폐기 포함]을 켠다(ADR-114의
 //   이동 방식: 목록 필터를 정하고 화면을 옮긴다)
-import type { ConfirmationItem, NormChangeView } from '@bive/shared';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { ConfirmationItem, ConfirmationTarget, NormChangeView } from '@bive/shared';
+import { useCallback, useEffect, useState } from 'react';
 
 import { formatCardTime } from '../../components/Card2Line/time.js';
 import { EMPTY_FILTER, setListFilter } from '../../components/ListView/index.js';
 import { ExceptionLabel } from '../../components/StatusBadge/StatusBadge.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { useNavigation } from '../../navigation/NavigationContext.js';
+import { NORM_CHANGE_EVENT_NAMES } from '../../runs/refreshCoalescer.js';
+import { useEventRefresh } from '../../runs/useEventRefresh.js';
 import { REQUIREMENTS_LIST_ID } from '../requirements/requirementsView.js';
 import { RULES_LIST_ID } from '../rules/rulesView.js';
 import {
@@ -35,14 +37,25 @@ type ChangesLoad =
   | { status: 'ready'; entries: NormChangeView[]; chainValid: boolean }
   | { status: 'error' };
 
-/** 상세가 보이는 항목의 규범 변경 기록 (대상마다 1회). 항목이 바뀌면 다시 읽고 늦게 온 응답은 버린다. */
+/**
+ * 상세가 보이는 항목의 규범 변경 기록 (대상마다 1회). 항목(대상)이 바뀌거나 이 프로젝트의 규범 변경 알림 · 재접속이 오면 다시 읽고
+ * (판단 카드가 새 판단을 보이게, ADR-119), 늦게 온 응답은 버린다.
+ */
 const useItemChanges = (projectId: string, item: ConfirmationItem | null): ChangesLoad => {
   const [loaded, setLoaded] = useState<{ key: string; load: ChangesLoad } | null>(null);
+  const [reload, setReload] = useState(0);
   const key = item === null ? null : confirmationKey(item);
-  const targets = useMemo(() => (item === null ? [] : judgmentTargets(item)), [item]);
+  // 대상 목록은 내용으로 비교한다 (목록을 다시 읽어 항목 객체가 바뀌어도 대상이 같으면 다시 부르지 않는다)
+  const targetsKey = item === null ? '' : JSON.stringify(judgmentTargets(item));
+  const refreshOnNormChange = useCallback((): Promise<void> => {
+    setReload((n) => n + 1);
+    return Promise.resolve();
+  }, []);
+  useEventRefresh(item === null ? null : projectId, NORM_CHANGE_EVENT_NAMES, refreshOnNormChange);
   useEffect(() => {
     if (key === null) return undefined;
     let live = true;
+    const targets = JSON.parse(targetsKey) as ConfirmationTarget[];
     Promise.all(
       targets.map((targetRef) => window.bive.invoke('normChange.list', { projectId, targetRef })),
     ).then(
@@ -64,7 +77,8 @@ const useItemChanges = (projectId: string, item: ConfirmationItem | null): Chang
     return () => {
       live = false;
     };
-  }, [projectId, key, targets]);
+    // 다시 읽기 번호는 다시 읽는 계기로만 쓴다
+  }, [projectId, key, targetsKey, reload]);
   return loaded !== null && loaded.key === key ? loaded.load : { status: 'loading' };
 };
 

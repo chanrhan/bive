@@ -72,14 +72,18 @@ export const ConfirmationTab = ({ projectId }: { projectId: string }): React.JSX
       };
       window.bive.invoke('confirmation.set', { projectId, target, author: { kind: 'human' } }).then(
         () => {
-          settle();
-          void refresh();
+          // 다시 읽기가 끝난 뒤(성공 · 실패 모두, refresh는 거부하지 않는다)에 버튼을 다시 켠다: 그 사이 새로 생긴 항목을
+          // 화면에 보이기 전에 다시 [확인]하지 않게 (사람이 본 것만 확인한다, ADR-119)
+          void refresh().then(settle);
         },
         (reason: unknown) => {
-          settle();
           // 이미 확인됨 · 삭제된 대상: 그 사이 다른 곳에서 확인했다. 오류 없이 지금 목록을 보인다
-          if (isStaleConfirm(reason)) void refresh();
-          else setError(key, confirmErrorText(reason));
+          if (isStaleConfirm(reason)) {
+            void refresh().then(settle);
+          } else {
+            settle();
+            setError(key, confirmErrorText(reason));
+          }
         },
       );
     },

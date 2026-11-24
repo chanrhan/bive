@@ -14,14 +14,19 @@ import { RULES } from './checklists/scr-03.js';
 import {
   CONFIRMATION_FILTERS,
   FIXTURE_CHANGE_LIST,
+  FIXTURE_CHANGE_LIST_BROKEN,
+  FIXTURE_CHANGE_LIST_MORE,
   FIXTURE_CONFIRM_RULE4,
   FIXTURE_LIST,
   FIXTURE_LIST_AFTER_RULE4,
+  FIXTURE_TRUNCATED,
   ID,
   ITEM_RETIRED,
+  ITEM_RETIRED_TRUNCATED,
   ITEM_SUPERSEDED,
   ITEM_TEST_2,
   LONG_PATH,
+  LATER_OBJECTION_GROUNDS,
   LONG_TITLE,
   listOf,
   NEW_RULE_GROUNDS,
@@ -196,10 +201,16 @@ test.describe('목록 기본 · 빈 상태 (수용 기준 1)', () => {
     await expectScreen(page, 'SCR-17', '빈');
   });
 
-  test('잘린 목록: 전체 수와 보인 수 머리줄', async ({ page }) => {
-    await setup(page, { ...FIXTURE_LIST, total: 250, truncated: true });
+  test('잘린 목록: 전체 수와 보인 수 머리줄, 배지 = total, 툴팁은 자르기 전 종류별 수', async ({
+    page,
+  }) => {
+    await setup(page, FIXTURE_TRUNCATED);
     await expect(page.getByTestId('confirmation-truncated')).toHaveText('250건 중 7건 표시');
     await expect(page.getByTestId('todo-badge')).toHaveText('250');
+    await expect(page.getByTestId('todo-button')).toHaveAttribute(
+      'title',
+      '미확인 246 · 테스트 변경 2 · 폐기 1 · 대체 1',
+    );
   });
 });
 
@@ -418,6 +429,118 @@ test.describe('[확인] (수용 기준 2)', () => {
     await expect(page.getByTestId('confirm-error')).toHaveText('확인 실패');
     await expect(page.getByTestId('confirm-button')).toBeEnabled();
     await expect(cards(page)).toHaveCount(6);
+  });
+});
+
+test.describe('판단 기록 · 일부 생략 · 상세 다시 읽기', () => {
+  test('변경 기록 검증이 깨졌으면 판단 구역 안에 "변경 기록 검증 실패", 판단 카드는 그대로', async ({
+    page,
+  }) => {
+    await setup(page, FIXTURE_LIST, { 'normChange.list': { result: FIXTURE_CHANGE_LIST_BROKEN } });
+    await cardAt(page, 5).click();
+    const section = page.getByTestId('detail-section-judgments');
+    await expect(section.getByTestId('chain-broken')).toHaveText('변경 기록 검증 실패');
+    await expect(page.getByTestId('chain-broken')).toHaveCount(1);
+    await expect(section.getByTestId('judgment-card')).toHaveCount(2);
+    // 판단이 없는 항목에서도 검증 실패는 보인다 (판단 기록 없음과 함께)
+    await cardAt(page, 1).click();
+    await expect(section.getByTestId('chain-broken')).toHaveText('변경 기록 검증 실패');
+    await expect(section.getByTestId('judgments-empty')).toHaveText('판단 기록 없음');
+  });
+
+  test('검증이 정상이면 "변경 기록 검증 실패"가 없다', async ({ page }) => {
+    await setup(page);
+    await cardAt(page, 5).click();
+    await expect(page.getByTestId('judgment-card')).toHaveCount(2);
+    await expect(page.getByTestId('chain-broken')).toHaveCount(0);
+  });
+
+  test('판단 기록을 못 읽으면 판단 구역 안에 "판단 기록 불러오기 실패", 나머지 상세와 [확인]은 그대로 쓸 수 있다', async ({
+    page,
+  }) => {
+    const bive = await setup(page, FIXTURE_LIST, {
+      'normChange.list': { error: { code: -32603, message: '내부 오류' } },
+    });
+    await cardAt(page, 0).click();
+    const section = page.getByTestId('detail-section-judgments');
+    await expect(section.getByTestId('judgments-failed')).toHaveText('판단 기록 불러오기 실패');
+    await expect(page.getByTestId('judgments-failed')).toHaveCount(1);
+    await expect(section.getByTestId('judgment-card')).toHaveCount(0);
+    await expect(section.getByTestId('judgments-empty')).toHaveCount(0);
+    // 목록 항목에서 온 칸은 그대로 보인다
+    await expect(page.getByTestId('detail-grounds').locator('dd')).toHaveText(SUPERSEDE_GROUNDS);
+    // 판단 기록을 못 읽어도 [확인]은 막지 않는다 (ADR-119)
+    const button = page.getByTestId('confirm-button');
+    await expect(button).toBeEnabled();
+    await button.click();
+    await expect.poll(() => callsOf(bive, 'confirmation.set')).toHaveLength(1);
+  });
+
+  test('글이 상한에서 잘린 항목은 기록 구역 안에 "일부 생략"', async ({ page }) => {
+    await setup(page, listOf([ITEM_RETIRED_TRUNCATED, ITEM_SUPERSEDED]));
+    await cardAt(page, 0).click();
+    await expect(
+      page.getByTestId('detail-section-facts').getByTestId('detail-truncated'),
+    ).toHaveText('일부 생략');
+    await cardAt(page, 1).click();
+    await expect(page.getByTestId('detail-truncated')).toHaveCount(0);
+  });
+
+  test('상세가 열린 동안 규범 변경 알림이 오면 판단 기록을 다시 읽어 새 판단 카드를 보인다', async ({
+    page,
+  }) => {
+    const bive = await setup(page);
+    await cardAt(page, 5).click();
+    await expect(page.getByTestId('judgment-card')).toHaveCount(2);
+    const before = (await callsOf(bive, 'normChange.list')).length;
+    await bive.setResponse('normChange.list', { result: FIXTURE_CHANGE_LIST_MORE });
+    await bive.emit('event.normChange.appended', { projectId: PROJECT.id, lastSeq: 12 });
+    await expect(page.getByTestId('judgment-card')).toHaveCount(3);
+    await expect(page.getByTestId('judgment-grounds').last()).toHaveText(LATER_OBJECTION_GROUNDS);
+    expect((await callsOf(bive, 'normChange.list')).length).toBeGreaterThan(before);
+    // 다른 프로젝트 알림으로는 다시 읽지 않는다
+    await page.waitForTimeout(300);
+    const after = (await callsOf(bive, 'normChange.list')).length;
+    await bive.emit('event.normChange.appended', {
+      projectId: '01JCCCCCCCCCCCCCCCCCCCCCCC',
+      lastSeq: 13,
+    });
+    await page.waitForTimeout(500);
+    expect((await callsOf(bive, 'normChange.list')).length).toBe(after);
+  });
+});
+
+test.describe('[확인] 중복 방지', () => {
+  test('같은 틱에 두 번 눌러도 confirmation.set은 1회', async ({ page }) => {
+    const bive = await setup(page);
+    await cardAt(page, 1).click();
+    await page.getByTestId('confirm-button').evaluate((el) => {
+      (el as HTMLButtonElement).click();
+      (el as HTMLButtonElement).click();
+    });
+    await expect.poll(() => callsOf(bive, 'confirmation.set')).toHaveLength(1);
+    await page.waitForTimeout(500);
+    expect(await callsOf(bive, 'confirmation.set')).toHaveLength(1);
+  });
+
+  test('성공 뒤 목록 다시 읽기가 끝날 때까지 [확인]은 꺼져 있고 두 번째 요청은 가지 않는다', async ({
+    page,
+  }) => {
+    const bive = await setup(page);
+    await cardAt(page, 1).click();
+    // 성공 뒤 다시 읽기는 늦게 끝난다 (그 사이 목록은 아직 옛 항목)
+    await bive.setResponse('confirmation.list', { result: FIXTURE_LIST, delayMs: 1500 });
+    const button = page.getByTestId('confirm-button');
+    await button.click();
+    await expect.poll(() => callsOf(bive, 'confirmation.set')).toHaveLength(1);
+    await page.waitForTimeout(500);
+    await expect(button).toBeDisabled();
+    await expect(button).toHaveText('저장 중');
+    await button.evaluate((el) => (el as HTMLButtonElement).click());
+    expect(await callsOf(bive, 'confirmation.set')).toHaveLength(1);
+    // 다시 읽기가 끝나면 다시 켜진다 (항목이 그대로 남은 응답)
+    await expect(button).toBeEnabled({ timeout: 5000 });
+    expect(await callsOf(bive, 'confirmation.set')).toHaveLength(1);
   });
 });
 

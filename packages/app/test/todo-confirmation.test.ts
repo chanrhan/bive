@@ -23,10 +23,15 @@ import {
   FIXTURE_CONFIRM_RULE4,
   FIXTURE_ITEMS,
   FIXTURE_LIST,
+  FIXTURE_CHANGE_LIST_BROKEN,
+  FIXTURE_CHANGE_LIST_MORE,
   FIXTURE_LIST_AFTER_RULE4,
+  FIXTURE_TRUNCATED,
+  FIXTURE_TRUNCATED_ONE,
   ID,
   ITEM_REQ2,
   ITEM_RETIRED,
+  ITEM_RETIRED_TRUNCATED,
   ITEM_RULE3,
   ITEM_RULE5,
   ITEM_SUPERSEDED,
@@ -86,6 +91,20 @@ describe('e2e 가짜 응답이 shared 스키마와 맞는다', () => {
     );
     expect(NormChangeListResult.parse(FIXTURE_CHANGE_LIST)).toEqual(FIXTURE_CHANGE_LIST);
     expect(ConfirmationSetResult.parse(FIXTURE_CONFIRM_RULE4)).toEqual(FIXTURE_CONFIRM_RULE4);
+    // spec들이 쓰는 나머지 가짜 응답 (잘린 목록 · 잘린 글 · 깨진 체인 · 판단이 더해진 기록)
+    for (const list of [FIXTURE_TRUNCATED, FIXTURE_TRUNCATED_ONE]) {
+      expect(ConfirmationListResult.parse(list)).toEqual(list);
+    }
+    expect(
+      ConfirmationListResult.parse({ ...FIXTURE_LIST, items: [ITEM_RETIRED_TRUNCATED] }),
+    ).toBeTruthy();
+    for (const changes of [FIXTURE_CHANGE_LIST_BROKEN, FIXTURE_CHANGE_LIST_MORE]) {
+      expect(NormChangeListResult.parse(changes)).toEqual(changes);
+    }
+    // 종류별 수의 합이 total과 다른 응답은 스키마가 거부한다 (옛 spec의 잘린 목록 같은 것)
+    expect(
+      ConfirmationListResult.safeParse({ ...FIXTURE_LIST, total: 250, truncated: true }).success,
+    ).toBe(false);
     expect(FIXTURE_LIST.total).toBe(7);
     expect(FIXTURE_LIST_AFTER_RULE4.total).toBe(5);
   });
@@ -357,6 +376,30 @@ describe('판단 카드', () => {
     ]);
     const missing = judgmentCard({ ...FIXTURE_CHANGES[1], detail: {} } as NormChangeView);
     expect([missing.subject, missing.verdict]).toEqual(['알 수 없음', '알 수 없음']);
+  });
+});
+
+describe('판단 카드의 에이전트 글 표기', () => {
+  it('근거 · 모순 대상에 숨은 글자 원문이 섞여 오면 표기로, 이미 표기된 글은 그대로', () => {
+    const entry = {
+      ...FIXTURE_CHANGES[1],
+      reason: '근거 \u202e뒤집힘\u202c 끝 \\u200b',
+      detail: {
+        judgment: {
+          subject: 'supersede',
+          verdict: 'contradiction',
+          contradicts: [{ id: ID.rule1, displayId: 'RULE-001\u200b' }],
+          createdSeq: 1,
+          input: { requirements: { total: 1, included: 1 }, rules: { total: 1, included: 1 } },
+        },
+      },
+    } as NormChangeView;
+    const card = judgmentCard(entry);
+    expect(card.grounds).toBe('근거 \\u202e뒤집힘\\u202c 끝 \\u200b');
+    expect(card.contradicts).toEqual(['RULE-001\\u200b']);
+    for (const text of [card.grounds ?? '', ...card.contradicts]) {
+      expect(/[\u200b\u202a-\u202e\u2066-\u2069]/.test(text)).toBe(false);
+    }
   });
 });
 

@@ -98,6 +98,8 @@ export const LONG_PATH =
 export const RETIRE_GROUNDS = '요구사항 REQ-002 삭제로 "응답에 호스트 이름을 포함한다"의 근거 없음';
 export const RULE5_RATIONALE = 'REQ-001 본문의 시각 요구를 검사 가능한 규칙으로';
 export const NEW_RULE_GROUNDS = '기존 효력 규칙 RULE-004와 동시에 만족 가능';
+export const LATER_OBJECTION_GROUNDS =
+  '두 번째 이의도 진술 "응답 시각을 밀리초까지"와 맞지 않아 유지';
 export const OBJECTION_GROUNDS = '이의 글의 주장은 진술 "응답 시각을 밀리초까지"와 맞지 않아 유지';
 
 /** 대체 (확인 풀림): 맨 위. */
@@ -221,6 +223,28 @@ export const FIXTURE_LIST: ConfirmationListResult = listOf(FIXTURE_ITEMS);
 export const FIXTURE_LIST_AFTER_RULE4: ConfirmationListResult = listOf(
   FIXTURE_ITEMS.filter((item) => !('rule' in item) || item.rule.id !== ID.rule4),
 );
+
+/** 잘린 목록: 받은 항목 7개, 자르기 전 250개 (종류별 수의 합 = 250). */
+export const FIXTURE_TRUNCATED: ConfirmationListResult = {
+  items: [...FIXTURE_ITEMS],
+  total: 250,
+  truncated: true,
+  totalByKind: { retired: 1, superseded: 1, test_changed: 2, unconfirmed_norm: 246 },
+};
+
+/** 잘린 목록 (받은 항목 1개, 자르기 전 250개). */
+export const FIXTURE_TRUNCATED_ONE: ConfirmationListResult = {
+  items: [ITEM_SUPERSEDED],
+  total: 250,
+  truncated: true,
+  totalByKind: { retired: 0, superseded: 1, test_changed: 0, unconfirmed_norm: 249 },
+};
+
+/** 글이 상한에서 잘린 폐기 항목 (`textTruncated`). */
+export const ITEM_RETIRED_TRUNCATED = {
+  ...ITEM_RETIRED,
+  textTruncated: true,
+} as const satisfies ConfirmationListResult['items'][number];
 
 const entry = (
   seq: number,
@@ -352,6 +376,42 @@ export const FIXTURE_CHANGES: NormChangeView[] = [
 
 export const FIXTURE_CHANGE_LIST: NormChangeListResult = {
   entries: FIXTURE_CHANGES,
+  chain: { valid: true, brokenAtSeq: null, reason: null },
+};
+
+/** 체인 검증이 깨진 규범 변경 기록 응답 (기록은 그대로, 검증 결과만 실패). */
+export const FIXTURE_CHANGE_LIST_BROKEN: NormChangeListResult = {
+  entries: FIXTURE_CHANGES,
+  chain: { valid: false, brokenAtSeq: 4, reason: 'hash_mismatch' },
+};
+
+/** 판단 1건이 더해진 규범 변경 기록 (상세가 열린 동안 알림으로 다시 읽을 때). */
+export const FIXTURE_CHANGE_LIST_MORE: NormChangeListResult = {
+  entries: [
+    ...FIXTURE_CHANGES,
+    {
+      seq: 12,
+      at: at('11:30'),
+      kind: 'judgment',
+      actor: RULE_WRITER,
+      targetRef: { entity: 'Rule', id: ID.rule5 },
+      sessionId: ID.session,
+      runId: null,
+      reason: LATER_OBJECTION_GROUNDS,
+      detail: {
+        judgment: {
+          subject: 'objection',
+          verdict: 'upheld',
+          contradicts: [],
+          causeSeq: 11,
+          input: INPUT,
+        },
+      },
+      textTruncated: false,
+      prevHash: hash('1'),
+      hash: hash('2'),
+    },
+  ],
   chain: { valid: true, brokenAtSeq: null, reason: null },
 };
 

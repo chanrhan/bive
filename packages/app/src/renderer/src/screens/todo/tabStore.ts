@@ -8,9 +8,7 @@ export const TODO_TABS = [{ id: 'confirmation', label: '확인할 것' }] as con
 
 export type TodoTabId = (typeof TODO_TABS)[number]['id'];
 
-const FIRST_TAB: TodoTabId = TODO_TABS[0].id;
-
-let lastTab: TodoTabId = FIRST_TAB;
+let lastTab: TodoTabId = TODO_TABS[0].id;
 const listeners = new Set<() => void>();
 
 const subscribe = (listener: () => void): (() => void) => {
@@ -20,17 +18,14 @@ const subscribe = (listener: () => void): (() => void) => {
   };
 };
 
-export const getTodoTab = (): TodoTabId => lastTab;
+const getTodoTab = (): TodoTabId => lastTab;
 
 /** 마지막 탭을 바꾼다. 없는 탭이면 무시한다. */
-export const setTodoTab = (tab: TodoTabId): void => {
+const setTodoTab = (tab: TodoTabId): void => {
   if (tab === lastTab || !TODO_TABS.some((t) => t.id === tab)) return;
   lastTab = tab;
   for (const listener of [...listeners]) listener();
 };
-
-/** 첫 탭으로 되돌린다 (프로젝트 전환 등). */
-export const resetTodoTab = (): void => setTodoTab(FIRST_TAB);
 
 export const useTodoTab = (): [TodoTabId, (tab: TodoTabId) => void] => {
   const tab = useSyncExternalStore(subscribe, getTodoTab, getTodoTab);

@@ -8,6 +8,7 @@ import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import {
   FIXTURE_LIST,
+  FIXTURE_TRUNCATED_ONE,
   HIDDEN_TODO_TABS,
   ITEM_SUPERSEDED,
   listOf,
@@ -75,12 +76,7 @@ test.describe('알림 배지 · 툴팁 (수용 기준 3)', () => {
   });
 
   test('잘린 목록에서도 배지 = total, 툴팁 합 = 배지 (자르기 전 종류별 수)', async ({ page }) => {
-    await setup(page, {
-      items: [ITEM_SUPERSEDED],
-      total: 250,
-      truncated: true,
-      totalByKind: { retired: 0, superseded: 1, test_changed: 0, unconfirmed_norm: 249 },
-    });
+    await setup(page, FIXTURE_TRUNCATED_ONE);
     await expect(badge(page)).toHaveText('250');
     await expect(todoButton(page)).toHaveAttribute('title', '미확인 249 · 대체 1');
   });
