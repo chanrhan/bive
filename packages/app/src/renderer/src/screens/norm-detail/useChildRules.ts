@@ -4,10 +4,13 @@
 // - 늦게 온 이전 응답은 버린다
 // - `replace`: 펼친 자식 규칙의 직접 편집이 저장되면 응답의 규칙으로 그 항목을 바꾼다(옛 제목을 남기지 않음, M7-03).
 //   그 전에 보낸 요청의 결과는 편집 전 값일 수 있어 버리고, 버린 요청이 있었으면 한 번 다시 읽는다
+// - 규범 변경 알림(규칙 작성 세션의 새 규칙 · 폐기 · 대체, M7-14 · ADR-119)을 받으면 지금 목록을 둔 채 다시 읽는다
 // 실행 알림은 구독하지 않는다: 펼친 자식 규칙의 판정은 다시 들어올 때까지 낡을 수 있다(ADR-078 한계)
 import type { RuleWithJudgment } from '@bive/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { NORM_CHANGE_EVENT_NAMES } from '../../runs/refreshCoalescer.js';
+import { useEventRefresh } from '../../runs/useEventRefresh.js';
 import { replaceRuleItem } from '../rules/rulesView.js';
 
 import { childRulesOf } from './requirementDetailView.js';
@@ -61,6 +64,13 @@ export const useChildRules = (
     };
     // 수정 시각 · 다시 읽기 번호는 다시 읽는 계기로만 쓴다
   }, [projectId, requirementId, updatedAt, reload]);
+
+  // 규범 변경 알림: 다시 읽기 번호만 올린다(위 효과가 읽는다. 늦게 온 이전 응답은 위에서 버린다)
+  const refreshOnNormChange = useCallback((): Promise<void> => {
+    setReload((n) => n + 1);
+    return Promise.resolve();
+  }, []);
+  useEventRefresh(projectId, NORM_CHANGE_EVENT_NAMES, refreshOnNormChange);
 
   const replace = useCallback(
     (item: RuleWithJudgment): void => {

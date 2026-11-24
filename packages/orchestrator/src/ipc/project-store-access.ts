@@ -46,9 +46,53 @@ const assertRegistered = (biveHome: string, projectId: string): void => {
 };
 
 /**
+ * 규범 변경 기록이 늘어난 저장소 사용이 끝났을 때(닫은 뒤) 부르는 함수 (M7-14 #226, ADR-119). 던지지 않아야 한다.
+ * `lastSeq`는 그 사용이 끝난 순간의 마지막 순번이다.
+ */
+export type NormChangeAppendedListener = (projectId: string, lastSeq: number) => void;
+
+/** `$BIVE_HOME` → 규범 변경 알림 함수들. 한 프로세스에 오케스트레이터가 여럿(시험)이어도 섞이지 않게 홈별로 둔다 */
+const normChangeListeners = new Map<string, Set<NormChangeAppendedListener>>();
+
+/**
+ * 이 `$BIVE_HOME`의 저장소 사용에서 규범 변경 기록이 늘면 `listener`를 부르게 한다. 해제 함수를 돌려준다.
+ * 규범 변경 기록을 쓰는 곳(바로 반영 · 폐기 · 판단 · 자동 시작 · 테스트 변경 등)은 모두 아래 `withRegisteredProjectStore`로
+ * 저장소를 열므로, 쓰는 곳마다 알림 코드를 두지 않고 여기 한 곳에서 사용 전후의 마지막 순번을 비교한다(읽기만 한다).
+ */
+export const onNormChangeAppended = (
+  biveHome: string,
+  listener: NormChangeAppendedListener,
+): (() => void) => {
+  let set = normChangeListeners.get(biveHome);
+  if (set === undefined) {
+    set = new Set();
+    normChangeListeners.set(biveHome, set);
+  }
+  const entry: NormChangeAppendedListener = (projectId, lastSeq) => listener(projectId, lastSeq);
+  set.add(entry);
+  return () => {
+    const current = normChangeListeners.get(biveHome);
+    if (current === undefined) return;
+    current.delete(entry);
+    if (current.size === 0) normChangeListeners.delete(biveHome);
+  };
+};
+
+/** 마지막 규범 변경 순번. 읽지 못하면 `null`(알림만 건너뛴다. 저장소 사용의 결과를 바꾸지 않는다). */
+const lastNormChangeSeq = (store: ProjectStore): number | null => {
+  try {
+    return store.normChanges.lastSeq();
+  } catch {
+    return null;
+  }
+};
+
+/**
  * 등록된 프로젝트의 저장소를 열어 함수를 실행하고 닫는다. 함수가 던진 오류는 그대로 다시 던진다
  * (오케스트레이터 내부 API용, 예: `ProposalService.submit`). 등록부에 없거나 프로젝트별 DB · 프로젝트 행이
  * 없으면 -32004 `RpcError` (저장소를 새로 만들지 않는다).
+ * 이 홈에 규범 변경 알림 함수가 있으면 사용 전후의 마지막 규범 변경 순번을 읽어, 늘었으면 닫은 뒤(커밋 뒤) 알린다.
+ * 함수가 던져도 그 전에 커밋된 기록이 있으면 알린다.
  */
 export const withRegisteredProjectStore = <T>(
   biveHome: string,
@@ -63,11 +107,25 @@ export const withRegisteredProjectStore = <T>(
     if (error instanceof NotFoundError) throw projectNotFound(projectId);
     throw error;
   }
+  const listeners = normChangeListeners.get(biveHome);
+  let before: number | null = null;
+  let after: number | null = null;
   try {
     if (store.getProject() === null) throw projectNotFound(projectId);
+    if (listeners !== undefined) before = lastNormChangeSeq(store);
     return fn(store);
   } finally {
+    if (before !== null) after = lastNormChangeSeq(store);
     store.close();
+    if (listeners !== undefined && before !== null && after !== null && after > before) {
+      for (const listener of [...listeners]) {
+        try {
+          listener(projectId, after);
+        } catch {
+          // 알림 실패는 저장소 사용의 결과를 바꾸지 않는다
+        }
+      }
+    }
   }
 };
 

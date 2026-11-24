@@ -9,8 +9,14 @@
 /** 렌더러가 다시 조회하는 실행 알림 이름 (shared `RUN_EVENT_NAMES`와 같음, 시험이 대조한다). */
 export const RUN_EVENT_NAMES = ['event.run.updated', 'event.step.updated'] as const;
 
-/** 할 일 배지 · 할 일 목록이 다시 조회하는 제안 알림 이름 (shared `PROPOSAL_EVENT_NAMES`와 같음, 시험이 대조한다). */
-export const PROPOSAL_EVENT_NAMES = ['event.proposal.changed'] as const;
+/**
+ * 할 일 배지 · 확인할 것 · 규칙 · 요구사항 상세의 자식 규칙 · 검증 화면이 다시 조회하는 규범 변경 알림 이름 (shared
+ * `NORM_CHANGE_EVENT_NAMES`와 같음, 시험이 대조한다, M7-14 · ADR-119).
+ */
+export const NORM_CHANGE_EVENT_NAMES = ['event.normChange.appended'] as const;
+
+/** 규칙 · 검증 화면이 다시 조회하는 알림: 실행 알림 + 규범 변경 알림 (폐기 · 대체 · 새 규칙은 실행 알림 없이도 생긴다). */
+export const NORM_VIEW_EVENT_NAMES = [...RUN_EVENT_NAMES, ...NORM_CHANGE_EVENT_NAMES] as const;
 
 /** 요구사항 상세의 규칙 작성 상태가 다시 조회하는 알림 이름 (shared `RULE_WRITER_EVENT_NAMES`와 같음, 시험이 대조한다). */
 export const RULE_WRITER_EVENT_NAMES = ['event.ruleWriter.changed'] as const;

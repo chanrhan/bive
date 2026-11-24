@@ -1,30 +1,41 @@
-// SCR-17 승인 대기: 목록 · 상세 · 수정 · 거절 · 승인 (이슈 #40 수용 기준 1~4, screens.md SCR-17, NRM-04 · TODO-01,
-// ADR-029 · ADR-035 · ADR-050 · ADR-063).
-// 앱을 열면 가짜 브리지의 project.current 응답으로 프로젝트가 열린 상태가 된다. 제안 · 요구사항 · 승인 기록 데이터도
-// 가짜 브리지로 준다. 데이터:
-//   대기  PRP-001 규칙 신규(부모 REQ-001, 안 읽음) · PRP-003 요구사항 신규(읽음)
-//   처리됨 PRP-004 규칙 신규 거절(사유 "범위 밖") · PRP-005 규칙 신규 수정 후 승인(제목 수정)
+// SCR-17 자리 확인할 것: 목록 · 상세 · [확인] · 판단 카드 · 필터 · 배치 (이슈 #226 수용 기준 1 · 2 · 4, screens.md 6장 할 일 · SCR-17,
+// TODO-01 · NRM-04, ADR-100 명세 변경 SCR-17 · D2 · D3 · B⑦ · D8, ADR-113 · ADR-119).
+// 옛 승인 대기의 승인 · 수정 · 거절 시험은 기능이 대체되어(ADR-063 · ADR-082 → ADR-119) 이 시험으로 바뀌었다.
+// 데이터는 가짜 브리지 응답(e2e/checklists/scr-17.ts, shared 스키마 대조는 test/todo-confirmation.test.ts)으로만 만든다:
+//   ① 대체 RULE-001(확인 풀림) · 폐기 RULE-002(미확인) ② 테스트 변경 RULE-004 2건(실행 2개) ③ 미확인 RULE-003 · RULE-005 · REQ-002
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import type {
-  ApprovalLogEntry,
-  ApprovalLogListResult,
-  Proposal,
-  ProposalCountResult,
-  ProposalKind,
-  Requirement,
-  Rule,
-} from '@bive/shared';
+import type { ConfirmationListResult } from '@bive/shared';
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
+import { REQUIREMENTS } from './checklists/scr-02.js';
+import { RULES } from './checklists/scr-03.js';
 import {
-  ACTION_LABELS,
-  APPROVAL_FILTERS,
-  DETAIL_SECTIONS,
-  PROCESSED_DETAIL_SECTIONS,
+  CONFIRMATION_FILTERS,
+  FIXTURE_CHANGE_LIST,
+  FIXTURE_CONFIRM_RULE4,
+  FIXTURE_LIST,
+  FIXTURE_LIST_AFTER_RULE4,
+  ID,
+  ITEM_RETIRED,
+  ITEM_SUPERSEDED,
+  ITEM_TEST_2,
+  LONG_PATH,
+  LONG_TITLE,
+  listOf,
+  NEW_RULE_GROUNDS,
+  OBJECTION_GROUNDS,
+  PROJECT,
+  REMOVED_ACTIONS,
+  RLO_RATIONALE_SHOWN,
+  RULE1_BEFORE,
+  RULE3_AFTER,
+  RULE5_RATIONALE,
+  RULE5_STATEMENT,
+  SUPERSEDE_GROUNDS,
 } from './checklists/scr-17.js';
-import { type BiveMock, mockBive } from './support/bive-mock.js';
+import { type BiveMock, mockBive, type MockResponses } from './support/bive-mock.js';
 import {
   collectVisibleText,
   expectScreen,
@@ -37,219 +48,38 @@ import {
   LIST_PANE_MAX,
   LIST_PANE_MIN,
   listPaneOverflow,
-  NARROW_WIDTHS,
   paneWidths,
-  sameRow,
   textClipping,
-  WIDE_WIDTH,
 } from './support/overflow.js';
 
-const PROJECT_ID = '01JBVE0000000000000000000P';
-const PROJECT = {
-  id: PROJECT_ID,
-  name: 'sample-next-app',
-  rootPath: '/tmp/sample-next-app',
-  baseBranch: 'main',
-  createdAt: '2026-10-16T00:00:00.000Z',
-} as const;
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
+const SERVER_ORDER = [
+  'RULE-001',
+  'RULE-002',
+  'RULE-004',
+  'RULE-004',
+  'RULE-003',
+  'RULE-005',
+  'REQ-002',
+] as const;
 
-const ID = {
-  p1: '01JBVE0000000000000000P001',
-  p3: '01JBVE0000000000000000P003',
-  p4: '01JBVE0000000000000000P004',
-  p5: '01JBVE0000000000000000P005',
-  req: '01JBVE000000000000000000R1',
-  rule: '01JBVE000000000000000000U1',
-} as const;
-const HUMAN = { kind: 'human' } as const;
+/** 화면에 날 코드 값(enum · 역할 ID)이 보이면 안 된다 (ADR-119, 1.1 코드 표기 금지). */
+const RAW_CODES =
+  /\b(?:no_contradiction|contradiction|upheld|superseded|retired|test_changed|unconfirmed_norm|unconfirmed|new_rule|supersede|objection|requirement_change|check_failure|rule-writer|test-writer|implementer|orchestrator|modified|removed)\b/;
 
-const rulePayload = (title: string): Record<string, unknown> => ({
-  title,
-  statement: `WHEN 클라이언트가 헬스 체크를 요청하면 THE SYSTEM SHALL ${title}`,
-  kind: 'business',
-  checkKinds: ['test'],
-  parentRequirementId: ID.req,
-});
-
-const base = {
-  targetRef: { entity: 'Requirement', id: ID.req },
-  rationale: '요구사항 문장에서 검사 가능한 규칙을 뽑음',
-  author: { kind: 'agent', role: 'rule-writer' },
-  source: 'rule_generation',
-  risk: null,
-  readAt: null,
-  state: 'pending',
-  decision: null,
-  adrId: null,
-  runId: null,
-} as const satisfies Partial<Proposal>;
-
-const P1_PAYLOAD = rulePayload('헬스 응답에 서버 시각 포함');
-const P1: Proposal = {
-  ...base,
-  id: ID.p1,
-  displayId: 'PRP-001',
-  kind: 'rule_new',
-  payload: P1_PAYLOAD,
-  diff: { before: null, after: P1_PAYLOAD },
-  createdAt: '2026-10-16T01:00:00.000Z',
-};
-const P3: Proposal = {
-  ...base,
-  id: ID.p3,
-  displayId: 'PRP-003',
-  kind: 'requirement_new',
-  targetRef: null,
-  payload: { text: '헬스 응답에 호스트 이름을 포함한다' },
-  diff: { before: null, after: { text: '헬스 응답에 호스트 이름을 포함한다' } },
-  rationale: '채팅 지시에서 요구사항을 뽑음',
-  source: 'chat',
-  author: { kind: 'agent', role: 'chat' },
-  readAt: '2026-10-16T03:30:00.000Z',
-  createdAt: '2026-10-16T03:00:00.000Z',
-};
-const P4_PAYLOAD = rulePayload('헬스 응답에 메모리 사용량 포함');
-const P4: Proposal = {
-  ...base,
-  id: ID.p4,
-  displayId: 'PRP-004',
-  kind: 'rule_new',
-  payload: P4_PAYLOAD,
-  diff: { before: null, after: P4_PAYLOAD },
-  state: 'rejected',
-  readAt: '2026-10-15T09:10:00.000Z',
-  decision: { at: '2026-10-15T09:20:00.000Z', by: HUMAN, rejectReason: '범위 밖' },
-  createdAt: '2026-10-15T09:00:00.000Z',
-};
-const P5_PAYLOAD = rulePayload('헬스 응답에 가동 시간 포함');
-const P5_EDITED = { ...P5_PAYLOAD, title: '헬스 응답에 가동 시간(초) 포함' };
-const P5: Proposal = {
-  ...base,
-  id: ID.p5,
-  displayId: 'PRP-005',
-  kind: 'rule_new',
-  payload: P5_PAYLOAD,
-  diff: { before: null, after: P5_PAYLOAD },
-  state: 'approved',
-  readAt: '2026-10-15T08:10:00.000Z',
-  decision: {
-    at: '2026-10-15T08:20:00.000Z',
-    by: HUMAN,
-    appliedRef: { entity: 'Rule', id: ID.rule },
-    editedPayload: P5_EDITED,
-  },
-  createdAt: '2026-10-15T08:00:00.000Z',
-};
-const PROPOSALS = [P1, P3, P4, P5];
-
-const REQUIREMENT: Requirement = {
-  id: ID.req,
-  displayId: 'REQ-001',
-  text: '헬스 엔드포인트는 서버 상태를 알려 준다',
-  author: HUMAN,
-  normState: 'approved',
-  unrulable: null,
-  createdAt: '2026-10-15T00:00:00.000Z',
-  updatedAt: '2026-10-15T00:00:00.000Z',
-  updatedBy: HUMAN,
-  deletedAt: null,
-  confirmation: { state: 'unconfirmed' },
-};
-
-const RULE: Rule = {
-  id: ID.rule,
-  displayId: 'RULE-001',
-  title: String(P1_PAYLOAD.title),
-  statement: String(P1_PAYLOAD.statement),
-  kind: 'business',
-  checkKinds: ['test'],
-  parentRequirementId: ID.req,
-  parentDetachedAt: null,
-  builtin: false,
-  targetBlockIds: [],
-  risk: null,
-  contractId: null,
-  author: P1.author,
-  normState: 'approved',
-  createdAt: '2026-10-16T05:00:00.000Z',
-  updatedAt: '2026-10-16T05:00:00.000Z',
-  deletedAt: null,
-  confirmation: { state: 'unconfirmed' },
-};
-
-const hash = (c: string): string => c.repeat(64);
-const LOG_REJECT: ApprovalLogEntry = {
-  seq: 1,
-  at: '2026-10-15T09:20:00.000Z',
-  action: 'reject',
-  actor: HUMAN,
-  targetRef: { entity: 'Proposal', id: ID.p4 },
-  clientId: 'pipe-1',
-  detail: { reason: '범위 밖' },
-  prevHash: hash('0'),
-  hash: hash('a'),
-};
-const LOG_EDITED: ApprovalLogEntry = {
-  seq: 2,
-  at: '2026-10-15T08:20:00.000Z',
-  action: 'approve_edited',
-  actor: HUMAN,
-  targetRef: { entity: 'Proposal', id: ID.p5 },
-  clientId: 'pipe-1',
-  detail: {
-    diff: { before: P5_PAYLOAD, after: P5_EDITED },
-    appliedRef: { entity: 'Rule', id: ID.rule },
-  },
-  prevHash: hash('a'),
-  hash: hash('b'),
-};
-const LOG_APPROVE: ApprovalLogEntry = {
-  seq: 3,
-  at: '2026-10-16T05:00:00.000Z',
-  action: 'approve',
-  actor: HUMAN,
-  targetRef: { entity: 'Proposal', id: ID.p1 },
-  clientId: 'pipe-1',
-  detail: { appliedRef: { entity: 'Rule', id: ID.rule } },
-  prevHash: hash('b'),
-  hash: hash('c'),
-};
-const LOG_RESULT: ApprovalLogListResult = {
-  entries: [LOG_REJECT, LOG_EDITED],
-  chain: { valid: true, brokenAtSeq: null, reason: null },
-};
-
-const KINDS: ProposalKind[] = [
-  'requirement_new',
-  'requirement_change',
-  'rule_new',
-  'rule_change',
-  'contract_new',
-  'design_change',
-  'rule_title_change',
-  'contract_change',
-];
-const countOf = (proposals: readonly Proposal[]): ProposalCountResult => {
-  const pending = proposals.filter((p) => p.state === 'pending');
-  return {
-    pending: pending.length,
-    pendingByKind: Object.fromEntries(
-      KINDS.map((kind) => [kind, pending.filter((p) => p.kind === kind).length]),
-    ) as Record<ProposalKind, number>,
-  };
-};
-
-const setup = async (page: Page, proposals: readonly Proposal[] = PROPOSALS): Promise<BiveMock> => {
+const setup = async (
+  page: Page,
+  list: ConfirmationListResult = FIXTURE_LIST,
+  extra: MockResponses = {},
+): Promise<BiveMock> => {
   const bive = await mockBive(page, {
     responses: {
       'system.status': { result: STATUS },
       'project.current': { result: { project: PROJECT } },
-      'proposal.count': { result: countOf(proposals) },
-      'proposal.list': { result: { proposals: [...proposals] } },
-      'proposal.markRead': { result: { proposal: { ...P1, readAt: '2026-10-16T05:00:00.000Z' } } },
-      'requirement.get': { result: { requirement: REQUIREMENT } },
-      'approvalLog.list': { result: LOG_RESULT },
+      'confirmation.list': { result: list },
+      'normChange.list': { result: FIXTURE_CHANGE_LIST },
+      'confirmation.set': { result: FIXTURE_CONFIRM_RULE4 },
+      ...extra,
     },
   });
   await page.goto('/');
@@ -259,1090 +89,459 @@ const setup = async (page: Page, proposals: readonly Proposal[] = PROPOSALS): Pr
   return bive;
 };
 
-const card = (page: Page, displayId: string): Locator =>
-  page.locator(`[data-testid="card"][data-id="${displayId}"]`);
+const cards = (page: Page): Locator => page.getByTestId('list-items').getByTestId('card');
+const cardAt = (page: Page, index: number): Locator => cards(page).nth(index);
 const detail = (page: Page): Locator => page.getByTestId('todo-detail');
-const action = (page: Page, id: 'reject' | 'edit' | 'approve'): Locator =>
-  page.getByTestId(`action-${id}`);
 const callsOf = async (bive: BiveMock, method: string): Promise<unknown[]> =>
   (await bive.calls()).filter((c) => c.method === method).map((c) => c.params);
 
-/** 상세 구획 testId를 DOM 순서대로. */
+/** 상세 구획을 DOM 순서대로. */
 const sectionOrder = (page: Page): Promise<string[]> =>
   detail(page)
     .locator('[data-detail-section]')
     .evaluateAll((els) => els.map((el) => el.getAttribute('data-detail-section') ?? ''));
 
-/** 화면 상태 스크린샷 (artifacts/screens/SCR-17/<이름>.png) + 화면 문구 규칙 검사 (screens.md 1.1). */
+/** 화면 상태 스크린샷 (artifacts/screens/SCR-17/<이름>.png) + 화면 문구 규칙 · 날 코드 값 검사. */
 const snapshot = async (page: Page, name: string): Promise<void> => {
   const file = path.join(SCREENSHOT_DIR, 'SCR-17', `${name}.png`);
   await mkdir(path.dirname(file), { recursive: true });
   await page.screenshot({ path: file, fullPage: true });
-  expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
+  const texts = await collectVisibleText(page);
+  expect(findForbiddenText(texts)).toEqual([]);
+  expect(texts.filter(({ text }) => RAW_CODES.test(text))).toEqual([]);
 };
 
-/** 처리 상태 필터 값을 고른다 (기본 '대기'). */
-const chooseStates = async (page: Page, states: readonly string[]): Promise<void> => {
-  const chip = page.getByTestId('filter-chip-state');
+/** 필터 칩의 값 하나를 켠다. */
+const choose = async (page: Page, criterion: string, value: string): Promise<void> => {
+  const chip = page.getByTestId(`filter-chip-${criterion}`);
   await chip.getByTestId('filter-chip-button').click();
-  for (const value of ['pending', 'approved', 'rejected']) {
-    const box = chip.locator(`[data-testid="filter-option"][data-value="${value}"] input`);
-    if (states.includes(value)) await box.check();
-    else await box.uncheck();
-  }
+  await chip.locator(`[data-testid="filter-option"][data-value="${value}"] input`).check();
   await page.keyboard.press('Escape');
 };
 
+/** 칩 메뉴를 열어 값 → 개수를 읽는다. */
+const optionCounts = async (page: Page, criterion: string): Promise<Record<string, string>> => {
+  const chip = page.getByTestId(`filter-chip-${criterion}`);
+  await chip.getByTestId('filter-chip-button').click();
+  const options = chip.getByTestId('filter-option');
+  const values = await options.evaluateAll((els) =>
+    els.map((el) => [
+      el.getAttribute('data-value') ?? '',
+      el.querySelector('[data-testid="filter-count"]')?.textContent ?? '',
+    ]),
+  );
+  await page.keyboard.press('Escape');
+  return Object.fromEntries(values);
+};
+
 test.describe('목록 기본 · 빈 상태 (수용 기준 1)', () => {
-  test('기본: 카드 1줄 종류 태그 · 제목, 2줄 ID · 예외 · 시각, 안 읽음 점', async ({ page }) => {
+  test('기본: 서버 순서 그대로(폐기 · 대체 맨 위), 1줄 종류 태그 · 제목, 2줄 ID · 예외 · 시각, 처리 버튼 · 상한 없음', async ({
+    page,
+  }) => {
     await setup(page);
     await expectScreen(page, 'SCR-17', '기본');
 
-    const rule = card(page, 'PRP-001');
-    await expect(rule.getByTestId('card-tag')).toHaveText('신규');
-    await expect(rule.getByTestId('card-title')).toHaveText(String(P1_PAYLOAD.title));
-    await expect(rule.getByTestId('card-id')).toHaveText('PRP-001');
-    await expect(rule.locator('time')).toHaveAttribute('datetime', P1.createdAt);
-    await expect(rule.getByTestId('card-unread')).toBeVisible();
-    await expect(card(page, 'PRP-003').getByTestId('card-tag')).toHaveText('요구사항');
-    await expect(card(page, 'PRP-003').getByTestId('card-unread')).toHaveCount(0);
-    // 처리됨은 기본 '대기' 필터에서 빠진다
-    await expect(page.getByTestId('card-id')).toHaveText(['PRP-003', 'PRP-001']);
+    // 순서: 서버가 준 그대로 (문제 우선 · 시각 정렬을 하면 RULE-003(10:00)이 둘째로 올라온다)
+    await expect(cards(page).getByTestId('card-id')).toHaveText([...SERVER_ORDER]);
+    await expect(cards(page).getByTestId('card-tag')).toHaveText([
+      '대체',
+      '폐기',
+      '변경',
+      '변경',
+      '신규',
+      '신규',
+      '요구사항',
+    ]);
+    await expect(cards(page).getByTestId('card-exception')).toHaveText([
+      '확인 풀림',
+      '미확인',
+      '테스트 변경',
+      '테스트 변경',
+      '미확인',
+      '미확인',
+      '미확인',
+    ]);
+    await expect(cards(page).getByTestId('card-title')).toHaveText([
+      RULE1_BEFORE.title,
+      ITEM_RETIRED.before.title,
+      ITEM_TEST_2.title,
+      ITEM_TEST_2.title,
+      RULE3_AFTER.title,
+      LONG_TITLE,
+      '헬스 응답에 리전 이름을 포함한다',
+    ]);
+    // 자리: 태그 · 제목은 1줄, ID · 예외 · 시각은 2줄
+    const first = cardAt(page, 0);
+    await expect(first.locator('.card-line-1').getByTestId('card-tag')).toHaveText('대체');
+    await expect(first.locator('.card-line-1').getByTestId('card-title')).toHaveText(
+      RULE1_BEFORE.title,
+    );
+    const line2 = first.getByTestId('card-line-2');
+    await expect(line2.getByTestId('card-id')).toHaveText('RULE-001');
+    await expect(line2.getByTestId('card-exception')).toHaveText('확인 풀림');
+    await expect(line2.locator('time')).toHaveAttribute('datetime', ITEM_SUPERSEDED.at);
+    const ids = await line2.evaluate((el) =>
+      [...el.children].map((c) => c.getAttribute('data-testid') ?? c.tagName.toLowerCase()),
+    );
+    expect(ids.indexOf('card-id')).toBeLessThan(ids.indexOf('card-exception'));
+    // 처리 버튼 · 상한 머리줄 없음 (D8)
+    for (const name of REMOVED_ACTIONS) {
+      await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
+    }
+    await expect(page.getByText(/상한/)).toHaveCount(0);
   });
 
-  test('빈: 대기 항목 없음', async ({ page }) => {
-    await setup(page, []);
+  test('빈: 확인할 항목 없음', async ({ page }) => {
+    await setup(page, listOf([]));
     await expectScreen(page, 'SCR-17', '빈');
+  });
+
+  test('잘린 목록: 전체 수와 보인 수 머리줄', async ({ page }) => {
+    await setup(page, { ...FIXTURE_LIST, total: 250, truncated: true });
+    await expect(page.getByTestId('confirmation-truncated')).toHaveText('250건 중 7건 표시');
+    await expect(page.getByTestId('todo-badge')).toHaveText('250');
   });
 });
 
 test.describe('상세 (수용 기준 2)', () => {
-  test('출처 → 에이전트 제안(변경 내용 · 근거 · 생성 주체) → 승인하면 → 거절하면, 오른쪽 아래 떠 있는 버튼', async ({
+  test('대체: 변경 전후 diff · 사유(숨은 글자 표기) · 근거 · 생성 주체 · 판단 카드(모순) · 대상과 대체 규칙 링크', async ({
     page,
   }) => {
     const bive = await setup(page);
-    await card(page, 'PRP-001').click();
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-001');
+    await cardAt(page, 0).click();
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'RULE-001');
+    await expect
+      .poll(() => sectionOrder(page))
+      .toEqual(['head', 'diff', 'facts', 'judgments', 'links']);
+    await expect(page.getByTestId('detail-tag')).toHaveText('대체');
+    await expect(page.getByTestId('detail-title')).toHaveText(RULE1_BEFORE.title);
+    await expect(page.getByTestId('detail-exception')).toHaveText('확인 풀림');
 
-    // 구획 순서와 제목
-    await expect.poll(() => sectionOrder(page)).toEqual(DETAIL_SECTIONS.map((s) => s.id));
-    for (const { id, title } of DETAIL_SECTIONS) {
-      await expect(page.getByRole('region', { name: title, exact: true })).toHaveAttribute(
-        'data-testid',
-        `detail-${id}`,
+    const rows = page.getByTestId('detail-diff-row');
+    await expect(rows.locator('dt')).toHaveText(['제목', '진술']);
+    await expect(rows.nth(0).getByTestId('diff-before')).toHaveText(`이전${RULE1_BEFORE.title}`);
+    await expect(rows.nth(0).getByTestId('diff-after')).toHaveText(`이후${RULE3_AFTER.title}`);
+    await expect(rows.nth(1).getByTestId('diff-before')).toHaveText(
+      `이전${RULE1_BEFORE.statement}`,
+    );
+    await expect(rows.nth(1).getByTestId('diff-after')).toHaveText(`이후${RULE3_AFTER.statement}`);
+
+    // 사유의 U+202E는 표기로 (원문 글자가 화면에 남지 않음), 이미 표시 값인 근거는 그대로(역슬래시 하나)
+    await expect(page.getByTestId('detail-rationale').locator('dd')).toHaveText(
+      RLO_RATIONALE_SHOWN,
+    );
+    const rationale = await page.getByTestId('detail-rationale').locator('dd').innerText();
+    expect(rationale.includes('\u202e')).toBe(false);
+    await expect(page.getByTestId('detail-grounds').locator('dd')).toHaveText(SUPERSEDE_GROUNDS);
+    await expect(page.getByTestId('detail-author').locator('dd')).toHaveText(
+      '에이전트 · 규칙 작성',
+    );
+
+    // 판단 카드: 대체는 새 규칙(RULE-003)을 대상으로 남은 모순 판단
+    const card = page.getByTestId('judgment-card');
+    await expect(card).toHaveCount(1);
+    await expect(card.getByTestId('judgment-subject')).toHaveText('모순 판단');
+    await expect(card.getByTestId('judgment-verdict')).toHaveText('모순');
+    await expect(card.getByTestId('judgment-contradicts')).toHaveText('모순 대상 · RULE-001');
+    await expect(card.getByTestId('judgment-grounds')).toHaveText(SUPERSEDE_GROUNDS);
+
+    await expect(page.getByTestId('detail-link')).toHaveText([
+      '대상 · RULE-001',
+      '대체 규칙 · RULE-003',
+    ]);
+    // 대상(옛 규칙)과 대체 규칙의 기록을 읽는다
+    await expect
+      .poll(() => callsOf(bive, 'normChange.list'))
+      .toEqual(
+        expect.arrayContaining([
+          { projectId: PROJECT.id, targetRef: { entity: 'Rule', id: ID.rule1 } },
+          { projectId: PROJECT.id, targetRef: { entity: 'Rule', id: ID.rule3 } },
+        ]),
       );
-    }
-    await expect(page.getByTestId('detail-title')).toHaveText(String(P1_PAYLOAD.title));
-    await expect(page.getByTestId('detail-id')).toHaveText('PRP-001');
-
-    // 출처: 생성 경로 + 부모 요구사항(requirement.get 결과)
-    await expect(page.getByTestId('source-path')).toContainText('규칙 자동 생성');
-    await expect(page.getByTestId('source-parent')).toContainText(`REQ-001 · ${REQUIREMENT.text}`);
-    expect(await callsOf(bive, 'requirement.get')).toContainEqual({
-      projectId: PROJECT_ID,
-      id: ID.req,
-    });
-
-    // 에이전트 제안: 변경 내용(신규 → 추가만) · 근거 · 생성 주체(에이전트 · 역할명)
-    const diff = page.getByTestId('proposal-diff');
-    await expect(diff.getByTestId('diff-row')).toHaveCount(5);
-    await expect(diff.locator('[data-key="title"] [data-testid="diff-after"]')).toHaveText(
-      String(P1_PAYLOAD.title),
-    );
-    await expect(diff.locator('[data-key="kind"]')).toContainText('비즈니스');
-    await expect(diff.locator('[data-key="checkKinds"]')).toContainText('인수 테스트');
-    await expect(diff.locator('[data-key="parentRequirementId"]')).toContainText('REQ-001');
-    await expect(diff.getByTestId('diff-before')).toHaveCount(0);
-    await expect(page.getByTestId('proposal-rationale')).toContainText(P1.rationale);
-    await expect(page.getByTestId('proposal-author')).toContainText('에이전트 · 규칙 작성');
-    await expect(page.getByTestId('detail-if-approve')).toContainText('규칙 추가');
-    await expect(page.getByTestId('detail-if-reject')).toContainText('규범 변경 없음');
-    // 예상 비용 미표시
-    await expect(detail(page).getByText(/비용/)).toHaveCount(0);
-
-    // [거절] [수정] [승인] 순서, 상세 오른쪽 아래에 떠 있음
-    const bar = page.getByTestId('floating-actions');
-    await expect(bar.getByRole('button')).toHaveText([...ACTION_LABELS]);
-    await expect(bar).toHaveCSS('position', 'absolute');
-    const pane = await detail(page).boundingBox();
-    const box = await bar.boundingBox();
-    if (pane === null || box === null) throw new Error('상세 · 버튼 영역 없음');
-    const right = pane.x + pane.width - (box.x + box.width);
-    const bottom = pane.y + pane.height - (box.y + box.height);
-    expect(right).toBeGreaterThanOrEqual(0);
-    expect(right).toBeLessThan(40);
-    expect(bottom).toBeGreaterThanOrEqual(0);
-    expect(bottom).toBeLessThan(40);
-    // 버튼 묶음의 가운데가 상세의 오른쪽 아래 사분면에 있다
-    expect(box.x + box.width / 2).toBeGreaterThan(pane.x + pane.width / 2);
-    expect(box.y + box.height / 2).toBeGreaterThan(pane.y + pane.height / 2);
-    await snapshot(page, '상세');
-
-    // 처리하지 않으면 처리 RPC를 부르지 않는다
-    for (const method of ['proposal.approve', 'proposal.amend', 'proposal.reject']) {
-      expect(await callsOf(bive, method)).toEqual([]);
-    }
+    await snapshot(page, '상세-대체');
   });
 
-  test('요구사항 제안: 부모 없음, 변경 내용은 문장', async ({ page }) => {
-    const bive = await setup(page);
-    await card(page, 'PRP-003').click();
-    await expect.poll(() => sectionOrder(page)).toEqual(DETAIL_SECTIONS.map((s) => s.id));
-    await expect(page.getByTestId('source-path')).toContainText('채팅 지시');
-    await expect(page.getByTestId('source-parent')).toHaveCount(0);
-    await expect(page.getByTestId('proposal-author')).toContainText('에이전트 · 채팅');
-    await expect(
-      page.getByTestId('proposal-diff').locator('[data-key="text"] [data-testid="diff-after"]'),
-    ).toHaveText('헬스 응답에 호스트 이름을 포함한다');
-    await expect(page.getByTestId('detail-if-approve')).toContainText('요구사항 추가');
-    expect(await callsOf(bive, 'requirement.get')).toEqual([]);
-  });
-});
-
-/** 스크린샷 이름. 기본 창은 상태 이름 그대로, 좁은 창은 폭을 붙인다 (#179). */
-type Shot = (name: string) => string;
-const asIs: Shot = (name) => name;
-
-/**
- * [수정] 흐름 (수용 기준 3): 대화 끝 카드 · 자동 스크롤 · 포커스, 빈 문장은 문구와 확인 비활성, 수정 후 승인 1회.
- * 창 폭은 `width`, 높이는 상세가 화면보다 길어 스크롤이 필요한 560px.
- */
-const editFlow = async (page: Page, width: number, shot: Shot): Promise<void> => {
-  // 상세가 화면보다 길어 스크롤이 필요한 높이
-  await page.setViewportSize({ width, height: 560 });
-  const bive = await setup(page);
-  await card(page, 'PRP-001').click();
-  await expect(page.getByTestId('detail-if-reject')).toBeVisible();
-  const scroller = page.getByTestId('proposal-detail');
-  expect(await scroller.evaluate((el) => el.scrollTop)).toBe(0);
-
-  await action(page, 'edit').click();
-  const editCard = page.getByTestId('edit-card');
-  await expect(editCard).toBeVisible();
-  await expect(action(page, 'edit')).toHaveAttribute('aria-pressed', 'true');
-  // 대화 끝 카드: 상세 내용의 마지막 요소
-  expect(await editCard.evaluate((el) => el.parentElement?.lastElementChild === el)).toBe(true);
-  await expect(editCard).toBeInViewport({ ratio: 1 });
-  expect(await scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
-  // 자동 스크롤은 카드 끝을 떠 있는 버튼 위에 둔다 (카드의 확인 버튼이 가려지지 않음)
-  const cardBox = await editCard.boundingBox();
-  const barBox = await page.getByTestId('floating-actions').boundingBox();
-  if (cardBox === null || barBox === null) throw new Error('카드 · 버튼 영역 없음');
-  expect(cardBox.y + cardBox.height).toBeLessThanOrEqual(barBox.y);
-  const title = page.getByTestId('edit-title');
-  await expect(title).toBeFocused();
-  await expect(title).toHaveValue(String(P1_PAYLOAD.title));
-  await expect(page.getByTestId('edit-statement')).toHaveValue(String(P1_PAYLOAD.statement));
-  await snapshot(page, shot('수정'));
-
-  // 빈 문장: 화면 문구 + 확인 비활성
-  const confirm = page.getByTestId('edit-confirm');
-  await title.fill('   ');
-  await expect(page.getByTestId('edit-error')).toHaveText('제목 비어 있음');
-  await expect(title).toHaveAttribute('aria-invalid', 'true');
-  await expect(confirm).toBeDisabled();
-  await title.fill('헬스 응답에 UTC 서버 시각 포함');
-  await expect(page.getByTestId('edit-error')).toHaveCount(0);
-  await expect(confirm).toBeEnabled();
-
-  // 고친 진술이 EARS 형식이 아니면 화면 문구 + 확인 비활성 (조건 안 낱말 shall · 여러 줄 · 형식 없음)
-  const statement = page.getByTestId('edit-statement');
-  for (const bad of [
-    'WHEN A PAYMENT THAT THE BUYER SHALL CONFIRM EXPIRES THE SYSTEM SHALL CANCEL',
-    'WHEN 결제\n취소 THE SYSTEM SHALL 환불',
-    '헬스 요청을 받으면 시스템은 시각을 응답한다',
-  ]) {
-    await statement.fill(bad);
-    await expect(page.getByTestId('edit-error')).toHaveText(
-      '진술 형식 오류 (WHEN 조건 THE SYSTEM SHALL 응답)',
-    );
-    await expect(statement).toHaveAttribute('aria-invalid', 'true');
-    await expect(confirm).toBeDisabled();
-    await statement.press('Control+Enter');
-  }
-  expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
-  await statement.fill(String(P1_PAYLOAD.statement));
-  await expect(page.getByTestId('edit-error')).toHaveCount(0);
-  await expect(confirm).toBeEnabled();
-
-  // 처리 뒤 목록 · 배지 응답
-  const approved: Proposal = {
-    ...P1,
-    readAt: '2026-10-16T05:00:00.000Z',
-    state: 'approved',
-    decision: {
-      at: '2026-10-16T05:00:00.000Z',
-      by: HUMAN,
-      appliedRef: { entity: 'Rule', id: ID.rule },
-    },
-  };
-  await bive.setResponse('proposal.amend', {
-    result: {
-      proposal: approved,
-      applied: { entity: 'Rule', rule: RULE },
-      approvalLog: LOG_APPROVE,
-    },
-    delayMs: 1500,
-  });
-  await bive.setResponse('proposal.list', { result: { proposals: [approved, P3, P4, P5] } });
-  await bive.setResponse('proposal.count', { result: countOf([approved, P3, P4, P5]) });
-  const listCalls = (await callsOf(bive, 'proposal.list')).length;
-  const countCalls = (await callsOf(bive, 'proposal.count')).length;
-
-  // 저장 중 재전송 없음: 두 번 눌러도 1회
-  await confirm.click();
-  await expect(page.getByTestId('floating-actions-busy')).toHaveText('처리 중');
-  await expect(action(page, 'approve')).toBeDisabled();
-  await confirm.click({ force: true });
-  await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
-  expect(await callsOf(bive, 'proposal.amend')).toEqual([
-    {
-      projectId: PROJECT_ID,
-      id: ID.p1,
-      author: HUMAN,
-      edited: { ...P1_PAYLOAD, title: '헬스 응답에 UTC 서버 시각 포함' },
-    },
-  ]);
-  expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
-
-  // 처리된 항목은 대기 필터에서 빠지고 목록 · 배지를 다시 읽는다
-  await expect(page.getByTestId('card-id')).toHaveText(['PRP-003']);
-  await expect(page.getByTestId('todo-badge')).toHaveText('1');
-  expect((await callsOf(bive, 'proposal.list')).length).toBeGreaterThan(listCalls);
-  expect((await callsOf(bive, 'proposal.count')).length).toBeGreaterThan(countCalls);
-  await expect(detail(page).getByTestId('empty-state')).toHaveText('선택 항목 없음');
-};
-
-/** [거절] 흐름 (수용 기준 3): 대화 끝 카드 · 포커스, 사유가 비면 확인 비활성, 조합 중 키는 가로채지 않음, 거절 1회. */
-const rejectFlow = async (page: Page, shot: Shot): Promise<void> => {
-  const bive = await setup(page);
-  await card(page, 'PRP-001').click();
-  await action(page, 'reject').click();
-
-  const rejectCard = page.getByTestId('reject-card');
-  await expect(rejectCard).toBeVisible();
-  expect(await rejectCard.evaluate((el) => el.parentElement?.lastElementChild === el)).toBe(true);
-  await expect(rejectCard).toBeInViewport();
-  const reason = page.getByTestId('reject-reason');
-  await expect(reason).toBeFocused();
-  const confirm = page.getByTestId('reject-confirm');
-  await expect(confirm).toBeDisabled();
-  await reason.fill('  \n ');
-  await expect(confirm).toBeDisabled();
-  // 공백만이면 단축키로도 보내지 않는다
-  await reason.press('Control+Enter');
-  expect(await callsOf(bive, 'proposal.reject')).toEqual([]);
-  await snapshot(page, shot('거절'));
-
-  await reason.fill('헬스 응답 범위 밖');
-  await expect(confirm).toBeEnabled();
-
-  // 한글 조합 중의 Enter · Esc는 조합 확정용이라 확인 · 닫기로 쓰지 않는다
-  const composing = (key: string, ctrlKey: boolean): Promise<void> =>
-    reason.evaluate(
-      (el, init) =>
-        void el.dispatchEvent(
-          new KeyboardEvent('keydown', {
-            ...init,
-            bubbles: true,
-            cancelable: true,
-            isComposing: true,
-          }),
-        ),
-      { key, ctrlKey },
-    );
-  await composing('Enter', true);
-  await composing('Escape', false);
-  await expect(rejectCard).toBeVisible();
-  expect(await callsOf(bive, 'proposal.reject')).toEqual([]);
-
-  const rejected: Proposal = {
-    ...P1,
-    state: 'rejected',
-    decision: { at: '2026-10-16T05:00:00.000Z', by: HUMAN, rejectReason: '헬스 응답 범위 밖' },
-  };
-  await bive.setResponse('proposal.reject', {
-    result: {
-      proposal: rejected,
-      approvalLog: { ...LOG_APPROVE, action: 'reject', detail: { reason: '헬스 응답 범위 밖' } },
-    },
-    delayMs: 1500,
-  });
-  await bive.setResponse('proposal.list', { result: { proposals: [rejected, P3, P4, P5] } });
-  await bive.setResponse('proposal.count', { result: countOf([rejected, P3, P4, P5]) });
-  // 단축키 확인 + 버튼 재클릭: 1회만
-  await reason.press('Control+Enter');
-  await confirm.click({ force: true });
-  await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
-  expect(await callsOf(bive, 'proposal.reject')).toEqual([
-    { projectId: PROJECT_ID, id: ID.p1, author: HUMAN, reason: '헬스 응답 범위 밖' },
-  ]);
-  await expect(page.getByTestId('card-id')).toHaveText(['PRP-003']);
-  await expect(page.getByTestId('todo-badge')).toHaveText('1');
-};
-
-/** Esc로 입력 카드 닫기, [승인]은 바로 사람 주체 승인 1회 (수용 기준 3). */
-const escApproveFlow = async (page: Page): Promise<void> => {
-  const bive = await setup(page);
-  await card(page, 'PRP-003').click();
-  await action(page, 'edit').click();
-  await expect(page.getByTestId('edit-text')).toBeFocused();
-  await page.getByTestId('edit-text').press('Escape');
-  await expect(page.getByTestId('edit-card')).toHaveCount(0);
-
-  const approved: Proposal = {
-    ...P3,
-    state: 'approved',
-    decision: {
-      at: '2026-10-16T05:00:00.000Z',
-      by: HUMAN,
-      appliedRef: { entity: 'Requirement', id: ID.req },
-    },
-  };
-  await bive.setResponse('proposal.approve', {
-    result: {
-      proposal: approved,
-      applied: { entity: 'Requirement', requirement: REQUIREMENT },
-      approvalLog: { ...LOG_APPROVE, targetRef: { entity: 'Proposal', id: ID.p3 } },
-    },
-    delayMs: 1500,
-  });
-  await bive.setResponse('proposal.list', { result: { proposals: [P1, approved, P4, P5] } });
-  await bive.setResponse('proposal.count', { result: countOf([P1, approved, P4, P5]) });
-  await action(page, 'approve').click();
-  await action(page, 'approve').click({ force: true });
-  await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
-  expect(await callsOf(bive, 'proposal.approve')).toEqual([
-    { projectId: PROJECT_ID, id: ID.p3, author: HUMAN },
-  ]);
-  await expect(page.getByTestId('card-id')).toHaveText(['PRP-001']);
-  await expect(page.getByTestId('todo-badge')).toHaveText('1');
-};
-
-test.describe('수정 · 거절 입력 카드 (수용 기준 3)', () => {
-  test('[수정]: 대화 끝 카드 · 자동 스크롤 · 포커스, 빈 문장은 문구와 확인 비활성, 수정 후 승인 1회', async ({
+  test('미확인 규칙: 이후 값만(제목 · 진술), 사유, 판단 카드 모순 판단 · 모순 없음과 이의 판단 · 유지', async ({
     page,
   }) => {
-    await editFlow(page, 1440, asIs);
-  });
-
-  test('[거절]: 대화 끝 카드 · 포커스, 사유가 비면 확인 비활성, 조합 중 키는 가로채지 않음, 거절 1회', async ({
-    page,
-  }) => {
-    await rejectFlow(page, asIs);
-  });
-
-  test('처리 중 다른 카드를 골라도 그 선택은 유지되고, 돌아와도 같은 제안을 다시 보내지 않는다', async ({
-    page,
-  }) => {
-    const bive = await setup(page);
-    const approved: Proposal = {
-      ...P1,
-      state: 'approved',
-      decision: {
-        at: '2026-10-16T05:00:00.000Z',
-        by: HUMAN,
-        appliedRef: { entity: 'Rule', id: ID.rule },
-      },
-    };
-    await bive.setResponse('proposal.approve', {
-      result: {
-        proposal: approved,
-        applied: { entity: 'Rule', rule: RULE },
-        approvalLog: LOG_APPROVE,
-      },
-      delayMs: 2500,
-    });
-    await bive.setResponse('proposal.list', { result: { proposals: [approved, P3, P4, P5] } });
-    await bive.setResponse('proposal.count', { result: countOf([approved, P3, P4, P5]) });
-
-    await card(page, 'PRP-001').click();
-    await action(page, 'approve').click();
-    await expect(page.getByTestId('floating-actions-busy')).toBeVisible();
-
-    // 처리 중 다른 카드 → 그 상세는 처리 중이 아님
-    await card(page, 'PRP-003').click();
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-003');
-    await expect(action(page, 'approve')).toBeEnabled();
-    await expect(page.getByTestId('floating-actions-busy')).toHaveCount(0);
-
-    // 처리 중인 제안으로 돌아오면 여전히 처리 중이고 다시 보낼 수 없다
-    await card(page, 'PRP-001').click();
-    await expect(page.getByTestId('floating-actions-busy')).toBeVisible();
-    await expect(action(page, 'approve')).toBeDisabled();
-    await action(page, 'approve').click({ force: true });
-
-    // 다시 다른 카드를 고른 채로 앞 요청이 끝나면 그 선택은 풀리지 않는다
-    await card(page, 'PRP-003').click();
-    await expect(page.getByTestId('card-id')).toHaveText(['PRP-003']);
-    await expect(page.getByTestId('todo-badge')).toHaveText('1');
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-003');
-    await expect(page.getByTestId('detail-title')).toHaveText('헬스 응답에 호스트 이름을 포함한다');
-    expect(await callsOf(bive, 'proposal.approve')).toEqual([
-      { projectId: PROJECT_ID, id: ID.p1, author: HUMAN },
-    ]);
-  });
-
-  test('Esc로 입력 카드 닫기, [승인]은 바로 사람 주체 승인 1회', async ({ page }) => {
-    await escApproveFlow(page);
-  });
-
-  test('이미 처리된 제안(-32009): 문구를 보이고 목록 · 배지를 다시 읽어 처리 기록을 보인다', async ({
-    page,
-  }) => {
-    const bive = await setup(page);
-    await card(page, 'PRP-001').click();
-    await bive.setResponse('proposal.approve', {
-      error: { code: -32009, message: '이미 처리된 제안입니다' },
-    });
-    const elsewhere: Proposal = {
-      ...P1,
-      state: 'rejected',
-      decision: { at: '2026-10-16T04:00:00.000Z', by: HUMAN, rejectReason: '중복' },
-    };
-    await bive.setResponse('proposal.list', { result: { proposals: [elsewhere, P3, P4, P5] } });
-    await bive.setResponse('approvalLog.list', {
-      result: {
-        entries: [
-          {
-            ...LOG_REJECT,
-            targetRef: { entity: 'Proposal', id: ID.p1 },
-            detail: { reason: '중복' },
-          },
-        ],
-        chain: { valid: true, brokenAtSeq: null, reason: null },
-      },
-    });
-    const listCalls = (await callsOf(bive, 'proposal.list')).length;
-    await action(page, 'approve').click();
-
-    await expect(page.getByTestId('detail-error')).toHaveText('처리 불가 (상태 변경)');
-    await expect
-      .poll(async () => (await callsOf(bive, 'proposal.list')).length)
-      .toBeGreaterThan(listCalls);
-    await expect(page.getByTestId('floating-actions')).toHaveCount(0);
-    await expect(page.getByTestId('record-reason')).toContainText('중복');
-    expect(await callsOf(bive, 'proposal.approve')).toHaveLength(1);
-  });
-});
-
-test.describe('수정 입력 보호 (#165, ADR-082)', () => {
-  const EDITED_TITLE = `${String(P1_PAYLOAD.title)}됨`;
-  const CONNECTED = { state: 'connected', status: STATUS } as const;
-  const DISCONNECTED = { state: 'disconnected' } as const;
-
-  /** PRP-001에서 [수정]을 열고 제목 끝에 "됨"을 붙인다 (roadmap 2.1 흐름 4번). */
-  const editTitle = async (page: Page): Promise<Locator> => {
-    await card(page, 'PRP-001').click();
-    await action(page, 'edit').click();
-    const title = page.getByTestId('edit-title');
-    await expect(title).toBeFocused();
-    await title.fill(EDITED_TITLE);
-    return title;
-  };
-
-  /** 수정 입력이 열려 있고 고친 제목이 그대로다. */
-  const expectDraft = async (page: Page): Promise<void> => {
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-001');
-    await expect(page.getByTestId('edit-card')).toBeVisible();
-    await expect(page.getByTestId('edit-title')).toHaveValue(EDITED_TITLE);
-    await expect(action(page, 'approve')).toBeDisabled();
-  };
-
-  test('수정 입력이 열려 있으면 떠 있는 [승인] · [거절]은 비활성이고 "수정 중"이 보인다, [수정 후 승인]만 수정 내용으로 처리', async ({
-    page,
-  }) => {
-    const bive = await setup(page);
-    await editTitle(page);
-
-    // 카드 밖 떠 있는 [승인]으로는 수정 내용이 버려지는 승인을 할 수 없다
-    await expect(action(page, 'approve')).toBeDisabled();
-    await expect(action(page, 'reject')).toBeDisabled();
-    await expect(action(page, 'edit')).toBeEnabled();
-    const note = page.getByTestId('floating-actions-note');
-    await expect(note).toBeVisible();
-    await expect(note).toHaveText('수정 중');
-    await action(page, 'approve').click({ force: true });
-    await action(page, 'reject').click({ force: true });
-    await expect(page.getByTestId('reject-card')).toHaveCount(0);
-    await expect(page.getByTestId('edit-title')).toHaveValue(EDITED_TITLE);
-    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
-    expect(await callsOf(bive, 'proposal.reject')).toEqual([]);
-    await snapshot(page, '수정-중');
-
-    // 고친 내용이 없어도(원문과 같아도) 입력이 열려 있는 동안은 같다
-    await page.getByTestId('edit-title').fill(String(P1_PAYLOAD.title));
-    await expect(action(page, 'approve')).toBeDisabled();
-
-    // 카드 안의 [수정 후 승인] = 수정 내용 · 사람 주체로 proposal.amend (approve_edited 기록)
-    await page.getByTestId('edit-title').fill(EDITED_TITLE);
-    const approved: Proposal = {
-      ...P1,
-      state: 'approved',
-      decision: {
-        at: '2026-10-16T05:00:00.000Z',
-        by: HUMAN,
-        appliedRef: { entity: 'Rule', id: ID.rule },
-        editedPayload: { ...P1_PAYLOAD, title: EDITED_TITLE },
-      },
-    };
-    await bive.setResponse('proposal.amend', {
-      result: {
-        proposal: approved,
-        applied: { entity: 'Rule', rule: { ...RULE, title: EDITED_TITLE } },
-        approvalLog: { ...LOG_APPROVE, action: 'approve_edited' },
-      },
-    });
-    await bive.setResponse('proposal.list', { result: { proposals: [approved, P3, P4, P5] } });
-    await page.getByTestId('edit-confirm').click();
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
-    expect(await callsOf(bive, 'proposal.amend')).toEqual([
-      {
-        projectId: PROJECT_ID,
-        id: ID.p1,
-        author: HUMAN,
-        edited: { ...P1_PAYLOAD, title: EDITED_TITLE },
-      },
-    ]);
-    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
-  });
-
-  test('제안 알림 · 재접속으로 목록을 다시 읽어도 수정 입력이 닫히거나 지워지지 않는다', async ({
-    page,
-  }) => {
-    const bive = await setup(page);
-    await editTitle(page);
-
-    // 다른 제안이 생겼다는 알림 → proposal.list 다시 조회
-    const newer: Proposal = { ...P3, id: '01JBVE0000000000000000P006', displayId: 'PRP-006' };
-    await bive.setResponse('proposal.list', { result: { proposals: [P1, P3, P4, P5, newer] } });
-    let listCalls = (await callsOf(bive, 'proposal.list')).length;
-    await bive.emit('event.proposal.changed', {
-      projectId: PROJECT_ID,
-      proposalId: newer.id,
-      displayId: newer.displayId,
-      kind: newer.kind,
-      state: 'pending',
-    });
-    await expect
-      .poll(async () => (await callsOf(bive, 'proposal.list')).length)
-      .toBeGreaterThan(listCalls);
-    await expect(card(page, 'PRP-006')).toBeVisible();
-    await expectDraft(page);
-
-    // 오케스트레이터에 다시 붙음 → proposal.list 다시 조회
-    listCalls = (await callsOf(bive, 'proposal.list')).length;
-    await bive.emit('system.connection', DISCONNECTED);
-    await bive.emit('system.connection', CONNECTED);
-    await expect
-      .poll(async () => (await callsOf(bive, 'proposal.list')).length)
-      .toBeGreaterThan(listCalls);
-    await expectDraft(page);
-    await expect(page.getByTestId('edit-title')).toBeFocused();
-    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
-  });
-
-  test('다른 카드 선택 · 필터 전환 · 화면 이동 뒤 돌아와도 수정 입력과 고친 내용이 남아 있다', async ({
-    page,
-  }) => {
-    const bive = await setup(page);
-    await editTitle(page);
-
-    // 다른 카드를 골랐다가 돌아옴
-    await card(page, 'PRP-003').click();
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-003');
-    await expect(page.getByTestId('edit-card')).toHaveCount(0);
-    await expect(action(page, 'approve')).toBeEnabled();
-    await card(page, 'PRP-001').click();
-    await expectDraft(page);
-
-    // 필터 전환 (처리됨만 → 다시 대기)
-    await chooseStates(page, ['approved', 'rejected']);
-    await expect(card(page, 'PRP-001')).toHaveCount(0);
-    await chooseStates(page, ['pending']);
-    await card(page, 'PRP-001').click();
-    await expectDraft(page);
-
-    // 다른 화면으로 갔다가 할 일로 돌아옴
-    await page.getByRole('button', { name: '검증', exact: true }).click();
-    await expect(page.getByTestId('main-area')).not.toHaveAttribute('data-route', 'todo');
-    await page.getByTestId('todo-button').click();
-    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'todo');
-    await card(page, 'PRP-001').click();
-    await expectDraft(page);
-
-    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
-    expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
-  });
-
-  test('Esc · [취소]: 고친 내용이 있으면 바로 닫지 않고 "수정 내용 있음"과 [계속 수정] · [버리기]를 보인다', async ({
-    page,
-  }) => {
-    const bive = await setup(page);
-    const title = await editTitle(page);
-
-    // Esc → 확인 줄, [계속 수정]에 초점. 입력은 그대로
-    await title.press('Escape');
-    const prompt = page.getByTestId('edit-discard');
-    await expect(prompt).toBeVisible();
-    await expect(prompt.getByTestId('edit-discard-text')).toHaveText('수정 내용 있음');
-    await expect(page.getByTestId('edit-keep')).toBeFocused();
-    await expect(page.getByTestId('edit-card')).toBeVisible();
-    await expect(title).toHaveValue(EDITED_TITLE);
-    await expect(action(page, 'approve')).toBeDisabled();
-    await snapshot(page, '수정-버리기-확인');
-
-    // 확인 줄에서 Esc = 계속 수정
-    await page.getByTestId('edit-keep').press('Escape');
-    await expect(prompt).toHaveCount(0);
-    await expect(title).toBeFocused();
-    await expect(title).toHaveValue(EDITED_TITLE);
-
-    // [취소] → 확인 줄 → [계속 수정]
-    await page.getByTestId('edit-cancel').click();
-    await expect(prompt).toBeVisible();
-    await page.getByTestId('edit-keep').click();
-    await expect(prompt).toHaveCount(0);
-    await expect(title).toHaveValue(EDITED_TITLE);
-
-    // [취소] → [버리기]: 그때만 닫히고 고친 내용이 버려진다. 다시 열면 원문
-    await page.getByTestId('edit-cancel').click();
-    await page.getByTestId('edit-discard-confirm').click();
-    await expect(page.getByTestId('edit-card')).toHaveCount(0);
-    await expect(action(page, 'approve')).toBeEnabled();
-    await expect(page.getByTestId('floating-actions-note')).toHaveCount(0);
-    await action(page, 'edit').click();
-    await expect(page.getByTestId('edit-title')).toHaveValue(String(P1_PAYLOAD.title));
-    // 고친 내용이 없으면 Esc로 바로 닫힌다
-    await page.getByTestId('edit-title').press('Escape');
-    await expect(page.getByTestId('edit-card')).toHaveCount(0);
-    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
-    expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
-  });
-});
-
-test.describe('1280×800 창의 버튼 문구 (#175)', () => {
-  // 기본 창: 사이드바 · 목록 · 오른쪽 채팅(360px 고정)을 빼면 상세 폭이 가장 좁다
-  test.use({ viewport: { width: 1280, height: 800 } });
-
-  const FLOATING = ['action-reject', 'action-edit', 'action-approve'] as const;
-
-  /** 상세에 가로 스크롤이 없고, 받은 요소가 한 줄 · 잘림 없음 · 상세 안. */
-  const expectOneLine = async (page: Page, testIds: readonly string[]): Promise<void> => {
-    for (const id of ['todo-detail', 'proposal-detail']) {
-      const { scroll, client } = await page
-        .getByTestId(id)
-        .evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
-      expect(scroll, `${id} 가로 스크롤`).toBeLessThanOrEqual(client);
-    }
-    expect(await textClipping(detail(page), testIds)).toEqual([]);
-  };
-
-  /** 한 묶음의 버튼들이 같은 줄에 왼쪽부터 차례로 놓인다 (#191). */
-  const expectSameRow = async (page: Page, testIds: readonly string[]): Promise<void> => {
-    expect(await sameRow(detail(page), testIds)).toEqual([]);
-  };
-
-  /** 입력 카드의 끝이 떠 있는 버튼에 가리지 않는다. 자동 스크롤 자리와 상세를 끝까지 내린 자리 둘 다. */
-  const expectCardAboveBar = async (page: Page, cardTestId: string): Promise<void> => {
-    const check = async (): Promise<void> => {
-      const cardBox = await page.getByTestId(cardTestId).boundingBox();
-      const barBox = await page.getByTestId('floating-actions').boundingBox();
-      if (cardBox === null || barBox === null) throw new Error('카드 · 버튼 영역 없음');
-      expect(cardBox.y + cardBox.height).toBeLessThanOrEqual(barBox.y);
-    };
-    await check();
-    const scroller = page.getByTestId('proposal-detail');
-    await scroller.evaluate((el) => {
-      el.scrollTop = el.scrollHeight;
-    });
-    expect(
-      await scroller.evaluate((el) => Math.ceil(el.scrollTop + el.clientHeight) >= el.scrollHeight),
-    ).toBe(true);
-    await check();
-  };
-
-  test('떠 있는 [거절] · [수정] · [승인]과 "수정 중", 수정 카드 · 버리기 확인 줄 · 거절 카드의 버튼이 한 줄로 잘리지 않고 상세 안에 있다', async ({
-    page,
-  }) => {
-    const bive = await setup(page);
-    await card(page, 'PRP-001').click();
-    await expect(page.getByTestId('detail-if-reject')).toBeVisible();
-    await expectOneLine(page, FLOATING);
-    await expectSameRow(page, FLOATING);
-
-    // 수정 중: 떠 있는 버튼 + "수정 중", 수정 카드의 [취소] · [수정 후 승인]
-    await action(page, 'edit').click();
-    const title = page.getByTestId('edit-title');
-    await expect(title).toBeFocused();
-    await title.fill(`${String(P1_PAYLOAD.title)}됨`);
-    await expect(page.getByTestId('floating-actions-note')).toHaveText('수정 중');
-    await expectOneLine(page, [
-      ...FLOATING,
-      'floating-actions-note',
-      'edit-cancel',
-      'edit-confirm',
-    ]);
-    await expectSameRow(page, FLOATING);
-    await expectSameRow(page, ['edit-cancel', 'edit-confirm']);
-    await expectCardAboveBar(page, 'edit-card');
-    await snapshot(page, '1280-수정-중');
-
-    // 버리기 확인 줄: "수정 내용 있음" · [계속 수정] · [버리기]
-    await page.getByTestId('edit-cancel').click();
-    await expect(page.getByTestId('edit-discard')).toBeVisible();
-    await expectOneLine(page, [
-      ...FLOATING,
-      'edit-discard-text',
-      'edit-keep',
-      'edit-discard-confirm',
-    ]);
-    await expectSameRow(page, ['edit-keep', 'edit-discard-confirm']);
-    await expectCardAboveBar(page, 'edit-card');
-    await snapshot(page, '1280-수정-버리기-확인');
-
-    // 버리고 거절 카드: [취소] · [거절 확정]
-    await page.getByTestId('edit-discard-confirm').click();
-    await expect(page.getByTestId('edit-card')).toHaveCount(0);
-    await action(page, 'reject').click();
-    await expect(page.getByTestId('reject-reason')).toBeFocused();
-    await expectOneLine(page, [...FLOATING, 'reject-cancel', 'reject-confirm']);
-    await expectSameRow(page, ['reject-cancel', 'reject-confirm']);
-    await expectCardAboveBar(page, 'reject-card');
-    await snapshot(page, '1280-거절');
-
-    // 처리 중: 떠 있는 버튼 + "처리 중" (응답을 기다리는 동안)
-    await bive.setResponse('proposal.reject', { pending: true });
-    await page.getByTestId('reject-reason').fill('헬스 응답 범위 밖');
-    await page.getByTestId('reject-confirm').click();
-    await expect(page.getByTestId('floating-actions-busy')).toHaveText('처리 중');
-    await expectOneLine(page, [...FLOATING, 'floating-actions-busy']);
-    await expectCardAboveBar(page, 'reject-card');
-    await snapshot(page, '1280-처리-중');
-  });
-});
-
-test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
-  const FLOATING = ['action-reject', 'action-edit', 'action-approve'] as const;
-  const listPane = (page: Page): Locator => page.getByTestId('todo-list-pane');
-
-  // 2줄째가 가장 긴 카드 (테스트 전용 데이터): 4자리 ID · 예외 2개(위험 높음 · 구현 중 제안) · 시각 · 안 읽음,
-  // 처리된 것은 예외 3개(거절 · 위험 높음 · 구현 중 제안)
-  const MANY_PAYLOAD = rulePayload('헬스 응답에 디스크 사용량 포함');
-  const P_MANY: Proposal = {
-    ...base,
-    id: '01JBVE0000000000000000P012',
-    displayId: 'PRP-1234',
-    kind: 'rule_new',
-    payload: MANY_PAYLOAD,
-    diff: { before: null, after: MANY_PAYLOAD },
-    risk: 'high',
-    source: 'implementation',
-    createdAt: '2026-10-16T04:00:00.000Z',
-  };
-  const P_MANY_DONE: Proposal = {
-    ...base,
-    id: '01JBVE0000000000000000P013',
-    displayId: 'PRP-1235',
-    kind: 'requirement_change',
-    targetRef: { entity: 'Requirement', id: ID.req },
-    payload: { text: '헬스 응답에 디스크 사용량을 포함한다' },
-    diff: {
-      before: { text: REQUIREMENT.text },
-      after: { text: '헬스 응답에 디스크 사용량을 포함한다' },
-    },
-    risk: 'high',
-    source: 'implementation',
-    state: 'rejected',
-    decision: { at: '2026-10-16T04:30:00.000Z', by: HUMAN, rejectReason: '범위 밖' },
-    createdAt: '2026-10-16T04:10:00.000Z',
-  };
-
-  /** 상세에 가로 스크롤이 없고, 받은 버튼이 한 줄 · 잘림 없음 · 상세 안이며, 가운데를 누르면 그 버튼에 닿는다. */
-  const expectDetailLayout = async (page: Page, testIds: readonly string[]): Promise<void> => {
-    for (const id of ['todo-detail', 'proposal-detail']) {
-      const { scroll, client } = await page
-        .getByTestId(id)
-        .evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
-      expect(scroll, `${id} 가로 스크롤`).toBeLessThanOrEqual(client);
-    }
-    expect(await textClipping(detail(page), testIds)).toEqual([]);
-    expect(await hitProblems(detail(page), testIds)).toEqual([]);
-  };
-
-  for (const width of NARROW_WIDTHS) {
-    test.describe(`${width}×800`, () => {
-      test.use({ viewport: { width, height: 800 } });
-      const shot: Shot = (name) => `좁은-${width}-${name}`;
-
-      test('예외가 많은 카드(4자리 ID · 예외 2~3개 · 안 읽음)도 예외 배지 · 안 읽음 점이 통째로 보인다', async ({
-        page,
-      }) => {
-        await setup(page, [...PROPOSALS, P_MANY, P_MANY_DONE]);
-        await expect(card(page, P_MANY.displayId).getByTestId('card-exception')).toHaveText([
-          '위험 높음',
-          '구현 중 제안',
-        ]);
-        await expect(card(page, P_MANY.displayId).getByTestId('card-unread')).toHaveCount(1);
-        expect(await listPaneOverflow(listPane(page))).toEqual([]);
-        await snapshot(page, shot('목록-예외'));
-
-        await chooseStates(page, ['pending', 'approved', 'rejected']);
-        await expect(card(page, P_MANY_DONE.displayId).getByTestId('card-exception')).toHaveText([
-          '거절',
-          '위험 높음',
-          '구현 중 제안',
-        ]);
-        expect(await listPaneOverflow(listPane(page))).toEqual([]);
-        await snapshot(page, shot('목록-예외-처리됨'));
-      });
-
-      test('상세 칸은 최소 폭 이상이고 목록 칸은 넘치지 않는다, 떠 있는 버튼 · 입력 카드 버튼은 상세 안에서 눌린다', async ({
-        page,
-      }) => {
-        await setup(page);
-        await card(page, 'PRP-001').click();
-        await expect(page.getByTestId('detail-if-reject')).toBeVisible();
-
-        // 칸 폭: 목록은 최대 400px에서 줄어들고, 상세는 최소 폭을 지킨다
-        const widths = await paneWidths(listPane(page), detail(page));
-        expect(widths.list).toBeGreaterThanOrEqual(LIST_PANE_MIN);
-        expect(widths.list).toBeLessThanOrEqual(LIST_PANE_MAX);
-        expect(widths.detail).toBeGreaterThanOrEqual(DETAIL_PANE_MIN);
-        expect(await listPaneOverflow(listPane(page))).toEqual([]);
-        await expectDetailLayout(page, FLOATING);
-
-        // 수정 중: 떠 있는 버튼 + "수정 중", 수정 카드의 [취소] · [수정 후 승인]
-        await action(page, 'edit').click();
-        await page.getByTestId('edit-title').fill(`${String(P1_PAYLOAD.title)}됨`);
-        await expect(page.getByTestId('floating-actions-note')).toHaveText('수정 중');
-        await expectDetailLayout(page, [
-          ...FLOATING,
-          'floating-actions-note',
-          'edit-cancel',
-          'edit-confirm',
-        ]);
-        await page.getByTestId('edit-card').scrollIntoViewIfNeeded();
-        await snapshot(page, shot('수정-중'));
-
-        // 버리기 확인 줄 → 버리고 거절 카드
-        await page.getByTestId('edit-cancel').click();
-        await expectDetailLayout(page, [...FLOATING, 'edit-keep', 'edit-discard-confirm']);
-        await page.getByTestId('edit-discard-confirm').click();
-        await action(page, 'reject').click();
-        await expect(page.getByTestId('reject-reason')).toBeFocused();
-        await expectDetailLayout(page, [...FLOATING, 'reject-cancel', 'reject-confirm']);
-      });
-
-      test('[수정] 흐름: 수정 후 승인 1회', async ({ page }) => {
-        await editFlow(page, width, shot);
-      });
-
-      test('[거절] 흐름: 거절 1회', async ({ page }) => {
-        await rejectFlow(page, shot);
-      });
-
-      test('[승인] 흐름: Esc로 입력 카드 닫고 승인 1회', async ({ page }) => {
-        await escApproveFlow(page);
-      });
-    });
-  }
-
-  test(`${WIDE_WIDTH}px 창: 목록 칸은 ${LIST_PANE_MAX}px 그대로다`, async ({ page }) => {
-    await page.setViewportSize({ width: WIDE_WIDTH, height: 900 });
     await setup(page);
-    await card(page, 'PRP-001').click();
-    const widths = await paneWidths(listPane(page), detail(page));
-    expect(widths.list).toBe(LIST_PANE_MAX);
-    expect(widths.detail).toBe(WIDE_WIDTH - 232 - 360 - LIST_PANE_MAX);
+    await cardAt(page, 5).click();
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'RULE-005');
+    await expect(page.getByTestId('detail-tag')).toHaveText('신규');
+    await expect(page.getByTestId('detail-exception')).toHaveText('미확인');
+    const rows = page.getByTestId('detail-diff-row');
+    await expect(rows.locator('dt')).toHaveText(['제목', '진술']);
+    await expect(page.getByTestId('diff-before')).toHaveCount(0);
+    await expect(rows.nth(0).getByTestId('diff-after')).toHaveText(`이후${LONG_TITLE}`);
+    await expect(rows.nth(1).getByTestId('diff-after')).toHaveText(`이후${RULE5_STATEMENT}`);
+    await expect(page.getByTestId('detail-rationale').locator('dd')).toHaveText(RULE5_RATIONALE);
+    await expect(page.getByTestId('detail-grounds')).toHaveCount(0);
+
+    const judgment = page.getByTestId('judgment-card');
+    await expect(judgment.getByTestId('judgment-subject')).toHaveText(['모순 판단', '이의 판단']);
+    await expect(judgment.getByTestId('judgment-verdict')).toHaveText(['모순 없음', '유지']);
+    await expect(judgment.getByTestId('judgment-grounds')).toHaveText([
+      NEW_RULE_GROUNDS,
+      OBJECTION_GROUNDS,
+    ]);
+    await expect(judgment.getByTestId('judgment-actor')).toHaveText([
+      '에이전트 · 규칙 작성',
+      '에이전트 · 규칙 작성',
+    ]);
+    await expect(judgment.getByTestId('judgment-contradicts')).toHaveCount(0);
+    await snapshot(page, '상세-미확인-판단');
+  });
+
+  test('폐기: 이전 값만 · 판단 기록 없음, 요구사항: 본문 · 생성 주체 역할', async ({ page }) => {
+    await setup(page);
+    await cardAt(page, 1).click();
+    await expect(page.getByTestId('detail-tag')).toHaveText('폐기');
+    await expect(page.getByTestId('diff-after')).toHaveCount(0);
+    await expect(page.getByTestId('diff-before')).toHaveText([
+      `이전${ITEM_RETIRED.before.title}`,
+      `이전${ITEM_RETIRED.before.statement}`,
+    ]);
+    await expect(page.getByTestId('detail-grounds').locator('dd')).toHaveText(ITEM_RETIRED.grounds);
+    await expect(page.getByTestId('judgments-empty')).toHaveText('판단 기록 없음');
+
+    await cardAt(page, 6).click();
+    await expect(page.getByTestId('detail-tag')).toHaveText('요구사항');
+    await expect(page.getByTestId('detail-diff-row').locator('dt')).toHaveText(['본문']);
+    await expect(page.getByTestId('detail-author').locator('dd')).toHaveText('에이전트 · 채팅');
+    await expect(page.getByTestId('detail-link')).toHaveText(['대상 · REQ-002']);
+  });
+
+  test('테스트 변경: 바뀐 파일(경로 · 바뀜/지움) · 전체 수 · 실행, 같은 대상 항목 함께 확인 문구', async ({
+    page,
+  }) => {
+    await setup(page);
+    await cardAt(page, 3).click();
+    await expect(page.getByTestId('detail-tag')).toHaveText('변경');
+    await expect(page.getByTestId('detail-exception')).toHaveText('테스트 변경');
+    await expect(page.getByTestId('detail-diff')).toHaveCount(0);
+    await expect(page.getByTestId('detail-file-path')).toHaveText([
+      LONG_PATH,
+      'bive-acceptance/RULE-004/old-helper.acc.ts',
+    ]);
+    await expect(page.getByTestId('detail-file-change')).toHaveText(['바뀜', '지움']);
+    await expect(page.getByTestId('detail-file-count')).toHaveText('전체 3개 중 2개');
+    await expect(page.getByTestId('detail-run').locator('dd')).toHaveText('EXE-003');
+    await expect(page.getByTestId('detail-author').locator('dd')).toHaveText('오케스트레이터');
+    await expect(page.getByTestId('confirm-same-target')).toHaveText(
+      '같은 대상 항목 1건 함께 확인',
+    );
+    // 다른 대상의 항목에는 그 문구가 없다
+    await cardAt(page, 1).click();
+    await expect(page.getByTestId('confirm-same-target')).toHaveCount(0);
   });
 });
 
-test.describe('필터 · 처리 기록 (수용 기준 4)', () => {
-  test('필터 칩 4종, 위험도 0건 비활성, 처리됨 필터에서 승인 · 거절 기록(수정 내용 · 주체 · 사유)', async ({
+test.describe('[확인] (수용 기준 2)', () => {
+  test('confirmation.set을 사람 주체로 정확히 1회 부르고, 같은 대상의 항목이 함께 내려가며 목록 · 배지가 줄어든다', async ({
     page,
   }) => {
+    const bive = await setup(page, FIXTURE_LIST, {
+      'confirmation.set': { result: FIXTURE_CONFIRM_RULE4, delayMs: 300 },
+    });
+    await expect(page.getByTestId('todo-badge')).toHaveText('7');
+    await cardAt(page, 2).click();
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'RULE-004');
+    // 서버는 그 규칙의 테스트 변경 2건을 함께 내린다
+    await bive.setResponse('confirmation.list', { result: FIXTURE_LIST_AFTER_RULE4 });
+    const button = page.getByTestId('confirm-button');
+    await button.click();
+    // 저장 중에는 꺼진다(두 번 눌러도 1회)
+    await expect(button).toBeDisabled();
+    await expect(button).toHaveText('저장 중');
+    await button.click({ force: true });
+
+    await expect(cards(page)).toHaveCount(5);
+    await expect(cards(page).getByTestId('card-id')).toHaveText([
+      'RULE-001',
+      'RULE-002',
+      'RULE-003',
+      'RULE-005',
+      'REQ-002',
+    ]);
+    await expect(page.getByTestId('todo-badge')).toHaveText('5');
+    await expect(page.getByTestId('todo-button')).toHaveAttribute(
+      'title',
+      '미확인 3 · 폐기 1 · 대체 1',
+    );
+    // 고른 항목이 내려가 상세는 빈 자리
+    await expect(detail(page).getByTestId('empty-state')).toHaveText('선택 항목 없음');
+    expect(await callsOf(bive, 'confirmation.set')).toEqual([
+      {
+        projectId: PROJECT.id,
+        target: { entity: 'Rule', id: ID.rule4 },
+        author: { kind: 'human' },
+      },
+    ]);
+  });
+
+  test('폐기된 규칙도 이 화면에서 [확인]한다 (규칙 상세에는 그 버튼이 없다)', async ({ page }) => {
     const bive = await setup(page);
-    for (const { id, label } of APPROVAL_FILTERS) {
-      await expect(page.getByTestId(`filter-chip-${id}`)).toContainText(label);
-    }
+    await cardAt(page, 1).click();
+    await page.getByTestId('confirm-button').click();
+    await expect
+      .poll(() => callsOf(bive, 'confirmation.set'))
+      .toEqual([
+        {
+          projectId: PROJECT.id,
+          target: { entity: 'Rule', id: ID.rule2 },
+          author: { kind: 'human' },
+        },
+      ]);
+  });
+
+  test('이미 확인됨 · 삭제된 대상(-32009): 오류 없이 목록을 다시 읽는다, 그 밖의 실패는 한 줄', async ({
+    page,
+  }) => {
+    const bive = await setup(page, FIXTURE_LIST, {
+      'confirmation.set': { error: { code: -32009, message: '상태 충돌' } },
+    });
+    await cardAt(page, 4).click();
+    const before = (await callsOf(bive, 'confirmation.list')).length;
+    await bive.setResponse('confirmation.list', {
+      result: listOf(FIXTURE_LIST.items.filter((_, i) => i !== 4)),
+    });
+    await page.getByTestId('confirm-button').click();
+    await expect
+      .poll(async () => (await callsOf(bive, 'confirmation.list')).length)
+      .toBe(before + 1);
+    await expect(cards(page)).toHaveCount(6);
+    await expect(page.getByTestId('confirm-error')).toHaveCount(0);
+
+    await bive.setResponse('confirmation.set', { error: { code: -32603, message: '내부 오류' } });
+    await cardAt(page, 0).click();
+    await page.getByTestId('confirm-button').click();
+    await expect(page.getByTestId('confirm-error')).toHaveText('확인 실패');
+    await expect(page.getByTestId('confirm-button')).toBeEnabled();
+    await expect(cards(page)).toHaveCount(6);
+  });
+});
+
+test.describe('대상 링크', () => {
+  test('폐기된 규칙 링크는 규칙 화면을 [폐기 포함] · 그 표시 ID 검색으로, 요구사항 링크는 요구사항 화면을 검색으로 연다', async ({
+    page,
+  }) => {
+    await setup(page, FIXTURE_LIST, {
+      'rule.list': { result: { rules: RULES } },
+      'requirement.list': { result: { requirements: REQUIREMENTS } },
+    });
+    await cardAt(page, 0).click();
+    await page.getByTestId('detail-link').first().click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(page.getByTestId('list-search')).toHaveValue('RULE-001');
+    await expect(page.getByTestId('hidden-toggle')).toHaveAttribute('aria-pressed', 'true');
+
+    await page.getByTestId('todo-button').click();
+    await cardAt(page, 6).click();
+    await page.getByTestId('detail-link').click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'requirements');
+    await expect(page.getByTestId('list-search')).toHaveValue('REQ-002');
+  });
+});
+
+test.describe('필터 칩 (수용 기준 4)', () => {
+  test('확인 상태 · 종류 · 위험도 · 생성 주체, 값별 개수는 항목에서, 켜면 남는 카드와 결과 줄', async ({
+    page,
+  }) => {
+    await setup(page);
+    // 칩은 이 4개뿐이고 이 순서다 (옛 "처리 상태" · "제안자" 칩 없음)
+    const chips = page.getByRole('group', { name: '필터' }).locator('.filter-chip');
+    expect(
+      await chips.evaluateAll((els) => els.map((el) => el.getAttribute('data-testid') ?? '')),
+    ).toEqual(CONFIRMATION_FILTERS.map(({ id }) => `filter-chip-${id}`));
+    await expect(chips).toHaveText(CONFIRMATION_FILTERS.map(({ label }) => label));
+    // 위험도: 항목에 근거가 없어 값이 없다 (0건 비활성)
     await expect(
       page.getByTestId('filter-chip-risk').getByTestId('filter-chip-button'),
     ).toBeDisabled();
-
-    await chooseStates(page, ['approved', 'rejected']);
-    await expect(page.getByTestId('card-id')).toHaveText(['PRP-004', 'PRP-005']);
-    await expect(card(page, 'PRP-004').getByTestId('card-exception')).toHaveText('거절');
-
-    // 거절 기록: 처리 · 주체 · 시각 · 사유, 처리 버튼 없음
-    await card(page, 'PRP-004').click();
-    await expect.poll(() => sectionOrder(page)).toEqual(PROCESSED_DETAIL_SECTIONS.map((s) => s.id));
-    const record = page.getByTestId('decision-record');
-    await expect(record).toHaveAttribute('data-action', 'reject');
-    await expect(page.getByTestId('record-action')).toContainText('거절');
-    await expect(page.getByTestId('record-actor')).toContainText('사람');
-    await expect(page.getByTestId('record-time').locator('time')).toHaveAttribute(
-      'datetime',
-      LOG_REJECT.at,
-    );
-    await expect(page.getByTestId('record-reason')).toContainText('범위 밖');
-    await expect(page.getByTestId('record-diff')).toHaveCount(0);
-    await expect(page.getByTestId('floating-actions')).toHaveCount(0);
-    await expect(page.getByTestId('record-chain-broken')).toHaveCount(0);
-    expect(await callsOf(bive, 'approvalLog.list')).toContainEqual({
-      projectId: PROJECT_ID,
-      targetRef: { entity: 'Proposal', id: ID.p4 },
+    expect(await optionCounts(page, 'confirm')).toEqual({
+      unconfirmed: '4',
+      released: '1',
+      confirmed: '2',
+    });
+    expect(await optionCounts(page, 'kind')).toEqual({
+      retired: '1',
+      superseded: '1',
+      test_changed: '2',
+      rule: '2',
+      requirement: '1',
+    });
+    expect(await optionCounts(page, 'author')).toEqual({
+      'rule-writer': '4',
+      planner: '0',
+      'test-writer': '0',
+      implementer: '0',
+      chat: '1',
+      human: '0',
+      orchestrator: '2',
     });
 
-    // 수정 후 승인 기록: 수정 내용(바뀐 제목만 이전 · 이후) · 주체
-    await card(page, 'PRP-005').click();
-    await expect(record).toHaveAttribute('data-action', 'approve_edited');
-    await expect(page.getByTestId('record-action')).toContainText('수정 후 승인');
-    await expect(page.getByTestId('record-actor')).toContainText('사람');
-    await expect(page.getByTestId('record-reason')).toHaveCount(0);
-    const recordDiff = page.getByTestId('record-diff');
-    await expect(recordDiff.getByTestId('diff-row')).toHaveCount(1);
-    await expect(recordDiff.getByTestId('diff-before')).toContainText(String(P5_PAYLOAD.title));
-    await expect(recordDiff.getByTestId('diff-after')).toContainText(P5_EDITED.title);
-    await expect(page.getByTestId('floating-actions')).toHaveCount(0);
-    await snapshot(page, '처리됨');
-  });
+    await choose(page, 'confirm', 'released');
+    await expect(cards(page).getByTestId('card-id')).toHaveText(['RULE-001']);
+    await expect(page.getByTestId('list-result-count')).toHaveText('7개 중 1개');
+    await page.getByTestId('list-reset').click();
 
-  test('승인 기록 체인 검증이 깨졌으면 처리 기록에 예외 글자', async ({ page }) => {
-    const bive = await setup(page);
-    await bive.setResponse('approvalLog.list', {
-      result: { ...LOG_RESULT, chain: { valid: false, brokenAtSeq: 2, reason: 'hash_mismatch' } },
-    });
-    await chooseStates(page, ['rejected']);
-    await card(page, 'PRP-004').click();
-    await expect(page.getByTestId('record-reason')).toContainText('범위 밖');
-    await expect(page.getByTestId('record-chain-broken')).toHaveText('승인 기록 검증 실패');
+    await choose(page, 'kind', 'test_changed');
+    await expect(cards(page).getByTestId('card-id')).toHaveText(['RULE-004', 'RULE-004']);
+    await page.getByTestId('list-reset').click();
+
+    await choose(page, 'author', 'chat');
+    await expect(cards(page).getByTestId('card-id')).toHaveText(['REQ-002']);
+    await snapshot(page, '필터-생성주체');
   });
 });
 
-test.describe('수정 입력 보호: 다른 제안 승인 · 버리기 확인 중 단축키 (#173, ADR-082)', () => {
-  const EDITED_TITLE = `${String(P1_PAYLOAD.title)}됨`;
+test.describe('창 폭에 따른 배치 (ADR-090 · ADR-093)', () => {
+  for (const width of [820, 1100, 1280] as const) {
+    test.describe(`${String(width)}×800`, () => {
+      test.use({ viewport: { width, height: 800 } });
 
-  /** PRP-001(A)에서 [수정]을 열고 제목 끝에 "됨"을 붙인다. */
-  const editA = async (page: Page): Promise<Locator> => {
-    await card(page, 'PRP-001').click();
-    await action(page, 'edit').click();
-    const title = page.getByTestId('edit-title');
-    await expect(title).toBeFocused();
-    await title.fill(EDITED_TITLE);
-    return title;
-  };
+      test('목록 칸 · 상세 칸 · 판단 카드 · 긴 제목 · 긴 파일 경로가 칸 안에 있다', async ({
+        page,
+      }) => {
+        await setup(page);
+        expect(await listPaneOverflow(page.getByTestId('todo-list-pane'))).toEqual([]);
 
-  test('A를 수정 중일 때 B를 승인하면 승인 요청은 B의 ID로만 가고, A로 돌아오면 수정 초안이 그대로 남아 있다', async ({
-    page,
-  }) => {
-    const bive = await setup(page);
-    await editA(page);
+        const noHorizontalScroll = async (): Promise<void> => {
+          for (const id of ['todo-detail', 'confirmation-detail']) {
+            const { scroll, client } = await page
+              .getByTestId(id)
+              .evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
+            expect(scroll, `${id} 가로 스크롤`).toBeLessThanOrEqual(client);
+          }
+        };
 
-    // B(PRP-003)를 고른다: B에는 수정 입력이 없으므로 [승인]이 열려 있다
-    await card(page, 'PRP-003').click();
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-003');
-    await expect(page.getByTestId('edit-card')).toHaveCount(0);
-    await expect(action(page, 'approve')).toBeEnabled();
-    const approvedB: Proposal = {
-      ...P3,
-      state: 'approved',
-      decision: {
-        at: '2026-10-16T05:00:00.000Z',
-        by: HUMAN,
-        appliedRef: { entity: 'Requirement', id: ID.req },
-      },
-    };
-    await bive.setResponse('proposal.approve', {
-      result: {
-        proposal: approvedB,
-        applied: { entity: 'Requirement', requirement: REQUIREMENT },
-        approvalLog: { ...LOG_APPROVE, targetRef: { entity: 'Proposal', id: ID.p3 } },
-      },
+        // 긴 제목 · 판단 카드
+        await cardAt(page, 5).click();
+        await expect(page.getByTestId('judgment-card')).toHaveCount(2);
+        const widths = await paneWidths(page.getByTestId('todo-list-pane'), detail(page));
+        expect(widths.list).toBeGreaterThanOrEqual(LIST_PANE_MIN);
+        expect(widths.list).toBeLessThanOrEqual(LIST_PANE_MAX);
+        expect(widths.detail).toBeGreaterThanOrEqual(DETAIL_PANE_MIN);
+        await noHorizontalScroll();
+        expect(await textClipping(detail(page), ['confirm-button'])).toEqual([]);
+        expect(await hitProblems(detail(page), ['confirm-button'])).toEqual([]);
+        const cardBoxes = await page
+          .getByTestId('judgment-card')
+          .evaluateAll((els) => els.map((el) => el.scrollWidth <= el.clientWidth));
+        expect(cardBoxes).toEqual([true, true]);
+        await snapshot(page, `폭-${String(width)}-판단`);
+
+        // 긴 파일 경로
+        await cardAt(page, 3).click();
+        await expect(page.getByTestId('detail-file-path').first()).toHaveText(LONG_PATH);
+        await noHorizontalScroll();
+        const paths = await page
+          .getByTestId('detail-file')
+          .evaluateAll((els) => els.map((el) => el.scrollWidth <= el.clientWidth));
+        expect(paths).toEqual([true, true]);
+        expect(await hitProblems(detail(page), ['confirm-button'])).toEqual([]);
+        await snapshot(page, `폭-${String(width)}-테스트변경`);
+      });
     });
-    await bive.setResponse('proposal.list', { result: { proposals: [P1, approvedB, P4, P5] } });
-    await bive.setResponse('proposal.count', { result: countOf([P1, approvedB, P4, P5]) });
-    await action(page, 'approve').click();
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
-    await expect(page.getByTestId('card-id')).toHaveText(['PRP-001']);
-
-    // 승인 요청은 B 하나뿐, A에 대한 처리 요청은 없다
-    expect(await callsOf(bive, 'proposal.approve')).toEqual([
-      { projectId: PROJECT_ID, id: ID.p3, author: HUMAN },
-    ]);
-    expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
-    expect(await callsOf(bive, 'proposal.reject')).toEqual([]);
-
-    // A로 돌아오면 수정 입력이 고친 제목으로 열려 있고 [승인] · [거절]은 계속 막혀 있다
-    await card(page, 'PRP-001').click();
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-001');
-    await expect(page.getByTestId('edit-card')).toBeVisible();
-    await expect(page.getByTestId('edit-title')).toHaveValue(EDITED_TITLE);
-    await expect(action(page, 'approve')).toBeDisabled();
-    await expect(action(page, 'reject')).toBeDisabled();
-  });
-
-  test('버리기 확인 줄이 떠 있는 동안 Ctrl+Enter는 수정 후 승인으로 처리되지 않는다 (확인 줄의 버튼 · 입력 칸 어디서 눌러도)', async ({
-    page,
-  }) => {
-    const bive = await setup(page);
-    const title = await editA(page);
-    const prompt = page.getByTestId('edit-discard');
-
-    // Esc → 확인 줄, 초점은 [계속 수정]
-    await title.press('Escape');
-    await expect(prompt).toBeVisible();
-    await expect(page.getByTestId('edit-keep')).toBeFocused();
-    await page.getByTestId('edit-keep').press('Control+Enter');
-    await expect(page.getByTestId('edit-card')).toBeVisible();
-    await expect(title).toHaveValue(EDITED_TITLE);
-
-    // 확인 줄을 그대로 둔 채 입력 칸을 눌러 초점을 옮기고 Ctrl+Enter
-    if ((await prompt.count()) === 0) await title.press('Escape');
-    await expect(prompt).toBeVisible();
-    await title.click();
-    await expect(title).toBeFocused();
-    await expect(prompt).toBeVisible();
-    await title.press('Control+Enter');
-    // 처리 요청이 나가지 않고, 확인 줄 · 수정 입력 · 고친 내용이 그대로다
-    await expect(prompt).toBeVisible();
-    await expect(page.getByTestId('edit-card')).toBeVisible();
-    await expect(title).toHaveValue(EDITED_TITLE);
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'PRP-001');
-    expect(await callsOf(bive, 'proposal.amend')).toEqual([]);
-    expect(await callsOf(bive, 'proposal.approve')).toEqual([]);
-
-    // [계속 수정]으로 확인 줄을 닫으면 단축키가 다시 수정 후 승인이다 (막힌 것은 확인 줄이 떠 있는 동안뿐)
-    await page.getByTestId('edit-keep').click();
-    await expect(prompt).toHaveCount(0);
-    await expect(title).toBeFocused();
-    const approved: Proposal = {
-      ...P1,
-      state: 'approved',
-      decision: {
-        at: '2026-10-16T05:00:00.000Z',
-        by: HUMAN,
-        appliedRef: { entity: 'Rule', id: ID.rule },
-        editedPayload: { ...P1_PAYLOAD, title: EDITED_TITLE },
-      },
-    };
-    await bive.setResponse('proposal.amend', {
-      result: {
-        proposal: approved,
-        applied: { entity: 'Rule', rule: { ...RULE, title: EDITED_TITLE } },
-        approvalLog: { ...LOG_APPROVE, action: 'approve_edited' },
-      },
-    });
-    await bive.setResponse('proposal.list', { result: { proposals: [approved, P3, P4, P5] } });
-    await title.press('Control+Enter');
-    await expect(detail(page)).toHaveAttribute('data-selected-id', 'none');
-    expect(await callsOf(bive, 'proposal.amend')).toEqual([
-      {
-        projectId: PROJECT_ID,
-        id: ID.p1,
-        author: HUMAN,
-        edited: { ...P1_PAYLOAD, title: EDITED_TITLE },
-      },
-    ]);
-  });
+  }
 });

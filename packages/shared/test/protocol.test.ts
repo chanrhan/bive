@@ -21,6 +21,9 @@ import {
   JsonRpcSuccessResponse,
   METHOD_NAMES,
   METHODS,
+  NORM_CHANGE_EVENT_NAMES,
+  NormChangeAppendedEvent,
+  NOTIFICATIONS,
   parseJsonFrame,
   parseNotification,
   parseRequest,
@@ -981,5 +984,32 @@ describe('confirmation.list 응답 (M7-13 #225, ADR-113)', () => {
       ConfirmationListResult.safeParse({ ...result(1), items: [{ ...norm, kind: 'unconfirmed' }] })
         .success,
     ).toBe(false);
+  });
+
+  it('종류별 항목 수(선택 칸, M7-14)는 네 종류를 모두 갖고 합이 전체 항목 수와 같아야 한다', () => {
+    const base = { items: [norm], total: 3, truncated: false };
+    const byKind = { retired: 1, superseded: 0, test_changed: 1, unconfirmed_norm: 1 };
+    // 없어도 된다 (넓히기만 한 칸)
+    expect(ConfirmationListResult.safeParse(base).success).toBe(true);
+    expect(ConfirmationListResult.safeParse({ ...base, totalByKind: byKind }).success).toBe(true);
+    expect(
+      ConfirmationListResult.safeParse({ ...base, totalByKind: { ...byKind, retired: 2 } }).success,
+    ).toBe(false);
+    const missing = { retired: 1, test_changed: 1, unconfirmed_norm: 1 };
+    expect(ConfirmationListResult.safeParse({ ...base, totalByKind: missing }).success).toBe(false);
+    expect(
+      ConfirmationListResult.safeParse({ ...base, totalByKind: { ...byKind, unconfirmed: 0 } })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe('event.normChange.appended (M7-14 #226, ADR-119)', () => {
+  it('알림으로 등록되어 있고 프로젝트 ID와 양의 정수 마지막 순번만 받는다', () => {
+    expect(NORM_CHANGE_EVENT_NAMES).toEqual(['event.normChange.appended']);
+    const params = { projectId: '01ARZ3NDEKTSV4RRFFQ69G5FAV', lastSeq: 3 };
+    expect(NOTIFICATIONS['event.normChange.appended'].params.parse(params)).toEqual(params);
+    expect(NormChangeAppendedEvent.safeParse({ ...params, lastSeq: 0 }).success).toBe(false);
+    expect(NormChangeAppendedEvent.safeParse({ ...params, kind: 'retired' }).success).toBe(false);
   });
 });

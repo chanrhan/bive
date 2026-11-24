@@ -3,23 +3,25 @@ import { useMemo } from 'react';
 
 import { useConnection } from '../connection/useConnection.js';
 import { useProject } from '../project/ProjectContext.js';
-import { todoBadgeTotal, todoBreakdown } from '../proposals/labels.js';
-import { ProposalCountProvider, useProposalCount } from '../proposals/ProposalCountContext.js';
+import { todoBadgeTotal, todoBreakdown } from '../screens/todo/confirmationView.js';
+import { TodoListProvider, useTodoList } from '../todo/TodoListContext.js';
 import { ChatPanel } from './ChatPanel.js';
 import { MainArea } from './MainArea.js';
 import { Sidebar } from './Sidebar.js';
 import { readToken, useMediaQuery } from './useMediaQuery.js';
 
 export const AppLayout = (): React.JSX.Element => (
-  <ProposalCountProvider>
+  <TodoListProvider>
     <LayoutBody />
-  </ProposalCountProvider>
+  </TodoListProvider>
 );
 
 const LayoutBody = (): React.JSX.Element => {
   const connection = useConnection();
   const { project } = useProject();
-  const { count } = useProposalCount();
+  // 할 일 배지 · 툴팁 = 확인할 것 목록 (ADR-100 A7, ADR-119)
+  const { load } = useTodoList();
+  const todo = load.status === 'ready' ? load.result : null;
   // 기준 폭은 토큰 하나(--bp-chat-collapse)에서 읽는다. 미디어 쿼리 안에서는 CSS 변수를 못 쓴다
   const breakpoint = useMemo(() => readToken('--bp-chat-collapse', '1100px'), []);
   const collapsed = useMediaQuery(`(width < ${breakpoint})`);
@@ -32,8 +34,8 @@ const LayoutBody = (): React.JSX.Element => {
     >
       <Sidebar
         projectName={project?.name ?? null}
-        todoCount={todoBadgeTotal(count)}
-        todoBreakdown={todoBreakdown(count)}
+        todoCount={todoBadgeTotal(todo)}
+        todoBreakdown={todoBreakdown(todo)}
         connection={connection}
       />
       <MainArea />

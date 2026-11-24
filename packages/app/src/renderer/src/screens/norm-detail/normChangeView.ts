@@ -80,11 +80,14 @@ export const UNDECIDED_REASON_TEXT = {
   interrupted: '오케스트레이터 재기동',
 } as const satisfies Record<NormUndecidedReason, string>;
 
-/** 모르는 값(뒤 버전이 더한 값)은 날 값 대신 이것으로 그린다. */
-const UNKNOWN_TEXT = '알 수 없음';
+/** 모르는 값(뒤 버전이 더한 값)은 날 값 대신 이것으로 그린다. 확인할 것의 판단 카드도 같은 규칙이다(M7-14). */
+export const UNKNOWN_TEXT = '알 수 없음';
 
-const labelOf = <T extends string>(table: Readonly<Record<T, string>>, value: string): string =>
-  Object.hasOwn(table, value) ? table[value as T] : UNKNOWN_TEXT;
+/** 표시명 표에서 값을 찾는다. 표에 없는 값은 {@link UNKNOWN_TEXT}. */
+export const labelOf = <T extends string>(
+  table: Readonly<Record<T, string>>,
+  value: string,
+): string => (Object.hasOwn(table, value) ? table[value as T] : UNKNOWN_TEXT);
 
 /** 글의 이름: 규칙을 만들거나 고친 이유는 사유, 판단 · 폐기 · 대체 · 이의의 뒷받침은 근거. */
 const GROUNDS_KINDS: ReadonlySet<NormChangeKind> = new Set([

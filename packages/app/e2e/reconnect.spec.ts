@@ -1,7 +1,7 @@
 // 재접속 → 열린 화면 · 할 일 배지 다시 조회 (이슈 #164 M1-36 수용 기준 2 · 3, screens.md 1.2 연결 상태 · SCR-03 ·
 // SCR-05 · 할 일, RUN-02 · NFR-06, ADR-045 · ADR-076).
-// 1) 연결 상태가 끊김 → 연결됨으로 바뀌면 열려 있는 규칙 화면(rule.list) · 검증 화면(verification.summary) · 할 일 배지
-//    (proposal.count) · 할 일 목록(proposal.list)이 한 번 다시 조회한다. 끊긴 동안 잃은 알림을 회복한다
+// 1) 연결 상태가 끊김 → 연결됨으로 바뀌면 열려 있는 규칙 화면(rule.list) · 검증 화면(verification.summary) · 할 일 배지와
+//    확인할 것 목록(같은 confirmation.list 한 번, M7-14 · ADR-119)이 한 번 다시 조회한다. 끊긴 동안 잃은 알림을 회복한다
 //    (예: 오케스트레이터가 죽었다 다시 뜬 뒤 실행이 중단으로 보이고 [재개]가 생김)
 // 2) 앱 시작의 첫 연결됨 · 연결됨이 이어지는 동안에는 다시 조회하지 않는다(전이 때만)
 // 3) 재접속이 연달아 와도 합친다(동시 조회 1개 · 뒤따르는 조회 최대 1개)
@@ -10,25 +10,14 @@ import { expect, type Page, test } from '@playwright/test';
 
 import { run, stages, SUMMARY } from './checklists/scr-05.js';
 import { PROJECT, RULES } from './checklists/scr-06.js';
+import { listOf } from './checklists/scr-17.js';
 import { type BiveMock, mockBive, type MockResponses } from './support/bive-mock.js';
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 const CONNECTED = { state: 'connected', status: STATUS } as const;
 const DISCONNECTED = { state: 'disconnected' } as const;
 
-const COUNT = {
-  pending: 0,
-  pendingByKind: {
-    requirement_new: 0,
-    requirement_change: 0,
-    rule_new: 0,
-    rule_change: 0,
-    contract_new: 0,
-    design_change: 0,
-    rule_title_change: 0,
-    contract_change: 0,
-  },
-} as const;
+const EMPTY_TODO = listOf([]);
 
 /** 오케스트레이터가 다시 뜬 뒤의 검증 요약: 최근 실행이 중단(구현 단계에서 끊김). */
 const INTERRUPTED = {
@@ -48,8 +37,7 @@ const open = async (page: Page, menu: string, responses: MockResponses = {}): Pr
       'requirement.list': { result: { requirements: [] } },
       'rule.list': { result: { rules: RULES } },
       'verification.summary': { result: SUMMARY },
-      'proposal.count': { result: COUNT },
-      'proposal.list': { result: { proposals: [] } },
+      'confirmation.list': { result: EMPTY_TODO },
       ...responses,
     },
   });
@@ -82,14 +70,14 @@ test.describe('재접속 → 다시 조회 (수용 기준 2)', () => {
     await expect(page.getByRole('button', { name: '재개' })).toHaveCount(0);
     await page.waitForTimeout(300);
     const summaries = await countCalls(bive, 'verification.summary');
-    const counts = await countCalls(bive, 'proposal.count');
+    const counts = await countCalls(bive, 'confirmation.list');
 
     // 연결됨이 이어지는 동안은 다시 부르지 않는다 (main은 1초마다 연결됨을 보낸다)
     await bive.emit('system.connection', CONNECTED);
     await bive.emit('system.connection', CONNECTED);
     await page.waitForTimeout(300);
     expect(await countCalls(bive, 'verification.summary')).toBe(summaries);
-    expect(await countCalls(bive, 'proposal.count')).toBe(counts);
+    expect(await countCalls(bive, 'confirmation.list')).toBe(counts);
 
     // 오케스트레이터가 죽고(끊김) 다시 뜨는 사이 실행은 중단이 됐다. 끊긴 동안에는 다시 부르지 않는다
     await bive.setResponse('verification.summary', { result: INTERRUPTED });
@@ -104,14 +92,14 @@ test.describe('재접속 → 다시 조회 (수용 기준 2)', () => {
     await expect(page.getByRole('button', { name: '재개', exact: true })).toBeVisible();
     expect(await countCalls(bive, 'verification.summary')).toBe(summaries + 1);
     // 할 일 배지도 한 번 다시 센다
-    await expect.poll(() => countCalls(bive, 'proposal.count')).toBe(counts + 1);
+    await expect.poll(() => countCalls(bive, 'confirmation.list')).toBe(counts + 1);
     await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'verification');
 
     // 그 뒤 연결됨이 이어져도 더 부르지 않는다
     await bive.emit('system.connection', CONNECTED);
     await page.waitForTimeout(300);
     expect(await countCalls(bive, 'verification.summary')).toBe(summaries + 1);
-    expect(await countCalls(bive, 'proposal.count')).toBe(counts + 1);
+    expect(await countCalls(bive, 'confirmation.list')).toBe(counts + 1);
   });
 
   test('규칙 화면: 다시 붙으면 rule.list를 다시 부른다', async ({ page }) => {
@@ -128,18 +116,18 @@ test.describe('재접속 → 다시 조회 (수용 기준 2)', () => {
     }
   });
 
-  test('할 일 화면: 다시 붙으면 배지(proposal.count)와 목록(proposal.list)을 다시 부른다', async ({
+  test('할 일 화면: 다시 붙으면 배지와 목록이 쓰는 confirmation.list를 한 번 다시 부른다', async ({
     page,
   }) => {
     const bive = await open(page, '할 일');
     await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'todo');
-    await expect(page.getByTestId('todo-approval')).toHaveAttribute('data-state', 'ready');
+    await expect(page.getByTestId('todo-confirmation')).toHaveAttribute('data-state', 'ready');
     await page.waitForTimeout(300);
-    const counts = await countCalls(bive, 'proposal.count');
-    const lists = await countCalls(bive, 'proposal.list');
+    const lists = await countCalls(bive, 'confirmation.list');
     await reconnect(page, bive);
-    await expect.poll(() => countCalls(bive, 'proposal.count')).toBe(counts + 1);
-    await expect.poll(() => countCalls(bive, 'proposal.list')).toBe(lists + 1);
+    await expect.poll(() => countCalls(bive, 'confirmation.list')).toBe(lists + 1);
+    await page.waitForTimeout(300);
+    expect(await countCalls(bive, 'confirmation.list')).toBe(lists + 1);
   });
 
   test('앱 시작 때 처음 받은 연결됨으로는 다시 조회하지 않는다 (처음 불러오기와 중복 없음)', async ({
@@ -149,12 +137,12 @@ test.describe('재접속 → 다시 조회 (수용 기준 2)', () => {
     await expect(page.getByTestId('pipeline-current')).toHaveText('구현');
     await page.waitForTimeout(300);
     const summaries = await countCalls(bive, 'verification.summary');
-    const counts = await countCalls(bive, 'proposal.count');
+    const counts = await countCalls(bive, 'confirmation.list');
     // 화면에 들어온 뒤 처음 오는 main의 연결됨 알림
     await bive.emit('system.connection', CONNECTED);
     await page.waitForTimeout(500);
     expect(await countCalls(bive, 'verification.summary')).toBe(summaries);
-    expect(await countCalls(bive, 'proposal.count')).toBe(counts);
+    expect(await countCalls(bive, 'confirmation.list')).toBe(counts);
   });
 });
 
