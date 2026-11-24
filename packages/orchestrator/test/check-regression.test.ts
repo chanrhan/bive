@@ -30,11 +30,8 @@ import { openProjectStore } from '@bive/store';
 import type { NormJudgeLauncher, NormJudgeOutcome, NormJudgeRequest } from '../src/engine/types.js';
 import { readNormChanges } from '../src/ipc/norm-change-handlers.js';
 import { retireAgentRule, supersedeAgentRule, upholdAgentRule } from '../src/norms/agent-rule.js';
-import {
-  CHECK_UNDECIDED_REASON,
-  knownCaseMatcher,
-  settleCheckFailure,
-} from '../src/norms/check-contradiction.js';
+import { caseNameLiterals, knownCaseMatcher } from '../src/norms/case-names.js';
+import { CHECK_UNDECIDED_REASON, settleCheckFailure } from '../src/norms/check-contradiction.js';
 import { NORM_INPUT_BEGIN, NORM_INPUT_END } from '../src/norms/norm-input.js';
 import {
   CHECK_CASE_NOT_INSTRUCTION,
@@ -887,6 +884,114 @@ describe('판단 입력은 실패한 규칙 ID와 인수 테스트 파일에 적
     ]) {
       expect(known('RULE-002', name), name).toBe(false);
     }
+  });
+
+  it('대조는 describe · it · test 호출의 첫 인자 리터럴로 좁다: 주석 · import 지정자 · 다른 호출의 따옴표 글은 알려진 케이스가 아니다 (M3-37 #265 수용 기준 2, ADR-121)', () => {
+    const file = [
+      "// it('주석 속 케이스 이름')",
+      "/* describe('막힌 주석 묶음', () => { it('막힌 주석 케이스') }) */",
+      "import { describe, expect, it, test } from 'vitest';",
+      "import { request } from '@bive/http';",
+      "const label = '변수에 둔 이름';",
+      "describe('묶음', () => {",
+      "  it('케이스 1', async () => {",
+      "    expect(await request('GET', '/api/health')).toMatchObject({ status: 200 });",
+      "    expect('기대 값 글').toBe('기대 값 글');",
+      '  });',
+      "  test('테스트 케이스', () => undefined);",
+      '  it(label, () => undefined);',
+      "  it('이어' + ' 붙임', () => undefined);",
+      '});',
+    ].join('\n');
+    expect([...caseNameLiterals(file)].sort()).toEqual(['묶음', '케이스 1', '테스트 케이스']);
+    const known = knownCaseMatcher({ 'bive-acceptance/RULE-002/a.acc.ts': file });
+    for (const name of ['묶음 > 케이스 1', '묶음 > 테스트 케이스']) {
+      expect(known('RULE-002', name), name).toBe(true);
+    }
+    for (const name of [
+      '주석 속 케이스 이름',
+      '막힌 주석 묶음 > 막힌 주석 케이스',
+      '묶음 > 막힌 주석 케이스',
+      'vitest',
+      '@bive/http',
+      '묶음 > /api/health',
+      '묶음 > GET',
+      '묶음 > 기대 값 글',
+      '묶음 > 변수에 둔 이름',
+      '묶음 > 이어 붙임',
+      '묶음 > 이어',
+    ]) {
+      expect(known('RULE-002', name), name).toBe(false);
+    }
+  });
+
+  it('받는 호출 꼴 · 놓치는 꼴 (모호하면 모르는 이름): 수식(skip · only · todo · concurrent · sequential · fails · shuffle)과 중첩 묶음 · 이스케이프 · 줄바꿈 템플릿은 받고, each · for · skipIf · runIf · 보간 · 괄호 · 대괄호 · 선택적 호출 · 다른 함수 · 문법 오류 파일은 받지 않는다 (ADR-121)', () => {
+    const accepted = [
+      "describe.skip('수식 skip', () => undefined);",
+      "it.only('수식 only', () => undefined);",
+      "test.todo('수식 todo');",
+      "describe.concurrent('수식 concurrent', () => undefined);",
+      "describe.sequential('수식 sequential', () => undefined);",
+      "it.fails('수식 fails', () => undefined);",
+      "describe.shuffle('수식 shuffle', () => undefined);",
+      "test.skip.concurrent('수식 둘', () => undefined);",
+      "describe('바깥', () => { describe('안쪽', () => { it('가장 안', () => undefined); }); });",
+      "it('이스케이프 \\u0041 \\' 따옴표', () => undefined);",
+      'it(`줄\n바꿈 템플릿`, () => undefined);',
+    ].join('\n');
+    expect([...caseNameLiterals(accepted)].sort()).toEqual(
+      [
+        '수식 skip',
+        '수식 only',
+        '수식 todo',
+        '수식 concurrent',
+        '수식 sequential',
+        '수식 fails',
+        '수식 shuffle',
+        '수식 둘',
+        '바깥',
+        '안쪽',
+        '가장 안',
+        "이스케이프 A ' 따옴표",
+        '줄\n바꿈 템플릿',
+      ].sort(),
+    );
+    const known = knownCaseMatcher({ 'bive-acceptance/RULE-002/a.acc.ts': accepted });
+    expect(known('RULE-002', '바깥 > 안쪽 > 가장 안')).toBe(true);
+    // 판정 러너가 보는 이름은 이스케이프를 푼 실행 값이다 (원문 글자는 모른다)
+    expect(known('RULE-002', "이스케이프 A ' 따옴표")).toBe(true);
+    expect(known('RULE-002', "이스케이프 \\u0041 \\' 따옴표")).toBe(false);
+    const rejected = [
+      "it.each([1, 2])('each 이름 %s', () => undefined);",
+      "describe.each([[1]])('describe each 이름', () => undefined);",
+      "test.for([1])('for 이름', () => undefined);",
+      "it.skipIf(true)('skipIf 이름', () => undefined);",
+      "it.runIf(true)('runIf 이름', () => undefined);",
+      "it.extend({})('extend 이름', () => undefined);",
+      "it.unknown('모르는 수식', () => undefined);",
+      'it(`보간 ${String(1)}`, () => undefined);',
+      "(it)('괄호 이름', () => undefined);",
+      "it['skip']('대괄호 이름', () => undefined);",
+      "it?.('선택적 호출 이름', () => undefined);",
+      "it.skip?.('선택적 수식 이름', () => undefined);",
+      "it<string>('형식 인자 이름', () => undefined);",
+      "foo.it('다른 객체의 it', () => undefined);",
+      "suite('suite 이름', () => undefined);",
+      "bench('bench 이름', () => undefined);",
+      "it(('괄호 안 리터럴'), () => undefined);",
+      "it('as 이름' as string, () => undefined);",
+      "it('', () => undefined);",
+    ].join('\n');
+    expect([...caseNameLiterals(rejected)]).toEqual([]);
+    // 문법 오류가 있는 파일은 아무것도 읽지 않는다 (다른 파일의 리터럴은 그대로 쓴다)
+    const broken = "it('문법 오류 파일의 이름', () => {\n";
+    expect([...caseNameLiterals(broken)]).toEqual([]);
+    const mixed = knownCaseMatcher({
+      'bive-acceptance/RULE-002/broken.acc.ts': broken,
+      'bive-acceptance/RULE-002/ok.acc.ts': "it('멀쩡한 파일의 이름', () => undefined);",
+    });
+    expect(mixed('RULE-002', '문법 오류 파일의 이름')).toBe(false);
+    expect(mixed('RULE-002', '멀쩡한 파일의 이름')).toBe(true);
   });
 
   it('작업 지시 스냅샷: 시스템 프롬프트의 고정 문장, 케이스 이름은 틀 안의 머리말 뒤 표시 값 한 줄(줄 나눔 · 가짜 표시 줄 · 방향 제어 글자 표기, 수 · 길이 상한)', () => {

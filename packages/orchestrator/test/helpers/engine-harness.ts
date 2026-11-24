@@ -19,6 +19,7 @@ import {
 import { openProjectStore, registerProject, type ProjectStore } from '@bive/store';
 
 import type { StepExecutor, StepExecutors, StepOutcome } from '../../src/engine/types.js';
+import { caseFileText, commitAcceptanceFiles } from './acceptance-commit.js';
 import { REPO_ROOT } from './process.js';
 
 export const human = { kind: 'human' } as const satisfies Author;
@@ -196,20 +197,32 @@ export const seedNormRule = (store: ProjectStore, seed: SeedNormRule): Rule =>
     createdAt: new Date(seed.at).toISOString(),
   });
 
-/** 규칙의 판정 기록 1건 (케이스 이름만 의미 있다, 실행 밖 판정). */
+/**
+ * 규칙의 판정 기록 1건 (케이스 이름만 의미 있다, 실행 밖 판정). `repo`를 주면 그 저장소에 `fileNames`(기본 `names`)마다
+ * `it(<이름>)`인 인수 테스트 파일 커밋을 만들어 판정 커밋으로 쓴다(파일에 적힌 이름만 규범 자료 · 인용 출처가 "알려진 케이스"로
+ * 싣는다, ADR-121). 없으면 없는 커밋이라 이름은 모두 모르는 케이스가 된다.
+ */
 export const seedNormCases = (
   store: ProjectStore,
   rule: Rule,
   names: readonly string[],
   at: number,
+  repo?: string,
+  fileNames: readonly string[] = names,
 ): void => {
+  const commit =
+    repo === undefined
+      ? 'a'.repeat(40)
+      : commitAcceptanceFiles(repo, {
+          [`bive-acceptance/${rule.displayId}/health.acc.ts`]: caseFileText(fileNames),
+        });
   store.judgments.record([
     {
       id: newId(),
       ruleId: rule.id,
       runId: null,
       stepId: null,
-      commit: 'a'.repeat(40),
+      commit,
       judgedAt: new Date(at).toISOString(),
       status: 'pass',
       runner: 'vitest',

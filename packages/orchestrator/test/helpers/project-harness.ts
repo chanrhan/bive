@@ -45,6 +45,8 @@ export interface ProjectHarnessOptions {
   ruleWriter?: (context: { biveHome: string; now: () => number }) => RuleWriterLauncher;
   /** `rule.update`의 진술 변경 뒤 실행 자동 시작 창구 (생략하면 실행을 만들지 않는다) */
   ruleEditStarter?: (context: { biveHome: string; now: () => number }) => RuleEditStarter;
+  /** 프로젝트 폴더 (생략하면 없는 경로 `/work/sample-next-app`). 판정 커밋의 인수 테스트 파일을 읽는 시험은 실제 저장소를 준다 */
+  rootPath?: string;
 }
 
 export const startProjectHarness = async (
@@ -56,7 +58,7 @@ export const startProjectHarness = async (
     {
       id: newId(),
       name: '샘플 앱',
-      rootPath: '/work/sample-next-app',
+      rootPath: options.rootPath ?? '/work/sample-next-app',
       baseBranch: 'main',
       createdAt: iso(T0),
     },

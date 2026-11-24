@@ -478,6 +478,18 @@ const deniedNameMessage = (node: TS.Identifier | TS.StringLiteralLike): string |
 };
 
 /**
+ * 인수 테스트 소스의 구문 트리와 파서 (케이스 이름 대조가 쓴다, M3-37 #265 · ADR-121). 문법 오류가 있으면 `null`(해석이
+ * 애매한 소스에서는 아무것도 읽지 않는다).
+ */
+export const parseAcceptanceSource = (
+  source: string,
+): { readonly ts: typeof TS; readonly sourceFile: TS.SourceFile } | null => {
+  loadParser();
+  const { sourceFile, diagnostics } = parseSource(source);
+  return diagnostics.length > 0 ? null : { ts, sourceFile };
+};
+
+/**
  * 인수 테스트 소스의 import 문제를 찾는다. 빈 배열이면 통과.
  * 정적 import · `export … from` · 부작용 import · 동적 import(문자열 리터럴만) · 타입 import(`import('x')` 타입)의
  * 모듈 이름을 허용 목록과 대조하고, 모듈 이름을 숨길 수 있는 수단(`require` · `eval` · `Function` · `importActual` 류 ·

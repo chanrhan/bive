@@ -30,6 +30,7 @@ import { DEFAULT_INSTALL_TIMEOUT_MS, JudgeCheckoutError } from '../judge/checkou
 import { installDependencies } from '../judge/checkout.js';
 import type { JudgeRunResult } from '../judge/runner.js';
 import { checkFailureFeedback } from '../norms/check-contradiction.js';
+import { latestJudgedCaseFilter } from '../norms/case-names.js';
 import { collectNormInput, normInputRecord } from '../norms/norm-input.js';
 import {
   ObjectionInputError,
@@ -387,9 +388,15 @@ export const createImplementationExecutor =
       ruleIds.some((id) => file.startsWith(`bive-acceptance/${id}/`)),
     );
     const installAllowlist = context.read((store) => store.settings.get().installAllowlist);
-    // 효력 있는 규범은 작업 지시로만 준다 (도구 목록은 그대로, ADR-100 K1 · A14)
+    // 효력 있는 규범은 작업 지시로만 준다 (도구 목록은 그대로, ADR-100 K1 · A14). 케이스 이름은 최근 판정 커밋의 인수 테스트
+    // 파일에 적힌 것만 싣는다 (M3-37, ADR-121)
+    const isKnownCase = await latestJudgedCaseFilter(context.read, context.git.repoPath);
     const normInput = context.read((store) =>
-      collectNormInput(store, { requirementIds: [], ruleIds: context.run.targetRuleIds }),
+      collectNormInput(
+        store,
+        { requirementIds: [], ruleIds: context.run.targetRuleIds },
+        { isKnownCase },
+      ),
     );
     // 이의 제기 도구의 콜백: 이의 기록 1건만 남긴다 (규칙 · 인수 테스트 · 규범 저장소의 다른 표는 쓰지 않는다, ADR-115)
     const raised: { entry: NormChangeEntry | null } = { entry: null };
