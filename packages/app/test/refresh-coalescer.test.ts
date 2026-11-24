@@ -1,10 +1,10 @@
 // 실행 알림 재조회의 합치기 규칙 (이슈 #32 수용 기준 3의 렌더러 쪽, ADR-076).
 // 연속 알림으로 조회가 폭주하지 않으면서(동시 조회 1개 · 뒤따르는 조회 최대 1개), 조회 중에 온 알림을 버리지 않아
 // 마지막 알림 뒤의 상태가 화면에 남는지 고정한다. 화면에서 실제로 다시 조회하는지는 e2e/run-start.spec.ts.
-// 제안 알림 · 재접속(M1-36)도 같은 합치기를 쓴다: 이름 대조 · 재접속 전이 판단은 여기, 화면 쪽은 e2e/todo-badge.spec.ts ·
-// e2e/reconnect.spec.ts.
+// 규범 변경 알림(M7-14) · 재접속(M1-36)도 같은 합치기를 쓴다: 이름 대조 · 재접속 전이 판단은 여기, 화면 쪽은
+// e2e/todo-badge.spec.ts · e2e/reconnect.spec.ts.
 import {
-  PROPOSAL_EVENT_NAMES as SHARED_PROPOSAL_EVENT_NAMES,
+  NORM_CHANGE_EVENT_NAMES as SHARED_NORM_CHANGE_EVENT_NAMES,
   RULE_WRITER_EVENT_NAMES as SHARED_RULE_WRITER_EVENT_NAMES,
   RUN_EVENT_NAMES as SHARED_RUN_EVENT_NAMES,
 } from '@bive/shared';
@@ -14,7 +14,8 @@ import { createReconnectDetector } from '../src/renderer/src/connection/reconnec
 import {
   createRefreshCoalescer,
   isProjectEvent,
-  PROPOSAL_EVENT_NAMES,
+  NORM_CHANGE_EVENT_NAMES,
+  NORM_VIEW_EVENT_NAMES,
   RULE_WRITER_EVENT_NAMES,
   RUN_EVENT_NAMES,
 } from '../src/renderer/src/runs/refreshCoalescer.js';
@@ -164,7 +165,11 @@ describe('createRefreshCoalescer', () => {
 describe('실행 알림 이름 · 프로젝트 거르기', () => {
   it('알림 이름이 shared와 같다', () => {
     expect(RUN_EVENT_NAMES).toEqual(SHARED_RUN_EVENT_NAMES);
-    expect(PROPOSAL_EVENT_NAMES).toEqual(SHARED_PROPOSAL_EVENT_NAMES);
+    expect(NORM_CHANGE_EVENT_NAMES).toEqual(SHARED_NORM_CHANGE_EVENT_NAMES);
+    expect(NORM_VIEW_EVENT_NAMES).toEqual([
+      ...SHARED_RUN_EVENT_NAMES,
+      ...SHARED_NORM_CHANGE_EVENT_NAMES,
+    ]);
     expect(RULE_WRITER_EVENT_NAMES).toEqual(SHARED_RULE_WRITER_EVENT_NAMES);
   });
 

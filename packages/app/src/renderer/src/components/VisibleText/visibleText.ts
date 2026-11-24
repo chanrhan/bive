@@ -6,7 +6,8 @@
 //   (오케스트레이터 `displayText`와 같은 표기. 렌더러는 shared를 형식으로만 가져오므로 여기에 다시 적는다, 상한은 두지 않는다)
 // - 변형 선택자 · 결합 문자(Mn 등)는 글자를 숨기지 않으므로 그대로 둔다
 // - 편집 입력에는 원문을 넣는다(사람이 고칠 수 있어야 한다). 이미 표시 값으로 온 글(`normChange.list`의 사유 · 근거)에는 다시 쓰지
-//   않는다(역슬래시가 두 번 바뀐다)
+//   않는다(역슬래시가 두 번 바뀐다). 그런 글은 역슬래시를 그대로 두는 `visibleDisplayText`를 거친다(표시 값이면 글이 바뀌지 않고,
+//   응답에 숨은 글자가 섞여 와도 화면에는 표기로 보인다, M7-14 · ADR-119)
 // DOM · React에 의존하지 않는다 (test/visible-text.test.ts).
 
 const NAMED: ReadonlyMap<string, string> = new Map([
@@ -24,7 +25,8 @@ const HANGUL_FILLERS: ReadonlySet<number> = new Set([0x115f, 0x1160, 0x3164, 0xf
 
 const hex4 = (unit: number): string => `\\u${unit.toString(16).padStart(4, '0')}`;
 
-const escapePiece = (piece: string): string => {
+const escapePiece = (piece: string, keepBackslash = false): string => {
+  if (keepBackslash && piece === '\\') return piece;
   const named = NAMED.get(piece);
   if (named !== undefined) return named;
   if (!HIDDEN_CATEGORY.test(piece) && !HANGUL_FILLERS.has(piece.codePointAt(0) ?? 0)) return piece;
@@ -34,10 +36,19 @@ const escapePiece = (piece: string): string => {
 };
 
 /** 화면 표기: 숨은 글자를 눈에 보이는 표기로 바꾼 글. 결과에는 숨은 글자가 남지 않는다. */
-export const visibleText = (text: string): string => Array.from(text, escapePiece).join('');
+export const visibleText = (text: string): string =>
+  Array.from(text, (piece) => escapePiece(piece)).join('');
 
 /**
  * 여러 줄 글의 화면 표기 (실행기의 실패 메시지 등): 줄바꿈(`\n`)은 줄로 남기고 그 밖의 숨은 글자는 {@link visibleText}와 같은
  * 표기로 바꾼다. 결과에는 줄바꿈 말고 숨은 글자가 남지 않는다.
  */
 export const visibleLines = (text: string): string => text.split('\n').map(visibleText).join('\n');
+
+/**
+ * 서버가 이미 표시 값(오케스트레이터 `displayText`)으로 준 글의 화면 표기 (`confirmation.list` · `normChange.list`의 글).
+ * {@link visibleText}와 같되 역슬래시는 그대로 둔다: 표시 값에는 숨은 글자가 없고 원래 역슬래시는 이미 `\\`라 결과가 입력과
+ * 같다(두 번 바뀌지 않는다). 숨은 글자가 섞여 오면 그 글자만 `\uXXXX` 등으로 바꾼다. 결과에는 숨은 글자가 남지 않는다.
+ */
+export const visibleDisplayText = (text: string): string =>
+  Array.from(text, (piece) => escapePiece(piece, true)).join('');
