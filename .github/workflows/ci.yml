@@ -137,6 +137,7 @@ jobs:
         group: [1, 2]
     env:
       # 묶음 1의 파일(시험 폴더 기준). 가장 느린 multi-rule(CI에서 약 4 ~ 7분)과 나머지를 시간으로 맞춰 둔다.
+      # 묶음 2에는 흐름 4개를 도는 contradiction(CI에서 약 12분)이 있다(M7-17).
       # 묶음 2는 이 목록 밖의 전부다. 파일을 옮길 때는 여기만 고친다
       PIPELINE_E2E_GROUP1: >-
         multi-rule.test.ts
@@ -146,6 +147,10 @@ jobs:
         extra-mcp.test.ts
         norm-input.test.ts
         auto-start-per-rule.test.ts
+        run-queue.test.ts
+        false-pass.test.ts
+        merge-conflict.test.ts
+        happy-path.test.ts
     steps:
       - name: 체크아웃
         uses: actions/checkout@v7
