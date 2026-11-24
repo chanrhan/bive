@@ -20,7 +20,7 @@ import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor } from '../src/engine/types.js';
 import { IMPLEMENTER_SYSTEM_PROMPT, implementerTaskPrompt } from '../src/implementer/prompts.js';
 import { createGitRunner } from '../src/git/git-exec.js';
-import { createWorktreeManager } from '../src/git/worktree-manager.js';
+import { createWorktreeManager, type WorktreeManager } from '../src/git/worktree-manager.js';
 import { createRunHandlers } from '../src/ipc/run-handlers.js';
 import { buildJudgeConfig } from '../src/judge/config.js';
 import { lintAcceptanceSource } from '../src/judge/acceptance-lint.js';
@@ -669,6 +669,60 @@ describe('폐기된 규칙: 검사 · 병합 재검사 대상에서 빠지고 �
     expect(userGit(h.repo, 'branch', '--list', done.run.branch ?? '')).toContain(
       done.run.branch ?? '',
     );
+  }, 60_000);
+
+  it('갱신 직전 확인(beforeUpdate)이 예외를 던지면 기준 브랜치를 갱신하지 않고, 임시 병합 워크트리를 지우고 잠금을 풀며, 실행은 단계 예외 경로(failed, step_error)로 끝난다 (ADR-120 검토 1회차 N5)', async () => {
+    let manager: WorktreeManager | null = null;
+    let runRef: Parameters<WorktreeManager['merge']>[0] | null = null;
+    let worktreesAtThrow = '';
+    const h = setup({
+      worktrees: (biveHome) => {
+        const real = createWorktreeManager({ biveHome });
+        manager = real;
+        return {
+          ...real,
+          merge: async (run, options) => {
+            runRef = run;
+            try {
+              return await real.merge(run, {
+                ...options,
+                beforeUpdate: () => {
+                  throw new Error('저장소 읽기 실패');
+                },
+              });
+            } catch (error) {
+              // 관리자가 빠져나온 순간 (엔진의 보존 처리 전)
+              worktreesAtThrow = userGit(h.repo, 'worktree', 'list', '--porcelain');
+              throw error;
+            }
+          },
+        };
+      },
+    });
+    const baseTip = mainTip(h);
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'step_error',
+      mergeCommit: null,
+    });
+    expect(exitOf(done, 'merge')).toMatchObject({
+      reason: 'step_error',
+      detail: { message: '저장소 읽기 실패' },
+    });
+    expect(mainTip(h)).toBe(baseTip);
+    // 관리자가 예외로 빠져나온 순간 임시 병합 워크트리는 이미 지워졌다 (실행 워크트리는 남는다)
+    expect(worktreesAtThrow).toContain(
+      `worktree ${fs.realpathSync(String(done.run.worktreePath))}`,
+    );
+    expect(worktreesAtThrow).not.toContain(`${path.sep}merges${path.sep}`);
+    // 저장소 병합 잠금 · 실행 잠금이 풀렸다: 같은 관리자로 다시 병합하면 끝까지 간다
+    if (manager === null || runRef === null) throw new Error('병합이 불리지 않음');
+    const again = await (manager as WorktreeManager).merge(runRef, {
+      check: () => Promise.resolve({ passed: true }),
+      checkTimeoutMs: 60_000,
+    });
+    expect(again.status).toBe('merged');
   }, 60_000);
 });
 

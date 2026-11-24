@@ -2041,6 +2041,29 @@ describe('0021 integrity_gaps: 병합 커밋 · 승인 기록 주체 · 대체 �
     });
   });
 
+  it.each(['running', 'interrupted', 'waiting_approval', 'queued'])(
+    '출발 상태 %s에서도 병합 커밋 없이 merged로 바꾸면 거부하고(확인 행 없음), 병합 커밋이 있으면 바꾸며 확인 전 행이 하나 생긴다',
+    (from) => {
+      withDb((db) => {
+        migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+        const rule = seedRule(db, 1, seedRequirement(db));
+        const run = insertRun(db, rule, { seq: 1, status: from });
+        expect(() => db.prepare("UPDATE runs SET status = 'merged' WHERE id = ?").run(run)).toThrow(
+          /병합 완료 실행에는 병합 커밋이 있어야 합니다/,
+        );
+        expect(db.prepare('SELECT status FROM runs WHERE id = ?').get(run)).toEqual({
+          status: from,
+        });
+        expect(checks(db)).toEqual([]);
+        db.prepare("UPDATE runs SET status = 'merged', merge_commit = ? WHERE id = ?").run(
+          SHA,
+          run,
+        );
+        expect(checks(db)).toEqual([{ run_id: run, checked_at: null }]);
+      });
+    },
+  );
+
   it('알림 확인 행: 병합 실행에만 확인 전으로 한 번 생기고, 확인 시각은 한 번만 채우며, 지울 수 없다', () => {
     withDb((db) => {
       migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });

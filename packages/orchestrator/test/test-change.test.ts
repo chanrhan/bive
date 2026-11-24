@@ -686,6 +686,57 @@ describe('병합 저장 뒤 알림 확인 전에 끝난 실행: 기동 때 실�
     expect(pending(h)).toEqual([]);
   });
 
+  describe('알림 기록과 확인 채우기는 한 트랜잭션이다 (한쪽 쓰기가 실패하면 둘 다 남지 않는다)', () => {
+    const record = (h: ReturnType<typeof storeHarness>, runId: string, store: ProjectStore) =>
+      recordTestChanges(store, {
+        run: { id: runId },
+        baseCommit: 'a'.repeat(40),
+        headCommit: 'b'.repeat(40),
+        sessionId: null,
+        at: new Date().toISOString(),
+        changes: [{ ruleId: h.rule.id, files: FILES }],
+      });
+    const checkedAt = (h: ReturnType<typeof storeHarness>, runId: string) =>
+      h.read((store) =>
+        store.db
+          .prepare('SELECT checked_at FROM run_test_change_checks WHERE run_id = ?')
+          .get(runId),
+      );
+
+    it('(가) 확인 채우기가 실패하면 테스트 변경 알림도 남지 않고 확인 전 그대로다', () => {
+      const h = storeHarness();
+      confirmRule(h);
+      const runId = mergedWithoutNotice(h, { base: 'a'.repeat(40), head: 'b'.repeat(40) });
+      h.read((store) => {
+        store.runs.markTestChangeChecked = () => {
+          throw new Error('확인 채우기 실패');
+        };
+        expect(() => record(h, runId, store)).toThrow('확인 채우기 실패');
+      });
+      expect(notices(h)).toEqual([]);
+      expect(checkedAt(h, runId)).toEqual({ checked_at: null });
+      expect(pending(h)).toEqual([runId]);
+    });
+
+    it('(나) 알림 쓰기가 실패하면 확인 시각이 채워지지 않는다', () => {
+      const h = storeHarness();
+      confirmRule(h);
+      const runId = mergedWithoutNotice(h, { base: 'a'.repeat(40), head: 'b'.repeat(40) });
+      h.read((store) => {
+        store.db.exec(`CREATE TEMP TRIGGER fail_test_changed BEFORE INSERT ON norm_changes
+          WHEN NEW.kind = 'test_changed' BEGIN SELECT RAISE(ABORT, '알림 쓰기 실패'); END`);
+        expect(() => record(h, runId, store)).toThrow('알림 쓰기 실패');
+      });
+      expect(notices(h)).toEqual([]);
+      expect(checkedAt(h, runId)).toEqual({ checked_at: null });
+      expect(pending(h)).toEqual([runId]);
+      // 실패 원인이 없어지면 그때 한 번에 둘 다 남는다
+      h.read((store) => record(h, runId, store));
+      expect(notices(h)).toHaveLength(1);
+      expect(pending(h)).toEqual([]);
+    });
+  });
+
   it('git 비교가 실패하면 확인 전 그대로 남아 다음 기동이 다시 보고 그때 한 번 쓴다', async () => {
     const h = storeHarness();
     confirmRule(h);
