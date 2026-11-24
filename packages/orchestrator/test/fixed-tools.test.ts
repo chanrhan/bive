@@ -195,6 +195,8 @@ describe('propose_rule', () => {
     statement: 'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL time을 담는다',
     kind: 'business',
     checkKinds: ['test'],
+    targetBlocks: ['health'],
+    risk: 'medium',
     rationale: '검사 가능한 형태',
     contradiction: { verdict: 'none' },
   };

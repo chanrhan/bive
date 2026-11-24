@@ -4,11 +4,14 @@
 // - `routes.md`: 라우트 목록 (Next.js App Router의 `route.*` · `page.*` 위치에서 만든 경로 · 메서드, 코드 아님)
 // - `prisma/schema.prisma`: Prisma 스키마 사본 (있을 때)
 // - `bive-acceptance/<규칙 폴더>/**/*.acc.ts`: 다른 규칙의 기존 인수 테스트 사본
+// - `blocks.json`: 블록 선언의 읽기 전용 사본 (지금 판의 선언 그대로, 선언이 없으면 없음. M3-01 #46, ADR-005 · ADR-122). 세션이 고쳐도
+//   경로 가드가 쓰기를 거부하고(테스트 작성 역할은 대상 규칙 폴더 밖 쓰기 불가) 결과로 옮기지도 않는다. 원본은 프로젝트 폴더 밖
+//   저장소에 있다. 세션 도중 사람이 선언을 바꿔도 이 사본은 세션 시작 때의 판이다(다음 세션이 새 판을 받는다)
 // 세션이 쓴 결과는 대상 규칙 폴더의 `*.acc.ts`만 오케스트레이터가 실행 워크트리로 옮긴다(그 폴더의 `*.acc.ts`를 통째로 교체).
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { Rule } from '@bive/shared';
+import type { BlockDeclaration, Rule } from '@bive/shared';
 
 import { ACCEPTANCE_DECLARATION_FILES } from '../judge/acceptance-env.js';
 import { ACCEPTANCE_DIR, ACCEPTANCE_SUFFIX } from '../judge/config.js';
@@ -19,7 +22,12 @@ export const TEST_WRITER_INPUTS = {
   routes: 'routes.md',
   prismaSchema: 'prisma/schema.prisma',
   acceptanceDir: ACCEPTANCE_DIR,
+  blocks: 'blocks.json',
 } as const;
+
+/** `blocks.json` 본문: 선언 그대로의 JSON (값은 모두 보이는 ASCII라 표시 값 변환이 바꾸는 글자가 없다, ADR-122). */
+export const renderBlocks = (declaration: BlockDeclaration): string =>
+  `${JSON.stringify(declaration, null, 2)}\n`;
 
 /** 프롬프트 · 입력에 쓰는 규칙 값. */
 export type TestWriterRule = Pick<
@@ -189,6 +197,8 @@ export const prepareTestWriterInputs = (input: {
   worktree: string;
   sessionDir: string;
   rules: readonly TestWriterRule[];
+  /** 지금 블록 선언 (없으면 `null` 또는 생략: 사본을 두지 않는다) */
+  blocks?: BlockDeclaration | null;
 }): PreparedInputs => {
   const { worktree, sessionDir } = input;
   if (fs.readdirSync(sessionDir).length > 0) {
@@ -206,6 +216,9 @@ export const prepareTestWriterInputs = (input: {
   put(TEST_WRITER_INPUTS.routes, renderRoutes(routes));
   const schema = path.join(worktree, TEST_WRITER_INPUTS.prismaSchema);
   if (lstatKind(schema) === 'file') put(TEST_WRITER_INPUTS.prismaSchema, fs.readFileSync(schema));
+  if (input.blocks !== undefined && input.blocks !== null) {
+    put(TEST_WRITER_INPUTS.blocks, renderBlocks(input.blocks));
+  }
   // 대상 규칙 폴더의 기존 테스트는 넣지 않는다: 대상 규칙 폴더는 이번 시도의 결과로 통째로 정해진다
   // (Red 미충족 뒤 되돌린 워크트리에는 앞 시도의 테스트가 남아 있고, 세션에는 지우기 도구가 없다)
   const targets = new Set(input.rules.map((rule) => rule.displayId));

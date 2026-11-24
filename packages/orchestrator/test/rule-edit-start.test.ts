@@ -320,6 +320,8 @@ describe('autoStartRuleEditRun: 진술이 바뀐 사람 편집 1건 → 그 규�
                 'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답에 버전을 담는다',
               kind: 'business',
               checkKinds: ['test'],
+              targetBlocks: ['health'],
+              risk: 'medium',
               parentRequirementId: h.requirementId,
             },
             rationale: '시험 근거',

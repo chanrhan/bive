@@ -437,6 +437,8 @@ const NEW_RULE = {
   statement: 'WHEN 사용자가 가입을 요청하면 THE SYSTEM SHALL 비밀번호 길이로 가입을 막지 않는다',
   kind: 'business',
   checkKinds: ['test'],
+  targetBlocks: ['health'],
+  risk: 'medium',
 } as const;
 const RATIONALE = "새 요구사항의 '길이 제한 없음'을 옮김";
 
@@ -859,6 +861,8 @@ describe('confirmation.list: 확인할 것 목록 (M7-13 수용 기준 3, ADR-10
         displayId: 'RULE-004',
         text: NEW_RULE.title,
         author: AGENT_RW,
+        // 대체로 생긴 새 규칙의 위험도 (선택 칸, M3-01 #46). 위험도 없는 옛 규칙 · 요구사항 항목에는 칸이 없다
+        risk: 'medium',
         textTruncated: false,
       },
     ]);

@@ -24,6 +24,7 @@ export const TEST_WRITER_SYSTEM_PROMPT = [
   `- ${TEST_WRITER_INPUTS.rulesDir}/<규칙 ID>.md: 대상 규칙의 진술`,
   `- ${TEST_WRITER_INPUTS.routes}: 라우트 목록`,
   `- ${TEST_WRITER_INPUTS.prismaSchema}: 데이터 스키마 (있을 때)`,
+  `- ${TEST_WRITER_INPUTS.blocks}: 블록 선언 읽기 전용 사본 (있을 때, 고칠 수 없다)`,
   `- ${ACCEPTANCE_DIR}/<규칙 ID>/: 기존 인수 테스트 (있을 때)`,
   '',
   '작성 규약',

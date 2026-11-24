@@ -38,9 +38,11 @@ import {
   type NormChangeEntry,
   type NormJudgmentRequirementChange,
   type NormJudgmentRuleRef,
+  Risk,
   type Rule,
   RuleNewPayload,
   type RuleRetirement,
+  RuleTargetBlocks,
   type Ulid,
 } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
@@ -76,9 +78,45 @@ export class NormJudgmentInputError extends Error {
 /** 모순 없음 판단 기록의 사유 (판단 결과를 옮긴 고정 문장, 근거 글은 모순일 때만 받는다). */
 export const NO_CONTRADICTION_REASON = '효력 있는 기존 규칙과 모순 없음 (규칙 작성 역할의 판단)';
 
+/**
+ * 에이전트가 새로 만드는 규칙의 본문 (M3-01 #46, NRM-09, ADR-122): 규칙 본문(`RuleNewPayload`)에 대상 블록(블록 이름 1개 이상)과
+ * 위험도가 필수로 붙는다. 옛 제안 본문(`RuleNewPayload`)과 옛 규칙 행은 바꾸지 않는다(새로 만드는 이 경로에서만 강제한다).
+ */
+export const AgentRulePayload = RuleNewPayload.extend({
+  targetBlocks: RuleTargetBlocks,
+  risk: Risk,
+});
+export type AgentRulePayload = ReturnType<typeof AgentRulePayload.parse>;
+
+/**
+ * 대상 블록을 지금 블록 선언과 대조한다 (부른 쪽 트랜잭션 안, ADR-122). 선언이 있으면 이름이 모두 선언에 있어야 하고(없으면
+ * 도구 인자 오류로 돌아가는 스키마 오류, 아무것도 쓰지 않는다), 선언이 없으면 대조하지 않고 받은 이름을 그대로 둔다. 대조한 선언의
+ * 판(선언이 없으면 `null`)을 돌려준다: 신규 기록의 만든 내용에 남아 "선언 없이 받은 이름"이 조회 결과에 드러난다.
+ * @throws {ZodError} 선언에 없는 블록 이름
+ */
+const checkTargetBlocks = (store: ProjectStore, targetBlocks: readonly string[]): number | null => {
+  const current = store.blockDeclarations.current();
+  if (current === null) return null;
+  const declared = current.declaration.blocks.map((block) => block.name);
+  AgentRulePayload.pick({ targetBlocks: true })
+    .superRefine(({ targetBlocks: names }, ctx) => {
+      names.forEach((name, index) => {
+        if (!declared.includes(name)) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `블록 선언에 없는 블록: ${name} (선언된 블록: ${declared.join(', ')})`,
+            path: ['targetBlocks', index],
+          });
+        }
+      });
+    })
+    .parse({ targetBlocks });
+  return current.version;
+};
+
 /** 바로 반영할 규칙 (규칙 생성 도구의 인자에서 근거를 뺀 것). */
 export interface AgentRuleInput {
-  /** 규칙 본문 (`RuleNewPayload`로 검증: 제목 · EARS 진술 · 종류 · 검사 종류 · 부모 요구사항) */
+  /** 규칙 본문 (`AgentRulePayload`로 검증: 제목 · EARS 진술 · 종류 · 검사 종류 · 부모 요구사항 · 대상 블록 · 위험도) */
   readonly payload: unknown;
   /** 사유 · 근거 (규범 변경 기록 `reason`) */
   readonly rationale: string;
@@ -152,6 +190,8 @@ const ruleContent = (rule: Rule) => ({
   kind: rule.kind,
   checkKinds: rule.checkKinds,
   parentRequirementId: rule.parentRequirementId,
+  targetBlockIds: rule.targetBlockIds,
+  risk: rule.risk,
 });
 
 /**
@@ -166,7 +206,7 @@ export const createAgentRule = (
   input: AgentRuleInput,
   clock: AgentRuleClock,
 ): AgentRuleResult => {
-  const payload = RuleNewPayload.parse(input.payload);
+  const payload = AgentRulePayload.parse(input.payload);
   const author = AgentAuthorSchema.parse(input.author);
   return store.transaction(() => {
     const at = new Date(clock.now()).toISOString();
@@ -197,7 +237,7 @@ export const createAgentRule = (
 const writeAgentRule = (
   store: ProjectStore,
   input: {
-    readonly payload: RuleNewPayload;
+    readonly payload: AgentRulePayload;
     readonly author: AgentAuthor;
     readonly at: string;
     readonly id: Ulid;
@@ -215,6 +255,7 @@ const writeAgentRule = (
 ): AgentRuleResult => {
   const { payload, author, at, judgment: judged } = input;
   const contradicts = judged.contradicts;
+  const blockDeclarationVersion = checkTargetBlocks(store, payload.targetBlocks);
   const rule = store.rules.create({
     id: input.id,
     title: payload.title,
@@ -223,9 +264,9 @@ const writeAgentRule = (
     checkKinds: payload.checkKinds,
     parentRequirementId: payload.parentRequirementId,
     builtin: false,
-    // 대상 블록 · 위험도는 M3 이후 (NRM-09)
-    targetBlockIds: [],
-    risk: null,
+    // 대상 블록 · 위험도 (NRM-09, M3-01 #46): 새로 만드는 규칙에는 필수
+    targetBlockIds: [...payload.targetBlocks],
+    risk: payload.risk,
     contractId: null,
     author,
     normState: 'approved',
@@ -239,7 +280,8 @@ const writeAgentRule = (
     sessionId: input.sessionId,
     runId: input.runId,
     reason: input.rationale,
-    detail: { after: ruleContent(rule) },
+    // 대조한 블록 선언의 판 (`null` = 블록 선언 없음: 대상 블록 이름을 대조하지 않고 받은 그대로 둠, ADR-122)
+    detail: { after: { ...ruleContent(rule), blockDeclarationVersion } },
   });
   const { requirements, rules } = input.normInput;
   const judgment = store.normChanges.append({
@@ -827,7 +869,7 @@ export const supersedeAgentRule = (
   input: AgentSupersedeInput,
   clock: AgentRuleClock,
 ): AgentSupersedeResult => {
-  const payload = RuleNewPayload.parse(input.payload);
+  const payload = AgentRulePayload.parse(input.payload);
   const author = AgentAuthorSchema.parse(input.author);
   assertOneCause(input);
   return store.transaction(() => {

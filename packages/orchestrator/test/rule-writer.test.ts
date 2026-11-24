@@ -253,6 +253,8 @@ const validArgs = (overrides: Record<string, unknown> = {}): Record<string, unkn
     'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON에 서버 시각을 담는다',
   kind: 'business',
   checkKinds: ['test'],
+  targetBlocks: ['health'],
+  risk: 'medium',
   rationale: "요구사항의 '서버 시각 포함'",
   contradiction: { verdict: 'none' },
   ...overrides,
@@ -262,6 +264,14 @@ const validArgs = (overrides: Record<string, unknown> = {}): Record<string, unkn
 const withoutRationale = (args: Record<string, unknown>): Record<string, unknown> =>
   Object.fromEntries(
     Object.entries(args).filter(([key]) => key !== 'rationale' && key !== 'contradiction'),
+  );
+
+/** 이 변경 전부터 대기 중이던 옛 제안의 본문: 대상 블록 · 위험도가 없다 (옛 `RuleNewPayload`, M3-01 #46 · ADR-122). */
+const legacyProposalPayload = (args: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(withoutRationale(args)).filter(
+      ([key]) => key !== 'targetBlocks' && key !== 'risk',
+    ),
   );
 
 /** EARS 검사가 받는 진술 (규칙 화면 whenCondition과 교차 확인하는 공용 사례). */
@@ -365,8 +375,11 @@ describe('requirement.create 뒤 rule-writer 세션 (happy-path)', () => {
     const expected = happyPathProposals();
     expect(expected).toHaveLength(2);
     rules.forEach((rule, index) => {
+      // 도구 인자의 대상 블록은 규칙의 `targetBlockIds`(블록 이름)로 저장된다 (M3-01 #46)
+      const { targetBlocks, ...fields } = withoutRationale(expected[index] ?? {});
       expect(rule).toMatchObject({
-        ...withoutRationale(expected[index] ?? {}),
+        ...fields,
+        targetBlockIds: targetBlocks,
         displayId: `RULE-00${String(index + 1)}`,
         parentRequirementId: requirement.id,
         normState: 'approved',
@@ -1097,7 +1110,7 @@ describe('설정 미비 · 중복 · 종료', () => {
         createdAt: iso(T0),
       }),
     );
-    const legacyPayload = withoutRationale(validArgs({ parentRequirementId: legacy.id }));
+    const legacyPayload = legacyProposalPayload(validArgs({ parentRequirementId: legacy.id }));
     h.proposals.submit(h.project.id, {
       kind: 'rule_new',
       payload: legacyPayload,
@@ -1558,7 +1571,7 @@ describe('사후 확인 전환: 프롬프트 · 대기 중이던 제안 (M7-02 #
         createdAt: iso(T0),
       }),
     );
-    const payload = withoutRationale(validArgs({ parentRequirementId: legacy.id }));
+    const payload = legacyProposalPayload(validArgs({ parentRequirementId: legacy.id }));
     const [kept, dropped] = ['헬스 체크 응답의 서버 시각', '헬스 체크 응답 형식 유지'].map(
       (title) =>
         h.proposals.submit(h.project.id, {

@@ -194,10 +194,13 @@ export const createTestWritingExecutor =
     const sessionDir = path.join(context.biveHome, 'work', context.project.id, 'sessions', newId());
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
     try {
+      // 블록 선언은 읽기 전용 사본으로 둔다 (선언이 없으면 사본도 없다, M3-01 #46 · ADR-122)
+      const blocks = context.read((store) => store.blockDeclarations.current());
       const inputs = prepareTestWriterInputs({
         worktree: context.git.worktreePath,
         sessionDir,
         rules,
+        blocks: blocks?.declaration ?? null,
       });
       // 효력 있는 규범은 작업 지시의 글로만 준다 (파일로 복사하지 않는다, ADR-100 A14)
       const norms = context.read((store) =>

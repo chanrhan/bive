@@ -1,0 +1,28 @@
+{
+  "blocks": [
+    {
+      "name": "auth",
+      "kind": "domain",
+      "include": ["src/app/api/auth/**"],
+      "public": [],
+      "dependsOn": ["lib"],
+      "risk": "high"
+    },
+    {
+      "name": "health",
+      "kind": "domain",
+      "include": ["src/app/api/health/**"],
+      "public": [],
+      "dependsOn": ["lib"],
+      "risk": "medium"
+    },
+    {
+      "name": "lib",
+      "kind": "shared",
+      "include": ["src/lib/**"],
+      "public": ["src/lib/db.ts"],
+      "dependsOn": [],
+      "risk": "low"
+    }
+  ]
+}
