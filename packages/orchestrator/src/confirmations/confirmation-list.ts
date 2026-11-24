@@ -222,9 +222,13 @@ export const buildConfirmationList = (store: ProjectStore): ConfirmationListResu
     .sort((a, b) => byNewest(a.entry, b.entry))
     .flatMap(({ entry, rule }) => testChangeItem(store, entry, rule) ?? []);
   const all = [...top, ...tests, ...unconfirmedNorms(store)];
+  // 자르기 전 종류별 수 (할 일 툴팁의 종류별 건수, M7-14 · ADR-119). 합이 `total`이다
+  const totalByKind = { retired: 0, superseded: 0, test_changed: 0, unconfirmed_norm: 0 };
+  for (const item of all) totalByKind[item.kind] += 1;
   return {
     items: all.slice(0, CONFIRMATION_LIST_MAX_ITEMS),
     total: all.length,
     truncated: all.length > CONFIRMATION_LIST_MAX_ITEMS,
+    totalByKind,
   };
 };

@@ -781,7 +781,12 @@ describe('confirmation.list: 확인할 것 목록 (M7-13 수용 기준 3, ADR-10
       'unconfirmed_norm',
       'unconfirmed_norm',
     ]);
-    expect(list).toMatchObject({ total: 5, truncated: false });
+    expect(list).toMatchObject({
+      total: 5,
+      truncated: false,
+      // 종류별 수 (M7-14 #226, ADR-119)
+      totalByKind: { retired: 1, superseded: 1, test_changed: 1, unconfirmed_norm: 2 },
+    });
     const [supersede, retire, test, ...unconfirmed] = list.items as [
       ConfirmationItem,
       ConfirmationItem,
@@ -900,7 +905,12 @@ describe('confirmation.list: 확인할 것 목록 (M7-13 수용 기준 3, ADR-10
       target: { entity: 'Requirement', id: agentRequirement.id },
       author: human,
     });
-    expect(await listOf()).toEqual({ items: [], total: 0, truncated: false });
+    expect(await listOf()).toEqual({
+      items: [],
+      total: 0,
+      truncated: false,
+      totalByKind: { retired: 0, superseded: 0, test_changed: 0, unconfirmed_norm: 0 },
+    });
   });
 
   it('삭제된 요구사항은 목록에서 빠지고, 기록보다 앞선 확인은 그 기록을 본 것이 아니다', async () => {
@@ -951,6 +961,13 @@ describe('confirmation.list: 확인할 것 목록 (M7-13 수용 기준 3, ADR-10
     expect(list.items).toHaveLength(CONFIRMATION_LIST_MAX_ITEMS);
     expect(list.truncated).toBe(true);
     expect(list.items[0]?.kind).toBe('retired');
+    // 종류별 수는 자르기 전 수다: 잘려도 합이 전체 수(배지 수)와 같다 (M7-14 #226, ADR-119)
+    expect(list.totalByKind).toEqual({
+      retired: 1,
+      superseded: 0,
+      test_changed: 0,
+      unconfirmed_norm: CONFIRMATION_LIST_MAX_ITEMS + 3 + 2,
+    });
   });
 
   it('상한과 같은 수면 잘리지 않는다 (경계값)', async () => {

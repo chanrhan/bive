@@ -685,12 +685,30 @@ export const ConfirmationItem = z.union([
 ]);
 export type ConfirmationItem = z.infer<typeof ConfirmationItem>;
 
-export const ConfirmationListResult = z.strictObject({
-  items: z.array(ConfirmationItem).max(CONFIRMATION_LIST_MAX_ITEMS),
-  /** 자르기 전 항목 수 (확인할 것 배지의 수) */
-  total: z.int().nonnegative(),
-  truncated: z.boolean(),
-});
+/** 자르기 전 항목 수의 종류별 내역 (M7-14 #226, ADR-119: 항목이 잘려도 할 일 툴팁의 종류별 건수 합이 `total`과 같게). */
+export const ConfirmationKindCounts = z.strictObject({
+  retired: z.int().nonnegative(),
+  superseded: z.int().nonnegative(),
+  test_changed: z.int().nonnegative(),
+  unconfirmed_norm: z.int().nonnegative(),
+}) satisfies z.ZodType<Record<ConfirmationItemKind, number>>;
+export type ConfirmationKindCounts = z.infer<typeof ConfirmationKindCounts>;
+
+export const ConfirmationListResult = z
+  .strictObject({
+    items: z.array(ConfirmationItem).max(CONFIRMATION_LIST_MAX_ITEMS),
+    /** 자르기 전 항목 수 (확인할 것 배지의 수) */
+    total: z.int().nonnegative(),
+    truncated: z.boolean(),
+    /** 자르기 전 종류별 항목 수 (선택 칸, M7-14. 오케스트레이터는 늘 채운다). 있으면 합이 `total`이다 */
+    totalByKind: ConfirmationKindCounts.optional(),
+  })
+  .refine(
+    (result) =>
+      result.totalByKind === undefined ||
+      Object.values(result.totalByKind).reduce((sum, n) => sum + n, 0) === result.total,
+    { message: '종류별 항목 수의 합이 전체 항목 수와 다릅니다', path: ['totalByKind'] },
+  );
 export type ConfirmationListResult = z.infer<typeof ConfirmationListResult>;
 
 // ── 프로젝트 (PRJ-01, M1-01, ADR-025 · ADR-036 · ADR-040 · ADR-054) ─────────
@@ -1333,12 +1351,28 @@ export type RuleWriterChangedEvent = z.infer<typeof RuleWriterChangedEvent>;
 /** 규칙 작성 알림 이름. 렌더러는 받으면 요구사항 상세의 규칙 작성 상태를 다시 조회한다. */
 export const RULE_WRITER_EVENT_NAMES = ['event.ruleWriter.changed'] as const;
 
+// ── 규범 변경 알림 (NRM-07 · TODO-01, M7-14 #226, ADR-119) ──────────
+// - 규범 변경 기록이 하나 이상 추가된 저장소 사용이 끝난 뒤(커밋 뒤) 1개. 쓰는 곳마다 보내지 않고 저장소를 여닫는 한 곳에서
+//   그 사이 마지막 순번이 늘었는지 보고 보낸다. 기다리지 않는다
+// - 내용 없이 프로젝트 ID와 마지막 순번만 싣는다. 받는 쪽은 확인할 것 · 규칙 · 검증 화면을 다시 조회한다
+
+/** `event.normChange.appended`: 프로젝트의 규범 변경 기록이 늘어남. */
+export const NormChangeAppendedEvent = z.strictObject({
+  projectId: Ulid,
+  lastSeq: z.int().positive(),
+});
+export type NormChangeAppendedEvent = z.infer<typeof NormChangeAppendedEvent>;
+
+/** 규범 변경 알림 이름. 렌더러는 받으면 할 일 배지 · 확인할 것 · 규칙 · 검증 화면을 다시 조회한다. */
+export const NORM_CHANGE_EVENT_NAMES = ['event.normChange.appended'] as const;
+
 /** 알림 이름 → 파라미터 스키마. `event.*` 알림은 해당 이슈에서 추가한다. */
 export const NOTIFICATIONS = {
   'event.run.updated': { params: RunUpdatedEvent },
   'event.step.updated': { params: StepUpdatedEvent },
   'event.proposal.changed': { params: ProposalChangedEvent },
   'event.ruleWriter.changed': { params: RuleWriterChangedEvent },
+  'event.normChange.appended': { params: NormChangeAppendedEvent },
 } as const satisfies Record<string, NotificationSpec>;
 
 export type NotificationParams<N extends NotificationName> = z.infer<

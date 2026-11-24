@@ -984,11 +984,13 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
     ]);
     // 확인 서비스는 사람의 확인이 "여기까지 봤다"로 남기는 마지막 순번만 읽는다 (M7-13 검토 1회차, ADR-113)
     // 검증 요약은 에이전트 폐기 수를 세려고 목록만 읽는다 (M7-16, ADR-117. 쓰기 허용 목록은 위 그대로)
+    // 저장소를 여닫는 한 곳은 규범 변경 알림을 내려고 사용 전후의 마지막 순번만 읽는다 (M7-14 #226, ADR-119. 아래 시험)
     expect(using(/\.normChanges\./)).toEqual([
       'confirmations/confirmation-list.ts',
       'confirmations/confirmation-service.ts',
       'engine/start-basis.ts',
       'ipc/norm-change-handlers.ts',
+      'ipc/project-store-access.ts',
       'ipc/rule-writer-handlers.ts',
       'norms/agent-rule.ts',
       'norms/check-contradiction.ts',
@@ -998,6 +1000,9 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
       'runs/rule-edit-start.ts',
       'verification/summary.ts',
     ]);
+    // 저장소 접근 모듈의 규범 변경 기록 접근은 마지막 순번 읽기뿐이다 (알림 계기, 쓰기 · 목록 읽기 없음, ADR-119)
+    const access = files.find((f) => f.rel === 'ipc/project-store-access.ts')?.text ?? '';
+    expect(access.match(/\.normChanges\.[A-Za-z]+/g)).toEqual(['.normChanges.lastSeq']);
     // 바로 반영 모듈을 가져오는 곳 = 규칙 작성 서비스뿐 (에이전트 세션 중 규칙 작성 역할만)
     expect(using(/from '[./]+\/?norms\/agent-rule\.js'/)).toEqual([
       'rule-writer/rule-writer-service.ts',

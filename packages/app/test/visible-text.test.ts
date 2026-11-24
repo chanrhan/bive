@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import {
+  visibleDisplayText,
   visibleLines,
   visibleText,
 } from '../src/renderer/src/components/VisibleText/visibleText.js';
@@ -76,5 +77,32 @@ describe('오케스트레이터 displayText와 같은 표기 (검토 1회차 N2:
       expect(expected.truncated, input).toBe(false);
       expect(visibleText(input), input).toBe(expected.text);
     }
+  });
+
+  it('표시 값(displayText 결과)에 visibleDisplayText를 다시 거쳐도 글이 같다 (두 번 바뀌지 않음, M7-14 · ADR-119)', async () => {
+    const source = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../../orchestrator/src/text-limit.ts',
+    );
+    const { displayText } = (await import(pathToFileURL(source).href)) as DisplayTextModule;
+    for (const input of INPUTS) {
+      const shown = displayText(input, 10_000).text;
+      expect(visibleDisplayText(shown), input).toBe(shown);
+      // 원문을 그대로 받아도 숨은 글자는 남지 않는다 (역슬래시만 그대로)
+      expect(visibleDisplayText(input), input).toBe(visibleText(input).replaceAll('\\\\', '\\'));
+    }
+  });
+});
+
+describe('visibleDisplayText (이미 표시 값으로 온 글)', () => {
+  it('역슬래시 표기는 그대로, 섞여 온 숨은 글자만 표기로', () => {
+    // 이미 표기된 글: 바뀌지 않는다 (역슬래시가 둘이 되지 않음)
+    expect(visibleDisplayText('사유 \\u202e 경로 a\\\\n')).toBe('사유 \\u202e 경로 a\\\\n');
+    // 원문 글자가 섞여 오면 그 글자만 표기로
+    expect(visibleDisplayText('통과 \u202e패실\u202c')).toBe('통과 \\u202e패실\\u202c');
+    expect(visibleDisplayText('a\nb\t\u200b')).toBe('a\\nb\\t\\u200b');
+    // 두 번 거쳐도 같다
+    const once = visibleDisplayText('통과 \u202e패실');
+    expect(visibleDisplayText(once)).toBe(once);
   });
 });

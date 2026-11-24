@@ -1,34 +1,10 @@
-// 제안 표시명 · 할 일 배지 계산 (screens.md 6장 할 일 · SCR-17, TODO-01, ADR-056).
+// 역할 · 검사 종류 표시명 (규칙 상세 · 변경 이력 · 확인할 것이 함께 쓴다).
 // renderer는 shared를 import type으로만 가져오므로(architecture.md 2장) 표시명을 다시 적고,
-// test/todo-proposals.test.ts가 shared의 *_LABELS와 같은지 대조한다.
-import type {
-  AgentRole,
-  CheckKind,
-  ProposalCountResult,
-  ProposalKind,
-  ProposalSource,
-  ProposalState,
-  Risk,
-  RuleKind,
-} from '@bive/shared';
+// test/todo-confirmation.test.ts가 shared의 *_LABELS와 같은지 대조한다.
+// 옛 승인 대기(SCR-17)의 제안 표시명 · 배지 계산은 확인할 것(M7-14 #226, ADR-119)으로 바뀌어 지웠다.
+import type { AgentRole, CheckKind } from '@bive/shared';
 
-/** 제안 출처 표시명 (shared PROPOSAL_SOURCE_LABELS와 같음). 상세의 출처에 쓴다. */
-export const PROPOSAL_SOURCE_LABELS = {
-  rule_generation: '규칙 자동 생성',
-  chat: '채팅 지시',
-  reverse_extraction: '역추출',
-  writing_rules: '작성 규칙',
-  implementation: '구현',
-} as const satisfies Record<ProposalSource, string>;
-
-/** 규칙 종류 표시명 (shared RULE_KIND_LABELS와 같음). 규칙 제안 본문에 쓴다. */
-export const RULE_KIND_LABELS = {
-  architecture: '아키텍처',
-  'tech-constraint': '기술 제약',
-  business: '비즈니스',
-} as const satisfies Record<RuleKind, string>;
-
-/** 검사 종류 표시명 (shared CHECK_KIND_LABELS와 같음). 규칙 제안 본문에 쓴다. */
+/** 검사 종류 표시명 (shared CHECK_KIND_LABELS와 같음). 규칙 상세에 쓴다. */
 export const CHECK_KIND_LABELS = {
   test: '인수 테스트',
   pbt: '속성 기반 테스트',
@@ -37,27 +13,7 @@ export const CHECK_KIND_LABELS = {
   structure: '구조 검사',
 } as const satisfies Record<CheckKind, string>;
 
-/** 제안 종류 8종 표시명 (shared PROPOSAL_KIND_LABELS와 같음). 순서가 툴팁 · 필터 메뉴 순서다. */
-export const PROPOSAL_KIND_LABELS = {
-  requirement_new: '요구사항 신규',
-  requirement_change: '요구사항 변경',
-  rule_new: '규칙 신규',
-  rule_change: '규칙 변경',
-  contract_new: '계약 신규',
-  design_change: '설계 변경',
-  rule_title_change: '규칙 제목 변경',
-  contract_change: '계약 변경',
-} as const satisfies Record<ProposalKind, string>;
-
-/** 제안 상태 표시명 (shared PROPOSAL_STATE_LABELS와 같음). */
-export const PROPOSAL_STATE_LABELS = {
-  pending: '승인 대기',
-  approved: '승인',
-  rejected: '거절',
-  provisional: '잠정 승인',
-} as const satisfies Record<ProposalState, string>;
-
-/** 에이전트 역할 표시명 (shared AGENT_ROLE_LABELS와 같음). 제안자 필터에 쓴다. */
+/** 에이전트 역할 표시명 (shared AGENT_ROLE_LABELS와 같음). 생성 주체 · 생성 주체 필터에 쓴다. */
 export const AGENT_ROLE_LABELS = {
   'rule-writer': '규칙 작성',
   planner: '계획',
@@ -65,33 +21,3 @@ export const AGENT_ROLE_LABELS = {
   implementer: '구현',
   chat: '채팅',
 } as const satisfies Record<AgentRole, string>;
-
-/** 위험도 표시명 (shared RISK_LABELS와 같음). */
-export const RISK_LABELS = {
-  low: '낮음',
-  medium: '보통',
-  high: '높음',
-} as const satisfies Record<Risk, string>;
-
-const KIND_ORDER = Object.keys(PROPOSAL_KIND_LABELS) as ProposalKind[];
-
-/**
- * 사이드바 알림 배지 숫자. 화면 정의서는 승인 대기 + 검토 대기열 + 계약 변경 대기 합계이고,
- * M1에는 제안(승인 대기)만 있으므로 `proposal.count`의 대기 건수 그대로다. 검토 대기열은 M3에서 더한다.
- * 모르면(프로젝트 없음 · 조회 전 · 실패) null — 배지를 보이지 않는다.
- */
-export const todoBadgeTotal = (count: ProposalCountResult | null): number | null =>
-  count === null ? null : count.pending;
-
-/**
- * 알림 아이콘 툴팁의 종류별 건수: "규칙 신규 2 · 요구사항 신규 1". 0건 종류는 뺀다.
- * 건수 많은 순, 같으면 종류 순서. 대기가 없으면 빈 문자열.
- */
-export const todoBreakdown = (count: ProposalCountResult | null): string => {
-  if (count === null) return '';
-  return KIND_ORDER.map((kind) => ({ kind, n: count.pendingByKind[kind] ?? 0 }))
-    .filter(({ n }) => n > 0)
-    .sort((a, b) => b.n - a.n || KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind))
-    .map(({ kind, n }) => `${PROPOSAL_KIND_LABELS[kind]} ${n}`)
-    .join(' · ');
-};

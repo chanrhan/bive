@@ -1,5 +1,5 @@
 // 앱 창의 최소 크기 (이슈 #191 수용 기준 4, ADR-093): 창 안쪽 최소 크기(`MIN_CONTENT_SIZE`, 820 × 600)의 뷰포트에서
-// 요구사항(SCR-02) · 규칙(SCR-03) · 승인 대기(SCR-17)의 목록 + 상세 본문에 가로 스크롤이 없고, 목록 · 상세 칸이 최소 폭
+// 요구사항(SCR-02) · 규칙(SCR-03) · 확인할 것(SCR-17 자리)의 목록 + 상세 본문에 가로 스크롤이 없고, 목록 · 상세 칸이 최소 폭
 // 이상이며, 설정 모달(SCR-21)이 820 × 600 그대로 들어간다. 채팅은 1100px 미만이라 44px 띠다.
 // 대조: 최소보다 좁은 760px에서는 같은 검사가 본문 가로 스크롤을 잡는다(최소 크기가 필요한 이유, ADR-090 한계).
 // 창이 실제로 그 크기 아래로 줄지 않는 것은 스모크(smoke/run-smoke.ts)와 test/window.test.ts가 본다.
@@ -7,11 +7,12 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { Proposal, ProposalCountResult, ProposalKind, Settings } from '@bive/shared';
+import type { Settings } from '@bive/shared';
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import { MIN_CONTENT_SIZE } from '../src/main/window-size.js';
 import { FAILING_HISTORY, FAILING_RULE, PARENT, PROJECT, RULES } from './checklists/scr-06.js';
+import { FIXTURE_CHANGE_LIST, FIXTURE_LIST, ITEM_RULE5 } from './checklists/scr-17.js';
 import { mockBive } from './support/bive-mock.js';
 import { SCREENSHOT_DIR } from './support/expectScreen.js';
 import {
@@ -43,49 +44,6 @@ const SETTINGS: Settings = {
   updatedBy: null,
 };
 
-const PAYLOAD = {
-  title: '헬스 응답에 서버 시각 포함',
-  statement: 'WHEN 클라이언트가 헬스 체크를 요청하면 THE SYSTEM SHALL 헬스 응답에 서버 시각 포함',
-  kind: 'business',
-  checkKinds: ['test'],
-  parentRequirementId: PARENT.id,
-};
-/** 승인 대기 제안 하나 (테스트 전용 데이터): 위험 높음 · 구현 중 제안 · 안 읽음 */
-const PROPOSAL: Proposal = {
-  id: '01JBVE0000000000000000P001',
-  displayId: 'PRP-001',
-  kind: 'rule_new',
-  targetRef: { entity: 'Requirement', id: PARENT.id },
-  payload: PAYLOAD,
-  diff: { before: null, after: PAYLOAD },
-  rationale: '요구사항 문장에서 검사 가능한 규칙을 뽑음',
-  author: { kind: 'agent', role: 'rule-writer' },
-  source: 'implementation',
-  risk: 'high',
-  readAt: null,
-  state: 'pending',
-  decision: null,
-  adrId: null,
-  runId: null,
-  createdAt: '2026-10-16T01:00:00.000Z',
-};
-const KINDS: ProposalKind[] = [
-  'requirement_new',
-  'requirement_change',
-  'rule_new',
-  'rule_change',
-  'contract_new',
-  'design_change',
-  'rule_title_change',
-  'contract_change',
-];
-const COUNT: ProposalCountResult = {
-  pending: 1,
-  pendingByKind: Object.fromEntries(
-    KINDS.map((kind) => [kind, kind === 'rule_new' ? 1 : 0]),
-  ) as Record<ProposalKind, number>,
-};
-
 const open = async (page: Page): Promise<void> => {
   await mockBive(page, {
     responses: {
@@ -95,14 +53,8 @@ const open = async (page: Page): Promise<void> => {
       'requirement.get': { result: { requirement: PARENT } },
       'rule.list': { result: { rules: RULES } },
       'judgment.list': { result: { judgments: FAILING_HISTORY } },
-      'proposal.count': { result: COUNT },
-      'proposal.list': { result: { proposals: [PROPOSAL] } },
-      'proposal.markRead': {
-        result: { proposal: { ...PROPOSAL, readAt: '2026-10-16T05:00:00.000Z' } },
-      },
-      'approvalLog.list': {
-        result: { entries: [], chain: { valid: true, brokenAtSeq: null, reason: null } },
-      },
+      'confirmation.list': { result: FIXTURE_LIST },
+      'normChange.list': { result: FIXTURE_CHANGE_LIST },
       'settings.get': { result: { settings: SETTINGS } },
       'settings.validateForRun': { result: { ok: true } },
     },
@@ -140,9 +92,9 @@ const eachScreen = async (
   await check('규칙', page.getByTestId('rules-list-pane'), page.getByTestId('rule-detail'));
 
   await page.getByTestId('todo-button').click();
-  await page.locator(`[data-testid="card"][data-id="${PROPOSAL.displayId}"]`).click();
-  await expect(page.getByTestId('detail-if-reject')).toBeVisible();
-  await check('승인 대기', page.getByTestId('todo-list-pane'), page.getByTestId('todo-detail'));
+  await page.locator(`[data-testid="card"][data-id="${ITEM_RULE5.displayId}"]`).click();
+  await expect(page.getByTestId('judgment-card')).toHaveCount(2);
+  await check('확인할 것', page.getByTestId('todo-list-pane'), page.getByTestId('todo-detail'));
 };
 
 /** 본문(중앙 영역)과 상세 칸의 가로 넘침 (내용 폭 − 보이는 폭, 0이면 없음). */
@@ -158,7 +110,7 @@ const shot = async (page: Page, name: string): Promise<void> => {
 test.describe(`최소 창 ${MIN_CONTENT_SIZE.width} × ${MIN_CONTENT_SIZE.height} (#191, ADR-093)`, () => {
   test.use({ viewport: { ...MIN_CONTENT_SIZE } });
 
-  test('요구사항 · 규칙 · 승인 대기의 본문 · 상세에 가로 스크롤이 없고 목록 · 상세 칸은 최소 폭 이상, 채팅은 44px 띠', async ({
+  test('요구사항 · 규칙 · 확인할 것의 본문 · 상세에 가로 스크롤이 없고 목록 · 상세 칸은 최소 폭 이상, 채팅은 44px 띠', async ({
     page,
   }) => {
     await open(page);

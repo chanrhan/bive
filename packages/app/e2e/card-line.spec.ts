@@ -4,21 +4,15 @@
 // - 400px 목록(1280 · 1440px 창)의 카드는 이전 배치 그대로: 2줄째가 한 줄, ID 온전, ID · 보조 문구 · 예외가 간격 8px로
 //   이어지고, 카드 높이가 이전과 같다
 // - 좁은 목록(1024 ~ 1280px 창)에서도 ID는 말줄임되지 않고 예외 배지는 통째로 보인다(`listPaneOverflow`)
-// - 시각이 있는 카드(요구사항 SCR-02 · 승인 대기 SCR-17, #191): 400px 목록에서 시각은 줄 오른쪽 끝(안 읽음 점이 있으면
-//   점 앞 8px)이고 2줄째가 한 줄 · 카드 높이가 이전과 같다. 좁은 목록에서 보조 문구 · 시각은 최소 3em(모자라면 다음 줄로),
-//   안 읽음 점은 혼자 다음 줄 왼쪽에 남지 않고 시각과 같은 줄 오른쪽 끝에 붙는다
-// 데이터는 규칙 · 요구사항 · 승인 대기 화면의 가짜 브리지 응답뿐이다 (테스트 전용 데이터, NFR-03).
+// - 시각이 있는 카드(요구사항 SCR-02 · 확인할 것 SCR-17 자리, #191 · M7-14): 400px 목록에서 시각은 줄 오른쪽 끝(안 읽음 점이
+//   있으면 점 앞 8px)이고 2줄째가 한 줄 · 카드 높이가 이전과 같다. 좁은 목록에서 보조 문구 · 시각은 최소 3em(모자라면 다음 줄로),
+//   안 읽음 점은 혼자 다음 줄 왼쪽에 남지 않고 시각과 같은 줄 오른쪽 끝에 붙는다(지금 안 읽음 점을 쓰는 화면은 없다: 옛 승인 대기의
+//   점은 확인할 것으로 바뀌며 없어졌다, ADR-119)
+// 데이터는 규칙 · 요구사항 · 확인할 것 화면의 가짜 브리지 응답뿐이다 (테스트 전용 데이터, NFR-03).
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import type {
-  Proposal,
-  ProposalCountResult,
-  ProposalKind,
-  Requirement,
-  Rule,
-  RuleWithJudgment,
-} from '@bive/shared';
+import type { ConfirmationListResult, Requirement, Rule, RuleWithJudgment } from '@bive/shared';
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import { REQUIREMENTS } from './checklists/scr-02.js';
@@ -98,56 +92,62 @@ const MANY_REQUIREMENTS: Requirement[] = Array.from({ length: 16 }, (_, i) => {
   };
 });
 
-const REQ_ID = '01JBVE000000000000000000R1';
-
-/** 목록이 스크롤되도록 만드는 승인 대기 제안 16개 (PRP-101 ~ PRP-116, 테스트 전용 데이터).
- *  위험 높음 · 구현 중 제안 · 안 읽음을 돌려 가며 쓰고 PRP-1234는 4자리 ID · 위험 높음 · 구현 중 제안 · 안 읽음. */
-const MANY_PROPOSALS: Proposal[] = Array.from({ length: 16 }, (_, i) => {
+/** 목록이 스크롤되도록 만드는 확인할 것 항목 16개 (RULE-101 ~ RULE-116, 테스트 전용 데이터).
+ *  미확인 규칙 · 확인 풀림 대체 · 테스트 변경을 돌려 가며 쓰고 RULE-1234는 4자리 ID. */
+const MANY_ITEMS: ConfirmationListResult['items'] = Array.from({ length: 16 }, (_, i) => {
   const n = 101 + i;
   const day = String(1 + i).padStart(2, '0');
-  const payload = {
-    title: `헬스 응답 항목 ${n}`,
-    statement: 'WHEN 클라이언트가 헬스 체크를 요청하면 THE SYSTEM SHALL 응답한다',
-    kind: 'business',
-    checkKinds: ['test'],
-    parentRequirementId: REQ_ID,
+  const rule = {
+    id: `01JBVE00000000000000000${n}`,
+    displayId: i === 4 ? 'RULE-1234' : `RULE-${n}`,
   };
+  const at = `2026-10-${day}T01:00:00.000Z`;
+  const title = `헬스 응답 항목 ${n}`;
+  const statement = 'WHEN 클라이언트가 헬스 체크를 요청하면 THE SYSTEM SHALL 응답한다';
+  if (i % 4 === 0) {
+    return {
+      kind: 'superseded',
+      seq: n,
+      at,
+      actor: { kind: 'agent', role: 'rule-writer' },
+      sessionId: '01JBVE00000000000000000S01',
+      rule,
+      before: { title, statement },
+      after: {
+        title,
+        statement,
+        rule: { id: '01JBVE00000000000000000999', displayId: 'RULE-999' },
+      },
+      grounds: '근거',
+      rationale: '사유',
+      released: { seq: n + 1, at },
+      textTruncated: false,
+    };
+  }
+  if (i % 3 === 0) {
+    return {
+      kind: 'test_changed',
+      seq: n,
+      at,
+      rule,
+      title,
+      runId: '01JBVE00000000000000000E01',
+      runDisplayId: 'EXE-001',
+      sessionId: null,
+      files: [{ path: 'bive-acceptance/a.acc.ts', change: 'modified' }],
+      fileCount: 1,
+      textTruncated: false,
+    };
+  }
   return {
-    id: `01JBVE0000000000000000P${n}`,
-    displayId: i === 4 ? 'PRP-1234' : `PRP-${n}`,
-    kind: 'rule_new',
-    targetRef: { entity: 'Requirement', id: REQ_ID },
-    payload,
-    diff: { before: null, after: payload },
-    rationale: '요구사항 문장에서 검사 가능한 규칙을 뽑음',
+    kind: 'unconfirmed_norm',
+    at,
+    target: { entity: 'Rule', id: rule.id },
+    displayId: rule.displayId,
+    text: title,
     author: { kind: 'agent', role: 'rule-writer' },
-    source: i % 4 === 0 ? 'implementation' : 'rule_generation',
-    risk: i % 3 === 0 || i === 4 ? 'high' : null,
-    readAt: i % 2 === 0 ? null : '2026-10-20T03:30:00.000Z',
-    state: 'pending',
-    decision: null,
-    adrId: null,
-    runId: null,
-    createdAt: `2026-10-${day}T01:00:00.000Z`,
+    textTruncated: false,
   };
-});
-
-const PROPOSAL_KINDS: ProposalKind[] = [
-  'requirement_new',
-  'requirement_change',
-  'rule_new',
-  'rule_change',
-  'contract_new',
-  'design_change',
-  'rule_title_change',
-  'contract_change',
-];
-
-const proposalCount = (proposals: readonly Proposal[]): ProposalCountResult => ({
-  pending: proposals.length,
-  pendingByKind: Object.fromEntries(
-    PROPOSAL_KINDS.map((kind) => [kind, proposals.filter((p) => p.kind === kind).length]),
-  ) as Record<ProposalKind, number>,
 });
 
 const openRequirements = async (page: Page): Promise<Locator> => {
@@ -171,23 +171,21 @@ const openTodo = async (page: Page): Promise<Locator> => {
     responses: {
       'system.status': { result: STATUS },
       'project.current': { result: { project: PROJECT } },
-      'proposal.count': { result: proposalCount(MANY_PROPOSALS) },
-      'proposal.list': { result: { proposals: MANY_PROPOSALS } },
-      'approvalLog.list': {
-        result: { entries: [], chain: { valid: true, brokenAtSeq: null, reason: null } },
+      'confirmation.list': {
+        result: { items: MANY_ITEMS, total: MANY_ITEMS.length, truncated: false },
       },
     },
   });
   await page.goto('/');
   await page.getByTestId('todo-button').click();
-  await expect(page.getByTestId('card')).toHaveCount(MANY_PROPOSALS.length);
+  await expect(page.getByTestId('card')).toHaveCount(MANY_ITEMS.length);
   return page.getByTestId('todo-list-pane');
 };
 
-/** 시각이 있는 카드의 화면: 요구사항(시각) · 승인 대기(시각 · 안 읽음 점) */
+/** 시각이 있는 카드의 화면: 요구사항(시각) · 확인할 것(종류 태그 · 예외 · 시각) */
 const TIMED_SCREENS = [
   ['요구사항', openRequirements],
-  ['승인 대기', openTodo],
+  ['확인할 것', openTodo],
 ] as const;
 
 const listPane = (page: Page) => page.getByTestId('rules-list-pane');
@@ -371,10 +369,10 @@ test.describe('스크롤바가 있는 400px 목록: 카드는 이전 배치 그�
         const pane = await open(page);
         expect((await pane.boundingBox())?.width).toBe(400);
         await expectScrollbar(page);
-        // 시각이 있는 카드를 실제로 본다 (승인 대기는 안 읽음 점이 있는 카드 포함)
+        // 시각이 있는 카드를 실제로 본다 (확인할 것은 예외가 있는 카드)
         expect(await pane.locator('.card-time').count()).toBeGreaterThan(0);
-        if (screen === '승인 대기') {
-          expect(await pane.getByTestId('card-unread').count()).toBeGreaterThan(0);
+        if (screen === '확인할 것') {
+          expect(await pane.getByTestId('card-exception').count()).toBeGreaterThan(0);
         }
         expect(await wideLayoutProblems(pane)).toEqual([]);
         expect(await narrowLineProblems(pane)).toEqual([]);
@@ -524,7 +522,7 @@ test.describe('2줄째 끝 칸은 남는 폭이 최소 폭보다 작을 때만 �
             .evaluate((items: HTMLElement) => items.offsetWidth - items.clientWidth);
           if (scrollbar === '보임') await expectScrollbar(page);
           else expect(bar, '스크롤바 폭').toBe(0);
-          // 시각만 있는 카드를 실제로 본다 (요구사항 카드 전부, 승인 대기는 읽은 제안)
+          // 시각만 있는 카드를 실제로 본다 (요구사항 카드 전부, 확인할 것은 안 읽음 점 없는 카드 전부)
           expect(await timeOnlyCards(pane)).toBeGreaterThan(0);
           expect(await trailingWrapProblems(pane)).toEqual([]);
           expect(await narrowLineProblems(pane)).toEqual([]);

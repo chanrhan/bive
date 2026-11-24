@@ -5,7 +5,7 @@ import { requirementsChecklist } from './scr-02.js';
 import { rulesChecklist } from './scr-03.js';
 import { verificationChecklist } from './scr-05.js';
 import { ruleDetailChecklist } from './scr-06.js';
-import { approvalChecklist } from './scr-17.js';
+import { confirmationChecklist } from './scr-17.js';
 import { settingsChecklist } from './scr-21.js';
 import type { ScreenChecklist, ScreenId } from './types.js';
 
@@ -16,6 +16,6 @@ export const CHECKLISTS: Partial<Record<ScreenId, ScreenChecklist>> = {
   'SCR-03': rulesChecklist,
   'SCR-05': verificationChecklist,
   'SCR-06': ruleDetailChecklist,
-  'SCR-17': approvalChecklist,
+  'SCR-17': confirmationChecklist,
   'SCR-21': settingsChecklist,
 };

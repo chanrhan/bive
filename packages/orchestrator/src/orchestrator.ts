@@ -2,17 +2,19 @@
 // (PRD 5.1, ADR-027 · ADR-041 · ADR-049). 규칙 자동 생성 세션(ADR-062)은 선택된 어댑터로 돈다.
 // 연결을 받기 전에 `running` 실행을 `interrupted`로 바꾸고(자동 재개 없음) 실행 엔진(ADR-066)을 붙인다.
 // 실행 상태 저장마다 인증된 연결에 `event.step.updated` · `event.run.updated`를, 제안 등록 · 처리 저장마다
-// `event.proposal.changed`를 보낸다 (ADR-076).
+// `event.proposal.changed`를, 규범 변경 기록이 늘 때마다 `event.normChange.appended`를 보낸다 (ADR-076 · ADR-119).
 import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 
 import { type AgentSelection, selectAgent } from './agent/select.js';
 import { type InterruptedRun, PipelineEngine } from './engine/pipeline-engine.js';
 import type { StepExecutors } from './engine/types.js';
+import { normChangeAppendedNotifier } from './events/norm-change-events.js';
 import { ProposalEventPublisher } from './events/proposal-events.js';
 import { ruleWriterChangedNotifier } from './events/rule-writer-events.js';
 import { RunEventPublisher } from './events/run-events.js';
 import { createHandlers } from './ipc/handlers.js';
+import { onNormChangeAppended } from './ipc/project-store-access.js';
 import { PipeServer } from './ipc/server.js';
 import { NetPipeTransport, type PipeTransport } from './ipc/transport.js';
 import { DEFAULT_IDLE_SHUTDOWN_MS, Lifecycle, type RunTracker } from './lifecycle.js';
@@ -134,6 +136,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
   let token: string | null = null;
   /** 이 인스턴스가 bind한 소켓 파일의 식별자. bind 전이면 null */
   let boundSocket: string | null = null;
+  /** 규범 변경 알림 해제 (등록 전이면 null) */
+  let stopNormChangeEvents: (() => void) | null = null;
 
   /**
    * 소켓 · 토큰은 이 인스턴스의 것일 때만 지운다 (같은 죽은 잠금을 동시에 인수한 경합의 진 쪽이
@@ -154,6 +158,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         unlinkIfExists(paths.pipe);
       }
       if (token !== null) unlinkTokenIfOurs(paths.token, token);
+      stopNormChangeEvents?.();
+      stopNormChangeEvents = null;
       lock.release();
     }
   };
@@ -194,6 +200,12 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       onIdle: () => void stop('idle'),
     });
     const log = options.log ?? ((line: string) => console.log(line));
+    // 규범 변경 기록이 늘어난 저장소 사용 뒤 → event.normChange.appended (M7-14 #226, ADR-119). 저장소를 여닫는 한 곳에서
+    // 부르므로 기록을 쓰는 모듈은 이 알림을 모른다. 기다리지 않는다
+    stopNormChangeEvents = onNormChangeAppended(
+      options.biveHome,
+      normChangeAppendedNotifier({ sink: () => server, log }),
+    );
     // 제안 처리 저장 뒤 → event.proposal.changed (M1-36, ADR-076). 기다리지 않는다. 새 제안은 생기지 않는다(M7-02):
     // 규칙 작성 결과는 제안 없이 바로 반영되고, 이 변경 전부터 대기 중이던 제안만 처리된다
     const proposalEvents = new ProposalEventPublisher({ sink: () => server, log });

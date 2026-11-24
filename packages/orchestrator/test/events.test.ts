@@ -13,6 +13,7 @@ import net from 'node:net';
 import {
   createRequest,
   type JudgmentResult,
+  type NormChangeAppendedEvent,
   PROTOCOL_VERSION,
   parseNotification,
   type Proposal,
@@ -22,12 +23,17 @@ import {
   type RunUpdatedEvent,
   type StepUpdatedEvent,
 } from '@bive/shared';
+import type { ProjectStore } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { selectAgent } from '../src/agent/select.js';
 import type { StepExecutors } from '../src/engine/types.js';
 import { ProposalEventPublisher } from '../src/events/proposal-events.js';
 import { RunEventPublisher } from '../src/events/run-events.js';
+import {
+  onNormChangeAppended,
+  withRegisteredProjectStore,
+} from '../src/ipc/project-store-access.js';
 import { type Orchestrator, startOrchestrator } from '../src/orchestrator.js';
 import { submitProposal } from '../src/proposals/proposal-service.js';
 import { createRun } from '../src/runs/run-service.js';
@@ -58,7 +64,8 @@ type Received =
   | { method: 'event.run.updated'; params: RunUpdatedEvent }
   | { method: 'event.step.updated'; params: StepUpdatedEvent }
   | { method: 'event.proposal.changed'; params: ProposalChangedEvent }
-  | { method: 'event.ruleWriter.changed'; params: RuleWriterChangedEvent };
+  | { method: 'event.ruleWriter.changed'; params: RuleWriterChangedEvent }
+  | { method: 'event.normChange.appended'; params: NormChangeAppendedEvent };
 
 /** 받은 알림을 차례대로 모은다. 알림을 받을 때마다 `onNotice`를 부른다(받은 순간의 재조회). */
 const collect = (
@@ -161,6 +168,8 @@ const runState = (notice: Received): string => {
       return `proposal ${notice.params.displayId}:${notice.params.state}`;
     case 'event.ruleWriter.changed':
       return `ruleWriter ${notice.params.requirementId}`;
+    case 'event.normChange.appended':
+      return `normChange ${String(notice.params.lastSeq)}`;
   }
 };
 
@@ -644,6 +653,154 @@ describe('규칙 작성 시도 기록이 바뀔 때마다 event.ruleWriter.chang
       Array.from({ length: 4 }, () => ({ projectId: s.project.id, requirementId: requirement.id })),
     );
   }, 60_000);
+});
+
+describe('규범 변경 기록이 늘 때마다 event.normChange.appended (M7-14 #226, NRM-07 · TODO-01 · ADR-119)', () => {
+  it('규칙 작성 세션이 규칙을 바로 반영하면 커밋 뒤 알림이 가고, 받은 순간 확인할 것 목록 · 규범 변경 기록이 그 순번까지 보인다', async () => {
+    const s = await start();
+    const watcher = await client(s);
+    const caller = await client(s);
+    // 알림을 받은 순간 화면이 다시 조회하는 값 (렌더러의 confirmation.list 재조회와 같다)
+    const seen: Promise<{ lastSeq: number; recorded: number; ruleItems: number }>[] = [];
+    const received = collect(watcher, (notice) => {
+      if (notice.method !== 'event.normChange.appended') return;
+      const { projectId, lastSeq } = notice.params;
+      seen.push(
+        Promise.all([
+          caller.call('normChange.list', { projectId }),
+          caller.call('confirmation.list', { projectId }),
+        ]).then(([changes, list]) => ({
+          lastSeq,
+          recorded: changes.entries.at(-1)?.seq ?? 0,
+          ruleItems: list.items.filter(
+            (item) => item.kind === 'unconfirmed_norm' && item.target.entity === 'Rule',
+          ).length,
+        })),
+      );
+    });
+
+    // 사람의 설정 저장 · 요구사항 작성(설정 미비로 규칙 작성 생략)은 규범 변경 기록을 남기지 않아 알림이 없다
+    await caller.call('settings.update', {
+      projectId: s.project.id,
+      patch: { roles: { 'rule-writer': { model: null } } },
+      author: human,
+    });
+    const { requirement } = await caller.call('requirement.create', {
+      projectId: s.project.id,
+      text: '헬스 체크 응답에 서버 시각 포함',
+      author: human,
+    });
+    await waitFor(
+      () => received.some((n) => n.method === 'event.ruleWriter.changed'),
+      10_000,
+      '생략 알림',
+    );
+    await caller.call('ping');
+    expect(received.filter((n) => n.method === 'event.normChange.appended')).toEqual([]);
+    const before = (await caller.call('normChange.list', { projectId: s.project.id })).entries
+      .length;
+
+    // 설정 뒤 직접 편집 → 규칙 작성 세션이 규칙을 바로 반영 (신규 · 판단 기록)
+    await caller.call('settings.update', {
+      projectId: s.project.id,
+      patch: {
+        run: { maxBudgetUsd: 5, maxTurns: 200 },
+        roles: { 'rule-writer': { model: 'test-model', maxBudgetUsd: 1, maxTurns: 20 } },
+      },
+      author: human,
+    });
+    await caller.call('requirement.update', {
+      projectId: s.project.id,
+      id: requirement.id,
+      text: '헬스 체크 응답에 서버 시각을 포함',
+      author: human,
+    });
+    await waitFor(() => seen.length > 0, 30_000, '규범 변경 알림');
+    const after = (await caller.call('normChange.list', { projectId: s.project.id })).entries;
+    expect(after.length).toBeGreaterThan(before);
+    const states = await Promise.all(seen);
+    for (const state of states) {
+      // 알림은 커밋 뒤에 가므로 받은 순간 그 순번까지의 기록과 목록 항목이 보인다
+      expect(state.recorded).toBeGreaterThanOrEqual(state.lastSeq);
+      expect(state.ruleItems).toBeGreaterThan(0);
+    }
+    // 알림 값은 프로젝트 ID와 마지막 순번뿐이고, 순번은 늘기만 한다
+    const params = received
+      .filter((n) => n.method === 'event.normChange.appended')
+      .map((n) => n.params as NormChangeAppendedEvent);
+    expect(params.every((p) => Object.keys(p).sort().join() === 'lastSeq,projectId')).toBe(true);
+    expect(params.every((p) => p.projectId === s.project.id)).toBe(true);
+    expect(params.map((p) => p.lastSeq)).toEqual(
+      [...params.map((p) => p.lastSeq)].sort((a, b) => a - b),
+    );
+    expect(params.at(-1)?.lastSeq).toBe(after.at(-1)?.seq);
+  }, 60_000);
+
+  it('저장소를 여닫는 한 곳: 사용 중 기록이 늘었을 때만 닫은 뒤 1번 부르고, 던져도 커밋된 기록은 알리며, 떼면 부르지 않는다', () => {
+    const biveHome = makeBiveHome();
+    const seeded = seedProject(biveHome, copyFixture(temps));
+    const otherHome = makeBiveHome();
+    const calls: [string, number, boolean][] = [];
+    const listener = (projectId: string, lastSeq: number): void => {
+      // 닫은 뒤(커밋 뒤)에 부른다: 이 순간 다른 연결로 열어도 그 순번이 보인다
+      const visible = withRegisteredProjectStore(biveHome, projectId, (store) =>
+        store.normChanges.lastSeq(),
+      );
+      calls.push([projectId, lastSeq, visible >= lastSeq]);
+    };
+    const otherCalls: number[] = [];
+    const detach = onNormChangeAppended(biveHome, listener);
+    const detachOther = onNormChangeAppended(otherHome, (_, seq) => otherCalls.push(seq));
+    const append = (store: ProjectStore): number =>
+      store.normChanges.append({
+        at: new Date().toISOString(),
+        kind: 'created',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        targetRef: { entity: 'Rule', id: seeded.rule.id },
+        sessionId: newId(),
+        runId: null,
+        reason: '시험 근거',
+        detail: { after: { ruleId: seeded.rule.id } },
+      }).seq;
+    try {
+      // 읽기만 한 사용은 알리지 않는다
+      withRegisteredProjectStore(biveHome, seeded.project.id, (store) => store.normChanges.list());
+      expect(calls).toEqual([]);
+      // 기록 2건을 쓴 사용 1번 = 알림 1번, 값은 마지막 순번
+      const second = withRegisteredProjectStore(biveHome, seeded.project.id, (store) => {
+        append(store);
+        return append(store);
+      });
+      expect(calls).toEqual([[seeded.project.id, second, true]]);
+      // 커밋한 뒤 던져도 그 기록은 알린다
+      expect(() =>
+        withRegisteredProjectStore(biveHome, seeded.project.id, (store) => {
+          append(store);
+          throw new Error('뒤에서 실패');
+        }),
+      ).toThrow('뒤에서 실패');
+      expect(calls).toHaveLength(2);
+      // 되돌린 트랜잭션은 알리지 않는다
+      expect(() =>
+        withRegisteredProjectStore(biveHome, seeded.project.id, (store) =>
+          store.transaction(() => {
+            append(store);
+            throw new Error('되돌림');
+          }),
+        ),
+      ).toThrow('되돌림');
+      expect(calls).toHaveLength(2);
+      // 다른 홈의 함수는 부르지 않는다
+      expect(otherCalls).toEqual([]);
+      // 떼면 부르지 않는다
+      detach();
+      withRegisteredProjectStore(biveHome, seeded.project.id, append);
+      expect(calls).toHaveLength(2);
+    } finally {
+      detach();
+      detachOther();
+    }
+  });
 });
 
 describe('ProposalEventPublisher', () => {
