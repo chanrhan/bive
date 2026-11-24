@@ -289,6 +289,30 @@ export const waitForRunEnd = async (
   }
 };
 
+/**
+ * 표시 ID의 실행이 생길 때까지 run.list를 폴링해 그 실행을 돌려준다. 시험이 직접 만들지 않는 실행(판단 세션 뒤 자동 시작,
+ * 끝난 실행 뒤 다시 시작 등 오케스트레이터가 다른 실행의 사건 뒤에 만드는 실행)을 기다릴 때 쓴다.
+ */
+export const waitForRunCreated = async (
+  e: PipelineE2e,
+  displayId: string,
+  timeoutMs: number,
+): Promise<Run> => {
+  let found: Run | undefined;
+  await waitWithOutput(
+    e,
+    async () => {
+      const { runs } = await e.client.call('run.list', { projectId: e.projectId });
+      found = runs.find((run) => run.displayId === displayId);
+      return found !== undefined;
+    },
+    timeoutMs,
+    `실행 생성 (${displayId})`,
+  );
+  if (found === undefined) throw new Error(`실행 없음: ${displayId}`);
+  return found;
+};
+
 /** 실행을 만들고(사람) 끝 상태가 될 때까지 기다린다. */
 export const runToEnd = async (
   e: PipelineE2e,
