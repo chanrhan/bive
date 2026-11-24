@@ -50,6 +50,7 @@ export const JUDGMENT_SUBJECT_TEXT = {
   new_rule: '모순 판단',
   supersede: '모순 판단',
   objection: '이의 판단',
+  requirement_change: '요구사항 변경 판단',
   check_failure: '검사 실패 판단',
 } as const satisfies Record<NormJudgmentSubject, string>;
 
@@ -118,15 +119,16 @@ const actorText = (actor: NormChangeView['actor']): string =>
 const subjectOf = (entry: NormChangeView): NormChangeRow['subject'] => {
   const { judgment, retirement } = entry.detail;
   if (entry.kind === 'judgment' && judgment !== undefined) {
-    // 이의 판단 (M7-11, ADR-115): "이의 판단 · 유지 · 폐기 · 대체", 판단 없이 끝났으면 "판단 없음(사정)"을 덧붙인다
-    if (judgment.subject === 'objection') {
+    // 이의 판단 (M7-11, ADR-115) · 요구사항 변경 판단 (M7-10, ADR-116): "이의 판단 · 유지 · 폐기 · 대체",
+    // "요구사항 변경 판단 · 유지 · 폐기 · 대체", 판단 없이 끝났으면 "판단 없음(사정)"을 덧붙인다
+    if (judgment.subject === 'objection' || judgment.subject === 'requirement_change') {
       const verdict = labelOf(JUDGMENT_VERDICT_TEXT, judgment.verdict);
       const undecided =
         judgment.undecided === undefined
           ? ''
           : ` · ${NORM_CHANGE_TEXT.undecided} (${labelOf(UNDECIDED_REASON_TEXT, judgment.undecided.endReason)})`;
       return {
-        label: `${JUDGMENT_SUBJECT_TEXT.objection} · ${verdict}${undecided}`,
+        label: `${JUDGMENT_SUBJECT_TEXT[judgment.subject]} · ${verdict}${undecided}`,
         rules: [],
       };
     }

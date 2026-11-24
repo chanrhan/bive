@@ -1053,6 +1053,13 @@ describe('실행 자동 시작의 코드 경로 (M7-05 #217, ADR-100 C2 · D4, A
 
   it('규칙 작성 세션을 띄우는 곳: 요구사항 세션은 사람의 요구사항 저장 · 편집 처리기에서만, 실행 안의 판단 세션은 오케스트레이터 배선에서만 시작하고, 엔진 · 단계 · 자동 시작은 규칙 작성 서비스를 가져오지 않는다 (M7-11이 판단 세션 한 곳을 의도적으로 더했다)', () => {
     expect(using(/\bruleWriter\?\.(start|retry)\(/)).toEqual(['ipc/requirement-handlers.ts']);
+    // 요구사항 변경의 재판단 (M7-10 #222, ADR-116): 사람의 요구사항 편집 · 삭제 처리기의 창구와, 서비스 안에서 접어 둔 재판단을
+    // 세션이 끝난 뒤 다시 보는 자리뿐이다 (엔진 · 단계 · 실행 · 도구에서 재판단 세션을 띄우는 길이 없다)
+    expect(using(/\bruleWriter\?\.rejudge\(/)).toEqual(['ipc/requirement-handlers.ts']);
+    expect(using(/\.rejudge\(/)).toEqual([
+      'ipc/requirement-handlers.ts',
+      'rule-writer/rule-writer-service.ts',
+    ]);
     // 실행 안의 판단 세션 (M7-11 #223, ADR-115): 엔진은 주입받은 배선(`judgeNorms`)만 부르고, 그 배선은 오케스트레이터 한 곳이다.
     // 이것으로 처음 "실행 → 판단 → 대체 → 자동 시작"의 연쇄 경로가 생긴다(멈춤 장치는 하루 예산, ADR-100 D8 · ADR-115)
     expect(using(/\bruleWriter\??\.judge\(|\.judge\(request\)/)).toEqual(['orchestrator.ts']);
