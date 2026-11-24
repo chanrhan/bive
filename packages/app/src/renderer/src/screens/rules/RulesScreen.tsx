@@ -7,6 +7,7 @@
 //   고른 항목이 없으면 없다
 // - 실행 알림(event.run.updated · event.step.updated)을 받으면 목록을 다시 읽는다(useRules, ADR-076)
 // - 상세의 [편집] · [확인]이 저장되면 응답으로 목록 항목을 바꾼다(카드의 옛 제목 · 미확인을 남기지 않음, M7-03 · M7-15)
+// - 확인할 것 상세의 대상 링크로 열리면 그 규칙의 카드를 고른 상태다(navigation/pendingSelection.ts, ADR-123)
 // - 상세의 대체 규칙 · 판단 대상 링크를 누르면 그 규칙을 고른다. 폐기된 규칙이면 [폐기 포함]을 켜서 카드도 보이게 한다.
 //   폐기된 규칙의 상세에는 [실행]이 없다(효력 없는 규칙의 실행은 승인 단계에서 끝난다, ADR-107)
 // - 상태(ADR-060, ADR-053과 같음): 프로젝트 조회 중 = 비움 · 프로젝트 없음 = "프로젝트 없음" ·
@@ -14,11 +15,12 @@
 import './RulesScreen.css';
 
 import type { RuleWithJudgment } from '@bive/shared';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { useListFilter } from '../../components/ListView/filterStore.js';
 import { ListView } from '../../components/ListView/ListView.js';
 import { EmptyState } from '../../layout/EmptyState.js';
+import { takePendingSelection } from '../../navigation/pendingSelection.js';
 import { useProject } from '../../project/ProjectContext.js';
 import { RuleDetail } from '../norm-detail/RuleDetail.js';
 import { CreatedRunStatus } from './CreatedRunStatus.js';
@@ -65,6 +67,14 @@ const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => 
   const found = items.find((item) => item.rule.id === selectedId) ?? null;
   const selected = found !== null && isRetiredRule(found) && !filter.includeHidden ? null : found;
   const select = useCallback((item: RuleWithJudgment) => setSelectedId(item.rule.id), []);
+  // 다른 화면의 대상 링크로 열렸으면 목록을 다 읽은 뒤 그 표시 ID의 카드를 한 번 고른다. 목록에 없으면(지워진 규칙) 고르지 않는다
+  // (ADR-123). 폐기된 규칙이면 링크가 [폐기 포함]을 켜 두었다
+  useEffect(() => {
+    if (load.state !== 'ready') return;
+    const wanted = takePendingSelection(RULES_LIST_ID);
+    if (wanted === null) return;
+    setSelectedId(load.items.find((item) => item.rule.displayId === wanted)?.rule.id ?? null);
+  }, [load]);
   const openRule = useCallback(
     (ruleId: string) => {
       const target = items.find((item) => item.rule.id === ruleId);

@@ -1,6 +1,7 @@
 // 규칙 상세 (screens.md SCR-03 상세 · SCR-06 규범 상세, 1.4 상세 접힘, ADR-035 · ADR-073).
 // 규칙 목록 + 상세 2단의 상세 영역에 들어간다(별도 화면 아님). 요구사항 상세(#38)가 자식 규칙을 펼칠 때 다시 쓴다.
 // - 순서: 제목 · ID · 판정 → 진술 · 종류 · 검사 · 부모 요구사항 · 생성 주체 → 테스트 실행 결과 → 테스트 출력(접힘) → 실행 이력
+// - 실행 이력은 실행 하나가 한 줄이다(판정 · 실행 ID · 실행 상태와 종료 사유 · 커밋, runHistoryView.ts, ADR-123)
 // - 테스트 출력은 기본 접힘, 최신 판정이 실패면 자동 펼침. 안에 실패 원인(케이스 이름 · `file:line` · 메시지) · 전체 케이스
 // - 실패 원인의 `file:line`(판정 기록의 케이스 위치)에 코드 열기 링크(CodeLink)를 붙인다. 출발 화면은 놓는 화면이 정하고
 //   항목은 이 규칙이다 (MET-01, ADR-084). 줄이 없거나 상대 경로가 아니면 글자만 보인다
@@ -68,9 +69,12 @@ import {
   ruleEditErrorText,
   ruleEditParams,
 } from './ruleEditView.js';
+import { type RunHistoryRow, runHistoryRows } from './runHistoryView.js';
 import {
+  type ProjectRunsLoad,
   type RuleHistoryLoad,
   type RuleNormChangesLoad,
+  useProjectRuns,
   useRuleHistory,
   useRuleNormChanges,
   useRuleParent,
@@ -217,6 +221,7 @@ export const RuleDetail = ({
   );
   const latest = judgment.latest;
   const history = useRuleHistory(projectId, rule.id, latest?.id ?? null);
+  const runs = useProjectRuns(projectId);
   const knownMatches = knownParent !== undefined && knownParent.id === rule.parentRequirementId;
   const fetchedParent = useRuleParent(projectId, knownMatches ? null : rule.parentRequirementId);
   const parent = knownMatches ? knownParent : fetchedParent;
@@ -370,7 +375,7 @@ export const RuleDetail = ({
         <Field id="author" label={TEXT.author}>
           <AuthorMark kind={rule.author.kind} showLabel name={ruleAuthorName(rule.author)} />
         </Field>
-        <Field id="confirmation" label={EDIT.confirmation}>
+        <Field id="confirmation" label={EDIT.confirmationState}>
           <span className="rule-confirmation">
             <span data-testid="rule-confirmation-state" data-state={rule.confirmation.state}>
               {confirmationText(rule)}
@@ -447,7 +452,7 @@ export const RuleDetail = ({
       )}
 
       <Section id="history" title={TEXT.history}>
-        <History load={history} />
+        <History ruleId={rule.id} load={history} runs={runs} />
       </Section>
 
       <div className="rule-changes" data-testid="rule-changes">
@@ -686,9 +691,17 @@ const CaseLocation = ({
   );
 };
 
-/** 실행 이력: 판정 기록 최신부터 (판정 시각 · 판정 · 실행 · 커밋). */
-const History = ({ load }: { load: RuleHistoryLoad }): React.JSX.Element => {
-  if (load.state === 'loading') {
+/** 실행 이력: 실행 하나가 한 줄, 최신부터 (시각 · 판정 · 실행 · 실행 상태와 종료 사유 · 커밋, ADR-123). */
+const History = ({
+  ruleId,
+  load,
+  runs,
+}: {
+  ruleId: string;
+  load: RuleHistoryLoad;
+  runs: ProjectRunsLoad;
+}): React.JSX.Element => {
+  if (load.state === 'loading' || runs.state === 'loading') {
     return (
       <div className="rule-history-loading" data-testid="rule-history-loading" aria-busy="true" />
     );
@@ -700,30 +713,51 @@ const History = ({ load }: { load: RuleHistoryLoad }): React.JSX.Element => {
       </p>
     );
   }
-  if (load.entries.length === 0) {
-    return (
-      <p className="rule-detail-muted" data-testid="rule-history-empty">
-        {TEXT.noHistory}
-      </p>
-    );
-  }
+  const rows = runHistoryRows(ruleId, load.entries, runs.runs);
   return (
-    <ol className="rule-history-list">
-      {load.entries.map(({ judgment, runDisplayId }) => (
-        <li
-          key={judgment.id}
-          className="rule-history-row"
-          data-testid="history-row"
-          data-status={judgment.status}
-        >
-          <time dateTime={judgment.judgedAt}>{judgedAtText(judgment.judgedAt)}</time>
-          <StatusBadge kind="judgment" status={judgment.status} />
-          <span data-testid="history-run">{runDisplayId ?? ''}</span>
-          <span className="rule-mono" title={judgment.commit}>
-            {shortCommit(judgment.commit)}
-          </span>
-        </li>
-      ))}
-    </ol>
+    <>
+      {runs.runs === null && (
+        <p className="rule-detail-muted" data-testid="rule-runs-error">
+          {TEXT.runsFailed}
+        </p>
+      )}
+      {rows.length === 0 ? (
+        <p className="rule-detail-muted" data-testid="rule-history-empty">
+          {TEXT.noHistory}
+        </p>
+      ) : (
+        <ol className="rule-history-list">
+          {rows.map((row) => (
+            <HistoryRow key={row.key} row={row} />
+          ))}
+        </ol>
+      )}
+    </>
   );
 };
+
+const HistoryRow = ({ row }: { row: RunHistoryRow }): React.JSX.Element => (
+  <li
+    className="rule-history-row"
+    data-testid="history-row"
+    data-status={row.judgment?.status ?? ''}
+    data-run={row.runDisplayId ?? ''}
+  >
+    <time dateTime={row.at}>{row.time}</time>
+    {/* 칸 자리는 값이 없어도 둔다(판정 없이 끝난 실행의 줄도 같은 칸에 맞춰 보인다) */}
+    <span className="rule-history-judgment">
+      {row.judgment !== null && <StatusBadge kind="judgment" status={row.judgment.status} />}
+    </span>
+    <span data-testid="history-run">{row.runDisplayId ?? ''}</span>
+    <span className="rule-mono">
+      {row.judgment !== null && (
+        <span title={row.judgment.commit}>{shortCommit(row.judgment.commit)}</span>
+      )}
+    </span>
+    {row.status !== null && (
+      <span className="rule-history-status" data-testid="history-run-status">
+        {row.status}
+      </span>
+    )}
+  </li>
+);

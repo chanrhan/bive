@@ -6,7 +6,7 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { ConfirmationListResult } from '@bive/shared';
+import type { ConfirmationListResult, RuleWithJudgment } from '@bive/shared';
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import { REQUIREMENTS } from './checklists/scr-02.js';
@@ -596,25 +596,139 @@ test.describe('[확인] 뒤 버튼 복구', () => {
   });
 });
 
-test.describe('대상 링크', () => {
-  test('폐기된 규칙 링크는 규칙 화면을 [폐기 포함] · 그 표시 ID 검색으로, 요구사항 링크는 요구사항 화면을 검색으로 연다', async ({
+test.describe('대상 링크 (M3-35 #263: 카드를 고른 상태로 열림)', () => {
+  /** 규칙 화면 목록: RULE-001은 폐기된 규칙(RULE-003이 대체, 테스트 전용 데이터). */
+  const RULES_WITH_RETIRED: RuleWithJudgment[] = RULES.map((item) =>
+    item.rule.displayId === 'RULE-001'
+      ? {
+          ...item,
+          retirement: {
+            retiredAt: '2026-11-23T09:00:00.000Z',
+            supersededBy: {
+              id: RULES.find(({ rule }) => rule.displayId === 'RULE-003')?.rule.id ?? '',
+              displayId: 'RULE-003',
+            },
+            normChangeSeq: 3,
+          },
+        }
+      : item,
+  );
+  const ruleIdOf = (displayId: string): string =>
+    RULES.find(({ rule }) => rule.displayId === displayId)?.rule.id ?? '';
+  const selectedCard = (page: Page): Locator =>
+    page.getByTestId('list-items').locator('[data-testid="card"][aria-current="true"]');
+  const links: MockResponses = {
+    'rule.list': { result: { rules: RULES_WITH_RETIRED } },
+    'requirement.list': { result: { requirements: REQUIREMENTS } },
+  };
+
+  test('폐기된 규칙 링크: 규칙 화면이 [폐기 포함] · 그 표시 ID 검색으로 열리고 그 카드가 골라져 상세가 열린다', async ({
     page,
   }) => {
-    await setup(page, FIXTURE_LIST, {
-      'rule.list': { result: { rules: RULES } },
-      'requirement.list': { result: { requirements: REQUIREMENTS } },
-    });
+    await setup(page, FIXTURE_LIST, links);
     await cardAt(page, 0).click();
     await page.getByTestId('detail-link').first().click();
     await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
     await expect(page.getByTestId('list-search')).toHaveValue('RULE-001');
     await expect(page.getByTestId('hidden-toggle')).toHaveAttribute('aria-pressed', 'true');
+    await expect(selectedCard(page)).toHaveCount(1);
+    await expect(selectedCard(page)).toHaveAttribute('data-id', 'RULE-001');
+    await expect(page.getByTestId('rule-detail')).toHaveAttribute(
+      'data-selected-id',
+      ruleIdOf('RULE-001'),
+    );
+    await expect(page.getByTestId('rule-detail-retired')).toHaveText('폐기');
+  });
 
-    await page.getByTestId('todo-button').click();
+  test('대체 규칙 링크: 폐기 포함 없이 그 카드가 골라진다', async ({ page }) => {
+    await setup(page, FIXTURE_LIST, links);
+    await cardAt(page, 0).click();
+    await page.getByTestId('detail-link').nth(1).click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(page.getByTestId('hidden-toggle')).toHaveAttribute('aria-pressed', 'false');
+    await expect(selectedCard(page)).toHaveAttribute('data-id', 'RULE-003');
+    await expect(page.getByTestId('rule-detail')).toHaveAttribute(
+      'data-selected-id',
+      ruleIdOf('RULE-003'),
+    );
+  });
+
+  test('요구사항 링크: 요구사항 화면이 그 표시 ID 검색으로 열리고 그 카드가 골라져 상세가 열린다', async ({
+    page,
+  }) => {
+    await setup(page, FIXTURE_LIST, links);
     await cardAt(page, 6).click();
     await page.getByTestId('detail-link').click();
     await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'requirements');
     await expect(page.getByTestId('list-search')).toHaveValue('REQ-002');
+    await expect(selectedCard(page)).toHaveAttribute('data-id', 'REQ-002');
+    await expect(page.getByTestId('requirement-detail')).toHaveAttribute(
+      'data-selected-id',
+      REQUIREMENTS.find(({ displayId }) => displayId === 'REQ-002')?.id ?? '',
+    );
+  });
+
+  test('없는 대상(지워진 요구사항): 검색 결과 0개, 아무 카드도 고르지 않고 상세는 "선택 항목 없음"', async ({
+    page,
+  }) => {
+    const remaining = REQUIREMENTS.filter(({ displayId }) => displayId !== 'REQ-002');
+    await setup(page, FIXTURE_LIST, {
+      ...links,
+      'requirement.list': { result: { requirements: remaining } },
+    });
+    await cardAt(page, 6).click();
+    await page.getByTestId('detail-link').click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'requirements');
+    await expect(page.getByTestId('list-search')).toHaveValue('REQ-002');
+    // 목록에 보이는 요구사항(삭제된 것 제외) 가운데 0개
+    const listed = remaining.filter(({ deletedAt }) => deletedAt === null).length;
+    await expect(page.getByTestId('list-result-count')).toHaveText(`${String(listed)}개 중 0개`);
+    await expect(selectedCard(page)).toHaveCount(0);
+    await expect(page.getByTestId('requirement-detail').getByTestId('empty-state')).toHaveText(
+      '선택 항목 없음',
+    );
+  });
+});
+
+test.describe('[문제만] 토글 (M3-35 #263, ADR-123: 감춤)', () => {
+  test('확인할 것 목록에는 [문제만]이 없고, 다른 목록(규칙)에는 그대로 있다', async ({ page }) => {
+    await setup(page, FIXTURE_LIST, { 'rule.list': { result: { rules: RULES } } });
+    await expect(cards(page)).toHaveCount(SERVER_ORDER.length);
+    await expect(page.getByTestId('todo-confirmation').getByTestId('problem-toggle')).toHaveCount(
+      0,
+    );
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(page.getByTestId('problem-toggle')).toHaveCount(1);
+  });
+});
+
+test.describe('상세 다시 읽기 횟수 (M3-35 #263)', () => {
+  test('규범 변경 알림 한 번에 상세의 규범 변경 기록 읽기는 정확히 한 번이다 (목록 · 배지를 다시 읽어도 더 부르지 않는다)', async ({
+    page,
+  }) => {
+    const bive = await setup(page);
+    // RULE-005(미확인 규칙): 판단 대상이 그 규칙 하나다
+    await cardAt(page, 5).click();
+    await expect(page.getByTestId('judgment-card')).toHaveCount(2);
+    await page.waitForTimeout(300);
+    const changes = async (): Promise<number> => (await callsOf(bive, 'normChange.list')).length;
+    const lists = async (): Promise<number> => (await callsOf(bive, 'confirmation.list')).length;
+    const before = await changes();
+    const listBefore = await lists();
+    await bive.setResponse('normChange.list', { result: FIXTURE_CHANGE_LIST_MORE });
+    // 목록 다시 읽기는 상세 읽기보다 늦게 끝나게 한다(새 항목 객체가 상세 읽기 뒤에 들어와도 다시 부르지 않는지 본다)
+    await bive.setResponse('confirmation.list', { result: FIXTURE_LIST, delayMs: 300 });
+    await bive.emit('event.normChange.appended', { projectId: PROJECT.id, lastSeq: 12 });
+    await expect(page.getByTestId('judgment-card')).toHaveCount(3);
+    // 확인할 것 목록(= 배지)도 그 알림으로 다시 읽혔다: 항목 객체가 바뀌어도 상세는 다시 부르지 않는다
+    await expect.poll(lists).toBeGreaterThan(listBefore);
+    await page.waitForTimeout(500);
+    expect(await changes()).toBe(before + 1);
+    expect((await callsOf(bive, 'normChange.list')).at(-1)).toEqual({
+      projectId: PROJECT.id,
+      targetRef: { entity: 'Rule', id: ID.rule5 },
+    });
   });
 });
 

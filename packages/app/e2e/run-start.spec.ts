@@ -106,8 +106,11 @@ const selectFailingRule = async (page: Page): Promise<void> => {
 const callsOf = async (bive: BiveMock, method: string): Promise<MockCall[]> =>
   (await bive.calls()).filter((call) => call.method === method);
 
+/** 실행을 만들거나 바꾸는 요청 (실행 이력의 실행 목록 조회 `run.list`는 뺀다, ADR-123). */
 const runCalls = async (bive: BiveMock): Promise<MockCall[]> =>
-  (await bive.calls()).filter((call) => call.method.startsWith('run.'));
+  (await bive.calls()).filter(
+    (call) => call.method.startsWith('run.') && call.method !== 'run.list',
+  );
 
 const dialog = (page: Page) => page.getByRole('dialog', { name: RUN_START.title });
 

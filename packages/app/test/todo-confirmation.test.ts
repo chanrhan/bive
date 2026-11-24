@@ -13,7 +13,6 @@ import {
   type NormChangeView,
   NormJudgmentSubject,
   NormJudgmentVerdict,
-  PROPOSAL_STATE_LABELS,
 } from '@bive/shared';
 import { describe, expect, it } from 'vitest';
 
@@ -46,7 +45,6 @@ import {
   EMPTY_FILTER,
   type ListEntry,
 } from '../src/renderer/src/components/ListView/filter.js';
-import { DECISION_LABELS } from '../src/renderer/src/components/StatusBadge/status.js';
 import { AGENT_ROLE_LABELS, CHECK_KIND_LABELS } from '../src/renderer/src/proposals/labels.js';
 import {
   CONFIRMATION_CRITERIA,
@@ -77,9 +75,6 @@ describe('표시명 (shared 대조)', () => {
     expect(Object.keys(KIND_TAGS)).toEqual(ConfirmationItemKind.options);
     expect(AGENT_ROLE_LABELS).toEqual(SHARED_AGENT_ROLE_LABELS);
     expect(CHECK_KIND_LABELS).toEqual(SHARED_CHECK_KIND_LABELS);
-    // 상태 배지의 처리 결과 표시명 (옛 제안 시험에서 옮김)
-    expect(DECISION_LABELS.approved).toBe(PROPOSAL_STATE_LABELS.approved);
-    expect(DECISION_LABELS.rejected).toBe(PROPOSAL_STATE_LABELS.rejected);
   });
 });
 

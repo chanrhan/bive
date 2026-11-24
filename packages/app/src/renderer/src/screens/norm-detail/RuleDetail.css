@@ -287,9 +287,10 @@
   list-style: none;
 }
 
+/* 칸: 시각 · 판정 · 실행 · 커밋 · 실행 상태와 종료 사유(남는 폭, ADR-123) */
 .rule-history-row {
   display: grid;
-  grid-template-columns: 140px 72px 72px minmax(0, 1fr);
+  grid-template-columns: 140px 72px 72px 64px minmax(0, 1fr);
   align-items: center;
   gap: var(--space-3);
   font-size: var(--font-size-2);
@@ -300,11 +301,16 @@
   overflow-wrap: anywhere;
 }
 
-.rule-history-row > .status-badge {
+.rule-history-row > .status-badge,
+.rule-history-judgment {
   justify-self: start;
 }
 
-/* 좁은 상세(4칸이 한 줄에 들어가지 않는 폭)에서는 2칸 2줄: 시각 · 판정 / 실행 · 커밋. 값은 줄이지 않는다 (#165) */
+.rule-history-status {
+  color: var(--color-text-muted);
+}
+
+/* 좁은 상세(칸이 한 줄에 들어가지 않는 폭)에서는 2칸: 시각 · 판정 / 실행 · 커밋 / 실행 상태. 값은 줄이지 않는다 (#165) */
 @container rule-detail (max-width: 400px) {
   .rule-history-row {
     grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
