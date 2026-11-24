@@ -22,6 +22,7 @@ import { migration as m0017 } from './0017_session_norm_input.js';
 import { migration as m0018 } from './0018_rule_retirements.js';
 import { migration as m0019 } from './0019_confirmation_release.js';
 import { migration as m0020 } from './0020_session_objection_end.js';
+import { migration as m0021 } from './0021_integrity_gaps.js';
 
 export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0001,
@@ -44,4 +45,5 @@ export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0018,
   m0019,
   m0020,
+  m0021,
 ];

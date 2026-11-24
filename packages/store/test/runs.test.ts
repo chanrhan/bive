@@ -1,6 +1,6 @@
 // 실행 · 단계 리포지토리 (M1-12, RUN-01 · RUN-02 · NFR-01 · ADR-061). 실제 SQLite 임시 저장소.
 import { type Author, RUN_STEP_PLANS, STEP_ROLES, type StepKind } from '@bive/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ConflictError, NotFoundError } from '../src/errors.js';
 import { openProjectStore, type ProjectStore } from '../src/project-store.js';
@@ -228,6 +228,73 @@ describe('runs.list', () => {
         'EXE-002',
       ]);
       expect(store.runs.list({ status: 'merged' })).toEqual([]);
+    });
+  });
+
+  it('저장소 밖에서 형식이 깨진 실행 행 1건은 그 행만 건너뛰고 경고 한 줄(건수 · 프로젝트, 저장 값 없음)을 남긴다. 그 행을 ID로 읽으면 여전히 오류다 (M3-36 #264, ADR-120)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      withStore((store) => {
+        const rule = seedRule(store);
+        const first = store.runs.create(runInput([rule]));
+        const broken = store.runs.create(runInput([rule]));
+        const third = store.runs.create(runInput([rule]));
+        passApproval(store, broken);
+        // DB CHECK(JSON 배열)는 지나지만 읽기 스키마(Run.toolManifest)에 맞지 않는 값
+        store.db
+          .prepare(`UPDATE runs SET tool_manifest = '[{"x":1}]' WHERE id = ?`)
+          .run(broken.run.id);
+        expect(store.runs.list().map((r) => r.displayId)).toEqual(['EXE-001', 'EXE-003']);
+        expect(store.runs.list({ status: 'running' })).toEqual([]);
+        expect(store.runs.list({ status: 'waiting_approval' }).map((r) => r.id)).toEqual([
+          first.run.id,
+          third.run.id,
+        ]);
+        expect(() => store.runs.get(broken.run.id)).toThrow();
+        // 같은 건수면 프로세스당 한 번, 건수가 바뀌면 다시 한 번
+        expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+          `실행 기록 1건이 저장 형식에 맞지 않아 조회에서 건너뜀 (프로젝트 ${store.projectId})`,
+        ]);
+        store.db
+          .prepare(`UPDATE runs SET tool_manifest = '[{"x":1}]' WHERE id = ?`)
+          .run(third.run.id);
+        expect(store.runs.list().map((r) => r.displayId)).toEqual(['EXE-001']);
+        expect(warn).toHaveBeenCalledTimes(2);
+        expect(String(warn.mock.calls[1]?.[0])).toContain('실행 기록 2건이');
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('테스트 변경 알림 확인 (M3-36 #264, ADR-120)', () => {
+  it('실행이 merged로 저장되는 같은 트랜잭션에서 확인 전이 되고, 확인은 한 번만 채운다. 병합이 아닌 종료 · 진행 중 실행은 대상이 아니다', () => {
+    withStore((store) => {
+      const rule = seedRule(store);
+      const merged = passApproval(store, store.runs.create(runInput([rule])));
+      expect(store.runs.pendingTestChangeChecks()).toEqual([]);
+      // 병합 커밋 없이 merged는 DB가 거부하고 확인 전 행도 남지 않는다 (같은 트랜잭션)
+      expect(() =>
+        store.runs.transition(merged.run.id, {
+          run: { status: 'merged', currentStep: null, endedAt: T2 },
+        }),
+      ).toThrow(/병합 커밋이 있어야/);
+      expect(store.runs.pendingTestChangeChecks()).toEqual([]);
+      expect(store.runs.get(merged.run.id)?.status).toBe('running');
+      store.runs.transition(merged.run.id, {
+        run: { status: 'merged', currentStep: null, mergeCommit: SHA, endedAt: T2 },
+      });
+      const failed = passApproval(store, store.runs.create(runInput([rule])));
+      store.runs.transition(failed.run.id, {
+        run: { status: 'failed', failureReason: 'step_error', endedAt: T2 },
+      });
+      store.runs.create(runInput([rule]));
+      expect(store.runs.pendingTestChangeChecks()).toEqual([merged.run.id]);
+      expect(store.runs.markTestChangeChecked(failed.run.id, T2)).toBe(false);
+      expect(store.runs.markTestChangeChecked(merged.run.id, T2)).toBe(true);
+      expect(store.runs.markTestChangeChecked(merged.run.id, T2)).toBe(false);
+      expect(store.runs.pendingTestChangeChecks()).toEqual([]);
     });
   });
 });

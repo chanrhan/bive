@@ -27,6 +27,7 @@ import {
 
 import { withTransaction, type SqliteDatabase } from '../database.js';
 import { ConflictError, NotFoundError, isUniqueViolation } from '../errors.js';
+import { warnOnce } from '../read-warnings.js';
 import { DisplayIdSequences } from './display-id-sequences.js';
 import { SessionRepository } from './session-repository.js';
 
@@ -341,12 +342,14 @@ export class RunRepository {
   readonly #selectTargets;
   readonly #selectSteps;
   readonly #ruleState;
+  readonly #selectPendingTestChangeChecks;
+  readonly #markTestChangeChecked;
 
   constructor(
     db: SqliteDatabase,
     projectId: Ulid,
     sequences: DisplayIdSequences = new DisplayIdSequences(db),
-    sessions: SessionRepository = new SessionRepository(db),
+    sessions: SessionRepository = new SessionRepository(db, projectId),
   ) {
     this.#db = db;
     this.#projectId = projectId;
@@ -396,6 +399,12 @@ export class RunRepository {
     );
     this.#ruleState = db.prepare<[string], { deleted_at: string | null }>(
       'SELECT deleted_at FROM rules WHERE id = ?',
+    );
+    this.#selectPendingTestChangeChecks = db.prepare<[], { run_id: string }>(
+      'SELECT run_id FROM run_test_change_checks WHERE checked_at IS NULL ORDER BY rowid',
+    );
+    this.#markTestChangeChecked = db.prepare<[string, string]>(
+      'UPDATE run_test_change_checks SET checked_at = ? WHERE run_id = ? AND checked_at IS NULL',
     );
   }
 
@@ -495,13 +504,47 @@ export class RunRepository {
     return summarizeRunUsage(roles, this.steps(run.id), this.#sessions.listByRun(run.id));
   }
 
-  /** 실행을 표시 ID 순(= 생성 순)으로. `status`를 주면 그 상태만. */
+  /**
+   * 실행을 표시 ID 순(= 생성 순)으로. `status`를 주면 그 상태만. 저장 형식에 맞지 않는 행(저장소 밖에서 고친 행)은 그 행만
+   * 건너뛰고 경고 한 줄을 남긴다(ADR-094 · ADR-120: 행 하나가 목록 · 재기동 복구 전체를 실패시키지 않는다). 그 행을 ID로
+   * 읽으면(`get`) 여전히 오류다.
+   */
   list(filter: RunListFilter = {}): Run[] {
     const rows =
       filter.status === undefined
         ? this.#selectRuns.all()
         : this.#selectRunsByStatus.all(filter.status);
-    return rows.map((row) => this.#toRun(row));
+    const runs: Run[] = [];
+    let skipped = 0;
+    for (const row of rows) {
+      const run = this.#readRun(row);
+      if (run === null) skipped += 1;
+      else runs.push(run);
+    }
+    if (skipped > 0) {
+      warnOnce(
+        `runs.list:${this.#projectId}`,
+        String(skipped),
+        `실행 기록 ${String(skipped)}건이 저장 형식에 맞지 않아 조회에서 건너뜀 (프로젝트 ${this.#projectId})`,
+      );
+    }
+    return runs;
+  }
+
+  /**
+   * 테스트 변경 알림 확인 전인 병합 실행 ID (병합 순). 실행이 `merged`로 저장되는 같은 문장에서 DB 트리거가 행을 만든다
+   * (0021, ADR-120). 기동 때 앞 프로세스가 알림 확인을 끝내지 못한 실행을 되짚는 데 쓴다.
+   */
+  pendingTestChangeChecks(): string[] {
+    return this.#selectPendingTestChangeChecks.all().map((row) => row.run_id);
+  }
+
+  /**
+   * 테스트 변경 알림 확인을 끝냈다고 한 번 남긴다 (알림 기록과 같은 트랜잭션에서 부른다). 확인 전 행이 없으면(이미 남김 · 0021
+   * 전에 병합된 실행 · 병합되지 않은 실행) 아무것도 하지 않고 `false`.
+   */
+  markTestChangeChecked(runId: string, at: string): boolean {
+    return this.#markTestChangeChecked.run(at, runId).changes > 0;
   }
 
   /** 실행의 단계 시도를 파이프라인 순서 → 시도 번호 순으로. */
@@ -666,7 +709,24 @@ export class RunRepository {
   }
 
   #toRun(row: RunRow): Run {
-    return Run.parse({
+    return Run.parse(this.#runInput(row));
+  }
+
+  /** 저장 형식에 맞지 않는 행(JSON이 아님 · 스키마 위반)이면 `null`. */
+  #readRun(row: RunRow): Run | null {
+    let input: unknown;
+    try {
+      input = this.#runInput(row);
+    } catch (error) {
+      if (error instanceof SyntaxError) return null;
+      throw error;
+    }
+    const parsed = Run.safeParse(input);
+    return parsed.success ? parsed.data : null;
+  }
+
+  #runInput(row: RunRow): Record<string, unknown> {
+    return {
       id: row.id,
       displayId: row.display_id,
       projectId: this.#projectId,
@@ -692,7 +752,7 @@ export class RunRepository {
       createdAt: row.created_at,
       startedAt: row.started_at,
       endedAt: row.ended_at,
-    });
+    };
   }
 
   #assertLiveRule(ruleId: string): void {

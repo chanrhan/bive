@@ -9,8 +9,9 @@
 // - 병합 성공 → `passed`(`run.mergeCommit`), 실패 → `failed`(사유는 ADR-058 값 그대로), 브랜치 · 워크트리는 엔진이 보존
 // - 병합 직전 대상 규칙 재확인 (ADR-100 A3 · A4, M7-09, ADR-112): 단계를 열기 전에는 엔진이 대상 규칙의 폐기를 보고, 이 실행기는
 //   병합을 부르기 직전(`stage: before_merge`)과 병합 재검사의 판정 뒤(`stage: merge_recheck`)에 다시 본다. 폐기됐으면 병합하지 않고
-//   `failed`(`target_rule_retired`, 폐기된 대상 규칙의 표시 ID). 남는 틈: 관리자의 병합 안(재검사 판정 뒤 기준 브랜치 갱신까지,
-//   재검사가 없으면 병합 시작부터)에 폐기되면 병합된다(ADR-112 한계). 검사 · 재검사의 판정 대상은 효력 있는 규칙이다(폐기된 규칙의 인수 테스트 폴더는 남아 있어도 판정하지 않는다)
+//   `failed`(`target_rule_retired`, 폐기된 대상 규칙의 표시 ID). 관리자가 기준 브랜치를 갱신하기 바로 전(기다림 없이 갱신으로
+//   이어지는 자리, `beforeUpdate`)에 한 번 더 보고 폐기됐으면 갱신하지 않는다(`stage: before_update`, M3-36 #264 · ADR-120:
+//   ADR-112의 "관리자의 병합 안 폐기" 틈을 닫는다. 그 뒤의 폐기는 병합 뒤의 폐기다). 검사 · 재검사의 판정 대상은 효력 있는 규칙이다(폐기된 규칙의 인수 테스트 폴더는 남아 있어도 판정하지 않는다)
 // - 병합 순서 값(ADR-096): 기준 브랜치 갱신을 확인한 뒤(정상 병합 · 재개 복구 모두) 이 실행의 병합 커밋의 전체 조상 수를
 //   한 번 읽어 단계 결과 `mergeOrder`에 남긴다(판정 기준 순서, `verification/summary.ts`). 짧은 제한 시간 안에 못 읽거나
 //   실패하면 `null`(+ `mergeOrderError`)이고 병합 결과 · 단계 상태는 바뀌지 않는다
@@ -367,12 +368,24 @@ export const createMergeExecutor =
     const retiredBeforeMerge = retiredTargets();
     if (retiredBeforeMerge.length > 0)
       return retiredHalt(retiredBeforeMerge, { stage: 'before_merge' });
+    let retiredAtUpdate: string[] = [];
     const result = await context.worktrees.merge(context.git, {
       check,
       checkTimeoutMs,
       signal: context.signal,
+      // 기준 브랜치 갱신 바로 전 (재검사 판정 뒤 · 관리자의 마지막 확인 동안 폐기됐을 수 있다)
+      beforeUpdate: () => {
+        retiredAtUpdate = retiredTargets();
+        return retiredAtUpdate.length > 0 ? `대상 규칙 폐기: ${retiredAtUpdate.join(', ')}` : null;
+      },
     });
     context.signal.throwIfAborted();
+    if (result.status === 'failed' && result.reason === 'vetoed') {
+      return retiredHalt(retiredAtUpdate, {
+        stage: 'before_update',
+        ...(recheck === null ? {} : { recheck: recheck as Record<string, unknown> }),
+      });
+    }
     const checked = recheck as Record<string, unknown> | null;
     const tampered = integrity as {
       moment: 'before_judge' | 'after_judge';

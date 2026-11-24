@@ -1,6 +1,6 @@
 // 세션 · 도구 호출 기록 리포지토리 (M1-14, RUN-04 · NFR-02 · ADR-066). 실제 SQLite 임시 저장소.
 import { type Author, RUN_STEP_PLANS, STEP_ROLES, type Step } from '@bive/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ConflictError, NotFoundError } from '../src/errors.js';
 import { openProjectStore, type ProjectStore } from '../src/project-store.js';
@@ -394,6 +394,72 @@ describe('세션의 규범 입력 기록 (M7-08 #220, ADR-108)', () => {
       }
       expect(store.sessions.listByRun(run.id)).toHaveLength(before);
     });
+  });
+
+  it('저장소 밖에서 형식이 깨진 규범 입력 기록 1건은 그 칸만 비워 읽고(다른 칸 · 비용은 그대로) 경고 한 줄을 남기며, 세션 조회 · 하루 합산 원천 · 재기동 닫기가 모두 그대로 돈다. 저장된 값은 바뀌지 않는다 (M3-36 #264, ADR-120)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      withStore((store) => {
+        const { run, steps } = seedRun(store);
+        const stepId = stepOf(steps, 'test_writing').id;
+        const good = store.sessions.start({
+          id: newId(),
+          runId: run.id,
+          stepId,
+          role: 'test-writer',
+          model: 'model-a',
+          workDir: '/tmp/w',
+          startedAt: T0,
+          normInput: NORM_INPUT,
+          budget: { maxBudgetUsd: 1, maxTurns: 10 },
+        });
+        store.sessions.end(good.id, { endReason: 'success', totalCostUsd: 0.25, endedAt: T1 });
+        // DB CHECK(JSON 객체)는 지나지만 읽기 스키마(SessionNormInput)에 맞지 않는 값
+        const broken = newId();
+        store.db
+          .prepare(
+            `INSERT INTO sessions (id, run_id, step_id, role, model, work_dir, model_usage, tools,
+             mcp_servers, started_at, budget_max_usd, budget_max_turns, norm_input) VALUES (?, ?, ?,
+             'test-writer', 'model-a', '/tmp/w', '{}', '[]', '[]', ?, 2, 20, '{"summary":"x"}')`,
+          )
+          .run(broken, run.id, stepId, T0);
+        const rawOf = () =>
+          store.db.prepare('SELECT norm_input FROM sessions WHERE id = ?').get(broken);
+        const raw = rawOf();
+        expect(warn).not.toHaveBeenCalled();
+
+        const byRun = store.sessions.listByRun(run.id);
+        expect(byRun.map((session) => [session.id, session.normInput])).toEqual([
+          [good.id, NORM_INPUT],
+          [broken, null],
+        ]);
+        expect(byRun[1]).toMatchObject({
+          budget: { maxBudgetUsd: 2, maxTurns: 20 },
+          endReason: null,
+          totalCostUsd: null,
+        });
+        expect(store.sessions.get(broken)?.normInput).toBeNull();
+        // 하루 합산의 원천: 깨진 세션도 빠지지 않는다 (진행 중 = 넘긴 한도 전부로 세는 근거 칸이 그대로)
+        const day = store.sessions.listStartedBetween(Date.parse(T0) - 1, Date.parse(T1));
+        expect(day.map((session) => [session.id, session.budget?.maxBudgetUsd])).toEqual([
+          [good.id, 1],
+          [broken, 2],
+        ]);
+        // 재기동 닫기: 끝나지 않은 세션 목록과 종료 기록
+        expect(store.sessions.listUnended().map((session) => session.id)).toEqual([broken]);
+        store.sessions.end(broken, { endReason: 'aborted', error: '재기동', endedAt: T1 });
+        expect(store.sessions.get(broken)).toMatchObject({ endReason: 'aborted', normInput: null });
+        expect(store.runs.usage(run.id)?.run.costUsd).toBe(0.25);
+        // 저장된 값은 그대로 (바꿀 수 없는 칸)
+        expect(rawOf()).toEqual(raw);
+        // 같은 행은 프로세스당 한 번, 저장된 값을 싣지 않는다
+        expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+          `세션 기록의 규범 입력 1건이 저장 형식에 맞지 않아 비워 읽음 (프로젝트 ${store.projectId})`,
+        ]);
+      });
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

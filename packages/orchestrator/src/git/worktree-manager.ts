@@ -164,6 +164,11 @@ export interface MergeOptions {
   checkTimeoutMs?: number;
   /** 호출자의 중단 신호. 기준 브랜치를 갱신하기 전에 중단되면 `aborted`로 끝낸다(대기열에서 기다리는 중 포함) */
   signal?: AbortSignal;
+  /**
+   * 기준 브랜치를 갱신하기 바로 전(마지막 확인 뒤, 사이에 기다림 없이) 한 번 동기로 부른다. 문장을 돌려주면 갱신하지 않고
+   * `vetoed`로 끝낸다(그 문장이 사유). 호출자의 마지막 조건 확인 자리다(병합 시점의 대상 규칙 폐기, ADR-120)
+   */
+  beforeUpdate?: () => string | null;
 }
 
 export type MergeFailureReason =
@@ -202,6 +207,8 @@ export type MergeFailureReason =
   | 'aborted'
   /** 병합하는 동안 기준 브랜치가 다시 바뀌었다 */
   | 'base_changed'
+  /** 호출자가 갱신 직전 확인(`beforeUpdate`)에서 거부했다 */
+  | 'vetoed'
   /**
    * 기준 브랜치를 갱신하지 못했거나 갱신을 확인하지 못했다
    * (예: 덮어쓸 미추적 · 무시된 파일, 갱신 직전 · 순간의 프로젝트 폴더 체크아웃 변경. 참조만 갱신한 순간 기준 브랜치가
@@ -1172,6 +1179,10 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
           '프로젝트 폴더의 체크아웃이 바뀌는 중이라 기준 브랜치를 갱신하지 않았습니다',
         );
       }
+
+      // 호출자의 마지막 확인: 여기와 갱신 사이에 기다림이 없다 (이 뒤에 생긴 일은 병합 뒤의 일이다)
+      const veto = mergeOptions.beforeUpdate?.() ?? null;
+      if (veto !== null) return fail('vetoed', veto);
 
       try {
         if (fastForward) {

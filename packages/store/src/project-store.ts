@@ -85,7 +85,7 @@ export class ProjectStore {
     this.proposals = new ProposalRepository(db, this.sequences);
     this.approvalLog = new ApprovalLogRepository(db);
     this.settings = new SettingsRepository(db, projectId);
-    this.sessions = new SessionRepository(db);
+    this.sessions = new SessionRepository(db, projectId);
     this.runs = new RunRepository(db, projectId, this.sequences, this.sessions);
     this.judgments = new JudgmentRepository(db);
     this.codeOpens = new CodeOpenRepository(db, projectId);
