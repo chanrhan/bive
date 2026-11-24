@@ -23,7 +23,7 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 
 ## 명령
 
-2026-11-14 `main`(`2074c67`)에서 아래 표의 명령을 모두 실행해 기대 결과를 확인했다(`--open`은 README 6장 "M1 완료 기준 흐름 준비" 블록으로 띄워 원격 디버깅 포트로 요구사항 화면을 확인, 파이프라인 e2e 한 파일은 `forbidden-write.test.ts`). 같은 날 새 컨테이너의 `main`(`6626b6b`)에서 앱 기동 · 오케스트레이터 단독 기동 · CLI 핑 · 픽스처 설치 · GitHub REST를 다시 실행해 같은 결과를 확인했고, `--open`은 로드맵 2.1 준비 블록을 그대로 실행해 `app.pid` · `.bive.json`이 생기는 데까지 확인했다. 2026-11-21 `main`(`e95c318`)에서 CLAUDE.md 5장의 완료 조건 명령 9개를 다시 실행해 같은 결과를 확인했다.
+2026-11-14 `main`(`2074c67`)에서 아래 표의 명령을 모두 실행해 기대 결과를 확인했다(`--open`은 README 6장 "M1 완료 기준 흐름 준비" 블록으로 띄워 원격 디버깅 포트로 요구사항 화면을 확인, 파이프라인 e2e 한 파일은 `forbidden-write.test.ts`). 같은 날 새 컨테이너의 `main`(`6626b6b`)에서 앱 기동 · 오케스트레이터 단독 기동 · CLI 핑 · 픽스처 설치 · GitHub REST를 다시 실행해 같은 결과를 확인했고, `--open`은 로드맵 2.1 준비 블록을 그대로 실행해 `app.pid` · `.bive.json`이 생기는 데까지 확인했다. 2026-11-21 `main`(`e95c318`)과 2026-11-24 `main`(`f115b8e`)에서 CLAUDE.md 5장의 완료 조건 명령 9개를 다시 실행해 같은 결과를 확인했다.
 
 | 작업 | 명령 | 기대 결과 |
 |---|---|---|
@@ -35,7 +35,7 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 | 픽스처 테스트 | `pnpm -C fixtures/sample-next-app test` | 임시 SQLite 마이그레이션 → `next build` → `next start` → HTTP 확인 |
 | 픽스처 초기화 | `scripts/reset-fixture.sh $(mktemp -d)/fx --verify` | 복사 → 설치 → git 커밋 → 테스트 통과 |
 | 초기화 스크립트 검사 | `scripts/test-reset-fixture.sh` | 지우면 안 되는 경로를 거부하는지 검사 |
-| 파이프라인 e2e 한 파일 | `packages/orchestrator`에서 `pnpm exec vitest run --config vitest.pipeline.config.ts e2e/pipeline/<파일>` | 그 시험 하나만 통과. 픽스처 설치가 먼저 필요하다. 파일마다 실제 설치 · `next build`를 해서 오래 걸린다(2026-11-14 새 컨테이너에서 전체 `pnpm e2e:pipeline` 11개 파일이 약 19분, 한 파일 평균 2분 가까이. 2026-11-15 `multi-rule.test.ts`가 더해져 12개 파일이 되었고 CI에서 약 20분 30초, 실행을 두 번 하는 그 파일 하나가 약 7분으로 가장 느리다. 2026-11-21 이 VM에서 12개 파일 약 23분). 로컬 `pnpm e2e:pipeline`은 전체를 한 번에 돌고, CI는 두 묶음 잡 `pipeline-e2e-group (1)` · `(2)`로 나눠 병렬로 돈다. 묶음 1의 파일은 `.github/workflows/ci.yml`의 `PIPELINE_E2E_GROUP1`, 나머지(새 파일 포함)는 묶음 2이고, 집계 잡 `pipeline-e2e`가 모든 파일이 정확히 한 묶음에서 돌았는지 `scripts/check-pipeline-groups.py`로 대조한다 |
+| 파이프라인 e2e 한 파일 | `packages/orchestrator`에서 `pnpm exec vitest run --config vitest.pipeline.config.ts e2e/pipeline/<파일>` | 그 시험 하나만 통과. 픽스처 설치가 먼저 필요하다. 파일마다 실제 설치 · `next build`를 해서 오래 걸린다(2026-11-14 새 컨테이너에서 전체 `pnpm e2e:pipeline` 11개 파일이 약 19분, 한 파일 평균 2분 가까이. 2026-11-15 `multi-rule.test.ts`가 더해져 12개 파일이 되었고 CI에서 약 20분 30초, 실행을 두 번 하는 그 파일 하나가 약 7분으로 가장 느리다. 2026-11-24 이 VM에서 16개 파일 약 40분). 로컬 `pnpm e2e:pipeline`은 전체를 한 번에 돌고, CI는 두 묶음 잡 `pipeline-e2e-group (1)` · `(2)`로 나눠 병렬로 돈다. 묶음 1의 파일은 `.github/workflows/ci.yml`의 `PIPELINE_E2E_GROUP1`, 나머지(새 파일 포함)는 묶음 2이고, 집계 잡 `pipeline-e2e`가 모든 파일이 정확히 한 묶음에서 돌았는지 `scripts/check-pipeline-groups.py`로 대조한다 |
 | GitHub REST | `scripts/gh-rest.sh GET repos/chanrhan/bive/milestones` | 마일스톤 목록 JSON |
 
 코드 열기(IDE URL)는 화면 없는 VM에서 열 곳이 없으므로 앱을 `BIVE_OPEN_URL_LOG=$BIVE_HOME/open-url.log`(절대 경로, 빈 값은 미설정과 같음)를 더해 띄우면 URL을 열지 않고 그 파일에 한 줄씩 적는다(로드맵 2.2 흐름, ADR-087). IDE 설정은 프로젝트별이라 새 프로젝트의 첫 열기는 IDE 선택 단계가 먼저 나온다.
@@ -58,4 +58,6 @@ Ubuntu 24.04 x86_64, GUI 없음, 4 vCPU · 15GB RAM. 외부 HTTPS는 정책 프�
 - **병렬 worktree의 테스트가 서로 간섭한다**: 테스트는 `TMPDIR=$(mktemp -d /tmp/t<이슈>.XXXX) pnpm test`처럼 임시 폴더를 따로 준다. 로그 · PR 본문 같은 임시 파일을 공용 scratchpad에 둘 때는 이슈 번호를 파일 이름에 넣는다. 부하가 높아 프로세스 기동 시험이 시간 초과되면 그 파일만 단독으로 다시 실행해 판단한다 (ADR-064).
 - **CDP로 앱 창 크기를 바꿀 수 없다** (M2 검수 2026-11-21 확인): Electron의 원격 디버깅(`--remote-debugging-port`)에는 CDP `Browser` 도메인이 없어 `Browser.setWindowBounds`가 실패한다. 페이지에서 `window.resizeTo(w, h)`를 부르면 바뀌고, 앱의 최소 크기(창 안쪽 820 × 600, ADR-093)도 그대로 지켜진다.
 - **`xvfb-run -a`의 창이 1280px보다 넓어지지 않는다**: 기본 가상 화면 폭이 1280이다. 더 넓은 창을 볼 때는 `xvfb-run -a -s "-screen 0 1920x1080x24" <명령>`으로 화면 크기를 준다.
+- **흐름을 연달아 돌리면 디스크가 모자란다** (증상: 의존성 설치 실패, 판정 러너 오류, 실행이 구현 회귀 상한으로 끝남): 실행 작업 폴더(`$BIVE_HOME/work/<프로젝트 ID>/` 아래 `worktrees` · `judge` · `merges`)는 실행마다 픽스처 기준 약 880MB가 남고 자동으로 지워지지 않는다(ADR-058). M7 검수(2026-11-24)에서 11GB가 쌓여 실행이 실패했다. 끝난 `BIVE_HOME`의 `work/`를 지우고(진행 중 실행이 없을 때) `df -h /tmp`로 여유를 본다. 정책은 사람 결정(#267).
+- **`fresh` 뒤 다른 시나리오로 띄웠는데 앞 시나리오대로 돈다**: 앞 프로젝트에 실행이 진행 중이면 `quit` 뒤에도 오케스트레이터가 끝나지 않고, 다음 `app <시나리오>`의 앱이 그 오케스트레이터에 붙어 앞 `BIVE_SCENARIO`를 그대로 쓴다(M7 검수에서 `contradiction-missed`로 띄웠는데 `happy-path`로 돎). `fresh` 전에 `cli rpc run.list`의 실행이 모두 종료 상태이고 `$BIVE_HOME/run/orchestrator.pid`가 없어졌는지 확인한다.
 - **로드맵 준비 블록의 `app`이 다음 명령에서 사라진다**: `app` · `quit` · `cli`는 셸 함수이고 `app`은 앱을 그 셸의 백그라운드 작업으로 띄우므로 같은 셸에서만 쓸 수 있다. 도구 호출마다 셸이 끝나는 에이전트는 앱을 `setsid nohup <app의 명령> > <로그> 2>&1 &`로 셸에서 떼어 띄우고, 다음 호출에서 같은 `BIVE_HOME` · `FX`를 다시 export한다.

@@ -7,6 +7,8 @@ description: docs/roadmap.md 를 GitHub 라벨 · 마일스톤 · 이슈로 발�
 
 서브에이전트(모델 sonnet)에게 맡길 수 있는 기계적 작업. GitHub 호출은 전부 `scripts/gh-rest.sh`(= `gh api`)로 한다. 형식은 `docs/roadmap-format.md`. 실제로는 `scripts/publish-roadmap.py`가 아래 절차를 그대로 한다(먼저 `--dry-run`으로 계획을 보고, `--dry-run`은 GET 말고는 호출하지 않는다).
 
+주의: 미리 보기는 반드시 `--dry-run`과 함께 한다. `--show <키>`는 본문을 출력한 뒤 발행을 계속하므로 `--dry-run` 없이 쓰면 실제로 이슈를 만들고 본문을 고친다(2026-11-24 #258에서 이렇게 발행됨. 스크립트 수정은 #260).
+
 목록 조회(라벨 · 마일스톤 · 이슈)는 `--paginate`를 쓰지 않는다. 이 환경의 프록시가 다음 페이지 링크(`repositories/<id>/...`)를 거부하므로 `per_page=100&page=1, 2, …`로 100개보다 적은 페이지가 나올 때까지 읽는다.
 
 ## 절차
