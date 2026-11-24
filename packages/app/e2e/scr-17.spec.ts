@@ -544,6 +544,58 @@ test.describe('[확인] 중복 방지', () => {
   });
 });
 
+test.describe('[확인] 뒤 버튼 복구', () => {
+  test('-32009인데 다시 읽은 목록에 그 항목이 남아 있으면 오류 없이 버튼이 다시 "확인"으로 켜진다', async ({
+    page,
+  }) => {
+    const bive = await setup(page, FIXTURE_LIST, {
+      'confirmation.set': { error: { code: -32009, message: '상태 충돌' }, delayMs: 300 },
+    });
+    await cardAt(page, 1).click();
+    const before = (await callsOf(bive, 'confirmation.list')).length;
+    const button = page.getByTestId('confirm-button');
+    await button.click();
+    await expect(button).toBeDisabled();
+    await expect(button).toHaveText('저장 중');
+    // 다시 읽기는 끝나고 그 항목은 그대로 남아 있다
+    await expect
+      .poll(async () => (await callsOf(bive, 'confirmation.list')).length)
+      .toBe(before + 1);
+    await expect(cards(page)).toHaveCount(FIXTURE_LIST.items.length);
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'RULE-002');
+    await expect(button).toBeEnabled();
+    await expect(button).toHaveText('확인');
+    await expect(page.getByTestId('confirm-error')).toHaveCount(0);
+    // 다시 누를 수 있다
+    await button.click();
+    await expect.poll(() => callsOf(bive, 'confirmation.set')).toHaveLength(2);
+  });
+
+  test('성공 뒤 다시 읽기가 실패하면 목록 불러오기 실패를 보이고, 다음 다시 읽기에서 그 항목의 버튼은 켜져 있다', async ({
+    page,
+  }) => {
+    const bive = await setup(page);
+    await cardAt(page, 1).click();
+    await bive.setResponse('confirmation.list', { error: { code: -32603, message: '내부 오류' } });
+    await page.getByTestId('confirm-button').click();
+    await expect.poll(() => callsOf(bive, 'confirmation.set')).toHaveLength(1);
+    // 지금 동작: 목록 자리는 "목록 불러오기 실패", 항목이 없어 상세는 빈 자리, 배지는 없다
+    await expect(page.getByTestId('todo-list-pane').getByTestId('empty-state')).toHaveText(
+      '목록 불러오기 실패',
+    );
+    await expect(detail(page).getByTestId('empty-state')).toHaveText('선택 항목 없음');
+    await expect(page.getByTestId('todo-badge')).toHaveCount(0);
+    // 다음 다시 읽기(규범 변경 알림)에서 같은 항목이 돌아오면 고른 그대로이고 버튼은 꺼진 채 남지 않는다
+    await bive.setResponse('confirmation.list', { result: FIXTURE_LIST });
+    await bive.emit('event.normChange.appended', { projectId: PROJECT.id, lastSeq: 20 });
+    await expect(cards(page)).toHaveCount(FIXTURE_LIST.items.length);
+    await expect(detail(page)).toHaveAttribute('data-selected-id', 'RULE-002');
+    const button = page.getByTestId('confirm-button');
+    await expect(button).toBeEnabled();
+    await expect(button).toHaveText('확인');
+  });
+});
+
 test.describe('대상 링크', () => {
   test('폐기된 규칙 링크는 규칙 화면을 [폐기 포함] · 그 표시 ID 검색으로, 요구사항 링크는 요구사항 화면을 검색으로 연다', async ({
     page,
