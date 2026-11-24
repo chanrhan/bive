@@ -127,18 +127,24 @@ describe('해시: 승인 기록과 다른 접두 (도메인 구분)', () => {
   it('규범 변경 기록 항목을 승인 기록에 옮겨 넣으면 승인 기록 체인 검증이 잡는다', () => {
     withStore((store) => {
       const entry = store.normChanges.append(created());
-      store.db
-        .prepare(
-          `INSERT INTO approval_log (seq, at, action, actor, target_ref, client_id, detail, prev_hash, hash)
-           VALUES (1, ?, 'approve', ?, ?, NULL, '{}', ?, ?)`,
-        )
-        .run(
-          entry.at,
-          JSON.stringify(entry.actor),
-          JSON.stringify(entry.targetRef),
-          entry.prevHash,
-          entry.hash,
-        );
+      const insert = () =>
+        store.db
+          .prepare(
+            `INSERT INTO approval_log (seq, at, action, actor, target_ref, client_id, detail, prev_hash, hash)
+             VALUES (1, ?, 'approve', ?, ?, NULL, '{}', ?, ?)`,
+          )
+          .run(
+            entry.at,
+            JSON.stringify(entry.actor),
+            JSON.stringify(entry.targetRef),
+            entry.prevHash,
+            entry.hash,
+          );
+      // 규범 변경 기록의 주체는 사람이 아니라 DB가 먼저 거부한다 (0021, ADR-120)
+      expect(insert).toThrow(/승인 기록의 주체는 사람이어야 합니다/);
+      // 저장소 밖에서 트리거까지 지우고 넣어도 체인 검증이 잡는다
+      store.db.exec('DROP TRIGGER approval_log_actor_human');
+      insert();
       expect(store.approvalLog.verify()).toEqual({
         valid: false,
         brokenAtSeq: 1,

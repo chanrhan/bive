@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { type Run, type SettingsPatch, type Step } from '@bive/shared';
+import { type Run, RUN_STEP_PLANS, type SettingsPatch, STEP_ROLES, type Step } from '@bive/shared';
 import type { ProjectStore, RunDetail } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -516,4 +516,269 @@ describe('실제 오케스트레이터: 확인됨 규칙의 기존 인수 테스
       ).toEqual([]);
     }
   }, 120_000);
+});
+
+describe('병합 저장 뒤 알림 확인 전에 끝난 실행: 기동 때 실행마다 한 번 (M3-36 #264 수용 기준 1, ADR-120)', () => {
+  const confirmRule = (h: ReturnType<typeof storeHarness>) =>
+    h.read((store) =>
+      store.transaction(() => {
+        const log = store.approvalLog.append({
+          at: new Date().toISOString(),
+          action: 'confirm',
+          actor: human,
+          targetRef: { entity: 'Rule', id: h.rule.id },
+          clientId: 'pipe-1',
+          detail: {},
+        });
+        store.confirmations.confirm(
+          { entity: 'Rule', id: h.rule.id },
+          { by: human, at: log.at, basis: { kind: 'approval_log', seq: log.seq } },
+        );
+      }),
+    );
+  /** 기준 커밋(인수 테스트 3개)과 그 테스트를 바꾼 · 지운 커밋 */
+  const commits = (h: ReturnType<typeof storeHarness>) => {
+    write(h.repo, 'bive-acceptance/RULE-001/health.acc.ts', 'v1');
+    write(h.repo, 'bive-acceptance/RULE-001/old.acc.ts', 'old');
+    write(h.repo, 'bive-acceptance/RULE-001/same.acc.ts', 'same');
+    const base = commitAll(h.repo, 'acceptance: RULE-001');
+    write(h.repo, 'bive-acceptance/RULE-001/health.acc.ts', 'v2');
+    fs.rmSync(path.join(h.repo, 'bive-acceptance/RULE-001/old.acc.ts'));
+    const head = commitAll(h.repo, 'test-writer: RULE-001');
+    return { base, head };
+  };
+  /**
+   * 엔진의 병합 저장과 같은 DB 쓰기(실행 행을 병합 커밋과 함께 merged로)만 하고 알림기는 부르지 않는다: 저장 직후 프로세스가
+   * 끝난 상태. 확인 전 표시는 DB 트리거가 같은 문장에서 남긴다
+   */
+  const mergedWithoutNotice = (
+    h: ReturnType<typeof storeHarness>,
+    range: { base: string | null; head: string | null },
+  ): string =>
+    h.read((store) => {
+      const created = store.runs.create({
+        id: newId(),
+        type: 'A',
+        targetRuleIds: [h.rule.id],
+        currentStep: 'approval',
+        baseBranch: 'main',
+        budgetSnapshot: {
+          run: { maxBudgetUsd: 5, maxTurns: 100 },
+          roles: { 'test-writer': { maxBudgetUsd: 2, maxTurns: 50 } },
+        },
+        modelSnapshot: { 'test-writer': 'model-a' },
+        startedBy: human,
+        createdAt: new Date().toISOString(),
+        steps: RUN_STEP_PLANS.A.map((kind) => ({
+          id: newId(),
+          kind,
+          attempt: 1,
+          status: 'pending' as const,
+          role: STEP_ROLES[kind],
+          startedAt: null,
+        })),
+      });
+      store.db
+        .prepare(
+          `UPDATE runs SET status = 'merged', current_step = NULL, base_commit = ?, head_commit = ?,
+           merge_commit = ?, ended_at = ? WHERE id = ?`,
+        )
+        .run(range.base, range.head, 'f'.repeat(40), new Date().toISOString(), created.run.id);
+      return created.run.id;
+    });
+  const notices = (h: ReturnType<typeof storeHarness>) =>
+    h.read((store) => store.normChanges.list().filter((entry) => entry.kind === 'test_changed'));
+  const pending = (h: ReturnType<typeof storeHarness>) =>
+    h.read((store) => store.runs.pendingTestChangeChecks());
+  const countingGit = (calls: (readonly string[])[], inner: GitRunner = createGitRunner()) =>
+    ((args, options) => {
+      calls.push(args);
+      return inner(args, options);
+    }) as GitRunner;
+
+  it('확인 전 실행만 다시 보고: 바뀐 테스트가 있으면 알림 1건, 없으면 기록 없이 확인만 채운다. 다음 기동(새 알림기)은 git도 부르지 않고 다시 쓰지 않는다', async () => {
+    const h = storeHarness();
+    confirmRule(h);
+    const { base, head } = commits(h);
+    const changed = mergedWithoutNotice(h, { base, head });
+    const unchanged = mergedWithoutNotice(h, { base, head: base });
+    const noCommits = mergedWithoutNotice(h, { base: null, head: null });
+    expect(pending(h)).toEqual([changed, unchanged, noCommits]);
+
+    const calls: (readonly string[])[] = [];
+    const logs: string[] = [];
+    const first = new TestChangeNotifier({
+      biveHome: h.biveHome,
+      log: (line) => logs.push(line),
+      git: countingGit(calls),
+    });
+    first.recoverPending();
+    await first.idle();
+    expect(calls).toHaveLength(2);
+    const recorded = notices(h);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      actor: { kind: 'orchestrator' },
+      targetRef: { entity: 'Rule', id: h.rule.id },
+      runId: changed,
+      detail: { testChange: { files: FILES, fileCount: 2, baseCommit: base, headCommit: head } },
+    });
+    expect(pending(h)).toEqual([]);
+    expect(logs).toEqual([
+      '테스트 변경 알림 되짚기 (EXE-001, 재기동)',
+      '테스트 변경 알림 되짚기 (EXE-002, 재기동)',
+      '테스트 변경 알림 되짚기 (EXE-003, 재기동)',
+      '테스트 변경 알림 1건 (EXE-001)',
+    ]);
+
+    // 다음 기동: 확인한 실행은 다시 보지 않는다
+    const again: (readonly string[])[] = [];
+    const second = new TestChangeNotifier({
+      biveHome: h.biveHome,
+      log: () => undefined,
+      git: countingGit(again),
+    });
+    second.recoverPending();
+    await second.idle();
+    expect(again).toEqual([]);
+    expect(notices(h)).toEqual(recorded);
+    // 같은 실행의 병합 저장 이벤트가 다시 와도(관찰 경로) 기록 함수가 두 번 쓰지 않는다
+    second.observe({
+      type: 'run.saved',
+      projectId: h.projectId,
+      detail: h.read((store) => store.runs.getDetail(changed)) as RunDetail,
+    });
+    await second.idle();
+    expect(notices(h)).toEqual(recorded);
+    expect(h.read((store) => store.normChanges.verify())).toMatchObject({ valid: true });
+  });
+
+  it('알림이 필요 없는 실행(미확인 규칙)은 아무것도 쓰지 않고 확인만 채워, 뒤에 규칙을 확인해도 다음 기동이 알림을 만들지 않는다', async () => {
+    const h = storeHarness();
+    const { base, head } = commits(h);
+    const runId = mergedWithoutNotice(h, { base, head });
+    const first = new TestChangeNotifier({ biveHome: h.biveHome, log: () => undefined });
+    first.recoverPending();
+    await first.idle();
+    expect(notices(h)).toEqual([]);
+    expect(pending(h)).toEqual([]);
+    confirmRule(h);
+    const second = new TestChangeNotifier({ biveHome: h.biveHome, log: () => undefined });
+    second.recoverPending();
+    await second.idle();
+    expect(notices(h)).toEqual([]);
+    expect(h.read((store) => store.runs.get(runId)?.status)).toBe('merged');
+  });
+
+  it('관찰 경로(같은 프로세스의 병합 저장)도 기록과 같은 트랜잭션에서 확인을 채워 다음 기동이 되짚지 않는다', async () => {
+    const h = storeHarness();
+    confirmRule(h);
+    const { base, head } = commits(h);
+    const runId = mergedWithoutNotice(h, { base, head });
+    const notifier = new TestChangeNotifier({ biveHome: h.biveHome, log: () => undefined });
+    notifier.observe({
+      type: 'run.saved',
+      projectId: h.projectId,
+      detail: h.read((store) => store.runs.getDetail(runId)) as RunDetail,
+    });
+    await notifier.idle();
+    expect(notices(h)).toHaveLength(1);
+    expect(pending(h)).toEqual([]);
+  });
+
+  describe('알림 기록과 확인 채우기는 한 트랜잭션이다 (한쪽 쓰기가 실패하면 둘 다 남지 않는다)', () => {
+    const record = (h: ReturnType<typeof storeHarness>, runId: string, store: ProjectStore) =>
+      recordTestChanges(store, {
+        run: { id: runId },
+        baseCommit: 'a'.repeat(40),
+        headCommit: 'b'.repeat(40),
+        sessionId: null,
+        at: new Date().toISOString(),
+        changes: [{ ruleId: h.rule.id, files: FILES }],
+      });
+    const checkedAt = (h: ReturnType<typeof storeHarness>, runId: string) =>
+      h.read((store) =>
+        store.db
+          .prepare('SELECT checked_at FROM run_test_change_checks WHERE run_id = ?')
+          .get(runId),
+      );
+
+    it('(가) 확인 채우기가 실패하면 테스트 변경 알림도 남지 않고 확인 전 그대로다', () => {
+      const h = storeHarness();
+      confirmRule(h);
+      const runId = mergedWithoutNotice(h, { base: 'a'.repeat(40), head: 'b'.repeat(40) });
+      h.read((store) => {
+        store.runs.markTestChangeChecked = () => {
+          throw new Error('확인 채우기 실패');
+        };
+        expect(() => record(h, runId, store)).toThrow('확인 채우기 실패');
+      });
+      expect(notices(h)).toEqual([]);
+      expect(checkedAt(h, runId)).toEqual({ checked_at: null });
+      expect(pending(h)).toEqual([runId]);
+    });
+
+    it('(나) 알림 쓰기가 실패하면 확인 시각이 채워지지 않는다', () => {
+      const h = storeHarness();
+      confirmRule(h);
+      const runId = mergedWithoutNotice(h, { base: 'a'.repeat(40), head: 'b'.repeat(40) });
+      h.read((store) => {
+        store.db.exec(`CREATE TEMP TRIGGER fail_test_changed BEFORE INSERT ON norm_changes
+          WHEN NEW.kind = 'test_changed' BEGIN SELECT RAISE(ABORT, '알림 쓰기 실패'); END`);
+        expect(() => record(h, runId, store)).toThrow('알림 쓰기 실패');
+      });
+      expect(notices(h)).toEqual([]);
+      expect(checkedAt(h, runId)).toEqual({ checked_at: null });
+      expect(pending(h)).toEqual([runId]);
+      // 실패 원인이 없어지면 그때 한 번에 둘 다 남는다
+      h.read((store) => record(h, runId, store));
+      expect(notices(h)).toHaveLength(1);
+      expect(pending(h)).toEqual([]);
+    });
+  });
+
+  it('git 비교가 실패하면 확인 전 그대로 남아 다음 기동이 다시 보고 그때 한 번 쓴다', async () => {
+    const h = storeHarness();
+    confirmRule(h);
+    const { base, head } = commits(h);
+    const runId = mergedWithoutNotice(h, { base, head });
+    const logs: string[] = [];
+    const failing = new TestChangeNotifier({
+      biveHome: h.biveHome,
+      log: (line) => logs.push(line),
+      git: () => Promise.reject(new Error('git 실패')),
+    });
+    failing.recoverPending();
+    await failing.idle();
+    expect(logs.at(-1)).toBe('테스트 변경 알림 실패 (EXE-001): git 실패');
+    expect(notices(h)).toEqual([]);
+    expect(pending(h)).toEqual([runId]);
+    const next = new TestChangeNotifier({ biveHome: h.biveHome, log: () => undefined });
+    next.recoverPending();
+    await next.idle();
+    expect(notices(h).map((entry) => entry.runId)).toEqual([runId]);
+    expect(pending(h)).toEqual([]);
+  });
+
+  it('실제 오케스트레이터: 기동하면 앞 프로세스가 남긴 확인 전 실행의 알림을 쓰고, 다시 기동해도 한 번이다. 실행은 다시 시작하지 않는다', async () => {
+    const h = storeHarness();
+    confirmRule(h);
+    const { base, head } = commits(h);
+    const runId = mergedWithoutNotice(h, { base, head });
+    const runBefore = h.read((store) => store.runs.getDetail(runId));
+    for (let boot = 0; boot < 2; boot += 1) {
+      const result = await startOrchestrator({
+        biveHome: h.biveHome,
+        idleShutdownMs: 60_000,
+        agent: selectAgent({ BIVE_AGENT: 'scripted' }, { biveHome: h.biveHome }),
+        log: () => undefined,
+      });
+      if (result.status !== 'started') throw new Error('기동 실패');
+      await waitFor(() => notices(h).length > 0, 10_000, '테스트 변경 알림');
+      await result.orchestrator.stop();
+      expect(notices(h).map((entry) => entry.runId)).toEqual([runId]);
+      expect(pending(h)).toEqual([]);
+    }
+    expect(h.read((store) => store.runs.getDetail(runId))).toEqual(runBefore);
+  }, 60_000);
 });

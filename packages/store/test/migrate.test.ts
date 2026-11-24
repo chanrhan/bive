@@ -18,6 +18,7 @@ import { bivePaths } from '../src/paths.js';
 import { openProjectStore } from '../src/project-store.js';
 import { openRegistry } from '../src/registry.js';
 import { ApprovalLogRepository } from '../src/repositories/approval-log-repository.js';
+import { NormChangeRepository } from '../src/repositories/norm-change-repository.js';
 import { newId, useTempHome } from './support/temp-home.js';
 
 const home = useTempHome();
@@ -1387,7 +1388,8 @@ describe('0018 rule_retirements: 규칙 폐기 기록 (M7-09 #221, ADR-100 D5 ·
 
   it('짝 기록이 있는 폐기 · 대체만 받고, 되돌림(수정 · 삭제 · 덮어쓰기) · 내장 구조 규칙 · 삭제된 규칙 · 짝 기록 없는 폐기는 DB가 거부한다', () => {
     withDb((db) => {
-      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      // 0018의 트리거만 본다 (짝 기록 상세 `{}`). 0021이 더한 짝 기록 상세 · 대체 규칙 효력 대조는 아래 0021 시험이 본다
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 18), { now: fixedNow });
       const req = seedRequirement(db);
       const a = seedRule(db, 1, { parent: req });
       const b = seedRule(db, 2, { parent: req });
@@ -1784,6 +1786,400 @@ describe('0020 session_objection_end: 세션 종료 사유 이의 제기 (M7-11 
       const schema = schemaOf(db);
       expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
       expect(schemaOf(db)).toEqual(schema);
+    });
+  });
+});
+
+describe('0021 integrity_gaps: 병합 커밋 · 승인 기록 주체 · 대체 규칙 효력과 짝 기록 · 테스트 변경 알림 확인 (M3-36 #264, ADR-120)', () => {
+  const T = (minute: number) => `2026-11-24T03:${String(minute).padStart(2, '0')}:00.000Z`;
+  const human = '{"kind":"human"}';
+  const agent = '{"kind":"agent","role":"rule-writer"}';
+  const SHA = 'e'.repeat(40);
+  const BUDGET = '{"run":{"maxBudgetUsd":5,"maxTurns":100},"roles":{}}';
+  const NEW_OBJECTS = [
+    ['table', 'run_test_change_checks'],
+    ['trigger', 'approval_log_actor_human'],
+    ['trigger', 'rule_retirements_effective_successor'],
+    ['trigger', 'rule_retirements_norm_change_successor'],
+    ['trigger', 'run_test_change_checks_insert'],
+    ['trigger', 'run_test_change_checks_no_delete'],
+    ['trigger', 'run_test_change_checks_update'],
+    ['trigger', 'runs_merged_commit_insert'],
+    ['trigger', 'runs_merged_commit_update'],
+    ['trigger', 'runs_merged_test_change_insert'],
+    ['trigger', 'runs_merged_test_change_update'],
+  ];
+
+  const seedRequirement = (db: SqliteDatabase): string => {
+    const req = newId();
+    db.prepare(
+      `INSERT INTO requirements (id, display_id, text, author, norm_state, unrulable_reason, created_at,
+       updated_at, updated_by, deleted_at) VALUES (?, 'REQ-001', '본문', ?, 'approved', NULL, ?, ?, ?, NULL)`,
+    ).run(req, human, T(0), T(0), human);
+    return req;
+  };
+  const seedRule = (
+    db: SqliteDatabase,
+    seq: number,
+    parent: string,
+    normState: 'approved' | 'provisional' = 'approved',
+  ): string => {
+    const id = newId();
+    db.prepare(
+      `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
+       parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
+       updated_at, deleted_at) VALUES (?, ?, '제목', '진술', 'architecture', '["structure"]', ?, NULL, 0, '[]',
+       NULL, NULL, ?, ?, ?, ?, NULL)`,
+    ).run(id, `RULE-${String(seq).padStart(3, '0')}`, parent, agent, normState, T(seq), T(seq));
+    return id;
+  };
+  const insertRun = (
+    db: SqliteDatabase,
+    rule: string,
+    row: { seq: number; status: string; mergeCommit?: string | null },
+  ): string => {
+    const id = newId();
+    const display = `EXE-${String(row.seq).padStart(3, '0')}`;
+    db.prepare(
+      `INSERT INTO runs (id, display_id, type, status, current_step, last_completed_step, regression_count,
+       failure_reason, branch, worktree_path, base_branch, base_commit, head_commit, merge_commit, budget_snapshot,
+       model_snapshot, cost_usd, turns, tool_manifest, started_by, created_at, started_at, ended_at)
+       VALUES (?, ?, 'A', ?, NULL, 'merge', 0, NULL, ?, NULL, 'main', ?, ?, ?, ?, '{"implementer":"m"}',
+       NULL, NULL, '[]', ?, ?, ?, NULL)`,
+    ).run(
+      id,
+      display,
+      row.status,
+      `bive/run-${display}`,
+      SHA,
+      SHA,
+      row.mergeCommit ?? null,
+      BUDGET,
+      human,
+      T(row.seq),
+      T(row.seq),
+    );
+    db.prepare('INSERT INTO run_target_rules (run_id, rule_id, position) VALUES (?, ?, 0)').run(
+      id,
+      rule,
+    );
+    return id;
+  };
+  /** 제품 저장소 경로(해시 체인)로 폐기 · 대체 기록을 남긴다. */
+  const appendChange = (
+    db: SqliteDatabase,
+    kind: 'retired' | 'superseded',
+    ruleId: string,
+    retirement: unknown,
+  ): number =>
+    new NormChangeRepository(db).append({
+      at: T(30),
+      kind,
+      actor: { kind: 'agent', role: 'rule-writer' },
+      targetRef: { entity: 'Rule', id: ruleId },
+      sessionId: newId(),
+      runId: null,
+      reason: '근거',
+      detail: { before: { title: '제목', statement: '진술' }, retirement } as never,
+    }).seq;
+  /** 스키마를 거치지 않는 날 행 (상세 모양을 직접 정한다). */
+  const insertRaw = (db: SqliteDatabase, kind: string, ruleId: string, detail: string): number => {
+    const seq = (
+      db.prepare('SELECT coalesce(max(seq), 0) + 1 AS n FROM norm_changes').get() as { n: number }
+    ).n;
+    db.prepare(
+      `INSERT INTO norm_changes (seq, at, kind, actor, target_ref, session_id, run_id, reason, detail,
+       prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, NULL, '근거', ?, ?, ?)`,
+    ).run(
+      seq,
+      T(seq),
+      kind,
+      agent,
+      JSON.stringify({ entity: 'Rule', id: ruleId }),
+      newId(),
+      detail,
+      String(seq - 1).padStart(64, '0'),
+      String(seq).padStart(64, 'f'),
+    );
+    return seq;
+  };
+  const retire = (db: SqliteDatabase, ruleId: string, seq: number, supersededBy: string | null) =>
+    db
+      .prepare(
+        `INSERT INTO rule_retirements (rule_id, retired_at, superseded_by, norm_change_seq)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(ruleId, T(seq), supersededBy, seq);
+  const insertApproval = (db: SqliteDatabase, actor: string) =>
+    db
+      .prepare(
+        `INSERT INTO approval_log (seq, at, action, actor, target_ref, client_id, detail, prev_hash, hash)
+         VALUES ((SELECT coalesce(max(seq), 0) + 1 FROM approval_log), ?, 'confirm', ?, ?, NULL, '{}', ?, ?)`,
+      )
+      .run(
+        T(50),
+        actor,
+        JSON.stringify({ entity: 'Rule', id: newId() }),
+        '0'.repeat(64),
+        newId().padEnd(64, '0'),
+      );
+  const checks = (db: SqliteDatabase) =>
+    db.prepare('SELECT run_id, checked_at FROM run_test_change_checks ORDER BY rowid').all();
+
+  it('0020까지의 행은 새 제약을 어겨도 값 그대로 남고(병합 커밋 없는 병합 실행 · 잠정 규칙으로의 대체 · 짝 상세가 다른 대체), 기존 표 · 색인 · 트리거는 글자까지 같으며, 승인 기록 · 규범 변경 기록 체인이 그대로 유효하다. 옛 병합 실행은 알림 확인 대상이 아니다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 20), { now: fixedNow });
+      const req = seedRequirement(db);
+      const rule = seedRule(db, 1, req);
+      const old = seedRule(db, 2, req);
+      const provisional = seedRule(db, 3, req, 'provisional');
+      // 병합 커밋 없이 병합 완료가 된 옛 실행 (0020까지는 DB가 막지 않았다)
+      const oldMerged = insertRun(db, rule, { seq: 1, status: 'merged' });
+      insertRun(db, rule, { seq: 2, status: 'merged', mergeCommit: SHA });
+      // 승인 기록 · 규범 변경 기록 (제품 저장소 경로, 해시 체인)
+      const log = new ApprovalLogRepository(db);
+      log.append({
+        at: T(10),
+        action: 'approve',
+        actor: { kind: 'human' },
+        targetRef: { entity: 'Proposal', id: newId() },
+        clientId: 'pipe-1',
+        detail: { appliedRef: { entity: 'Rule', id: rule } },
+      });
+      log.append({
+        at: T(11),
+        action: 'confirm',
+        actor: { kind: 'human' },
+        targetRef: { entity: 'Rule', id: rule },
+        clientId: 'pipe-1',
+        detail: {},
+      });
+      // 잠정 규칙으로의 대체, 짝 상세는 다른 규칙을 적음 (0018은 둘 다 받았다)
+      const seq = appendChange(db, 'superseded', old, {
+        supersededBy: { id: rule, displayId: 'RULE-001' },
+        createdSeq: 1,
+        judgmentSeq: 1,
+      });
+      retire(db, old, seq, provisional);
+      const tables = [
+        'runs',
+        'run_target_rules',
+        'approval_log',
+        'norm_changes',
+        'rule_retirements',
+        'rules',
+      ];
+      const rowsOf = () =>
+        Object.fromEntries(
+          tables.map((table) => [table, db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]),
+        );
+      const before = rowsOf();
+      const schemaBefore = schemaOf(db);
+      const logBefore = new ApprovalLogRepository(db).verify();
+      const changesBefore = new NormChangeRepository(db).verify();
+      expect(logBefore).toEqual({ valid: true, brokenAtSeq: null, reason: null });
+      expect(changesBefore).toMatchObject({ valid: true });
+
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 21), { now: fixedNow }).applied).toEqual([21]);
+      expect(rowsOf()).toEqual(before);
+      const added = new Set(NEW_OBJECTS.map(([, name]) => name));
+      expect((schemaOf(db) as { name: string }[]).filter((item) => !added.has(item.name))).toEqual(
+        schemaBefore,
+      );
+      expect(
+        (schemaOf(db) as { type: string; name: string }[])
+          .filter((item) => added.has(item.name))
+          .map((item) => [item.type, item.name]),
+      ).toEqual(NEW_OBJECTS);
+      expect(new ApprovalLogRepository(db).verify()).toEqual(logBefore);
+      expect(new NormChangeRepository(db).verify()).toEqual(changesBefore);
+      expect(new ApprovalLogRepository(db).list()).toHaveLength(2);
+      // 이 마이그레이션 전에 병합된 실행은 확인 행이 없다 (기동 때 되짚지 않는다)
+      expect(checks(db)).toEqual([]);
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+      // 옛 병합 실행은 종료 상태라 바뀌지 않는다 (0005)
+      expect(() =>
+        db.prepare('UPDATE runs SET merge_commit = ? WHERE id = ?').run(SHA, oldMerged),
+      ).toThrow(/종료된 실행은 바꿀 수 없습니다/);
+      // 다시 실행해도 스키마가 같다
+      const schema = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 21), { now: fixedNow }).applied).toEqual([]);
+      expect(schemaOf(db)).toEqual(schema);
+    });
+  });
+
+  it('병합 완료(merged)로 들어가는 실행은 넣기 · 바꾸기 모두 병합 커밋이 있어야 하고, 병합 완료가 되는 같은 문장에서 알림 확인 전 행이 하나 생긴다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      const rule = seedRule(db, 1, seedRequirement(db));
+      expect(() => insertRun(db, rule, { seq: 1, status: 'merged' })).toThrow(
+        /병합 완료 실행에는 병합 커밋이 있어야 합니다/,
+      );
+      const running = insertRun(db, rule, { seq: 1, status: 'running' });
+      const queued = insertRun(db, rule, { seq: 2, status: 'queued' });
+      expect(() =>
+        db.prepare("UPDATE runs SET status = 'merged' WHERE id = ?").run(running),
+      ).toThrow(/병합 완료 실행에는 병합 커밋이 있어야 합니다/);
+      db.prepare('UPDATE runs SET merge_commit = ? WHERE id = ?').run(SHA, running);
+      // 병합 커밋을 지우며 병합 완료로 바꾸는 것도 거부
+      expect(() =>
+        db
+          .prepare("UPDATE runs SET status = 'merged', merge_commit = NULL WHERE id = ?")
+          .run(running),
+      ).toThrow(/병합 커밋이 있어야/);
+      expect(checks(db)).toEqual([]);
+      db.prepare("UPDATE runs SET status = 'merged' WHERE id = ?").run(running);
+      expect(checks(db)).toEqual([{ run_id: running, checked_at: null }]);
+      // 병합이 아닌 종료는 확인 행이 없다
+      db.prepare("UPDATE runs SET status = 'failed' WHERE id = ?").run(queued);
+      // 병합 커밋과 함께 처음부터 병합 완료로 넣은 행도 확인 행이 생긴다
+      const inserted = insertRun(db, rule, { seq: 3, status: 'merged', mergeCommit: SHA });
+      expect(checks(db)).toEqual([
+        { run_id: running, checked_at: null },
+        { run_id: inserted, checked_at: null },
+      ]);
+    });
+  });
+
+  it.each(['running', 'interrupted', 'waiting_approval', 'queued'])(
+    '출발 상태 %s에서도 병합 커밋 없이 merged로 바꾸면 거부하고(확인 행 없음), 병합 커밋이 있으면 바꾸며 확인 전 행이 하나 생긴다',
+    (from) => {
+      withDb((db) => {
+        migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+        const rule = seedRule(db, 1, seedRequirement(db));
+        const run = insertRun(db, rule, { seq: 1, status: from });
+        expect(() => db.prepare("UPDATE runs SET status = 'merged' WHERE id = ?").run(run)).toThrow(
+          /병합 완료 실행에는 병합 커밋이 있어야 합니다/,
+        );
+        expect(db.prepare('SELECT status FROM runs WHERE id = ?').get(run)).toEqual({
+          status: from,
+        });
+        expect(checks(db)).toEqual([]);
+        db.prepare("UPDATE runs SET status = 'merged', merge_commit = ? WHERE id = ?").run(
+          SHA,
+          run,
+        );
+        expect(checks(db)).toEqual([{ run_id: run, checked_at: null }]);
+      });
+    },
+  );
+
+  it('알림 확인 행: 병합 실행에만 확인 전으로 한 번 생기고, 확인 시각은 한 번만 채우며, 지울 수 없다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      const rule = seedRule(db, 1, seedRequirement(db));
+      const merged = insertRun(db, rule, { seq: 1, status: 'merged', mergeCommit: SHA });
+      const running = insertRun(db, rule, { seq: 2, status: 'running' });
+      const insertCheck = (runId: string, checkedAt: string | null) =>
+        db
+          .prepare('INSERT INTO run_test_change_checks (run_id, checked_at) VALUES (?, ?)')
+          .run(runId, checkedAt);
+      expect(() => insertCheck(running, null)).toThrow(/확인 전 행 하나만/);
+      expect(() => insertCheck(newId(), null)).toThrow(/확인 전 행 하나만/);
+      expect(() => insertCheck(merged, null)).toThrow(/확인 전 행 하나만/);
+      expect(() =>
+        db.prepare('INSERT OR REPLACE INTO run_test_change_checks VALUES (?, ?)').run(merged, T(1)),
+      ).toThrow(/확인 전 행 하나만/);
+      const mark = (at: string | null) =>
+        db
+          .prepare('UPDATE run_test_change_checks SET checked_at = ? WHERE run_id = ?')
+          .run(at, merged);
+      expect(() => mark(null)).toThrow(/한 번만 채웁니다/);
+      mark(T(2));
+      expect(() => mark(T(3))).toThrow(/한 번만 채웁니다/);
+      expect(() => db.prepare('UPDATE run_test_change_checks SET run_id = ?').run(running)).toThrow(
+        /한 번만 채웁니다/,
+      );
+      expect(() => db.prepare('DELETE FROM run_test_change_checks').run()).toThrow(
+        /지울 수 없습니다/,
+      );
+      expect(checks(db)).toEqual([{ run_id: merged, checked_at: T(2) }]);
+    });
+  });
+
+  it('승인 기록의 주체는 사람({"kind":"human"}, 다른 칸 없음)만 받는다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      for (const actor of [
+        agent,
+        '{"kind":"orchestrator"}',
+        '{"kind":"human","role":"x"}',
+        '{"kind":"human","kind":"human"}',
+        '{"kind":"Human"}',
+        '{}',
+        '"human"',
+        '["human"]',
+        'null',
+        'human',
+      ]) {
+        expect(() => insertApproval(db, actor), actor).toThrow(/주체는 사람이어야 합니다|JSON/);
+      }
+      expect(db.prepare('SELECT count(*) AS n FROM approval_log').get()).toEqual({ n: 0 });
+      insertApproval(db, human);
+      // 공백만 다른 같은 JSON 값은 받는다
+      insertApproval(db, '{ "kind" : "human" }');
+      expect(db.prepare('SELECT count(*) AS n FROM approval_log').get()).toEqual({ n: 2 });
+    });
+  });
+
+  it('폐기 기록: 대체한 규칙은 효력 있는 규칙(잠정 · 삭제 거부)이어야 하고, 짝 기록의 detail.retirement.supersededBy가 행과 같아야 한다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      const req = seedRequirement(db);
+      const a = seedRule(db, 1, req);
+      const b = seedRule(db, 2, req);
+      const c = seedRule(db, 3, req);
+      const provisional = seedRule(db, 4, req, 'provisional');
+      const d = seedRule(db, 5, req);
+      const e = seedRule(db, 6, req);
+      const pointTo = (id: string, displayId: string) => ({
+        supersededBy: { id, displayId },
+        createdSeq: 1,
+        judgmentSeq: 1,
+      });
+      // 대체한 규칙이 잠정 (짝 상세는 행과 같다)
+      const s1 = appendChange(db, 'superseded', a, pointTo(provisional, 'RULE-004'));
+      expect(() => retire(db, a, s1, provisional)).toThrow(/효력 있는 규칙이 아닙니다/);
+      // 짝 기록은 다른 규칙을 대체한 규칙이라고 적었다
+      const s2 = appendChange(db, 'superseded', a, pointTo(c, 'RULE-003'));
+      expect(() => retire(db, a, s2, b)).toThrow(/짝 기록의 대체한 규칙이 폐기 기록과 다릅니다/);
+      // 짝 기록이 대체한 규칙을 적지 않음 (null · 숫자 id · 칸 없음)
+      const s3 = insertRaw(db, 'superseded', a, '{"retirement":{"supersededBy":null}}');
+      expect(() => retire(db, a, s3, b)).toThrow(/짝 기록의 대체한 규칙/);
+      const s4 = insertRaw(db, 'superseded', a, '{"retirement":{"supersededBy":{"id":1}}}');
+      expect(() => retire(db, a, s4, b)).toThrow(/짝 기록의 대체한 규칙/);
+      const s5 = insertRaw(db, 'superseded', a, '{}');
+      expect(() => retire(db, a, s5, b)).toThrow(/짝 기록의 대체한 규칙/);
+      // 폐기만인데 짝 기록이 대체한 규칙을 적음 · 칸 없음
+      const r1 = insertRaw(
+        db,
+        'retired',
+        d,
+        JSON.stringify({ retirement: { supersededBy: { id: b, displayId: 'RULE-002' } } }),
+      );
+      expect(() => retire(db, d, r1, null)).toThrow(/짝 기록의 대체한 규칙/);
+      const r2 = insertRaw(db, 'retired', d, '{"retirement":{}}');
+      expect(() => retire(db, d, r2, null)).toThrow(/짝 기록의 대체한 규칙/);
+      expect(db.prepare('SELECT count(*) AS n FROM rule_retirements').get()).toEqual({ n: 0 });
+      // 맞는 짝: 대체 · 폐기만
+      const ok = appendChange(db, 'superseded', a, pointTo(b, 'RULE-002'));
+      retire(db, a, ok, b);
+      const okRetired = appendChange(db, 'retired', d, { supersededBy: null });
+      retire(db, d, okRetired, null);
+      // 삭제된 규칙으로의 대체도 거부
+      db.prepare('UPDATE rules SET deleted_at = ? WHERE id = ?').run(T(40), c);
+      const s6 = appendChange(db, 'superseded', e, pointTo(c, 'RULE-003'));
+      expect(() => retire(db, e, s6, c)).toThrow(/효력/);
+      expect(
+        db
+          .prepare(
+            'SELECT rule_id, superseded_by, norm_change_seq FROM rule_retirements ORDER BY rowid',
+          )
+          .all(),
+      ).toEqual([
+        { rule_id: a, superseded_by: b, norm_change_seq: ok },
+        { rule_id: d, superseded_by: null, norm_change_seq: okRetired },
+      ]);
     });
   });
 });

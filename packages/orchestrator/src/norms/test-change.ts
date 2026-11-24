@@ -12,6 +12,10 @@
 //   않는다(미확인 규칙은 미확인 항목으로 이미 목록에 있다). 사람의 진술 편집으로 시작된 실행(ADR-109)도 대상이다
 // - 확인 상태는 실행 생성 · 단계 진행 · 판정 · 병합의 조건이 아니다: 이 모듈은 엔진 · 단계가 아니라 오케스트레이터 배선이 엔진의
 //   저장 이벤트를 받아 부르고(엔진은 기다리지 않는다), 실패해도 로그 한 줄만 남긴다
+// - 병합 저장 뒤 알림 확인 전에 프로세스가 끝나도 빠지지 않는다 (M3-36 #264, ADR-120): 실행이 `merged`로 저장되는 같은 문장에서
+//   DB 트리거가 "확인 전" 표시(`run_test_change_checks`)를 남기고, 알림 기록(없으면 확인만)과 같은 트랜잭션에서 확인을 채운다.
+//   기동 때(`recoverPending`) 확인 전 표시가 남은 실행만 같은 방법으로 다시 본다. 실행마다 한 번이다(채운 표시는 다시 보지
+//   않고, 기록 함수도 같은 실행 · 규칙의 알림이 있으면 남기지 않는다). git 비교가 실패하면 표시를 채우지 않아 다음 기동에 다시 본다
 import {
   type NormChangeEntry,
   NORM_TEST_CHANGE_FILES_MAX,
@@ -20,12 +24,15 @@ import {
   type Step,
   Ulid,
 } from '@bive/shared';
-import type { ProjectStore } from '@bive/store';
+import { NotFoundError, openRegistry, type ProjectStore } from '@bive/store';
 
 import type { EngineEvent } from '../engine/types.js';
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { ACCEPTANCE_DIR } from '../judge/config.js';
+
+const errorText = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 /** 규칙 하나의 바뀐 인수 테스트 파일 (경로 순). */
 export interface RuleTestChange {
@@ -93,7 +100,7 @@ export const testWriterSessionOf = (steps: readonly Step[]): string | null => {
 
 /**
  * 테스트 변경 알림을 남긴다 (열린 저장소, 트랜잭션 1개). 규칙마다: 바뀐 파일이 있고, 규칙이 있고 삭제되지 않았으며 확인됨이고,
- * 같은 실행 · 규칙의 알림이 아직 없을 때만 1건.
+ * 같은 실행 · 규칙의 알림이 아직 없을 때만 1건. 같은 트랜잭션에서 그 실행의 알림 확인을 채운다(확인 전 표시가 있을 때만).
  * @returns 남긴 기록 (규칙 순)
  */
 export const recordTestChanges = (
@@ -138,8 +145,25 @@ export const recordTestChanges = (
         }),
       );
     }
+    store.runs.markTestChangeChecked(input.run.id, input.at);
     return recorded;
   });
+
+/** 등록된 프로젝트 ID들. 등록부가 아직 없으면 빈 목록. */
+const registeredProjectIds = (biveHome: string): string[] => {
+  let registry;
+  try {
+    registry = openRegistry({ home: biveHome, create: false });
+  } catch (error) {
+    if (error instanceof NotFoundError) return [];
+    throw error;
+  }
+  try {
+    return registry.entries.list().map((entry) => entry.projectId);
+  } finally {
+    registry.close();
+  }
+};
 
 export interface TestChangeNotifierOptions {
   /** `$BIVE_HOME` 절대 경로 */
@@ -193,12 +217,47 @@ export class TestChangeNotifier {
   observe(event: EngineEvent): void {
     if (event.type !== 'run.saved') return;
     const { run, steps } = event.detail;
-    if (run.status !== 'merged' || this.#seen.has(run.id)) return;
+    if (run.status !== 'merged') return;
+    this.#start(event.projectId, run, steps);
+  }
+
+  /**
+   * 기동 때 한 번: 등록된 프로젝트마다 알림 확인 전 표시가 남은 병합 실행(앞 프로세스가 병합 저장 뒤 확인을 끝내지 못함)을 병합
+   * 순으로 다시 본다(기다리지 않는다). 실행을 다시 시작하거나 재개하지 않는다. 프로젝트 · 실행을 읽지 못하면 로그 한 줄이고 표시는
+   * 그대로 남는다(다음 기동에 다시 본다).
+   */
+  recoverPending(): void {
+    let projectIds: string[];
+    try {
+      projectIds = registeredProjectIds(this.#biveHome);
+    } catch (error) {
+      this.#log(`테스트 변경 알림 되짚기 실패: ${errorText(error)}`);
+      return;
+    }
+    for (const projectId of projectIds) {
+      try {
+        const details = withRegisteredProjectStore(this.#biveHome, projectId, (store) =>
+          store.runs.pendingTestChangeChecks().flatMap((runId) => {
+            const detail = store.runs.getDetail(runId);
+            return detail === null ? [] : [detail];
+          }),
+        );
+        for (const { run, steps } of details) {
+          if (run.status !== 'merged') continue;
+          this.#log(`테스트 변경 알림 되짚기 (${run.displayId}, 재기동)`);
+          this.#start(projectId, run, steps);
+        }
+      } catch (error) {
+        this.#log(`테스트 변경 알림 되짚기 실패 (프로젝트 ${projectId}): ${errorText(error)}`);
+      }
+    }
+  }
+
+  #start(projectId: string, run: Run, steps: readonly Step[]): void {
+    if (this.#seen.has(run.id)) return;
     this.#seen.add(run.id);
-    const task = this.#record(event.projectId, run, steps).catch((error: unknown) => {
-      this.#log(
-        `테스트 변경 알림 실패 (${run.displayId}): ${error instanceof Error ? error.message : String(error)}`,
-      );
+    const task = this.#record(projectId, run, steps).catch((error: unknown) => {
+      this.#log(`테스트 변경 알림 실패 (${run.displayId}): ${errorText(error)}`);
     });
     this.#pending.add(task);
     void task.finally(() => this.#pending.delete(task));
@@ -211,7 +270,14 @@ export class TestChangeNotifier {
 
   async #record(projectId: string, run: Run, steps: readonly Step[]): Promise<void> {
     const { baseCommit, headCommit } = run;
-    if (baseCommit === null || headCommit === null) return;
+    const at = (): string => new Date(this.#now()).toISOString();
+    if (baseCommit === null || headCommit === null) {
+      // 비교할 두 커밋이 없다: 알림은 없고 확인만 채운다
+      withRegisteredProjectStore(this.#biveHome, projectId, (store) =>
+        store.runs.markTestChangeChecked(run.id, at()),
+      );
+      return;
+    }
     const target = withRegisteredProjectStore(this.#biveHome, projectId, (store) => ({
       repoPath: store.projects.get(projectId)?.rootPath ?? null,
       rules: run.targetRuleIds.flatMap((id) => {
@@ -219,7 +285,10 @@ export class TestChangeNotifier {
         return rule === null ? [] : [{ id, displayId: rule.displayId }];
       }),
     }));
-    if (target.repoPath === null) return;
+    if (target.repoPath === null) {
+      this.#log(`테스트 변경 알림 확인 보류 (${run.displayId}): 프로젝트 폴더를 알 수 없음`);
+      return;
+    }
     const changes: RuleTestChange[] = [];
     for (const rule of target.rules) {
       const files = await changedAcceptanceFiles(
@@ -230,14 +299,14 @@ export class TestChangeNotifier {
       );
       if (files.length > 0) changes.push({ ruleId: rule.id, files });
     }
-    if (changes.length === 0) return;
+    // 바뀐 파일이 없어도 확인은 채운다 (기록 함수가 같은 트랜잭션에서)
     const recorded = withRegisteredProjectStore(this.#biveHome, projectId, (store) =>
       recordTestChanges(store, {
         run,
         baseCommit,
         headCommit,
         sessionId: testWriterSessionOf(steps),
-        at: new Date(this.#now()).toISOString(),
+        at: at(),
         changes,
       }),
     );

@@ -284,6 +284,9 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
     await server.listen();
     if (unixSocket) boundSocket = fileIdentity(paths.pipe);
     lifecycle.start();
+    // 연결을 받기 시작한 뒤: 앞 프로세스가 병합 저장 뒤 테스트 변경 알림 확인을 끝내지 못한 실행을 한 번씩 다시 본다
+    // (M3-36 #264, ADR-120). 실행을 다시 시작하지 않는다. 기다리지 않는다(종료는 진행 중인 기록을 기다린다)
+    testChanges.recoverPending();
     // 연결을 받기 시작한 뒤: 저장된 실행 대기를 생성 순으로 이어간다. 자리를 차지한 실행(진행 중 · 중단)이 있는 프로젝트는
     // 그대로다 (ADR-105). 재기동으로 중단된 실행은 자동으로 이어가지 않는다(위 recoverInterruptedRuns)
     engine.startQueuedRuns();

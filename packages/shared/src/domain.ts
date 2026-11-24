@@ -660,7 +660,7 @@ export type ApprovalLogBreakReason = z.infer<typeof ApprovalLogBreakReason>;
 export const APPROVAL_LOG_GENESIS_HASH = '0'.repeat(64);
 
 /**
- * 승인 기록의 행동별 상세. 수정 후 승인은 `diff`, 거절은 `reason`, 승인은 `appliedRef`,
+ * 승인 기록의 행동별 상세. 수정 후 승인은 `diff`, 거절은 `reason`, 승인 · 수정 후 승인은 `appliedRef`(그 밖의 행동에는 없다),
  * 실행 시작은 `ruleIds`(사람이 확인한 대상 규칙, 요청 순서 그대로, ADR-061).
  * 확인(`confirm`)은 `seenNormChangeSeq`(그 확인 순간의 규범 변경 기록 마지막 순번 = 사람이 여기까지 봤다, M7-13 · ADR-113).
  * 이 칸이 없는 옛 확인은 규범 변경 기록을 본 적 없음(0)으로 읽는다.
@@ -687,6 +687,9 @@ export type RuleEditDiff = z.infer<typeof RuleEditDiff>;
 
 /** 수정 diff를 남기는 행동: 수정 후 승인과 사람의 직접 편집 (ADR-100 A2 · A8). */
 const EDIT_ACTIONS: readonly ApprovalAction[] = ['approve_edited', 'rule_edit', 'contract_edit'];
+
+/** 반영 규범(`appliedRef`)을 남기는 행동: 제안 승인 (ADR-120). */
+const APPLIED_REF_ACTIONS: readonly ApprovalAction[] = ['approve', 'approve_edited'];
 
 /**
  * 승인 기록 1건 (추가 전용). `hash` = SHA-256(정규 JSON(`hash`를 뺀 나머지 필드)),
@@ -730,13 +733,6 @@ export const ApprovalLogEntry = z
           path: ['targetRef'],
         });
       }
-      if (detail.appliedRef !== undefined) {
-        ctx.addIssue({
-          code: 'custom',
-          message: '확인에는 반영 규범이 없습니다',
-          path: ['detail', 'appliedRef'],
-        });
-      }
     }
     // 사람의 규칙 직접 편집은 규칙을 대상으로 하고 diff는 제목 · 진술의 전후다 (M7-03, ADR-109). 반영 규범 칸은 제안 승인에만 있다
     if (action === 'rule_edit') {
@@ -754,13 +750,15 @@ export const ApprovalLogEntry = z
           path: ['targetRef'],
         });
       }
-      if (detail.appliedRef !== undefined) {
-        ctx.addIssue({
-          code: 'custom',
-          message: '규칙 직접 편집에는 반영 규범이 없습니다',
-          path: ['detail', 'appliedRef'],
-        });
-      }
+    }
+    // 반영 규범 칸은 제안 승인(승인 · 수정 후 승인)에만 있다 (M3-36 #264, ADR-120). 이 칸을 쓰는 제품 코드는 제안 승인뿐이라
+    // 이 변경 전의 행이 형식 위반(체인 검증의 malformed)이 되지 않는다
+    if (detail.appliedRef !== undefined && !APPLIED_REF_ACTIONS.includes(action)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '반영 규범은 제안 승인에만 있습니다',
+        path: ['detail', 'appliedRef'],
+      });
     }
     if (action !== 'confirm' && detail.seenNormChangeSeq !== undefined) {
       ctx.addIssue({
