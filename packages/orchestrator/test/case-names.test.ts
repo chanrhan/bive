@@ -10,6 +10,7 @@ import {
   judgedCaseFilter,
   readJudgedAcceptanceTexts,
 } from '../src/norms/case-names.js';
+import type { GitRunner } from '../src/git/git-exec.js';
 import {
   caseFileText,
   commitAcceptanceFiles,
@@ -96,5 +97,60 @@ describe('최근 판정 커밋의 인수 테스트 파일 읽기 (ADR-121)', () 
     const text = texts['bive-acceptance/RULE-001/big.acc.ts'] ?? '';
     expect(Buffer.byteLength(text, 'utf8')).toBe(ACCEPTANCE_TEXT_MAX_BYTES);
     expect(text).not.toContain('뒤쪽 이름');
+  });
+
+  it('대체 객체(refs/replace)를 따르지 않는다: 판정한 커밋을 다른 커밋으로 바꿔 두어도 그 커밋의 글을 읽는다 (검토 1회차 N2)', async () => {
+    const repo = initAcceptanceRepo(makeBiveHome());
+    const judged = commitAcceptanceFiles(repo, {
+      'bive-acceptance/RULE-001/a.acc.ts': caseFileText(['판정한 커밋의 이름']),
+    });
+    const other = commitAcceptanceFiles(repo, {
+      'bive-acceptance/RULE-001/a.acc.ts': caseFileText(['대체 커밋의 이름']),
+    });
+    execFileSync('git', ['replace', judged, other], { cwd: repo });
+    // 대조군: 저장소의 보통 git 읽기는 대체를 따른다 (이 시험이 대체 객체를 실제로 만들었다)
+    expect(
+      execFileSync('git', ['show', `${judged}:bive-acceptance/RULE-001/a.acc.ts`], {
+        cwd: repo,
+        encoding: 'utf8',
+      }),
+    ).toContain('대체 커밋의 이름');
+    const texts = await readJudgedAcceptanceTexts(repo, [
+      { ruleDisplayId: 'RULE-001', commit: judged },
+    ]);
+    expect(texts['bive-acceptance/RULE-001/a.acc.ts']).toContain('판정한 커밋의 이름');
+    expect(texts['bive-acceptance/RULE-001/a.acc.ts']).not.toContain('대체 커밋의 이름');
+  });
+
+  it('커밋 형식(16진 40 · 64자)이 아닌 값은 git을 부르지 않고 글이 없다: 옵션 꼴 · 짧은 값 · 대문자 · 공백 (검토 1회차 N3)', async () => {
+    const calls: (readonly string[])[] = [];
+    const git: GitRunner = (args) => {
+      calls.push(args);
+      return Promise.resolve({ stdout: '', stderr: '', code: 0 });
+    };
+    const texts = await readJudgedAcceptanceTexts(
+      '/없는/저장소',
+      [
+        { ruleDisplayId: 'RULE-001', commit: '--all' },
+        { ruleDisplayId: 'RULE-002', commit: '--output=/tmp/x' },
+        { ruleDisplayId: 'RULE-003', commit: 'abc1234' },
+        { ruleDisplayId: 'RULE-004', commit: 'A'.repeat(40) },
+        { ruleDisplayId: 'RULE-005', commit: `${'a'.repeat(40)} ` },
+        { ruleDisplayId: 'RULE-006', commit: 'a'.repeat(41) },
+      ],
+      git,
+    );
+    expect(texts).toEqual({});
+    expect(calls).toEqual([]);
+    // 대조군: 형식에 맞는 값은 git을 부른다 (40 · 64자)
+    await readJudgedAcceptanceTexts(
+      '/없는/저장소',
+      [
+        { ruleDisplayId: 'RULE-001', commit: 'a'.repeat(40) },
+        { ruleDisplayId: 'RULE-002', commit: 'b'.repeat(64) },
+      ],
+      git,
+    );
+    expect(calls.map((args) => args[5])).toEqual(['a'.repeat(40), 'b'.repeat(64)]);
   });
 });

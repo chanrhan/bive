@@ -516,6 +516,43 @@ describe('근거 인용 검사 (수용 기준 2, ADR-100 A6 · R3)', () => {
     expect(retire(u, 'RULE-001', caseOnly).rule.id).toBe(u.old.id);
   });
 
+  it('고유 조각 판단에 쓰는 다른 규칙의 글도 같은 기준을 지난다: 다른 효력 있는 규칙의 최근 판정에 파일에 없는 이름이 대상 규칙의 인용 조각을 담아도 그 조각은 여전히 고유하다 (M3-37 #265 검토 1회차 B1, ADR-121)', () => {
+    // GROUNDS가 인용한 대상 규칙(RULE-001) 진술 조각을 그대로 담은 이름이 RULE-002의 최근 판정에 섞였다 (RULE-002 파일에는 없다)
+    const SHADOW = '응답 JSON의 time 필드에 응답 시점의 서버 시각을 그대로 적는다';
+    const seedShadow = (): Seeded => {
+      const seeded = seed();
+      seedNormCases(seeded.store, seeded.other, [SHADOW], T0 + 6);
+      return seeded;
+    };
+    // 기준이 RULE-002의 그 이름을 모르므로 고유 조각 판단에서 빠지고, 진술 인용이 그대로 통과한다
+    const s = seedShadow();
+    expect(retire(s, 'RULE-001', GROUNDS).rule.id).toBe(s.old.id);
+    const t = seedShadow();
+    expect(supersede(t).superseded.id).toBe(t.old.id);
+    // 대조군: 같은 이름이 RULE-002의 인수 테스트 파일에 적혀 있으면(알려진 이름) 그 조각은 겹치는 조각이라 인용이 아니다
+    const known = knownCaseMatcher({
+      'bive-acceptance/RULE-001/health.acc.ts': caseFileText([OLD_CASE, '응답 JSON에 ok가 true다']),
+      'bive-acceptance/RULE-002/shape.acc.ts': caseFileText([SHADOW]),
+    });
+    const u = seedShadow();
+    expect(
+      rejection(() =>
+        retireAgentRule(
+          u.store,
+          {
+            ruleId: 'RULE-001',
+            grounds: GROUNDS,
+            author: AGENT,
+            sessionId: SESSION,
+            isKnownCase: known,
+          },
+          clock(),
+        ),
+      ).code,
+    ).toBe('invalid_args');
+    expect(u.store.ruleRetirements.list()).toEqual([]);
+  });
+
   it('작업 지시의 표시 값(숨은 글자 표기)을 그대로 인용해도 받는다: 에이전트가 본 모양 (ADR-106 · ADR-108)', () => {
     const store = openStore();
     const req = seedNormRequirement(store, '본문', T0);

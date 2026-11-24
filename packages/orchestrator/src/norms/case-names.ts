@@ -155,7 +155,9 @@ const clipBytes = (text: string, max: number): string => {
 
 /**
  * 규칙마다 최근 판정을 한 커밋의 그 규칙 폴더 인수 테스트 파일 글을 git 객체에서 읽는다 (작업 트리 · 워크트리는 읽지 않는다).
- * 일반 파일(모드 100644 · 100755)만 읽고 기호 링크 · 하위 모듈은 건너뛴다. 커밋을 읽지 못하면 그 규칙은 글이 없다(모르는 이름이 된다).
+ * 대체 객체(`refs/replace`)는 따르지 않는다(`--no-replace-objects`, 판정한 커밋 그대로). 커밋 형식(16진 40 · 64자)이 아닌 값은
+ * git을 부르지 않는다. 일반 파일(모드 100644 · 100755)만 읽고 기호 링크 · 하위 모듈은 건너뛴다. 커밋을 읽지 못하면 그 규칙은
+ * 글이 없다(모르는 이름이 된다).
  * @returns 저장소 상대 경로(`bive-acceptance/<표시 ID>/…`) → 글 (파일당 {@link ACCEPTANCE_TEXT_MAX_BYTES}까지)
  */
 export const readJudgedAcceptanceTexts = async (
@@ -175,9 +177,12 @@ export const readJudgedAcceptanceTexts = async (
     let listing: string;
     try {
       listing = (
-        await git(['ls-tree', '-r', '-z', '-l', commit, '--', 'bive-acceptance/'], {
-          cwd: repoPath,
-        })
+        await git(
+          ['--no-replace-objects', 'ls-tree', '-r', '-z', '-l', commit, '--', 'bive-acceptance/'],
+          {
+            cwd: repoPath,
+          },
+        )
       ).stdout;
     } catch {
       continue;
@@ -194,7 +199,9 @@ export const readJudgedAcceptanceTexts = async (
       const ruleDir = file.split('/')[1];
       if (ruleDir === undefined || !ids.has(ruleDir)) continue;
       try {
-        const blob = (await git(['cat-file', 'blob', object], { cwd: repoPath })).stdout;
+        const blob = (
+          await git(['--no-replace-objects', 'cat-file', 'blob', object], { cwd: repoPath })
+        ).stdout;
         texts[file] = clipBytes(blob, ACCEPTANCE_TEXT_MAX_BYTES);
       } catch {
         continue;
