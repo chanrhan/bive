@@ -393,9 +393,8 @@ export interface RetirementWrite {
   readonly released: NormChangeEntry | null;
 }
 
-/** 확인 풀림 기록의 사유 (오케스트레이터의 고정 문장). */
-export const RELEASE_REASON =
-  '사람이 확인한 규칙을 에이전트가 폐기 · 대체해 확인이 풀림 (ADR-100 D3)';
+/** 확인 풀림 기록의 사유 (오케스트레이터의 고정 문장, 화면에 그대로 보인다). 문서 기호를 섞지 않는다 (M7-21 #268). */
+export const RELEASE_REASON = '사람이 확인한 규칙을 에이전트가 폐기 · 대체해 확인 풀림';
 
 /**
  * 폐기의 쓰기 (부른 쪽 트랜잭션 안, 폐기 · 대체 공통): 규범 변경 기록(`retired` · `superseded`, 사유 = 근거, `before` = 폐기 직전

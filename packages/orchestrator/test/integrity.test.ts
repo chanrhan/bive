@@ -31,9 +31,17 @@ import { loadScenario } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { PipeServer } from '../src/ipc/server.js';
+import {
+  NO_CONTRADICTION_REASON,
+  RELEASE_REASON,
+  REQUIREMENT_CHANGE_UNDECIDED_REASON,
+} from '../src/norms/agent-rule.js';
+import { CHECK_UNDECIDED_REASON } from '../src/norms/check-contradiction.js';
 import { NORM_INPUT_BEGIN } from '../src/norms/norm-input.js';
-import { recordObjection } from '../src/norms/objection.js';
+import { recordObjection, UNDECIDED_REASON } from '../src/norms/objection.js';
 import { RuleWriterService } from '../src/rule-writer/rule-writer-service.js';
+import { AUTO_START_REASON, CONTRADICTION_RESTART_REASON } from '../src/runs/auto-start.js';
+import { RULE_EDIT_START_REASON } from '../src/runs/rule-edit-start.js';
 import {
   BIVE_MCP_SERVER,
   COMMAND_TOOL_NAMES,
@@ -1010,6 +1018,91 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
     // 제안 등록(submit)을 부르는 제품 코드가 없다: 새 제안은 생기지 않는다 (ADR-100 A1)
     expect(using(/\bsubmitProposal\(|\.submit\(/)).toEqual(['proposals/proposal-service.ts']);
     expect(using(/new ProposalService\(/)).toEqual([]);
+  });
+});
+
+// ── 규범 변경 기록 사유의 고정 문장 (M7-21 #268, 화면 정의서 1.1 코드 표기 금지) ─────
+
+/**
+ * 오케스트레이터가 규범 변경 기록의 사유로 쓰는 고정 문장 전부 (이름 → 글). 사유는 확인할 것 · 규칙 변경 이력 화면에 그대로
+ * 보인다. 새 고정 사유 상수를 만들면 여기에 더한다(아래 구조 시험이 빠진 상수를 잡는다)
+ */
+const NORM_CHANGE_FIXED_REASONS: Readonly<Record<string, string>> = {
+  NO_CONTRADICTION_REASON,
+  RELEASE_REASON,
+  REQUIREMENT_CHANGE_UNDECIDED_REASON,
+  CHECK_UNDECIDED_REASON,
+  UNDECIDED_REASON,
+  AUTO_START_REASON,
+  CONTRADICTION_RESTART_REASON,
+  RULE_EDIT_START_REASON,
+};
+
+/** 문서 기호 꼴: ADR · SCR · NFR 번호, PRD, PRD 요구사항 ID(`RUN-08` 등 대문자 2~5자 + 숫자 2자리) */
+const DOC_TOKEN = /ADR-\d|SCR-\d|NFR-\d|PRD|\b[A-Z]{2,5}-\d{2}(?!\d)/;
+
+describe('규범 변경 기록 사유의 고정 문장에 문서 기호 없음 (M7-21 #268 수용 기준 1 · 2, 화면 정의서 1.1)', () => {
+  it('오케스트레이터가 쓰는 고정 사유 상수 전부에 문서 기호 꼴이 없고, 확인 풀림 사유는 명사형 글이다', () => {
+    for (const [name, text] of Object.entries(NORM_CHANGE_FIXED_REASONS)) {
+      expect({ name, match: DOC_TOKEN.exec(text)?.[0] ?? null }).toEqual({ name, match: null });
+    }
+    expect(RELEASE_REASON).toBe('사람이 확인한 규칙을 에이전트가 폐기 · 대체해 확인 풀림');
+  });
+
+  it('문서 기호 꼴 검사 자체 (대조군)', () => {
+    for (const text of [
+      '확인 풀림 (ADR-100 D3)',
+      'SCR-17',
+      'NFR-01',
+      'PRD 기준',
+      'RUN-08',
+      'COST-01',
+    ]) {
+      expect(DOC_TOKEN.test(text)).toBe(true);
+    }
+    for (const text of [NO_CONTRADICTION_REASON, 'RULE-001', 'REQ-001 규칙']) {
+      expect(DOC_TOKEN.test(text)).toBe(false);
+    }
+  });
+
+  it('규범 변경 기록을 쓰는 모듈의 사유 문자열 리터럴 · 고정 사유 상수가 모두 위 목록에 있고 문서 기호가 없다 (코드 구조)', () => {
+    const writers = sourceFiles(SRC_DIR)
+      .map((file) => ({
+        rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+        text: fs.readFileSync(file, 'utf8'),
+      }))
+      .filter((f) => /\.normChanges\.append\(/.test(f.text));
+    expect(writers.length).toBeGreaterThan(0);
+    // 문자열 리터럴 (따옴표 = 그룹 n, 내용 = 그룹 n+1)
+    const literal = (n: number) => `(['"\`])((?:\\\\.|(?!\\${n})[\\s\\S])*)\\${n}`;
+    const known = new Set(Object.keys(NORM_CHANGE_FIXED_REASONS));
+    for (const { rel, text } of writers) {
+      // `reason:` 뒤에 바로 쓴 문자열 리터럴 (사유를 상수 없이 날 글로 쓰는 호출)
+      for (const m of text.matchAll(new RegExp(`\\breason:\\s*${literal(1)}`, 'g'))) {
+        expect({ rel, text: m[2], match: DOC_TOKEN.exec(m[2] ?? '')?.[0] ?? null }).toEqual({
+          rel,
+          text: m[2],
+          match: null,
+        });
+      }
+      // 내보낸 `*_REASON` 문자열 상수 = 위 목록에 있어야 하는 고정 사유
+      for (const m of text.matchAll(
+        new RegExp(`export const ([A-Z][A-Z0-9_]*_REASON)\\s*=\\s*${literal(2)}`, 'g'),
+      )) {
+        const name = m[1] ?? '';
+        expect({ rel, name, known: known.has(name) }).toEqual({ rel, name, known: true });
+        expect({ rel, name, match: DOC_TOKEN.exec(m[3] ?? '')?.[0] ?? null }).toEqual({
+          rel,
+          name,
+          match: null,
+        });
+      }
+    }
+    // 목록의 상수는 모두 규범 변경 기록을 쓰는 모듈에서 내보낸 것이다 (목록이 낡지 않게)
+    const exported = writers.flatMap(({ text }) =>
+      [...text.matchAll(/export const ([A-Z][A-Z0-9_]*_REASON)\s*=/g)].map((m) => m[1]),
+    );
+    expect([...known].sort()).toEqual([...new Set(exported)].sort());
   });
 });
 
