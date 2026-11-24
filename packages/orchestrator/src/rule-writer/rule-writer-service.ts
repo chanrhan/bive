@@ -304,6 +304,8 @@ interface RejudgeContext {
   readonly decided: Set<string>;
   /** 판단 기록의 원인 (세션 시작 때 다시 읽은 요구사항으로 바꾼다) */
   cause: NormJudgmentRequirementChange;
+  /** 시도 기록 행을 만들었는지 (판단할 변경 · 대상을 확인한 뒤 · 진짜 생략일 때만 만든다) */
+  attempted: boolean;
   /** 세션이 받은 규범 입력의 요약 (열기 전이면 `null`) */
   normInput: NormInputSummary | null;
   tools: FixedToolExecutor | null;
@@ -498,6 +500,7 @@ export class RuleWriterService implements RuleWriterLauncher {
       rules,
       decided: new Set(),
       cause: requirementChangeOf(requirement, change),
+      attempted: false,
       normInput: null,
       tools: null,
       settled: false,
@@ -565,14 +568,17 @@ export class RuleWriterService implements RuleWriterLauncher {
       record.model = session.model;
       record.budget = { ...session.budget };
       this.#launched.set(keyOf(projectId, requirement.id), record);
-      // 시도 기록 저장이 실패해도 세션은 띄운다(세션 행만으로도 시도로 읽힌다)
-      this.#saveAttempt(record, () =>
-        store.ruleWriterRequests.create({
-          id: record.id,
-          requirementId: record.requirementId,
-          requestedAt: record.createdAt,
-        }),
-      );
+      // 시도 기록 저장이 실패해도 세션은 띄운다(세션 행만으로도 시도로 읽힌다). 재판단은 판단할 변경 · 대상을 시작 직전에 확인한 뒤
+      // 시도 기록을 만든다(판단할 것이 없으면 시도 기록도 없다, ADR-116 검토 2회차). 그동안의 중복 방지 · 접기는 메모리의 대기 상태다
+      if (rejudge === null) {
+        this.#saveAttempt(record, () =>
+          store.ruleWriterRequests.create({
+            id: record.id,
+            requirementId: record.requirementId,
+            requestedAt: record.createdAt,
+          }),
+        );
+      }
       this.#enqueue(record, requirement);
       return { status: 'queued', record: structuredClone(record) };
     } catch (error) {
@@ -745,17 +751,45 @@ export class RuleWriterService implements RuleWriterLauncher {
     reason: StoredSkipReason,
     detail: string | null,
   ): void {
-    this.#saveAttempt(record, () =>
-      withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
-        store.ruleWriterRequests.skip(record.id, {
-          reason,
-          detail,
-          at: record.endedAt ?? this.#timestamp(),
-        }),
-      ),
-    );
+    const at = record.endedAt ?? this.#timestamp();
+    const rejudge = this.#rejudges.get(record.id);
+    if (rejudge !== undefined && !rejudge.attempted) {
+      // 시도 기록을 만들기 전의 재판단: 진짜 생략(하루 한도 · 설정 · 시작 실패)만 이 시점에 생략 기록으로 만든다. 종료 중 · 요구사항
+      // 없어짐은 시도 기록을 남기지 않는다(판단 없음은 규범 변경 기록에 남고, 요구사항이 지워졌으면 삭제의 재판단이 뒤따른다)
+      if (reason !== 'closed' && reason !== 'requirement_unavailable') {
+        rejudge.attempted = true;
+        this.#saveAttempt(record, () =>
+          withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+            store.ruleWriterRequests.create({
+              id: record.id,
+              requirementId: record.requirementId,
+              requestedAt: record.createdAt,
+              skip: { reason, detail: detail ?? reason, missing: [], at },
+            }),
+          ),
+        );
+      }
+    } else {
+      this.#saveAttempt(record, () =>
+        withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+          store.ruleWriterRequests.skip(record.id, { reason, detail, at }),
+        ),
+      );
+    }
     const undecided = undecidedOfSkip(reason);
     if (undecided !== null) this.#settleRejudge(record, undecided);
+  }
+
+  /**
+   * 판단할 것이 없는 재판단(고친 본문이 고치기 전과 같음 · 남은 자식 규칙 없음)을 끝낸다: 시도 기록 · 판단 없음 기록을 남기지 않는다
+   * (바뀐 것이 없으니 상태 줄도 앞 상태 그대로다, ADR-116 검토 2회차).
+   */
+  #dropRejudge(record: RuleWriterSessionRecord, rejudge: RejudgeContext, detail: string): void {
+    rejudge.settled = true;
+    record.status = 'skipped';
+    record.error = detail;
+    record.endedAt = this.#timestamp();
+    this.#log(`재판단 생략 (${record.requirementDisplayId}, ${detail})`);
   }
 
   /**
@@ -893,16 +927,12 @@ export class RuleWriterService implements RuleWriterLauncher {
     if (rejudge !== null) rejudge.cause = requirementChangeOf(requirement, rejudge.change);
     // 대기하는 사이 고치기 전 본문으로 되돌렸으면(A → B → A) 판단할 변경이 없다: 세션을 열지 않고 판단 없음 기록도 남기지 않는다
     if (rejudge?.change === 'updated' && rejudge.previousText === requirement.text) {
-      rejudge.settled = true;
-      const detail = '고친 본문이 고치기 전 본문과 같아 판단할 변경 없음';
-      record.status = 'skipped';
-      record.skipReason = 'requirement_unavailable';
-      record.error = detail;
-      record.endedAt = this.#timestamp();
-      this.#log(`재판단 생략 (${record.requirementDisplayId}, ${detail})`);
-      this.#saveSkip(record, 'requirement_unavailable', detail);
+      this.#dropRejudge(record, rejudge, '고친 본문이 고치기 전 본문과 같아 판단할 변경 없음');
       return;
     }
+    // 재판단 대상은 시작 직전에 다시 고른다 (대기하는 사이 폐기 · 대체 · 새 자식 규칙이 생겼을 수 있다). 남은 대상이 없으면 판단할
+    // 것이 없으므로 하루 한도 · 설정을 보기 전에 끝낸다 (시도 기록 없음)
+    if (rejudge !== null && !this.#retargetRejudge(record, rejudge, requirement.id)) return;
     const { model } = record;
     if (model === null || record.budget === null) {
       this.#end(record, 'error_during_execution', '세션 설정 없음');
@@ -912,8 +942,19 @@ export class RuleWriterService implements RuleWriterLauncher {
     const budget = this.#dailyCappedBudget(record, record.budget);
     if (budget === null) return;
     record.budget = budget;
-    // 재판단 대상은 시작 직전에 다시 고른다 (대기하는 사이 폐기 · 대체 · 새 자식 규칙이 생겼을 수 있다)
-    if (rejudge !== null && !this.#retargetRejudge(record, rejudge, requirement.id)) return;
+    // 재판단의 시도 기록은 판단할 변경 · 대상을 확인한 이 시점에 만든다 (상태 줄에 진행이 보인다)
+    if (rejudge !== null && !rejudge.attempted) {
+      rejudge.attempted = true;
+      this.#saveAttempt(record, () =>
+        withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
+          store.ruleWriterRequests.create({
+            id: record.id,
+            requirementId: record.requirementId,
+            requestedAt: record.createdAt,
+          }),
+        ),
+      );
+    }
     const controller = new AbortController();
     this.#controllers.add(controller);
     const workDir = path.join(this.#biveHome, 'work', record.projectId, 'sessions', record.id);
@@ -1390,8 +1431,8 @@ export class RuleWriterService implements RuleWriterLauncher {
   // ── 요구사항 변경의 재판단 세션 (M7-10 #222, ADR-116) ─────────────────
 
   /**
-   * 재판단 대상 자식 규칙을 시작 직전에 다시 고른다. 남은 대상이 없거나 읽지 못하면 생략 기록을 남기고 `false`(대상이 없으면 마무리할
-   * 규칙도 없다).
+   * 재판단 대상 자식 규칙을 시작 직전에 다시 고른다. 남은 대상이 없으면 판단할 것이 없어 시도 기록 · 판단 없음 기록 없이 `false`,
+   * 읽지 못하면 시작 실패 생략 기록을 남기고 `false`.
    */
   #retargetRejudge(
     record: RuleWriterSessionRecord,
@@ -1413,8 +1454,9 @@ export class RuleWriterService implements RuleWriterLauncher {
         if (record.rejudge !== null) record.rejudge.ruleIds = rules.map((rule) => rule.id);
         return true;
       }
-      reason = 'requirement_unavailable';
-      detail = '판단할 효력 있는 자식 규칙 없음';
+      // 대기하는 사이 자식 규칙이 모두 효력을 잃었다: 판단할 것이 없다 (시도 기록 · 판단 없음 기록 없음)
+      this.#dropRejudge(record, rejudge, '판단할 효력 있는 자식 규칙 없음');
+      return false;
     } catch (error) {
       reason = 'start_failed';
       detail = errorMessage(error);

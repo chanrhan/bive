@@ -45,6 +45,7 @@ import {
 import {
   byRecentChange,
   collectNormInput,
+  effectiveRules,
   NORM_INPUT_BEGIN,
   NORM_INPUT_END,
   NORM_INPUT_LIMITS,
@@ -3065,7 +3066,12 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
         [other, OTHER_GROUNDS],
         [builtin, BUILTIN_GROUNDS],
       ] as const) {
-        expect(quotesRule(grounds, [rule.statement]), rule.displayId).toBe(true);
+        // 실제 검사와 같은 인자: 대상의 글과 효력 있는 다른 규칙의 글 (고유 조각이어야 인용이다, ADR-115)
+        const others = effectiveRules(store)
+          .filter((item) => item.id !== rule.id)
+          .map((item) => item.statement);
+        expect(others.length).toBeGreaterThan(0);
+        expect(quotesRule(grounds, [rule.statement], others), rule.displayId).toBe(true);
         expect(store.normChanges.list().filter((entry) => entry.targetRef.id === rule.id)).toEqual(
           [],
         );
@@ -3139,29 +3145,95 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
     ]);
   });
 
-  it('대기하는 사이 고친 본문을 고치기 전 본문으로 되돌리면(A → B → A) 세션을 열지 않고 판단 없음 기록도 남기지 않는다 (검토 1회차 N1)', async () => {
-    const h = await startHarness();
-    await saveSettings(h);
-    const { requirement } = await seedChildren(h);
-    // 앞 세션(다른 요구사항의 규칙 작성)을 관문에 세워 재판단을 대기열에 둔다
+  /**
+   * 재판단을 대기열에 둔 채(앞 세션이 관문에서 대기) `during`을 하고 관문을 연다. 그 사이의 시도 기록 수 · 상태 줄 조회를 돌려준다.
+   */
+  const queuedRejudge = async (
+    h: RuleWriterHarness,
+    requirementId: string,
+    during: () => Promise<unknown>,
+  ) => {
+    const status = async () =>
+      (
+        await h.client.call('ruleWriter.status', {
+          projectId: h.project.id,
+          requirementId,
+        })
+      ).entries;
+    const attempts = () =>
+      h.read((store) => store.ruleWriterRequests.listByRequirement(requirementId).length);
+    const before = { status: await status(), attempts: attempts() };
     h.useScenario(ruleWriterScenario([gateTurn]));
     const blocker = await createRequirement(h, BODY_4);
     await waitFor(() => existsSync(gatePath(h)), 5000, '앞 세션이 관문에서 대기');
     h.useScenario(upholdAllScenario(['RULE-001', 'RULE-002']));
-    await editRequirement(h, requirement.id, BODY_2);
-    expect(lastRecord(h, requirement.id)).toMatchObject({ status: 'queued' });
-    await editRequirement(h, requirement.id, BODY_1);
+    await editRequirement(h, requirementId, BODY_2);
+    expect(lastRecord(h, requirementId)).toMatchObject({ status: 'queued' });
+    // 대기 중인 재판단은 시도 기록이 아직 없다: 상태 줄은 앞 상태 그대로다 (ADR-116 검토 2회차)
+    expect(attempts()).toBe(before.attempts);
+    expect(await status()).toEqual(before.status);
+    await during();
     rmSync(gatePath(h));
     await h.service.whenSettled(h.project.id, blocker.id);
-    await h.service.whenSettled(h.project.id, requirement.id);
+    await h.service.whenSettled(h.project.id, requirementId);
     await h.service.idle();
+    return { before, after: { status: await status(), attempts: attempts() } };
+  };
+
+  it('대기하는 사이 고친 본문을 고치기 전 본문으로 되돌리면(A → B → A) 세션을 열지 않고, 판단 없음 기록 · 시도 기록을 남기지 않아 상태 줄이 앞 상태 그대로다 (검토 1 · 2회차)', async () => {
+    const h = await startHarness();
+    await saveSettings(h);
+    const { requirement } = await seedChildren(h);
+    const { before, after } = await queuedRejudge(h, requirement.id, () =>
+      editRequirement(h, requirement.id, BODY_1),
+    );
     expect(h.specs).toHaveLength(2);
     expect(lastRecord(h, requirement.id)).toMatchObject({
       status: 'skipped',
-      skipReason: 'requirement_unavailable',
+      skipReason: null,
       error: '고친 본문이 고치기 전 본문과 같아 판단할 변경 없음',
     });
     expect(changeJudgments(h)).toEqual([]);
+    expect(after.attempts).toBe(before.attempts);
+    expect(after.status).toEqual(before.status);
+    expect(after.status).toEqual([
+      expect.objectContaining({ state: 'ended', endReason: 'success' }),
+    ]);
+  });
+
+  it('대기하는 사이 자식 규칙이 모두 효력을 잃으면 세션을 열지 않고, 판단 없음 기록 · 시도 기록을 남기지 않아 상태 줄이 앞 상태 그대로다 (검토 2회차)', async () => {
+    const h = await startHarness();
+    await saveSettings(h);
+    const { requirement, rule1, rule2 } = await seedChildren(h);
+    const { before, after } = await queuedRejudge(h, requirement.id, () => {
+      h.read((store) => {
+        for (const [rule, grounds] of [
+          [rule1, GROUNDS_1],
+          [rule2, GROUNDS_2],
+        ] as const) {
+          retireAgentRule(
+            store,
+            {
+              ruleId: rule.id,
+              grounds,
+              author: { kind: 'agent', role: 'rule-writer' },
+              sessionId: createUlidGenerator()(),
+            },
+            { now: () => T0 },
+          );
+        }
+      });
+      return Promise.resolve();
+    });
+    expect(h.specs).toHaveLength(2);
+    expect(lastRecord(h, requirement.id)).toMatchObject({
+      status: 'skipped',
+      skipReason: null,
+      error: '판단할 효력 있는 자식 규칙 없음',
+    });
+    expect(changeJudgments(h)).toEqual([]);
+    expect(after.attempts).toBe(before.attempts);
+    expect(after.status).toEqual(before.status);
   });
 
   it('같은 시각의 수정 뒤 삭제: 두 재판단의 판단 없음 기록이 겹치지 않고 각각 남는다 (원인 키 = 요구사항 · 변경 종류 · 시각 · 본문 해시, 검토 1회차 N2)', async () => {
