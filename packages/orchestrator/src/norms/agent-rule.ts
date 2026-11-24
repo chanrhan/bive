@@ -29,6 +29,9 @@
 //   해시)은 이의 판단과 같은 자리(폐기 쪽 쓰기 앞)에 같은 트랜잭션으로 남는다. 같은 변경(요구사항 · 종류 · 시각 · 본문 해시)의 같은 규칙에 판단은 1건이고,
 //   판단하지 못한 자식 규칙은 {@link settleRequirementChange}가 오케스트레이터의 유지(`undecided`)로 마무리한다(판단 없음은 폐기가
 //   아니다). 지운 요구사항의 자식 규칙은 대체할 수 없다
+// - 검사 실패 판단(M7-12 #224, ADR-100 B⑧ · A4, ADR-118): 검사 단계 · 병합 재검사에서 실패한 대상 밖 규칙을 판단 세션이 폐기 ·
+//   대체하면 판단 기록(주제 `check_failure`, 결과 모순, 모순 대상 = 실행의 대상 규칙, 원인 = 단계 시도 · 케이스 이름)을 같은 자리에,
+//   유지하면 결과 모순 없음의 판단 기록 1건을 남긴다. 실행 · 규칙마다 판단은 1건이다
 import {
   type AgentAuthor,
   AgentAuthor as AgentAuthorSchema,
@@ -43,6 +46,11 @@ import {
 import type { ProjectStore } from '@bive/store';
 
 import { releaseConfirmation } from '../confirmations/confirmation-service.js';
+import {
+  checkFailureCause,
+  checkJudgmentsOf,
+  type CheckJudgmentContext,
+} from './check-contradiction.js';
 import { displayText } from '../text-limit.js';
 import { MIN_QUOTE_LENGTH } from '../tools/definitions.js';
 import { EARS_FRAME_WORDS } from '../tools/ears.js';
@@ -464,6 +472,8 @@ export interface AgentRetireInput {
   readonly sessionId: Ulid;
   /** 이의 판단이면 그 판단의 원인 · 실행 (M7-11, ADR-115). 없으면 요구사항 세션의 폐기 */
   readonly objection?: AgentObjectionJudgment;
+  /** 검사 실패 판단이면 그 판단의 원인 · 실행 (M7-12, ADR-118). `objection`과 함께 쓰지 않는다 */
+  readonly check?: AgentCheckJudgment;
   /** 요구사항 변경 판단이면 그 원인 (M7-10, ADR-116). `objection`과 함께 줄 수 없다 */
   readonly requirementChange?: AgentRequirementChangeJudgment;
 }
@@ -486,6 +496,29 @@ export interface AgentObjectionJudgment {
   readonly normInput: NormInputSummary;
 }
 
+/** 실행 안 판단 세션의 검사 실패 판단 문맥 (M7-12, ADR-118). */
+export interface AgentCheckJudgment extends CheckJudgmentContext {
+  /** 판단 세션이 받은 규범 입력의 요약 */
+  readonly normInput: NormInputSummary;
+}
+
+type RunJudgment =
+  | { readonly kind: 'objection'; readonly context: AgentObjectionJudgment }
+  | { readonly kind: 'check'; readonly context: AgentCheckJudgment };
+
+/** 실행 안 판단 문맥: 이의 또는 검사 실패 (둘 다 없으면 요구사항 세션). */
+const runJudgmentOf = (input: {
+  readonly objection?: AgentObjectionJudgment | undefined;
+  readonly check?: AgentCheckJudgment | undefined;
+}): RunJudgment | null => {
+  if (input.objection !== undefined && input.check !== undefined) {
+    throw new Error('이의 판단과 검사 실패 판단을 함께 쓸 수 없다');
+  }
+  if (input.objection !== undefined) return { kind: 'objection', context: input.objection };
+  if (input.check !== undefined) return { kind: 'check', context: input.check };
+  return null;
+};
+
 export interface AgentRetireResult extends RetirementWrite {
   /** 폐기된 규칙 (폐기 직전 내용) */
   readonly rule: Rule;
@@ -494,10 +527,12 @@ export interface AgentRetireResult extends RetirementWrite {
 }
 
 /**
- * 이의 판단 기록 (부른 쪽 트랜잭션 안): 대상 규칙 하나에 대한 폐기 · 대체 · 유지. 같은 이의의 같은 규칙에 판단이 이미 있으면 거부한다.
- * @throws {NormRetirementInputError} 이미 판단함
+ * 실행 안 판단 기록 (부른 쪽 트랜잭션 안): 대상 규칙 하나에 대한 폐기 · 대체 · 유지. 이의 판단은 결과 그대로(주제 `objection`),
+ * 검사 실패 판단은 유지 = 모순 없음 · 폐기 · 대체 = 모순(주제 `check_failure`, 모순 대상 = 실행의 대상 규칙)으로 남긴다. 같은 이의 ·
+ * 같은 실행의 같은 규칙에 판단이 이미 있으면 거부한다.
+ * @throws {NormRetirementInputError} 이미 판단함 · 검사 실패 판단의 대상이 실패한 규칙이 아님
  */
-const writeObjectionJudgment = (
+const writeRunJudgment = (
   store: ProjectStore,
   input: {
     readonly target: Rule;
@@ -507,10 +542,54 @@ const writeObjectionJudgment = (
     readonly grounds: string;
     readonly verdict: 'upheld' | 'retired' | 'superseded';
     readonly createdSeq?: number;
-    readonly objection: AgentObjectionJudgment;
+    readonly judgment: RunJudgment;
   },
 ): NormChangeEntry => {
-  const { target, objection } = input;
+  const { target, judgment } = input;
+  const { requirements, rules } = judgment.context.normInput;
+  const counts = {
+    requirements: { total: requirements.total, included: requirements.included },
+    rules: { total: rules.total, included: rules.included },
+  };
+  const created = input.createdSeq === undefined ? {} : { createdSeq: input.createdSeq };
+  if (judgment.kind === 'check') {
+    const context = judgment.context;
+    if (!context.failures.some((failure) => failure.ruleId === target.id)) {
+      throw new NormRetirementInputError(
+        'invalid_args',
+        `${target.displayId}는 이 검사에서 실패한 판단 대상 규칙이 아님`,
+      );
+    }
+    if (checkJudgmentsOf(store, context.runId).some((entry) => entry.targetRef.id === target.id)) {
+      throw new NormRetirementInputError(
+        'invalid_args',
+        `이 실행의 ${target.displayId}는 이미 판단함 (실행 · 규칙마다 판단은 한 번)`,
+      );
+    }
+    const contradiction = input.verdict !== 'upheld';
+    return store.normChanges.append({
+      at: input.at,
+      kind: 'judgment',
+      actor: input.author,
+      targetRef: { entity: 'Rule', id: target.id },
+      sessionId: input.sessionId,
+      runId: context.runId,
+      reason: input.grounds,
+      detail: {
+        judgment: {
+          subject: 'check_failure',
+          verdict: contradiction ? 'contradiction' : 'no_contradiction',
+          contradicts: contradiction
+            ? context.targets.map((rule) => ({ id: rule.id, displayId: rule.displayId }))
+            : [],
+          ...created,
+          check: checkFailureCause(context, target.id),
+          input: counts,
+        },
+      },
+    });
+  }
+  const objection = judgment.context;
   const judged = store.normChanges
     .list()
     .some(
@@ -526,7 +605,6 @@ const writeObjectionJudgment = (
       `이 이의의 ${target.displayId}는 이미 판단함 (규칙마다 판단은 한 번)`,
     );
   }
-  const { requirements, rules } = objection.normInput;
   return store.normChanges.append({
     at: input.at,
     kind: 'judgment',
@@ -540,12 +618,9 @@ const writeObjectionJudgment = (
         subject: 'objection',
         verdict: input.verdict,
         contradicts: [],
-        ...(input.createdSeq === undefined ? {} : { createdSeq: input.createdSeq }),
+        ...created,
         causeSeq: objection.causeSeq,
-        input: {
-          requirements: { total: requirements.total, included: requirements.included },
-          rules: { total: rules.total, included: rules.included },
-        },
+        input: counts,
       },
     },
   });
@@ -631,14 +706,44 @@ const writeRequirementChangeJudgment = (
   });
 };
 
-/** @throws {Error} 이의 판단과 요구사항 변경 판단을 함께 줌 (부르는 쪽 결함) */
+/** @throws {Error} 이의 · 검사 실패 · 요구사항 변경 판단 문맥을 둘 이상 줌 (부르는 쪽 결함, 세 문맥은 서로 배타적이다) */
 const assertOneCause = (input: {
   readonly objection?: AgentObjectionJudgment | undefined;
+  readonly check?: AgentCheckJudgment | undefined;
   readonly requirementChange?: AgentRequirementChangeJudgment | undefined;
 }): void => {
-  if (input.objection !== undefined && input.requirementChange !== undefined) {
-    throw new Error('이의 판단과 요구사항 변경 판단은 함께 줄 수 없음');
+  const given = [input.objection, input.check, input.requirementChange].filter(
+    (context) => context !== undefined,
+  );
+  if (given.length > 1) {
+    throw new Error('이의 · 검사 실패 · 요구사항 변경 판단 문맥은 함께 줄 수 없음 (하나만)');
   }
+};
+
+/** 판단 문맥에 맞는 판단 기록을 쓴다 (부른 쪽 트랜잭션 안). 문맥이 없으면(요구사항 세션의 폐기 · 대체) `null`. */
+const writeCauseJudgment = (
+  store: ProjectStore,
+  judged: {
+    readonly target: Rule;
+    readonly author: AgentAuthor;
+    readonly at: string;
+    readonly sessionId: Ulid;
+    readonly grounds: string;
+    readonly verdict: 'upheld' | 'retired' | 'superseded';
+    readonly createdSeq?: number;
+  },
+  input: {
+    readonly objection?: AgentObjectionJudgment | undefined;
+    readonly check?: AgentCheckJudgment | undefined;
+    readonly requirementChange?: AgentRequirementChangeJudgment | undefined;
+  },
+): NormChangeEntry | null => {
+  const runJudgment = runJudgmentOf(input);
+  if (runJudgment !== null) return writeRunJudgment(store, { ...judged, judgment: runJudgment });
+  if (input.requirementChange !== undefined) {
+    return writeRequirementChangeJudgment(store, { ...judged, judgment: input.requirementChange });
+  }
+  return null;
 };
 
 /**
@@ -657,28 +762,27 @@ export const retireAgentRule = (
     const rule = resolveTarget(store, input.ruleId);
     assertQuoted(store, rule, input.grounds);
     const at = new Date(clock.now()).toISOString();
-    const { objection, requirementChange } = input;
-    // 이의 · 요구사항 변경 판단은 폐기 쪽 쓰기 앞에 둔다 (폐기 기록 → 폐기 행 → 확인 풀림의 순서 사이에 끼우지 않는다, ADR-113)
-    const judged = {
-      target: rule,
-      author,
-      at,
-      sessionId: input.sessionId,
-      grounds: input.grounds,
-      verdict: 'retired',
-    } as const;
-    const judgment =
-      objection !== undefined
-        ? writeObjectionJudgment(store, { ...judged, objection })
-        : requirementChange !== undefined
-          ? writeRequirementChangeJudgment(store, { ...judged, judgment: requirementChange })
-          : null;
+    const runJudgment = runJudgmentOf(input);
+    // 이의 · 검사 실패 · 요구사항 변경 판단은 폐기 쪽 쓰기 앞에 둔다 (폐기 기록 → 폐기 행 → 확인 풀림의 순서 사이에 끼우지 않는다,
+    // ADR-113)
+    const judgment = writeCauseJudgment(
+      store,
+      {
+        target: rule,
+        author,
+        at,
+        sessionId: input.sessionId,
+        grounds: input.grounds,
+        verdict: 'retired',
+      },
+      input,
+    );
     const written = writeRetirement(store, {
       target: rule,
       author,
       at,
       sessionId: input.sessionId,
-      runId: objection?.runId ?? null,
+      runId: runJudgment?.context.runId ?? null,
       grounds: input.grounds,
       supersede: null,
     });
@@ -694,6 +798,8 @@ export interface AgentSupersedeInput extends AgentRuleInput {
   readonly grounds: string;
   /** 이의 판단이면 그 판단의 원인 · 실행 (M7-11, ADR-115) */
   readonly objection?: AgentObjectionJudgment;
+  /** 검사 실패 판단이면 그 판단의 원인 · 실행 (M7-12, ADR-118) */
+  readonly check?: AgentCheckJudgment;
   /** 요구사항 변경 판단이면 그 원인 (M7-10, ADR-116). 삭제의 판단은 대체할 수 없다 */
   readonly requirementChange?: AgentRequirementChangeJudgment;
 }
@@ -703,7 +809,7 @@ export interface AgentSupersedeResult extends AgentRuleResult {
   readonly superseded: Rule;
   /** 대체 기록 (`superseded`) + 폐기 기록 */
   readonly retirement: RetirementWrite;
-  /** 이의 판단 기록 (이의 판단일 때만) */
+  /** 실행 안 판단 기록 (이의 · 검사 실패 판단일 때만) */
   readonly objectionJudgment: NormChangeEntry | null;
 }
 
@@ -731,8 +837,8 @@ export const supersedeAgentRule = (
     assertQuoted(store, target, input.grounds);
     const others = resolveContradicts(store, input.contradiction, target);
     const at = new Date(clock.now()).toISOString();
-    const objection = input.objection;
-    const runId = objection?.runId ?? null;
+    const runJudgment = runJudgmentOf(input);
+    const runId = runJudgment?.context.runId ?? null;
     const created = writeAgentRule(store, {
       payload,
       author,
@@ -751,23 +857,20 @@ export const supersedeAgentRule = (
             : `${input.grounds}\n${input.contradiction.grounds}`,
       },
     });
-    // 이의 · 요구사항 변경 판단은 새 규칙 쪽 쓰기 뒤 · 폐기 쪽 쓰기 앞 (확인 풀림의 쓰기 순서 사이에 끼우지 않는다, ADR-113)
-    const judged = {
-      target,
-      author,
-      at,
-      sessionId: input.sessionId,
-      grounds: input.grounds,
-      verdict: 'superseded',
-      createdSeq: created.normChange.seq,
-    } as const;
-    const requirementChange = input.requirementChange;
-    const objectionJudgment =
-      objection !== undefined
-        ? writeObjectionJudgment(store, { ...judged, objection })
-        : requirementChange !== undefined
-          ? writeRequirementChangeJudgment(store, { ...judged, judgment: requirementChange })
-          : null;
+    // 이의 · 검사 실패 · 요구사항 변경 판단은 새 규칙 쪽 쓰기 뒤 · 폐기 쪽 쓰기 앞 (확인 풀림의 쓰기 순서 사이에 끼우지 않는다, ADR-113)
+    const objectionJudgment = writeCauseJudgment(
+      store,
+      {
+        target,
+        author,
+        at,
+        sessionId: input.sessionId,
+        grounds: input.grounds,
+        verdict: 'superseded',
+        createdSeq: created.normChange.seq,
+      },
+      input,
+    );
     const retirement = writeRetirement(store, {
       target,
       author,
@@ -797,12 +900,27 @@ export type AgentUpholdInput = {
   readonly author: AgentAuthor;
   readonly sessionId: Ulid;
 } & (
-  | { readonly objection: AgentObjectionJudgment; readonly requirementChange?: undefined }
-  | { readonly objection?: undefined; readonly requirementChange: AgentRequirementChangeJudgment }
+  | {
+      readonly objection: AgentObjectionJudgment;
+      readonly check?: undefined;
+      readonly requirementChange?: undefined;
+    }
+  | {
+      readonly objection?: undefined;
+      /** 검사 실패 판단 문맥 (M7-12: 유지 = 모순 없음) */
+      readonly check: AgentCheckJudgment;
+      readonly requirementChange?: undefined;
+    }
+  | {
+      readonly objection?: undefined;
+      readonly check?: undefined;
+      readonly requirementChange: AgentRequirementChangeJudgment;
+    }
 );
 
 /**
- * 이의 대상 규칙을 유지한다고 판단한다 (트랜잭션 1개: 판단 기록 `judgment` 1건, 주제 `objection` · 결과 `upheld`). 규칙 · 인수
+ * 이의 · 검사 실패 판단의 대상 규칙을 유지한다고 판단한다 (트랜잭션 1개: 판단 기록 `judgment` 1건, 주제 `objection` · 결과 `upheld`
+ * 또는 주제 `check_failure` · 결과 `no_contradiction`). 규칙 · 인수
  * 테스트 · 폐기 기록은 바꾸지 않는다(M7-11, ADR-115).
  * @throws {ZodError} 주체가 에이전트가 아님 · 빈 근거
  * @throws {NormRetirementInputError} 대상이 없음 · 효력 없음 · 내장 구조 규칙 · 이미 판단함
@@ -816,21 +934,21 @@ export const upholdAgentRule = (
   assertOneCause(input);
   return store.transaction(() => {
     const rule = resolveTarget(store, input.ruleId);
-    const judged = {
-      target: rule,
-      author,
-      at: new Date(clock.now()).toISOString(),
-      sessionId: input.sessionId,
-      grounds: input.grounds,
-      verdict: 'upheld',
-    } as const;
-    const judgment =
-      input.objection !== undefined
-        ? writeObjectionJudgment(store, { ...judged, objection: input.objection })
-        : writeRequirementChangeJudgment(store, {
-            ...judged,
-            judgment: input.requirementChange,
-          });
+    const judgment = writeCauseJudgment(
+      store,
+      {
+        target: rule,
+        author,
+        at: new Date(clock.now()).toISOString(),
+        sessionId: input.sessionId,
+        grounds: input.grounds,
+        verdict: 'upheld',
+      },
+      input,
+    );
+    if (judgment === null) {
+      throw new Error('유지 판단에는 이의 · 검사 실패 · 요구사항 변경 판단 문맥이 필요하다');
+    }
     return { rule, judgment };
   });
 };

@@ -29,6 +29,7 @@ import { IMPLEMENTER_SYSTEM_PROMPT, implementerTaskPrompt } from '../implementer
 import { DEFAULT_INSTALL_TIMEOUT_MS, JudgeCheckoutError } from '../judge/checkout.js';
 import { installDependencies } from '../judge/checkout.js';
 import type { JudgeRunResult } from '../judge/runner.js';
+import { checkFailureFeedback } from '../norms/check-contradiction.js';
 import { collectNormInput, normInputRecord } from '../norms/norm-input.js';
 import {
   ObjectionInputError,
@@ -189,7 +190,26 @@ const implementationFeedback = (context: StepContext): string | null => {
     const text = context.read((store) => objectionFeedback(store, seq));
     if (text !== null) return clipFeedback(text);
   }
-  return previousImplementationFeedback(context.steps, context.step);
+  const previous = previousImplementationFeedback(context.steps, context.step);
+  // 검사의 대상 밖 규칙 실패가 모순 아님으로 판단됐으면 그 근거를 덧붙인다 (M7-12, ADR-118)
+  const judgedRuleIds = last === undefined ? [] : existingRuleJudgmentOf(last.exitDetail);
+  if (judgedRuleIds.length > 0) {
+    const grounds = context.read((store) =>
+      checkFailureFeedback(store, context.run.id, judgedRuleIds),
+    );
+    if (grounds !== null) {
+      return clipFeedback(previous === null ? grounds : `${previous}\n${grounds}`);
+    }
+  }
+  return previous;
+};
+
+/** 검사 · 병합 시도 결과에 실린 검사 실패 판단의 대상 규칙 ID (`exitDetail.existingRuleJudgment.ruleIds`). */
+const existingRuleJudgmentOf = (exitDetail: unknown): string[] => {
+  if (!isRecord(exitDetail)) return [];
+  const judged = exitDetail.existingRuleJudgment;
+  if (!isRecord(judged) || !Array.isArray(judged.ruleIds)) return [];
+  return judged.ruleIds.filter((id): id is string => typeof id === 'string');
 };
 
 /**
@@ -205,9 +225,8 @@ const finishObjection = async (
   const judged = resumed
     ? null
     : await context.judgeNorms({
-        cause: { kind: 'objection', seq: objection.seq },
+        cause: { kind: 'objection', seq: objection.seq, text: objection.reason ?? '' },
         ruleIds: rules.map((rule) => rule.id),
-        text: objection.reason ?? '',
       });
   context.signal.throwIfAborted();
   const endReason =

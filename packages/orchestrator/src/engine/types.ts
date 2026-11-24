@@ -19,7 +19,10 @@ import type { ProjectStore, RunDetail, RunPatch } from '@bive/store';
 import type { SessionBudget, SessionResultEvent } from '../agent/adapter.js';
 import type { RunGitRef, WorktreeManager } from '../git/worktree-manager.js';
 import type { CommandContext } from '../tools/commands.js';
+import type { CheckFailureInput } from '../norms/check-contradiction.js';
 import type { RoleToolsHooks } from '../tools/executor.js';
+
+export type { CheckFailureInput };
 
 /** 엔진이 실행기를 부르는 단계 (승인 단계는 엔진이 `evaluateApprovalStep`으로 판정한다). */
 export type EngineStepKind = Exclude<StepKind, 'approval'>;
@@ -97,6 +100,11 @@ export const ENGINE_FAILURE_REASONS = [
    * ADR-115). 구현 단계 실행기가 쓴다
    */
   'objection_applied',
+  /**
+   * 검사 단계 · 병합 재검사에서 실행의 대상이 아닌 효력 있는 규칙이 실패해 규칙을 맡는 역할이 모순으로 판단하고 그 규칙을 폐기 ·
+   * 대체해 그 실행을 병합 없이 끝냄 ("기존 규칙 모순", M7-12 #224, ADR-100 B⑧ · A4, ADR-118). 검사 · 병합 실행기가 쓴다
+   */
+  'existing_rule_contradiction',
 ] as const;
 export type EngineFailureReason = (typeof ENGINE_FAILURE_REASONS)[number];
 
@@ -166,22 +174,34 @@ export interface StepSessionResult {
 }
 
 /**
- * 실행 안 판단 세션의 원인 (M7-11 #223, ADR-115). 지금은 구현 역할의 이의 기록 하나다. 검사 단계의 기존 규칙 실패(M7-12)는 종류를
- * 더한다(판단 세션을 띄우는 길은 같다).
+ * 실행 안 판단 세션의 원인 (M7-11 #223 · ADR-115, M7-12 #224 · ADR-118). 판단 세션을 띄우는 길은 원인 종류와 무관하게 같다.
+ * - `objection`: 구현 역할의 이의 기록. 판단 세션은 이의 글(`text`, 다른 역할이 쓴 글 원문)을 들여 쓴 표시 값으로만 받는다
+ * - `check_failure`: 검사 단계 · 병합 재검사에서 실행의 대상이 아닌 효력 있는 규칙이 실패함. 판단 입력은 실패한 규칙 ID와 케이스
+ *   이름뿐이다(ADR-100 A5): 실행기 출력 원문(실패 메시지 · 스택 · 표준 출력)과 구현 세션의 글은 싣지 않는다. 케이스 이름은 그 규칙의
+ *   인수 테스트 파일에 적힌 것만 싣고 나머지는 수로만 싣는다(`isKnownCase`, 규범 자료의 케이스 이름도 같은 기준으로 거른다)
  */
-export interface NormJudgeCause {
-  readonly kind: 'objection';
-  /** 원인 규범 변경 기록 순번 */
-  readonly seq: number;
-}
+export type NormJudgeCause =
+  | {
+      readonly kind: 'objection';
+      /** 원인 규범 변경 기록 순번 */
+      readonly seq: number;
+      /** 이의 글 원문 (구현 역할이 쓴 글. 판단 세션의 작업 지시에는 들여 쓴 표시 값으로만 실린다) */
+      readonly text: string;
+    }
+  | {
+      readonly kind: 'check_failure';
+      readonly stage: 'check' | 'merge_recheck';
+      /** 실패한 대상 밖 규칙마다 실패 케이스 이름 (인수 테스트 파일에 적힌 것만 원문, 나머지는 수) */
+      readonly failures: readonly CheckFailureInput[];
+      /** 케이스 이름이 그 규칙의 인수 테스트 파일(구현이 바꿀 수 없는 파일)에 적힌 것인지 */
+      readonly isKnownCase: (ruleDisplayId: string, name: string) => boolean;
+    };
 
 /** 단계 실행기가 판단 세션을 청하는 입력 (`StepContext.judgeNorms`). 실행 · 단계 · 한도는 엔진이 채운다. */
 export interface NormJudgeStepRequest {
   readonly cause: NormJudgeCause;
-  /** 판단 대상 규칙 ID */
+  /** 판단 대상 규칙 ID (검사 실패는 실패한 대상 밖 규칙) */
   readonly ruleIds: readonly Ulid[];
-  /** 원인 기록의 글 원문 (다른 역할이 쓴 글. 판단 세션의 작업 지시에는 들여 쓴 표시 값으로만 실린다) */
-  readonly text: string;
 }
 
 /** 오케스트레이터 배선이 받는 판단 세션 요청 (엔진이 실행 · 단계 · 실행 잔여 한도 · 중단 신호를 더한 것). */
@@ -190,7 +210,10 @@ export interface NormJudgeRequest extends NormJudgeStepRequest {
   readonly run: Pick<Run, 'id' | 'displayId'>;
   /** 판단 세션을 청한 단계 시도 */
   readonly stepId: Ulid;
-  /** 이 실행의 남은 한도 (판단 세션 한도 = min(규칙 작성 역할 설정, 프로젝트 하루 잔여, 이것)) */
+  /**
+   * 이 실행의 남은 한도 (판단 세션 한도 = min(규칙 작성 역할 설정, 프로젝트 하루 잔여, 이것)). 판단 세션 행은 이 실행 · 단계 시도에
+   * 묶여 실행 합계에 든다(M7-12, ADR-118)
+   */
   readonly runBudget: SessionBudget;
   /** 실행 중단 · 오케스트레이터 종료 신호. 중단되면 세션을 끝내고 그 사유로 거부한다 */
   readonly signal: AbortSignal;

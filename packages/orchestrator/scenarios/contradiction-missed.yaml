@@ -1,0 +1,311 @@
+# 모순을 못 본 경우: 검사 단계의 기존 규칙 실패 → 모순 → 대체 (roadmap M7-12 #224, ADR-100 B⑧ · A4 · A5, ADR-118).
+# 형식: src/agent/scenario.ts. 요구사항마다 규칙 1개(로드맵 M7 흐름 8의 전제). 규칙 작성 세션은 세션 vars로 고른다: 요구사항 세션은
+# requirementDisplayId, 실행 안의 판단 세션은 judgment(원인 종류 check_failure). 실행 안 세션은 `when.ruleId`로 고른다(ADR-092).
+# REQ-001(서버 시각 포함) → RULE-001(응답 JSON의 time). REQ-002(서버 시각 제거)의 세션은 RULE-001과의 모순을 보지 못하고
+# RULE-002(time 없음)만 만든다(contradiction none). 실행 2(RULE-002)의 구현이 time을 빼면 검사 단계에서 대상 밖 RULE-001이
+# 실패하고, 판단 세션이 모순으로 판단해 supersede_rule로 RULE-001을 RULE-003(응답 헤더 X-Server-Time의 서버 시각, REQ-001의 뜻을
+# 응답 본문 밖에서 지킨다)으로 대체한다 → 실행 2는 병합 없이 끝난다(기존 규칙 모순). 대체로 생긴 RULE-003의 실행(실행 3, 판단 세션
+# 종료 뒤 자동 시작)과 실행 2의 대상 규칙 RULE-002의 다시 시작(실행 4, 실행 2가 끝난 뒤)이 차례로 병합된다. 세션 순번은 실행마다
+# 세므로 RULE-002의 구현 세션은 하나다: 실행 2 · 실행 4 모두 본문의 time을 빼고 서버 시각을 응답 헤더에 둔다(실행 2는 RULE-001이
+# 실패해 병합되지 않고, 실행 4는 실행 3이 병합한 헤더 규칙 RULE-003과 함께 통과한다).
+# 파이프라인 e2e는 M7-17이 만든다.
+name: contradiction-missed
+description: 둘째 요구사항의 규칙 작성이 RULE-001과의 모순을 보지 못해 실행 2의 검사에서 RULE-001이 실패하고, 판단 세션이 모순으로 RULE-001을 대체해 실행 2는 병합 없이 끝나며 대체 규칙과 RULE-002의 실행이 병합
+roles:
+  rule-writer:
+    sessions:
+      - description: REQ-001 - 서버 시각 포함
+        when:
+          requirementDisplayId: REQ-001
+        turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답의 서버 시각
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 time 필드에 응답 시점의 서버 시각을 ISO 8601 UTC 문자열로 담는다
+              kind: business
+              checkKinds: [test]
+              rationale: 요구사항의 '서버 시각 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+              contradiction: { verdict: none }
+          - message: 규칙 1건을 반영했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0156
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 920
+              outputTokens: 310
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 2600
+              costUSD: 0.0156
+      - description: REQ-002 - 서버 시각 제거 (RULE-001과의 모순을 보지 못하고 새 규칙만 만듦)
+        when:
+          requirementDisplayId: REQ-002
+        turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답에서 서버 시각 제거
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON에 time 필드를 담지 않는다
+              kind: business
+              checkKinds: [test]
+              rationale: 요구사항의 '서버 시각 제거'를 응답 본문의 time 필드 부재로 옮김
+              contradiction: { verdict: none }
+          - message: 규칙 1건을 반영했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0172
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 1240
+              outputTokens: 420
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 2600
+              costUSD: 0.0172
+      - description: 실행 안의 판단 세션 - 검사에서 실패한 RULE-001은 RULE-002와 모순, 응답 헤더의 서버 시각으로 대체
+        when:
+          judgment: check_failure
+        turns:
+          - tool: supersede_rule
+            args:
+              ruleId: '{{ruleId}}'
+              grounds: RULE-001 진술 "time 필드에 응답 시점의 서버 시각을 ISO 8601 UTC 문자열로 담는다"는 RULE-002의 응답 JSON에 time 필드를 담지 않는다와 동시에 만족될 수 없다. 서버 시각을 응답에 담으라는 REQ-001의 뜻은 응답 본문 밖(헤더)에서 지키도록 바꾼다
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답 헤더의 서버 시각
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 헤더 X-Server-Time에 응답 시점의 서버 시각을 ISO 8601 UTC 문자열로 담는다
+              kind: business
+              checkKinds: [test]
+              rationale: REQ-001의 '서버 시각 포함'을 RULE-002(본문에 time 없음)와 부딪히지 않는 응답 헤더로 옮김
+              contradiction: { verdict: none }
+          - message: RULE-001을 RULE-003으로 대체했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0187
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 1630
+              outputTokens: 480
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 2600
+              costUSD: 0.0187
+  test-writer:
+    sessions:
+      - description: RULE-001 - 서버 시각 인수 테스트
+        when:
+          ruleId: RULE-001
+        turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 서버 시각. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+
+                describe('GET /api/health 서버 시각', () => {
+                  it('응답 JSON의 time이 응답 시점의 ISO 8601 UTC 시각이다', async () => {
+                    const before = Date.now();
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+                    const after = Date.now();
+
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as { ok?: unknown; time?: unknown };
+                    expect(body.ok).toBe(true);
+                    expect(typeof body.time).toBe('string');
+                    const time = String(body.time);
+                    expect(time).toMatch(ISO_UTC);
+                    const at = Date.parse(time);
+                    expect(at).toBeGreaterThanOrEqual(before - 1000);
+                    expect(at).toBeLessThanOrEqual(after + 1000);
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0421
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2310
+              outputTokens: 940
+              cacheReadInputTokens: 4100
+              cacheCreationInputTokens: 6050
+              costUSD: 0.0421
+      - description: RULE-002 - 서버 시각 없음 인수 테스트
+        when:
+          ruleId: RULE-002
+        turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-no-time.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답에서 서버 시각 제거. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                describe('GET /api/health 서버 시각 없음', () => {
+                  it('응답 JSON에 time 필드가 없다', async () => {
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as Record<string, unknown>;
+                    expect(body.ok).toBe(true);
+                    expect(Object.hasOwn(body, 'time')).toBe(false);
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0376
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2080
+              outputTokens: 760
+              cacheReadInputTokens: 4100
+              cacheCreationInputTokens: 6050
+              costUSD: 0.0376
+      - description: RULE-003 - 응답 헤더의 서버 시각 인수 테스트
+        when:
+          ruleId: RULE-003
+        turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-time-header.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답 헤더의 서버 시각. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+
+                describe('GET /api/health 서버 시각 헤더', () => {
+                  it('응답 헤더 X-Server-Time이 응답 시점의 ISO 8601 UTC 시각이다', async () => {
+                    const before = Date.now();
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+                    const after = Date.now();
+
+                    expect(res.status).toBe(200);
+                    const time = String(res.headers.get('x-server-time') ?? '');
+                    expect(time).toMatch(ISO_UTC);
+                    const at = Date.parse(time);
+                    expect(at).toBeGreaterThanOrEqual(before - 1000);
+                    expect(at).toBeLessThanOrEqual(after + 1000);
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0398
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2190
+              outputTokens: 820
+              cacheReadInputTokens: 4100
+              cacheCreationInputTokens: 6050
+              costUSD: 0.0398
+  implementer:
+    sessions:
+      - description: RULE-001 - 헬스 체크 응답에 time을 더함
+        when:
+          ruleId: RULE-001
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 서버 시각을 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true, time: new Date().toISOString() });
+                }
+          - message: 헬스 체크 응답에 서버 시각(time)을 추가했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0587
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 3120
+              outputTokens: 1180
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0587
+      - description: RULE-002 - 본문의 time을 빼고 서버 시각은 응답 헤더에 둠 (실행 2에서는 검사에서 RULE-001이 실패하고, 다시 시작한 실행 4에서는 실행 3의 헤더 규칙과 함께 통과한다)
+        when:
+          ruleId: RULE-002
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태를 돌려주고 서버 시각은 응답 헤더에 담는다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true }, { headers: { 'X-Server-Time': new Date().toISOString() } });
+                }
+          - message: 헬스 체크 응답 본문에서 time을 빼고 서버 시각은 응답 헤더에 두었습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0533
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 2990
+              outputTokens: 1040
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0533
+      - description: RULE-003 (실행 3) - 본문의 time은 그대로 두고 응답 헤더에 서버 시각을 더함
+        when:
+          ruleId: RULE-003
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 서버 시각을 돌려주고 서버 시각을 응답 헤더에도 담는다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  const time = new Date().toISOString();
+                  return Response.json({ ok: true, time }, { headers: { 'X-Server-Time': time } });
+                }
+          - message: 헬스 체크 응답 헤더에 서버 시각(X-Server-Time)을 더했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0571
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 3060
+              outputTokens: 1120
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0571

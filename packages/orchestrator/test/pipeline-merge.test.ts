@@ -9,7 +9,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { Run } from '@bive/shared';
+import { createUlidGenerator, type Run } from '@bive/shared';
 
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import {
@@ -25,6 +25,8 @@ import {
   MERGE_ORDER_TIMEOUT_MS,
   readMergeOrder,
 } from '../src/steps/merge.js';
+import type { NormJudgeLauncher, NormJudgeRequest } from '../src/engine/types.js';
+import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { basisOf, mergeRecordOf } from '../src/verification/summary.js';
 import { human, ROUTE, userGit, withProject } from './helpers/engine-harness.js';
 import {
@@ -49,6 +51,8 @@ afterEach(async () => {
   await cleanup();
   for (const dir of temps.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 }, 120_000);
+
+const newUlid = createUlidGenerator();
 
 const setup = (options: Omit<PipelineSetupOptions, 'temps' | 'engines'> = {}): PipelineHarness =>
   setupPipeline({ ...options, temps, engines });
@@ -221,6 +225,173 @@ describe('판정 통과 → merge → main에 merge commit (수용 기준 4, RUN
     expect(userGit(h.repo, 'log', '-1', '--format=%s', 'refs/heads/main')).toBe('사용자 커밋');
     expect(mergeCount(h)).toBe(0);
     expect(isLocked(h, String(done.run.worktreePath))).toBe(true);
+  }, 60_000);
+});
+
+describe('병합 재검사의 기존 규칙 실패에도 같은 판단 (M7-12 #224 수용 기준 3, ADR-017 · ADR-100 B⑧ · A4, ADR-118)', () => {
+  /** 대상 밖 RULE-002(`secondRule`)의 인수 테스트 파일 (판정 러너 이름 `RULE-002 > 케이스 N`의 조각이 적혀 있다). */
+  const rule2Acceptance = (repo: string): void => {
+    fs.mkdirSync(path.join(repo, 'bive-acceptance', 'RULE-002'), { recursive: true });
+    fs.writeFileSync(
+      path.join(repo, 'bive-acceptance', 'RULE-002', 'health-ok.acc.ts'),
+      "import { describe, it } from 'vitest';\ndescribe('RULE-002', () => {\n  it('케이스 1', () => undefined);\n});\n",
+    );
+  };
+  /** 재검사(병합 단계)에서만 RULE-002가 실패한다. 검사 단계는 모두 통과 */
+  const decide: NonNullable<PipelineSetupOptions['decide']> = (call) =>
+    Object.fromEntries(
+      (call.input.ruleIds ?? []).map((id) => [
+        id,
+        call.kind === 'red_check' || (call.kind === 'merge' && id === 'RULE-002')
+          ? ['failed']
+          : ['passed'],
+      ]),
+    );
+  const recheckSetup = (
+    launcher: (biveHome: string) => NormJudgeLauncher,
+    requests: NormJudgeRequest[],
+  ) =>
+    setup({
+      secondRule: true,
+      prepareRepo: rule2Acceptance,
+      decide,
+      executors: (defaults) => ({
+        ...defaults,
+        merge: before(defaults.merge, (context) => userCommitsOnMain(context.git.repoPath)),
+      }),
+      judgeNorms: ({ biveHome }) => {
+        const inner = launcher(biveHome);
+        return (request) => {
+          requests.push(request);
+          return inner(request);
+        };
+      },
+    });
+
+  it('재검사에서 대상 밖 규칙만 실패하면 판단 세션을 청하고, 모순(폐기)이면 병합하지 않고 failed(existing_rule_contradiction) · 기준 브랜치 그대로', async () => {
+    const requests: NormJudgeRequest[] = [];
+    const retiring =
+      (biveHome: string): NormJudgeLauncher =>
+      (request) => {
+        const { cause } = request;
+        if (cause.kind !== 'check_failure') throw new Error('검사 실패 판단이 아님');
+        return Promise.resolve(
+          withProject(biveHome, request.projectId, (store) => {
+            const targets = (store.runs.get(request.run.id)?.targetRuleIds ?? []).map((id) => ({
+              id,
+              displayId: store.rules.get(id)?.displayId ?? id,
+            }));
+            retireAgentRule(
+              store,
+              {
+                ruleId: request.ruleIds[0] ?? '',
+                grounds:
+                  '기존 규칙의 진술 "ok 값 true를 유지한다"는 새 규칙과 동시에 만족될 수 없다',
+                author: { kind: 'agent', role: 'rule-writer' },
+                sessionId: request.run.id,
+                check: {
+                  runId: request.run.id,
+                  stage: cause.stage,
+                  stepId: request.stepId,
+                  targets,
+                  failures: cause.failures,
+                  normInput: {
+                    requirements: { total: 1, included: 1, omitted: 0 },
+                    rules: { total: 2, included: 2, omitted: 0 },
+                    truncated: false,
+                  },
+                },
+              },
+              { now: Date.now },
+            );
+            return { status: 'ended', sessionId: request.run.id, endReason: 'success' } as const;
+          }),
+        );
+      };
+    const h = recheckSetup(retiring, requests);
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'existing_rule_contradiction',
+      mergeCommit: null,
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      ruleIds: [h.rules[1]?.id],
+      stepId: stepOf(done, 'merge').id,
+      cause: {
+        kind: 'check_failure',
+        stage: 'merge_recheck',
+        failures: [{ ruleId: h.rules[1]?.id, cases: ['RULE-002 > 케이스 1'], unknownCases: 0 }],
+      },
+    });
+    expect(exitOf(done, 'merge')).toMatchObject({
+      reason: 'existing_rule_contradiction',
+      detail: { stage: 'merge_recheck', failedRuleIds: ['RULE-002'], mergeReason: 'check_failed' },
+    });
+    const judgment = withProject(h.biveHome, h.project.id, (store) =>
+      store.normChanges.list().find((entry) => entry.kind === 'judgment'),
+    );
+    expect(judgment?.detail.judgment).toMatchObject({
+      subject: 'check_failure',
+      verdict: 'contradiction',
+      check: { stage: 'merge_recheck', stepId: stepOf(done, 'merge').id },
+    });
+    // 병합되지 않았다: 기준 브랜치 끝은 사용자 커밋, 병합 커밋 0
+    expect(userGit(h.repo, 'log', '-1', '--format=%s', 'refs/heads/main')).toBe('사용자 커밋');
+    expect(mergeCount(h)).toBe(0);
+  }, 60_000);
+
+  it('모순 아님(판단 없음 포함)이면 지금처럼 재검사 실패로 끝나고(failed check_failed, 병합 단계에는 구현 회귀가 없다) 판단은 기록에 남는다', async () => {
+    const requests: NormJudgeRequest[] = [];
+    const h = recheckSetup(
+      () => () => Promise.resolve({ status: 'ended', sessionId: newUlid(), endReason: 'success' }),
+      requests,
+    );
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'check_failed',
+      mergeCommit: null,
+    });
+    expect(requests).toHaveLength(1);
+    expect(exitOf(done, 'merge')).toMatchObject({
+      reason: 'check_failed',
+      detail: {
+        existingRuleJudgment: {
+          decisions: [{ ruleId: 'RULE-002', verdict: 'no_contradiction', undecided: true }],
+        },
+      },
+    });
+    const kinds = withProject(h.biveHome, h.project.id, (store) =>
+      store.normChanges.list().map((entry) => [entry.kind, entry.detail.judgment?.check?.stage]),
+    );
+    expect(kinds).toEqual([['judgment', 'merge_recheck']]);
+    expect(mergeCount(h)).toBe(0);
+  }, 60_000);
+
+  it('대상 규칙이 재검사에서 실패하면 판단 세션을 청하지 않고 지금처럼 끝난다', async () => {
+    const requests: NormJudgeRequest[] = [];
+    const h = setup({
+      decide: (call) =>
+        Object.fromEntries(
+          (call.input.ruleIds ?? []).map((id) => [
+            id,
+            call.kind === 'red_check' || call.kind === 'merge' ? ['failed'] : ['passed'],
+          ]),
+        ),
+      executors: (defaults) => ({
+        ...defaults,
+        merge: before(defaults.merge, (context) => userCommitsOnMain(context.git.repoPath)),
+      }),
+      judgeNorms: () => (request) => {
+        requests.push(request);
+        return Promise.resolve({ status: 'ended', sessionId: newUlid(), endReason: 'success' });
+      },
+    });
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({ status: 'failed', failureReason: 'check_failed' });
+    expect(requests).toEqual([]);
   }, 60_000);
 });
 

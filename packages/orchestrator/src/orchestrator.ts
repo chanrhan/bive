@@ -180,6 +180,7 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
           await engine.stop();
           // 병합된 실행의 테스트 변경 알림 기록이 끝나기를 기다린다 (저장소를 닫은 뒤에 쓰지 않게)
           await testChanges.idle();
+          await autoStarter.idle();
           await closeAndCleanup();
         } finally {
           resolveClosed(reason);
@@ -210,12 +211,15 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       onEvent: observeThenPublish(
         (event) => {
           testChanges.observe(event);
+          // 기존 규칙 모순으로 끝난 실행의 대상 규칙 다시 시작 (M7-12 #224, ADR-100 B⑧ · A4, ADR-118). 기다리지 않는다
+          autoStarter.observe(event);
         },
         (event) => runEvents.publish(event),
         log,
       ),
       ...(options.executors === undefined ? {} : { executors: options.executors }),
-      // 실행 안의 판단 세션 (M7-11 #223, ADR-100 D4 · A4, ADR-115): 구현 역할의 이의를 규칙 작성 서비스의 판단 세션으로 잇는다.
+      // 실행 안의 판단 세션 (M7-11 #223, ADR-100 D4 · A4, ADR-115): 구현 역할의 이의 · 검사 단계의 기존 규칙 실패(M7-12 #224,
+      // ADR-118)를 규칙 작성 서비스의 판단 세션으로 잇는다.
       // 엔진 · 단계는 규칙 작성 서비스를 모르고 이 배선만 부른다. 대체로 생긴 새 규칙의 실행은 판단 세션 종료 뒤 자동 시작된다
       judgeNorms: (request) => ruleWriter.judge(request),
     });

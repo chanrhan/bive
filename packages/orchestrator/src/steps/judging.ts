@@ -167,6 +167,11 @@ export type CommitJudgeOutcome =
       readonly ruleIds: string[];
       /** 체크아웃의 인수 테스트 해시 */
       readonly acceptanceHashes: Record<string, string>;
+      /**
+       * 체크아웃의 인수 테스트 파일 내용 (`readAcceptanceTexts`일 때만, 해시를 잰 그 파일 그대로 · 설치 전). 검사 실패 판단이
+       * 케이스 이름을 파일에 적힌 이름과 대조할 때 쓴다(M7-12, ADR-118)
+       */
+      readonly acceptanceTexts?: Readonly<Record<string, string>>;
     };
 
 export interface CommitJudgeInput {
@@ -177,7 +182,26 @@ export interface CommitJudgeInput {
   readonly expectedAcceptanceHashes?: Readonly<Record<string, string>>;
   readonly norms: NormGuard;
   readonly signal: AbortSignal;
+  /** 인수 테스트 파일 내용을 결과에 싣는다 (설치 · 판정 전, 프로젝트 코드가 돌기 전에 읽는다) */
+  readonly readAcceptanceTexts?: boolean;
 }
+
+/** 인수 테스트 파일 하나에서 읽는 상한 (넘는 부분은 대조에 쓰지 않는다: 그 뒤의 이름은 모르는 이름이 된다). */
+const ACCEPTANCE_TEXT_MAX_BYTES = 1024 * 1024;
+
+const readAcceptanceTexts = (
+  dir: string,
+  hashes: Readonly<Record<string, string>>,
+): Record<string, string> =>
+  Object.fromEntries(
+    Object.keys(hashes).flatMap((file) => {
+      const full = path.join(dir, file);
+      // 일반 파일만 읽는다 (기호 링크는 따라가지 않는다: 해시도 링크 대상 경로로만 잰다)
+      if (!fs.lstatSync(full).isFile()) return [];
+      const buffer = fs.readFileSync(full);
+      return [[file, buffer.subarray(0, ACCEPTANCE_TEXT_MAX_BYTES).toString('utf8')]];
+    }),
+  );
 
 /** 커밋의 깨끗한 체크아웃에서 판정한다. 체크아웃은 어떤 경우에도 지운다. */
 export const judgeCommit = async (
@@ -209,6 +233,10 @@ export const judgeCommit = async (
     }
     const ruleIds = input.selectRules(ruleDirsOf(acceptanceHashes));
     if (ruleIds.length === 0) return { kind: 'no_rules', ruleDirs: ruleDirsOf(acceptanceHashes) };
+    const acceptanceTexts =
+      input.readAcceptanceTexts === true
+        ? readAcceptanceTexts(checkout.dir, acceptanceHashes)
+        : undefined;
     const logFile = installLogFile(context);
     try {
       await (options.installDependencies ?? installDependencies)(checkout.dir, {
@@ -253,7 +281,13 @@ export const judgeCommit = async (
     const after = input.norms.verify();
     if (after.length > 0)
       return { kind: 'norm_mismatch', moment: 'after_judge', mismatches: after };
-    return { kind: 'judged', result, ruleIds, acceptanceHashes };
+    return {
+      kind: 'judged',
+      result,
+      ruleIds,
+      acceptanceHashes,
+      ...(acceptanceTexts === undefined ? {} : { acceptanceTexts }),
+    };
   } finally {
     await checkout.dispose();
   }

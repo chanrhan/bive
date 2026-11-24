@@ -221,4 +221,45 @@ describe('normChangeRow', () => {
       '요구사항 변경 판단 · 유지 · 판단 없음 (중단)',
     );
   });
+
+  it('검사 실패 판단: 모순은 "검사 실패 판단 · 모순"과 실행의 대상 규칙 링크, 모순 없음 · 판단 없음은 대상 규칙 없이 (M7-12, ADR-118)', () => {
+    const target = { id: '01JR0000000000000000000002', displayId: 'RULE-002' };
+    const check = (judgment: Partial<NormJudgmentDetail>, actor = 'agent') =>
+      normChangeRow(
+        entry({
+          kind: 'judgment',
+          ...(actor === 'agent' ? {} : { actor: { kind: 'orchestrator' }, sessionId: null }),
+          runId: '01JR0000000000000000000001',
+          reason: '근거 글',
+          detail: {
+            judgment: {
+              subject: 'check_failure',
+              verdict: 'no_contradiction',
+              contradicts: [],
+              check: {
+                stage: 'check',
+                stepId: '01JR0000000000000000000003',
+                targets: [target],
+                cases: ['GET /api/health 서버 시각 > time이 있다'],
+                unknownCases: 0,
+                omittedCases: 0,
+              },
+              input: { requirements: { total: 1, included: 1 }, rules: { total: 2, included: 2 } },
+              ...judgment,
+            } as NormJudgmentDetail,
+          },
+        }),
+      );
+    expect(check({}).subject).toEqual({ label: '검사 실패 판단 · 모순 없음', rules: [] });
+    expect(check({ verdict: 'contradiction', contradicts: [target] }).subject).toEqual({
+      label: '검사 실패 판단 · 모순',
+      rules: [target],
+    });
+    expect(
+      check({ undecided: { endReason: 'guard_violation' } }, 'orchestrator').subject?.label,
+    ).toBe('검사 실패 판단 · 모순 없음 · 판단 없음 (가드 위반)');
+    expect(check({ verdict: 'future' as NormJudgmentDetail['verdict'] }).subject?.label).toBe(
+      '검사 실패 판단 · 알 수 없음',
+    );
+  });
 });

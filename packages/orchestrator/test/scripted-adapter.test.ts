@@ -26,9 +26,11 @@ import { createRoleTools } from '../src/tools/executor.js';
 import { waitFor } from './helpers/process.js';
 
 const REQUIRED_SCENARIOS = [
+  'accidental-break',
   'auto-start',
   'budget-exceeded',
   'contradiction',
+  'contradiction-missed',
   'extra-mcp',
   'fail-check',
   'false-pass',
@@ -121,6 +123,40 @@ describe('시나리오 파일 스키마', () => {
         'rule-writer',
         'test-writer',
       ]);
+    }
+  });
+
+  it('검사 실패 판단 시나리오 (M7-12, ADR-118): contradiction-missed는 둘째 요구사항이 모순을 보지 못하고 새 규칙만 만들고 판단 세션이 대체, accidental-break는 구현 시도 1이 time을 빼고 판단 세션이 모순 아님', () => {
+    const toolsOf = (session: { turns: readonly unknown[] } | undefined): string[] =>
+      (session?.turns ?? []).flatMap((turn) =>
+        typeof turn === 'object' && turn !== null && 'tool' in turn ? [String(turn.tool)] : [],
+      );
+    const missed = loadScenario('contradiction-missed');
+    const writers = missed.roles['rule-writer']?.sessions ?? [];
+    const req2 = writers.find((session) => session.when?.requirementDisplayId === 'REQ-002');
+    expect(toolsOf(req2)).toEqual(['propose_rule']);
+    expect(JSON.stringify(req2?.turns)).toContain('"verdict":"none"');
+    const missedJudge = writers.find((session) => session.when?.judgment === 'check_failure');
+    expect(toolsOf(missedJudge)).toEqual(['supersede_rule']);
+    expect(
+      (missed.roles.implementer?.sessions ?? []).map((session) => session.when?.ruleId),
+    ).toEqual(['RULE-001', 'RULE-002', 'RULE-003']);
+
+    const broken = loadScenario('accidental-break');
+    const brokenJudge = broken.roles['rule-writer']?.sessions.find(
+      (session) => session.when?.judgment === 'check_failure',
+    );
+    expect(toolsOf(brokenJudge)).toEqual(['uphold_rule']);
+    const rule2 = (broken.roles.implementer?.sessions ?? []).filter(
+      (session) => session.when?.ruleId === 'RULE-002',
+    );
+    expect(rule2).toHaveLength(2);
+    expect(JSON.stringify(rule2[0]?.turns)).not.toContain('toISOString()');
+    expect(JSON.stringify(rule2[1]?.turns)).toContain('toISOString()');
+    // 둘 다 폐기만 하는 판단 · 이의는 없다
+    for (const scenario of [missed, broken]) {
+      expect(JSON.stringify(scenario)).not.toContain('retire_rule');
+      expect(JSON.stringify(scenario)).not.toContain('raise_objection');
     }
   });
 

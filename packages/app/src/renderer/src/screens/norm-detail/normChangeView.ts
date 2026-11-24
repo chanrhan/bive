@@ -51,6 +51,7 @@ export const JUDGMENT_SUBJECT_TEXT = {
   supersede: '모순 판단',
   objection: '이의 판단',
   requirement_change: '요구사항 변경 판단',
+  check_failure: '검사 실패 판단',
 } as const satisfies Record<NormJudgmentSubject, string>;
 
 /** 판단 결과 표시명 (shared NORM_JUDGMENT_VERDICT_LABELS와 같음, 시험이 대조). */
@@ -62,7 +63,7 @@ export const JUDGMENT_VERDICT_TEXT = {
   superseded: '대체',
 } as const satisfies Record<NormJudgmentVerdict, string>;
 
-/** 판단 없이 끝난 이의의 사정 표시명 (shared NORM_UNDECIDED_REASON_LABELS와 같음, 시험이 대조). */
+/** 판단 없이 끝난 이의 · 검사 실패 판단의 사정 표시명 (shared NORM_UNDECIDED_REASON_LABELS와 같음, 시험이 대조). */
 export const UNDECIDED_REASON_TEXT = {
   success: '정상 종료',
   error_max_turns: '턴 한도 초과',
@@ -129,6 +130,23 @@ const subjectOf = (entry: NormChangeView): NormChangeRow['subject'] => {
       return {
         label: `${JUDGMENT_SUBJECT_TEXT[judgment.subject]} · ${verdict}${undecided}`,
         rules: [],
+      };
+    }
+    // 검사 실패 판단 (M7-12, ADR-118): "검사 실패 판단 · 모순(대상 규칙 링크) · 모순 없음", 판단 없이 끝났으면 "판단 없음(사정)"
+    if (judgment.subject === 'check_failure') {
+      const contradiction = judgment.verdict === 'contradiction';
+      const verdict = contradiction
+        ? NORM_CHANGE_TEXT.contradiction
+        : judgment.verdict === 'no_contradiction'
+          ? NORM_CHANGE_TEXT.noContradiction
+          : UNKNOWN_TEXT;
+      const undecided =
+        judgment.undecided === undefined
+          ? ''
+          : ` · ${NORM_CHANGE_TEXT.undecided} (${labelOf(UNDECIDED_REASON_TEXT, judgment.undecided.endReason)})`;
+      return {
+        label: `${JUDGMENT_SUBJECT_TEXT.check_failure} · ${verdict}${undecided}`,
+        rules: contradiction ? judgment.contradicts : [],
       };
     }
     if (!Object.hasOwn(JUDGMENT_SUBJECT_TEXT, judgment.subject)) {

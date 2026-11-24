@@ -26,10 +26,13 @@
 //   판단 요청을 이 서비스에 잇는다(엔진 · 단계는 이 서비스를 모른다). 같은 규칙 작성 역할 · 같은 도구 목록으로 원인 기록(지금은
 //   구현 역할의 이의) 대상 규칙을 폐기 · 대체 · 유지로 판단하는 세션을 한 번 연다. 원인 글은 작업 지시에 들여 쓴 표시 값으로만
 //   싣고(구현 세션의 다른 글은 넣지 않는다), 판단은 대상 규칙마다 한 번, 대상 밖 규칙 · 새 규칙 만들기는 거부한다. 판단을 모두
-//   남기면 실행기를 닫는다. 한도는 min(규칙 작성 역할 설정, 프로젝트 하루 잔여, 실행 잔여)이고 세션 행은 실행 밖 세션이다(하루
-//   합계에 들고 실행 합계에는 들지 않는다. 그 실행과의 연결은 판단 기록의 연결 실행 · 세션 ID).
+//   남기면 실행기를 닫는다. 한도는 min(규칙 작성 역할 설정, 프로젝트 하루 잔여, 실행 잔여)이고 세션 행은 그 실행 · 판단을 청한
+//   단계 시도에 묶인다(하루 합계와 실행 합계 모두에 든다, M7-12 · ADR-118. 이의 판단도 같다).
 //   세션이 끝나면 요구사항 세션과 같은 `onSessionEnded`(대체로 생긴 새 규칙의 실행 자동 시작)를 부른다. 요구사항 세션의
 //   대기열 · 시도 기록과는 따로 돈다
+// - 검사 실패 판단(M7-12 #224, ADR-100 B⑧ · A4 · A5, ADR-118): 원인이 검사 단계 · 병합 재검사의 대상 밖 규칙 실패면 판단 대상은
+//   실패한 기존 규칙뿐이고, 작업 지시에는 이 실행의 대상 규칙(새 규칙) · 실패한 규칙 · 인수 테스트 파일에 적힌 실패 케이스 이름(표시
+//   값, 틀 안)만 싣는다(실행기 출력 원문 · 구현 세션의 글 없음). 규범 자료의 케이스 이름도 같은 기준으로 거른다
 // - 다시 시도(`retry`): 사람이 요구사항을 직접 편집해 저장했을 때, 가장 최근 시도가 생략 · 실패(`success` 아닌 종료)이고
 //   그 요구사항에서 규칙 작성 역할이 만든 규칙(이 변경 전의 규칙 자동 생성 제안 포함)이 없으면 새 시도를 띄운다. 진행 중 · 대기 중이거나 성공한 요구사항은 띄우지 않는다 (ADR-099)
 // - 요구사항 변경의 재판단(`rejudge`, M7-10 #222, ADR-100 NRM-01 · NRM-02 행 · D5 · D6, ADR-116): 사람이 효력 있는 자식 규칙이 있는
@@ -72,6 +75,7 @@ import type { NormJudgeOutcome, NormJudgeRequest } from '../engine/types.js';
 import { RpcError } from '../ipc/server.js';
 import type { TaskTracker } from '../lifecycle.js';
 import {
+  type AgentCheckJudgment,
   type AgentObjectionJudgment,
   type AgentRequirementChangeJudgment,
   createAgentRule,
@@ -113,10 +117,12 @@ import {
 import { denied, failed, invalidArgs, type IssueList, ok } from '../tools/result.js';
 import {
   type JudgmentPromptRule,
+  RULE_WRITER_CHECK_JUDGMENT_SYSTEM_PROMPT,
   RULE_WRITER_JUDGMENT_SYSTEM_PROMPT,
   RULE_WRITER_REQUIREMENT_DELETED_SYSTEM_PROMPT,
   RULE_WRITER_REQUIREMENT_UPDATED_SYSTEM_PROMPT,
   RULE_WRITER_SYSTEM_PROMPT,
+  ruleWriterCheckJudgmentPrompt,
   ruleWriterJudgmentPrompt,
   ruleWriterRejudgePrompt,
   ruleWriterTaskPrompt,
@@ -284,10 +290,14 @@ const untilAborted = (signal: AbortSignal): Promise<never> =>
 interface JudgmentSession {
   readonly id: string;
   readonly projectId: string;
+  readonly runId: string;
   readonly label: string;
   readonly rules: readonly JudgmentPromptRule[];
   readonly decided: Set<string>;
-  readonly objection: AgentObjectionJudgment;
+  /** 반영 모듈에 넘기는 실행 안 판단 문맥 (이의 또는 검사 실패, 정확히 하나) */
+  readonly context:
+    { readonly objection: AgentObjectionJudgment } | { readonly check: AgentCheckJudgment };
+  readonly normInput: NormInputSummary;
   tools: FixedToolExecutor | null;
 }
 
@@ -1648,7 +1658,11 @@ export class RuleWriterService implements RuleWriterLauncher {
     const { signal } = request;
     signal.throwIfAborted();
     if (this.#closed) return untilAborted(signal);
-    const label = `${request.run.displayId} 원인 ${String(request.cause.seq)}`;
+    const { cause } = request;
+    const label =
+      cause.kind === 'objection'
+        ? `${request.run.displayId} 원인 ${String(cause.seq)}`
+        : `${request.run.displayId} 검사 실패 ${cause.stage}`;
     const id = this.#newId();
     const workDir = path.join(this.#biveHome, 'work', request.projectId, 'sessions', id);
     let prepared;
@@ -1664,14 +1678,28 @@ export class RuleWriterService implements RuleWriterLauncher {
       this.#log(`판단 세션 생략 (${label}, ${prepared.reason})`);
       return prepared;
     }
-    const { model, budget, norms, rules } = prepared;
+    const { model, budget, norms, rules, targets } = prepared;
     const session: JudgmentSession = {
       id,
       projectId: request.projectId,
+      runId: request.run.id,
       label,
       rules,
       decided: new Set(),
-      objection: { causeSeq: request.cause.seq, runId: request.run.id, normInput: norms.summary },
+      context:
+        cause.kind === 'objection'
+          ? { objection: { causeSeq: cause.seq, runId: request.run.id, normInput: norms.summary } }
+          : {
+              check: {
+                runId: request.run.id,
+                stage: cause.stage,
+                stepId: request.stepId,
+                targets: targets.map((rule) => ({ id: rule.id, displayId: rule.displayId })),
+                failures: cause.failures,
+                normInput: norms.summary,
+              },
+            },
+      normInput: norms.summary,
       tools: null,
     };
     const controller = new AbortController();
@@ -1717,14 +1745,33 @@ export class RuleWriterService implements RuleWriterLauncher {
         controller,
         spec: {
           role: RULE_WRITER_ROLE,
-          systemPrompt: RULE_WRITER_JUDGMENT_SYSTEM_PROMPT,
-          prompt: ruleWriterJudgmentPrompt({
-            runDisplayId: request.run.displayId,
-            causeSeq: request.cause.seq,
-            rules,
-            text: request.text,
-            norms,
-          }),
+          systemPrompt:
+            cause.kind === 'objection'
+              ? RULE_WRITER_JUDGMENT_SYSTEM_PROMPT
+              : RULE_WRITER_CHECK_JUDGMENT_SYSTEM_PROMPT,
+          prompt:
+            cause.kind === 'objection'
+              ? ruleWriterJudgmentPrompt({
+                  runDisplayId: request.run.displayId,
+                  causeSeq: cause.seq,
+                  rules,
+                  text: cause.text,
+                  norms,
+                })
+              : ruleWriterCheckJudgmentPrompt({
+                  runDisplayId: request.run.displayId,
+                  stage: cause.stage,
+                  targets,
+                  failures: rules.map((rule) => {
+                    const failure = cause.failures.find((item) => item.ruleId === rule.id);
+                    return {
+                      rule,
+                      cases: failure?.cases ?? [],
+                      unknownCases: failure?.unknownCases ?? 0,
+                    };
+                  }),
+                  norms,
+                }),
           workDir,
           tools,
           budget,
@@ -1733,8 +1780,8 @@ export class RuleWriterService implements RuleWriterLauncher {
           vars: {
             projectId: request.projectId,
             runId: request.run.displayId,
-            judgment: request.cause.kind,
-            causeSeq: String(request.cause.seq),
+            judgment: cause.kind,
+            causeSeq: cause.kind === 'objection' ? String(cause.seq) : '',
             ruleId: rules[0]?.displayId ?? '',
             ruleIds: rules.map((rule) => rule.displayId).join(','),
             requirementId: rules[0]?.parentRequirementId ?? '',
@@ -1813,6 +1860,8 @@ export class RuleWriterService implements RuleWriterLauncher {
         readonly budget: SessionBudget;
         readonly norms: NormInput;
         readonly rules: JudgmentPromptRule[];
+        /** 이 실행의 대상 규칙 (검사 실패 판단의 다른 쪽, 이의 판단은 쓰지 않는다) */
+        readonly targets: JudgmentPromptRule[];
       } {
     const settings = store.settings.get();
     const daily = projectDailyBudget(store, settings, this.#now());
@@ -1841,27 +1890,43 @@ export class RuleWriterService implements RuleWriterLauncher {
       maxBudgetUsd: Math.min(role.budget.maxBudgetUsd, request.runBudget.maxBudgetUsd),
       maxTurns: Math.min(role.budget.maxTurns, request.runBudget.maxTurns),
     };
-    const rules: JudgmentPromptRule[] = request.ruleIds.flatMap((ruleId) => {
-      const rule = store.rules.get(ruleId);
-      return rule === null
-        ? []
-        : [
+    const promptRules = (ids: readonly string[]): JudgmentPromptRule[] =>
+      ids.flatMap((ruleId) => {
+        const rule = store.rules.get(ruleId);
+        return rule === null
+          ? []
+          : [
+              {
+                id: rule.id,
+                displayId: rule.displayId,
+                title: rule.title,
+                statement: rule.statement,
+                parentRequirementId: rule.parentRequirementId,
+              },
+            ];
+      });
+    const { cause } = request;
+    const rules = promptRules(request.ruleIds);
+    const runTargets = store.runs.get(request.run.id)?.targetRuleIds ?? [];
+    const targets = cause.kind === 'check_failure' ? promptRules(runTargets) : [];
+    // 검사 실패 판단: 초점은 두 쪽 규칙, 케이스 이름은 인수 테스트 파일에 적힌 것만 싣는다 (ADR-100 A5, ADR-118)
+    const norms =
+      cause.kind === 'check_failure'
+        ? collectNormInput(
+            store,
             {
-              id: rule.id,
-              displayId: rule.displayId,
-              title: rule.title,
-              statement: rule.statement,
-              parentRequirementId: rule.parentRequirementId,
+              requirementIds: [],
+              ruleIds: [...targets.map((rule) => rule.id), ...request.ruleIds],
             },
-          ];
-    });
-    const norms = collectNormInput(store, { requirementIds: [], ruleIds: request.ruleIds });
-    // 세션 행은 실행 밖 세션으로 남긴다: 세션 행의 단계 시도는 그 단계 역할(구현)의 세션만 받는다. 이 실행 · 단계와의 연결은
-    // 판단 기록(연결 실행 · 세션 ID)과 단계 시도 결과(`judgmentSession.sessionId`)에 있다. 재기동 때는 실행 밖 세션으로 닫힌다
+            { isKnownCase: cause.isKnownCase },
+          )
+        : collectNormInput(store, { requirementIds: [], ruleIds: request.ruleIds });
+    // 세션 행은 이 실행 · 판단을 청한 단계 시도에 묶는다(실행 안 판단 세션, 저장소가 규칙 작성 역할만 단계 역할과 달라도 받는다):
+    // 하루 합계와 실행 합계 모두에 들고 `run.get`의 세션 목록에 나온다. 재기동 때는 그 실행의 세션으로 닫힌다 (M7-12, ADR-118)
     store.sessions.start({
       id,
-      runId: null,
-      stepId: null,
+      runId: request.run.id,
+      stepId: request.stepId,
       requirementId: null,
       role: RULE_WRITER_ROLE,
       model: role.model,
@@ -1870,7 +1935,7 @@ export class RuleWriterService implements RuleWriterLauncher {
       normInput: normInputRecord(norms),
       startedAt: this.#timestamp(),
     });
-    return { status: 'ready', model: role.model, budget, norms, rules };
+    return { status: 'ready', model: role.model, budget, norms, rules, targets };
   }
 
   /** 판단 세션 기록 쓰기 (실패는 로그만). */
@@ -1886,7 +1951,7 @@ export class RuleWriterService implements RuleWriterLauncher {
     this.#quietlyPersist(session, (store) =>
       store.sessions.appendToolCall({
         id: this.#newId(),
-        runId: null,
+        runId: session.runId,
         sessionId: session.id,
         at: call.at,
         role: call.role,
@@ -1939,7 +2004,7 @@ export class RuleWriterService implements RuleWriterLauncher {
             grounds: input.grounds,
             author: { kind: 'agent', role: RULE_WRITER_ROLE },
             sessionId: session.id,
-            objection: session.objection,
+            ...session.context,
           },
           { now: this.#now },
         ),
@@ -1977,11 +2042,11 @@ export class RuleWriterService implements RuleWriterLauncher {
             author: { kind: 'agent', role: RULE_WRITER_ROLE },
             sessionId: session.id,
             contradiction,
-            normInput: session.objection.normInput,
+            normInput: session.normInput,
             // 판단 대상인지는 위에서 봤다 (표시 ID 또는 ID 그대로 넘긴다)
             ruleId,
             grounds,
-            objection: session.objection,
+            ...session.context,
           },
           { now: this.#now, newId: this.#newId },
         ),
@@ -2007,7 +2072,7 @@ export class RuleWriterService implements RuleWriterLauncher {
             grounds: input.grounds,
             author: { kind: 'agent', role: RULE_WRITER_ROLE },
             sessionId: session.id,
-            objection: session.objection,
+            ...session.context,
           },
           { now: this.#now },
         ),
@@ -2017,7 +2082,9 @@ export class RuleWriterService implements RuleWriterLauncher {
     }
     this.#decided(session, rule);
     return ok(
-      `규칙 ${rule.displayId} 유지로 판단 (규칙 · 인수 테스트는 그대로, 근거는 구현 역할에게 전해진다)`,
+      'check' in session.context
+        ? `규칙 ${rule.displayId} 모순 아님으로 판단 (규칙 · 인수 테스트는 그대로, 근거는 구현 역할에게 전해진다)`
+        : `규칙 ${rule.displayId} 유지로 판단 (규칙 · 인수 테스트는 그대로, 근거는 구현 역할에게 전해진다)`,
     );
   }
 }

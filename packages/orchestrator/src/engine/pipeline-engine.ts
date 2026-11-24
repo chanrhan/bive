@@ -1440,8 +1440,8 @@ export class PipelineEngine {
 
   /**
    * 실행 안 판단 세션 1개 (M7-11 #223, ADR-115): 주입받은 배선에 실행 · 단계 · 실행 잔여 한도 · 중단 신호를 넘기고 끝날 때까지
-   * 기다린다. 배선이 없거나 실행 예산이 남지 않았으면 세션을 열지 않는다(`not_opened`). 판단 세션의 한도는 실행 잔여 안이다
-   * (세션 행은 실행 밖 세션이라 하루 한도 합계에 들고 실행 합계에는 들지 않는다).
+   * 기다린다. 배선이 없거나 실행 예산이 남지 않았으면 세션을 열지 않는다(`not_opened`). 판단 세션의 한도는 실행 잔여 안이고, 세션
+   * 행은 이 실행 · 단계 시도에 묶여 하루 한도 합계와 실행 합계 모두에 든다(M7-12 #224, ADR-118. 쓴 돈이 실행 잔여에서 빠진다).
    */
   async #judge(
     projectId: string,
@@ -1462,7 +1462,11 @@ export class PipelineEngine {
       return { status: 'not_opened', reason: 'budget_exhausted', detail: '실행 예산 소진' };
     }
     this.#log(
-      `판단 세션 요청 (${run.displayId}, 원인 ${request.cause.kind} ${String(request.cause.seq)})`,
+      `판단 세션 요청 (${run.displayId}, 원인 ${request.cause.kind}${
+        request.cause.kind === 'objection'
+          ? ` ${String(request.cause.seq)}`
+          : ` ${request.cause.stage}`
+      })`,
     );
     const outcome = await launch({
       ...request,

@@ -158,6 +158,12 @@ const toToolCall = (row: ToolCallRow): ToolCall =>
     durationMs: row.duration_ms,
   });
 
+/**
+ * 실행 안 판단 세션의 역할 (M7-11 · M7-12, ADR-118). 이 역할의 세션은 단계 역할과 달라도 그 실행의 단계 시도에 묶일 수 있다
+ * (규칙 작성 역할은 어떤 실행 유형의 단계 역할도 아니다).
+ */
+export const JUDGMENT_SESSION_ROLE = 'rule-writer';
+
 export class SessionRepository {
   readonly #db: SqliteDatabase;
   readonly #insert;
@@ -235,7 +241,9 @@ export class SessionRepository {
 
   /**
    * 세션 행을 만든다(종료 사유 `null`). 실행 세션은 단계 시도가 그 실행 · 역할의 것이어야 하고,
-   * 실행 밖 세션(규칙 작성)은 실행 · 단계 없이 대상 요구사항(`requirementId`)을 가진다.
+   * 실행 밖 세션(규칙 작성)은 실행 · 단계 없이 대상 요구사항(`requirementId`)을 가진다. 실행 안 판단 세션(규칙 작성 역할이 그 실행의
+   * 단계 시도 안에서 판단하는 세션, M7-11 · M7-12, ADR-118)은 단계 역할과 달라도 그 실행의 단계 시도에 묶인다: 실행 합계 · 실행 예산에
+   * 든다.
    * @throws {NotFoundError} 단계 시도가 없을 때
    * @throws {ConflictError} 단계가 다른 실행 · 다른 역할이거나 같은 ID가 이미 있을 때
    */
@@ -260,7 +268,8 @@ export class SessionRepository {
       if (session.stepId !== null) {
         const step = this.#stepOf.get(session.stepId);
         if (step === undefined) throw new NotFoundError('단계', session.stepId);
-        if (step.run_id !== session.runId || step.role !== session.role) {
+        const judgmentSession = session.role === JUDGMENT_SESSION_ROLE;
+        if (step.run_id !== session.runId || (step.role !== session.role && !judgmentSession)) {
           throw new ConflictError(ENTITY, session.id, '단계 시도의 실행 · 역할과 다릅니다');
         }
       }

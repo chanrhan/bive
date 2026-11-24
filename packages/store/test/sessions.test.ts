@@ -145,6 +145,61 @@ describe('sessions', () => {
     });
   });
 
+  it('실행 안 판단 세션(규칙 작성 역할)은 단계 역할과 달라도 그 실행의 단계 시도에 묶이고 실행 합계에 든다, 다른 실행의 단계는 거부 (M7-12, ADR-118)', () => {
+    withStore((store) => {
+      const { run, steps } = seedRun(store);
+      const id = newId();
+      const step = stepOf(steps, 'implementation');
+      store.sessions.start({
+        id,
+        runId: run.id,
+        stepId: step.id,
+        role: 'rule-writer',
+        model: 'm',
+        workDir: '/w',
+        startedAt: T0,
+      });
+      store.sessions.appendToolCall({
+        id: newId(),
+        runId: run.id,
+        sessionId: id,
+        at: T0,
+        role: 'rule-writer',
+        name: 'uphold_rule',
+        argsSummary: '{}',
+        status: 'ok',
+        reason: null,
+        durationMs: 1,
+      });
+      expect(store.sessions.listByRun(run.id).map((s) => [s.id, s.role, s.stepId])).toEqual([
+        [id, 'rule-writer', step.id],
+      ]);
+      // 다른 실행의 단계 시도 · 다른 역할(테스트 작성)은 그대로 거부한다
+      expect(() =>
+        store.sessions.start({
+          id: newId(),
+          runId: newId(),
+          stepId: step.id,
+          role: 'rule-writer',
+          model: 'm',
+          workDir: '/w',
+          startedAt: T0,
+        }),
+      ).toThrow(ConflictError);
+      expect(() =>
+        store.sessions.start({
+          id: newId(),
+          runId: run.id,
+          stepId: step.id,
+          role: 'test-writer',
+          model: 'm',
+          workDir: '/w',
+          startedAt: T0,
+        }),
+      ).toThrow(ConflictError);
+    });
+  });
+
   it('실행 밖 세션(규칙 작성)은 실행 · 단계 없이 요구사항을 가리킨다', () => {
     withStore((store) => {
       const { run } = seedRun(store);

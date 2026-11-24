@@ -840,13 +840,16 @@ const NormChangeSeqList = z
  * (M7-11 #223, ADR-115: 결과는 `upheld` · `retired` · `superseded`, 원인 이의 기록 순번 `causeSeq` 필수). `requirement_change` =
  * 사람이 자식 규칙 있는 요구사항을 고치거나 지워 규칙 작성 역할(또는 판단 없이 끝난 경우의 오케스트레이터)이 그 자식 규칙 하나를
  * 폐기 · 대체 · 유지로 다시 판단함(M7-10 #222, ADR-116: 결과는 이의 판단과 같은 세 값, 원인은 `requirementChange` 필수, 삭제에는
- * 대체가 없다). 검사 단계의 기존 규칙 실패(M7-12)는 그 이슈가 값을 더한다(넓히기만).
+ * 대체가 없다). `check_failure` = 검사 단계 · 병합 재검사에서 실행의 대상이 아닌 효력 있는 규칙(판단 대상)이 실패해 규칙 작성
+ * 역할(또는 판단 없이 끝난 경우의 오케스트레이터)이 그 규칙과 실행의 대상 규칙이 모순인지 판단함(M7-12 #224, ADR-100 B⑧ · A4 · A5,
+ * ADR-118: 결과는 모순 없음 · 모순, 모순이면 `contradicts`가 실행의 대상 규칙, 원인은 `check`). 넓히기만 한다.
  */
 export const NormJudgmentSubject = z.enum([
   'new_rule',
   'supersede',
   'objection',
   'requirement_change',
+  'check_failure',
 ]);
 export type NormJudgmentSubject = z.infer<typeof NormJudgmentSubject>;
 
@@ -891,6 +894,7 @@ export const NORM_JUDGMENT_SUBJECT_LABELS = {
   supersede: '모순 판단',
   objection: '이의 판단',
   requirement_change: '요구사항 변경 판단',
+  check_failure: '검사 실패 판단',
 } as const satisfies Record<NormJudgmentSubject, string>;
 
 /** 판단 결과 표시명 (화면의 변경 이력). */
@@ -903,7 +907,7 @@ export const NORM_JUDGMENT_VERDICT_LABELS = {
 } as const satisfies Record<NormJudgmentVerdict, string>;
 
 /**
- * 판단 없이 끝난 이의의 사정 (`undecided.endReason`의 값, M7-11 · ADR-115): 판단 세션의 종료 사유, 세션을 열지 못한 사유, 재기동으로
+ * 판단 없이 끝난 이의 · 검사 실패 판단의 사정 (`undecided.endReason`의 값, M7-11 · ADR-115, M7-12 · ADR-118): 판단 세션의 종료 사유, 세션을 열지 못한 사유, 재기동으로
  * 끊김. 저장 칸은 문자열 그대로 받는다(넓히기만). 화면은 이 표의 표시명으로 그리고 모르는 값은 날 값을 내지 않는다.
  */
 export const NormUndecidedReason = z.enum([
@@ -931,6 +935,37 @@ export type NormJudgmentVerdict = z.infer<typeof NormJudgmentVerdict>;
 export const NormJudgmentRuleRef = z.strictObject({ id: Ulid, displayId: displayIdSchema('RULE') });
 export type NormJudgmentRuleRef = z.infer<typeof NormJudgmentRuleRef>;
 
+/** 검사 실패 판단에 싣는 케이스 이름 수 상한 (규칙 하나, M7-12 · ADR-118). 규범 입력의 규칙당 케이스 수와 같다. */
+export const NORM_CHECK_CASES_MAX = 20;
+/** 검사 실패 판단에 싣는 케이스 이름 하나의 상한 (저장 원문 기준 UTF-16 코드 단위). 규범 입력의 케이스 이름 상한과 같다. */
+export const NORM_CHECK_CASE_NAME_MAX = 200;
+
+/**
+ * 검사 실패 판단의 원인 (주제 `check_failure`에만, M7-12 #224 · ADR-118). 원인은 규범 변경 기록이 아니라 검사 단계 · 병합 재검사의
+ * 판정이라 그 단계 시도와 판정 내용 가운데 판단 입력이 된 것만 싣는다(ADR-100 A5: 실패한 규칙 ID와 케이스 이름뿐). 실패한 규칙은
+ * 기록의 대상(`targetRef`), 실행은 기록의 연결 실행이다.
+ * - `stage`: 검사 단계(`check`) 또는 병합 재검사(`merge_recheck`), `stepId`: 그 단계 시도
+ * - `targets`: 그 실행의 대상 규칙 (판단의 다른 쪽, 1개 이상 · 중복 없음)
+ * - `cases`: 실패한 케이스 이름 가운데 그 규칙의 인수 테스트 파일에 적힌 이름 (원문을 {@link NORM_CHECK_CASE_NAME_MAX}에서 자른
+ *   것, 최대 {@link NORM_CHECK_CASES_MAX}개). 저장은 원문이고 응답은 표시 값이라 칸의 상한은 표시 값 상한까지 받는다
+ * - `unknownCases`: 인수 테스트 파일에서 찾지 못한 실패 케이스 수 (이름은 싣지 않는다), `omittedCases`: 상한 때문에 빠진 수
+ */
+export const NormCheckFailureCause = z.strictObject({
+  stage: z.enum(['check', 'merge_recheck']),
+  stepId: Ulid,
+  targets: z
+    .array(NormJudgmentRuleRef)
+    .min(1)
+    .refine(
+      (rules) => new Set(rules.map((rule) => rule.id)).size === rules.length,
+      '대상 규칙이 중복됐습니다',
+    ),
+  cases: z.array(z.string().min(1).max(4000)).max(NORM_CHECK_CASES_MAX),
+  unknownCases: NonNegativeInt,
+  omittedCases: NonNegativeInt,
+});
+export type NormCheckFailureCause = z.infer<typeof NormCheckFailureCause>;
+
 /** 판단할 때 받은 규범 입력의 수 (효력 있는 전체 · 실은 것, ADR-100 A15). */
 const NormJudgmentInputCount = z
   .strictObject({ total: NonNegativeInt, included: NonNegativeInt })
@@ -951,12 +986,15 @@ export const NormJudgmentDetail = z
     /** 원인 기록 순번 (주제 `objection`이면 그 이의 기록, 필수. M7-11) */
     causeSeq: z.int().positive().optional(),
     /**
-     * 판단 세션이 이 규칙을 판단하지 못하고 끝나 오케스트레이터가 유지로 본 사실 (주제 `objection` · 결과 `upheld` · 주체
-     * 오케스트레이터에만, M7-11). `endReason`은 판단 세션의 종료 사유 또는 세션을 열지 못한 사유
+     * 판단 세션이 이 규칙을 판단하지 못하고 끝나 오케스트레이터가 유지로 본 사실 (주제 `objection` · 결과 `upheld`, 주제
+     * `check_failure` · 결과 `no_contradiction`, 주체 오케스트레이터에만, M7-11 · M7-12). `endReason`은 판단 세션의 종료 사유 또는
+     * 세션을 열지 못한 사유
      */
     undecided: z.strictObject({ endReason: z.string().min(1).max(64) }).optional(),
     /** 원인 요구사항 변경 (주제 `requirement_change`이면 필수, 다른 판단에는 없음. M7-10) */
     requirementChange: NormJudgmentRequirementChange.optional(),
+    /** 검사 실패 판단의 원인 (주제 `check_failure`에만 · 필수, M7-12) */
+    check: NormCheckFailureCause.optional(),
     input: z.strictObject({
       requirements: NormJudgmentInputCount,
       rules: NormJudgmentInputCount,
@@ -1039,19 +1077,43 @@ export const NormJudgmentDetail = z
         path: ['causeSeq'],
       });
     }
-    if (judgment.undecided !== undefined && judgment.verdict !== 'upheld') {
+    // 판단 없음은 이의 · 요구사항 변경 판단의 유지 · 검사 실패 판단의 모순 없음에만 (판단 없음을 폐기 · 모순으로 보지 않는다,
+    // M7-10 · M7-12)
+    if (
+      judgment.undecided !== undefined &&
+      !(
+        (decisionSubject && judgment.verdict === 'upheld') ||
+        (judgment.subject === 'check_failure' && judgment.verdict === 'no_contradiction')
+      )
+    ) {
       ctx.addIssue({
         code: 'custom',
-        message: '판단 없이 끝난 이의는 유지로만 남깁니다 (판단 없음을 폐기로 보지 않는다)',
+        message:
+          '판단 없이 끝난 이의 · 요구사항 변경 판단은 유지로, 검사 실패 판단은 모순 없음으로만 남깁니다 (판단 없음을 폐기 · 모순으로 보지 않는다)',
         path: ['undecided'],
       });
     }
-    if (judgment.undecided !== undefined && !decisionSubject) {
+    // 검사 실패 판단 (M7-12, ADR-118): 원인은 필수이고 그 판단에만. 모순이면 대상 규칙(실행의 대상 규칙)이 `contradicts`다
+    if ((judgment.subject === 'check_failure') !== (judgment.check !== undefined)) {
       ctx.addIssue({
         code: 'custom',
-        message: '판단 없음은 이의 · 요구사항 변경 판단에만 있습니다',
-        path: ['undecided'],
+        message: '검사 실패 판단에는 원인(check)이 필요하고, 다른 판단에는 없습니다',
+        path: ['check'],
       });
+    }
+    if (judgment.subject === 'check_failure' && judgment.check !== undefined) {
+      const targets = judgment.check.targets.map((rule) => rule.id);
+      if (
+        judgment.verdict === 'contradiction' &&
+        (judgment.contradicts.length !== targets.length ||
+          judgment.contradicts.some((rule) => !targets.includes(rule.id)))
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '검사 실패 판단의 모순 대상은 그 실행의 대상 규칙입니다',
+          path: ['contradicts'],
+        });
+      }
     }
   });
 export type NormJudgmentDetail = z.infer<typeof NormJudgmentDetail>;
@@ -1399,22 +1461,27 @@ export const NormChangeEntry = z
         });
       }
     }
-    // 이의 판단: 대상은 판단한 규칙, 연결 실행 필수. 판단 없음은 오케스트레이터만, 판단은 규칙 작성 역할만
+    // 이의 판단 · 검사 실패 판단 (실행 안 판단, M7-11 · M7-12): 대상은 판단한 규칙, 연결 실행 필수. 판단 없음은 오케스트레이터만,
+    // 판단은 규칙 작성 역할만
     const judged = entry.detail.judgment;
-    if (entry.kind === 'judgment' && judged?.subject === 'objection') {
+    if (
+      entry.kind === 'judgment' &&
+      (judged?.subject === 'objection' || judged?.subject === 'check_failure')
+    ) {
       if (entry.targetRef.entity !== 'Rule' || entry.runId === null) {
         ctx.addIssue({
           code: 'custom',
-          message: '이의 판단의 대상은 규칙이고 연결 실행이 필요합니다',
+          message: '실행 안 판단의 대상은 규칙이고 연결 실행이 필요합니다',
           path: ['targetRef'],
         });
       }
     }
-    // 이의 · 요구사항 변경 판단의 주체: 판단 없음은 오케스트레이터만, 판단은 규칙 작성 역할만
+    // 이의 · 요구사항 변경 · 검사 실패 판단의 주체: 판단 없음은 오케스트레이터만, 판단은 규칙 작성 역할만
     if (
       entry.kind === 'judgment' &&
       judged !== undefined &&
-      (RULE_DECISION_SUBJECTS as readonly string[]).includes(judged.subject)
+      ((RULE_DECISION_SUBJECTS as readonly string[]).includes(judged.subject) ||
+        judged.subject === 'check_failure')
     ) {
       const fallback = judged.undecided !== undefined;
       const actorOk = fallback
@@ -1424,7 +1491,7 @@ export const NormChangeEntry = z
         ctx.addIssue({
           code: 'custom',
           message:
-            '이의 · 요구사항 변경 판단의 주체는 규칙 작성 역할이고, 판단 없이 끝난 유지는 오케스트레이터입니다',
+            '이의 · 요구사항 변경 · 검사 실패 판단의 주체는 규칙 작성 역할이고, 판단 없이 끝난 판단은 오케스트레이터입니다',
           path: ['actor'],
         });
       }
@@ -1651,7 +1718,8 @@ export type SessionNormInput = z.infer<typeof SessionNormInput>;
 /**
  * 에이전트 세션 = SDK `query()` 1회 (기획서 3.2, RUN-04). 진행 중이면 종료 사유 · 비용 · 종료 시각이 `null`.
  * 실행 엔진(M1-14, ADR-066)이 세션을 열 때 행을 만들고 끝날 때 결과를 채운다(재기동 뒤 역할별 세션 순번의 근거).
- * 실행 밖 세션(규칙 작성, ADR-062)은 `runId` · `stepId`가 `null`이고 `requirementId`로 대상 요구사항을 가리킨다.
+ * 실행 밖 세션(규칙 작성, ADR-062)은 `runId` · `stepId`가 `null`이고 `requirementId`로 대상 요구사항을 가리킨다. 실행 안 판단
+ * 세션(규칙 작성 역할, ADR-115 · ADR-118)은 판단을 청한 단계 시도에 묶인다(단계 역할과 다르다).
  * `error`는 결과 없이 끝난 세션의 사유 문장(어댑터 오류 · 가드 위반 등).
  * `budget`은 세션을 열 때 어댑터에 넘긴 한도(min(역할 잔여, 실행 잔여), ADR-067). 결과 없이 끝나 비용 · 턴을 모르는
  * 세션은 잔여 한도 계산에서 이 한도를 다 쓴 것으로 본다. 한도 없이 연 세션(실행 밖 세션)은 `null`.

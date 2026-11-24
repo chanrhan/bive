@@ -973,8 +973,10 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
     // 사람의 규칙 진술 편집 뒤 자동 시작 모듈(M7-03, ADR-109)도 자동 시작 항목을 쓴다
     // 테스트 변경 알림 모듈(M7-13, ADR-113)도 그 종류를 쓰고, 확인할 것 목록(M7-13)은 읽는다
     // 이의 기록 모듈(M7-11, ADR-115)은 구현 역할의 이의와 판단 없는 유지를 쓴다 (규칙 · 폐기 · 판정은 쓰지 않는다, 아래 시험)
+    // 검사 실패 판단 모듈(M7-12, ADR-118)은 판단 없는 검사 실패 판단(모순 없음)만 쓴다 (규칙 · 폐기 · 판정은 쓰지 않는다, 아래 시험)
     expect(using(/\.normChanges\.append\(/)).toEqual([
       'norms/agent-rule.ts',
+      'norms/check-contradiction.ts',
       'norms/objection.ts',
       'norms/test-change.ts',
       'runs/auto-start.ts',
@@ -989,6 +991,7 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
       'ipc/norm-change-handlers.ts',
       'ipc/rule-writer-handlers.ts',
       'norms/agent-rule.ts',
+      'norms/check-contradiction.ts',
       'norms/objection.ts',
       'norms/test-change.ts',
       'runs/auto-start.ts',
@@ -1119,12 +1122,61 @@ describe('규칙 폐기 · 대체와 효력 판정의 코드 경로 (M7-09 #221,
       'norms/agent-rule.ts',
       'norms/norm-input.ts',
       'norms/objection.ts',
+      // 기존 규칙 모순으로 끝난 실행의 대상 규칙 다시 시작: 효력 없어진 대상 규칙을 건너뛴다 (M7-12, ADR-118)
+      'runs/auto-start.ts',
       'runs/rule-edit-start.ts',
       'runs/run-service.ts',
       'steps/check.ts',
       'steps/merge.ts',
       'verification/summary.ts',
     ]);
+  });
+});
+
+describe('검사 실패 판단의 코드 경로 (M7-12 #224, ADR-100 B⑧ · A4 · A5, ADR-118, 코드 구조)', () => {
+  const files = () =>
+    sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+  const using = (pattern: RegExp) =>
+    files()
+      .filter((f) => pattern.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+
+  it('검사 실패 판단 모듈은 판단 없는 모순 없음 기록만 쓰고 규칙 · 폐기 · 판정 · 확인 상태 · 파일에 닿지 않으며, 판단 세션을 청하는 곳은 검사 · 병합 실행기가 쓰는 판단 모듈 하나다', () => {
+    const module = fs.readFileSync(path.join(SRC_DIR, 'norms/check-contradiction.ts'), 'utf8');
+    for (const forbidden of [
+      /\.rules\.(create|update|detachFromParent)\(/,
+      /\.ruleRetirements\b/,
+      /\.judgments\.record\(/,
+      /\.confirmations\b/,
+      /\.requirements\.(create|update|softDelete)\(/,
+      /from 'node:fs'/,
+      /agent-rule\.js'/,
+    ]) {
+      expect(forbidden.test(module), String(forbidden)).toBe(false);
+    }
+    expect(
+      module.match(
+        /kind: '(?:created|updated|retired|superseded|judgment|objection|unconfirmed|auto_start|test_changed)'/g,
+      ),
+    ).toEqual(["kind: 'judgment'"]);
+    expect(module.match(/\.normChanges\.append\(/g)).toHaveLength(1);
+    // 판단 없음은 모순 없음으로만 쓴다 (모순 · 폐기로 쓰는 글자가 없다)
+    expect(module).toContain("verdict: 'no_contradiction'");
+    expect(module).not.toMatch(/verdict: 'contradiction'/);
+    // 판단 세션을 청하는 곳: 구현 실행기(이의)와 기존 규칙 판단 모듈(검사 · 병합 재검사)뿐
+    expect(using(/\.judgeNorms\(/)).toEqual(['steps/existing-rule.ts', 'steps/implementation.ts']);
+    expect(using(/\bsettleCheckFailure\(/)).toEqual(['steps/existing-rule.ts']);
+    expect(using(/\bjudgeExistingRuleFailures\(/)).toEqual(['steps/check.ts', 'steps/merge.ts']);
+    // 판단 입력에 실행기 출력 원문을 넣지 않는다 (A5): 판단 모듈 · 판단 프롬프트는 케이스의 메시지 · 실행기 기록 경로를 읽지 않는다
+    const existing = fs.readFileSync(path.join(SRC_DIR, 'steps/existing-rule.ts'), 'utf8');
+    const prompts = fs.readFileSync(path.join(SRC_DIR, 'rule-writer/prompts.ts'), 'utf8');
+    for (const text of [existing, module, prompts]) {
+      expect(text).not.toMatch(/\.message\b|reporterPath|stdout|stderr|caseSummary|judgeSummary/);
+    }
   });
 });
 

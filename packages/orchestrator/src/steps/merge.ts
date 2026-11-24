@@ -18,7 +18,12 @@
 //   직전 병합 시도가 재기동 중단(`interrupted`)일 때만, 기준 브랜치에 이 실행의 BIVE 병합 커밋(트레일러 `Bive-Run` ·
 //   `Bive-Project`, 둘째 부모 = 검사한 커밋)이 있고 그 트리가 첫 부모와 검사한 커밋의 병합 결과(`git merge-tree`)와 같으면
 //   그 커밋으로 `passed`(`recovered: true`)로 마무리한다. 첫 시도 · 트리가 다르면(검사하지 않은 파일) 복구하지 않는다(검토 1회차)
-import type { Rule } from '@bive/shared';
+// - 병합 재검사의 기존 규칙 실패 (M7-12 #224, ADR-100 B⑧ · A4 · A5, ADR-118): 재검사에서 대상이 아닌 효력 있는 규칙만 실패하면(병합은
+//   일어나지 않았다) 관리자가 돌아온 뒤 검사 단계와 같은 판단을 한다(`steps/existing-rule.ts`, 판단 세션은 관리자의 잠금 밖에서
+//   연다). 모순이면 `failed`(`existing_rule_contradiction`), 모순 없음이면 지금처럼 재검사 실패로 끝난다(병합 단계에는 구현 회귀가
+//   없다). 병합 커밋이 기록된 뒤의 실패는 이 판단과 무관하게 `merged`로 끝난다(ADR-091 · ADR-094). 이 실행에 모순 판단이 이미
+//   있으면(재기동 · 재개) 병합하지 않고 끝낸다
+import type { JudgmentResult, Rule } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
@@ -26,6 +31,7 @@ import type { MergeCheck } from '../git/worktree-manager.js';
 import { DEFAULT_INSTALL_TIMEOUT_MS } from '../judge/checkout.js';
 import { retiredTargetDisplayIds, TARGET_RULE_RETIRED } from '../norms/effective.js';
 import { approvedRules } from './check.js';
+import { contradictionHalt, judgeExistingRuleFailures } from './existing-rule.js';
 import {
   createNormGuard,
   DEFAULT_JUDGE_TIMEOUT_MS,
@@ -248,9 +254,18 @@ export const createMergeExecutor =
         headCommit,
       });
 
+    // 모순 판단으로 끝나야 할 실행은 병합하지 않는다 (재기동 · 재개로 종료 처리가 끊긴 경우, ADR-100 A4)
+    const contradicted = contradictionHalt(context);
+    if (contradicted !== null) return contradicted;
     const norms = createNormGuard(context);
     const rules: Rule[] = approvedRules(context);
     let retiredDuringCheck: string[] = [];
+    /** 재검사 판정이 끝났고 통과하지 못한 규칙이 있을 때의 판정 기록 · 인수 테스트 내용 (기존 규칙 판단용) */
+    let failedRecheck: {
+      judgments: JudgmentResult[];
+      rules: Rule[];
+      acceptanceTexts: Readonly<Record<string, string>>;
+    } | null = null;
     let integrity: { moment: 'before_judge' | 'after_judge'; mismatches: NormMismatch[] } | null =
       null;
     let recheck: Record<string, unknown> | null = null;
@@ -266,6 +281,7 @@ export const createMergeExecutor =
             rules.filter((rule) => dirs.includes(rule.displayId)).map((rule) => rule.displayId),
           norms,
           signal: merge.signal,
+          readAcceptanceTexts: true,
         },
         options,
       );
@@ -305,6 +321,17 @@ export const createMergeExecutor =
         retiredDuringCheck.length === 0 &&
         judged.result.status === 'completed' &&
         recorded.every((item) => item.status === 'pass');
+      if (
+        retiredDuringCheck.length === 0 &&
+        judged.result.status === 'completed' &&
+        recorded.some((item) => item.status !== 'pass')
+      ) {
+        failedRecheck = {
+          judgments: recorded,
+          rules: judgedRules,
+          acceptanceTexts: judged.acceptanceTexts ?? {},
+        };
+      }
       recheck = {
         mergeCommit: merge.mergeCommit,
         ruleIds: judged.ruleIds,
@@ -400,6 +427,36 @@ export const createMergeExecutor =
         run: { mergeCommit: result.mergeCommit },
       };
     }
+    // 재검사에서 대상 밖 규칙만 실패했으면 규칙을 맡는 역할의 판단 (병합은 일어나지 않았다, 판단 세션은 관리자의 잠금 밖)
+    const recheckFailure = failedRecheck as {
+      judgments: JudgmentResult[];
+      rules: Rule[];
+      acceptanceTexts: Readonly<Record<string, string>>;
+    } | null;
+    let existingRuleJudgment: Record<string, unknown> | null = null;
+    if (recheckFailure !== null) {
+      const existing = await judgeExistingRuleFailures(context, {
+        stage: 'merge_recheck',
+        ...recheckFailure,
+      });
+      if (existing.kind === 'halt') {
+        const outcome = existing.outcome;
+        return outcome.status === 'halt'
+          ? {
+              ...outcome,
+              exitDetail: {
+                ...(outcome.exitDetail as object),
+                mergeStatus: result.status,
+                mergeReason: result.reason,
+                ...(checked === null ? {} : { recheck: checked }),
+              },
+            }
+          : outcome;
+      }
+      if (existing.kind === 'no_contradiction') {
+        existingRuleJudgment = { ...existing.detail };
+      }
+    }
     let recovery: Record<string, unknown> | null = null;
     if (result.reason === 'no_changes' && resumedAfterInterruption(context)) {
       const recorded = await findRecordedMerge(git, context, headCommit);
@@ -434,5 +491,6 @@ export const createMergeExecutor =
       ...(result.checkDetail === undefined ? {} : { checkDetail: result.checkDetail }),
       ...(result.movedRef === undefined ? {} : { movedRef: result.movedRef }),
       ...(checked === null ? {} : { recheck: checked }),
+      ...(existingRuleJudgment === null ? {} : { existingRuleJudgment }),
     });
   };
