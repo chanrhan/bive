@@ -26,7 +26,7 @@
 //   이의의 같은 규칙에 판단은 1건이다
 // - 요구사항 변경 판단(M7-10 #222, ADR-100 NRM-01 · NRM-02 행 · D5 · D6, ADR-116): 사람이 자식 규칙 있는 요구사항을 고치거나 지우면
 //   재판단 세션이 자식 규칙을 폐기 · 대체 · 유지한다. 판단 기록(주제 `requirement_change`, 원인 = 요구사항 · 변경 종류 · 시각 · 본문
-//   해시)은 이의 판단과 같은 자리(폐기 쪽 쓰기 앞)에 같은 트랜잭션으로 남는다. 같은 변경(요구사항 · 시각)의 같은 규칙에 판단은 1건이고,
+//   해시)은 이의 판단과 같은 자리(폐기 쪽 쓰기 앞)에 같은 트랜잭션으로 남는다. 같은 변경(요구사항 · 종류 · 시각 · 본문 해시)의 같은 규칙에 판단은 1건이고,
 //   판단하지 못한 자식 규칙은 {@link settleRequirementChange}가 오케스트레이터의 유지(`undecided`)로 마무리한다(판단 없음은 폐기가
 //   아니다). 지운 요구사항의 자식 규칙은 대체할 수 없다
 import {
@@ -551,7 +551,10 @@ const writeObjectionJudgment = (
   });
 };
 
-/** 같은 요구사항 변경(요구사항 · 시각)의 그 규칙 판단 기록 (판단 없음 포함). 없으면 `undefined`. */
+/**
+ * 같은 요구사항 변경(요구사항 · 변경 종류 · 시각 · 본문 해시)의 그 규칙 판단 기록 (판단 없음 포함). 없으면 `undefined`. 같은 시각의
+ * 수정 뒤 삭제처럼 시각만 같은 다른 변경은 따로 판단한다 (ADR-116 검토 1회차).
+ */
 const requirementChangeJudgmentOf = (
   store: ProjectStore,
   cause: NormJudgmentRequirementChange,
@@ -559,11 +562,14 @@ const requirementChangeJudgmentOf = (
 ): NormChangeEntry | undefined =>
   store.normChanges.list().find((entry) => {
     const judged = entry.detail.judgment;
+    const change = judged?.requirementChange;
     return (
       entry.kind === 'judgment' &&
       judged?.subject === 'requirement_change' &&
-      judged.requirementChange?.requirement.id === cause.requirement.id &&
-      judged.requirementChange.at === cause.at &&
+      change?.requirement.id === cause.requirement.id &&
+      change.change === cause.change &&
+      change.at === cause.at &&
+      change.textHash === cause.textHash &&
       entry.targetRef.id === ruleId
     );
   });

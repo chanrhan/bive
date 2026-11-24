@@ -35,6 +35,7 @@ import { startOrchestrator, type Orchestrator } from '../src/orchestrator.js';
 import {
   NO_CONTRADICTION_REASON,
   NormRetirementInputError,
+  quotesRule,
   REQUIREMENT_CHANGE_UNDECIDED_REASON,
   retireAgentRule,
   settleRequirementChange,
@@ -70,6 +71,7 @@ import { whenCondition } from '../../app/src/renderer/src/screens/rules/rulesVie
 // 개발용 CLI 본체 (`cli rpc`, 조회 접미사만 허용). 파이프 연결만 이 시험의 클라이언트로 바꾼다
 import { runCli } from '../../app/src/cli-core.js';
 import { connect, type TestClient } from './helpers/client.js';
+import { seedNormRequirement, seedNormRule } from './helpers/engine-harness.js';
 import { cleanup, makeBiveHome, waitFor } from './helpers/process.js';
 import { iso, type ProjectHarness, startProjectHarness, T0 } from './helpers/project-harness.js';
 
@@ -2524,6 +2526,30 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
     return { requirement, rule1, rule2 };
   };
 
+  /** 자식이 아닌 효력 규칙: 다른 요구사항(REQ-002)의 규칙 RULE-003과 내장 규칙 RULE-004 (검토 1회차 B1 · B2) */
+  const OTHER_GROUNDS = '"version 필드에 배포 버전 문자열을 담는다"는 더 필요 없음';
+  const BUILTIN_GROUNDS = '"그 블록의 공개 API만 쓴다"는 지운 요구사항과 함께 없앤다';
+  const seedOthers = (h: ProjectHarness) =>
+    h.read((store) => {
+      const owner = seedNormRequirement(store, '버전 확인 응답', T0 + 10);
+      const other = seedNormRule(store, {
+        title: '버전 응답',
+        statement:
+          'WHEN 클라이언트가 GET /api/version을 요청하면 THE SYSTEM SHALL 응답 JSON의 version 필드에 배포 버전 문자열을 담는다',
+        parent: owner,
+        at: T0 + 11,
+      });
+      const builtin = seedNormRule(store, {
+        title: '공개 API로만 접근',
+        statement: 'WHEN 모듈이 다른 블록을 가져오면 THE SYSTEM SHALL 그 블록의 공개 API만 쓴다',
+        parent: null,
+        builtin: true,
+        at: T0 + 12,
+      });
+      expect([other.displayId, builtin.displayId]).toEqual(['RULE-003', 'RULE-004']);
+      return { other, builtin };
+    });
+
   /** 요구사항 변경 판단 기록 (순번 순) */
   const changeJudgments = (h: ProjectHarness) =>
     h.read((store) =>
@@ -2731,11 +2757,13 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
     const h = await startHarness();
     await saveSettings(h);
     const { requirement, rule1, rule2 } = await seedChildren(h);
+    // 자식이 아닌 규칙은 실제로 있는 다른 요구사항의 효력 규칙으로 부른다 (없는 규칙이면 대상 확인이 없어도 저장소가 거부한다)
+    const { other } = seedOthers(h);
     h.useScenario(
       ruleWriterScenario([
         { tool: 'uphold_rule', args: { ruleId: 'RULE-001', grounds: UPHOLD } },
         { tool: 'uphold_rule', args: { ruleId: rule1.id, grounds: UPHOLD } },
-        { tool: 'uphold_rule', args: { ruleId: 'RULE-999', grounds: UPHOLD } },
+        { tool: 'uphold_rule', args: { ruleId: 'RULE-003', grounds: UPHOLD } },
       ]),
     );
     await editRequirement(h, requirement.id, BODY_3);
@@ -2763,7 +2791,13 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
         },
       }),
     ]);
-    expect(await effectiveDisplayIds(h)).toEqual(['RULE-001', 'RULE-002']);
+    // 자식이 아닌 RULE-003에는 어떤 판단 기록도 없다
+    expect(
+      h.read((store) =>
+        store.normChanges.list().filter((entry) => entry.targetRef.id === other.id),
+      ),
+    ).toEqual([]);
+    expect(await effectiveDisplayIds(h)).toEqual(['RULE-001', 'RULE-002', 'RULE-003', 'RULE-004']);
     expect(h.read((store) => store.ruleRetirements.list())).toEqual([]);
     expect(h.logs).toContain('재판단 판단 없음 → 유지 (REQ-001, success, 1건)');
   });
@@ -2777,8 +2811,24 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
     readonly opened: boolean;
     readonly prepare?: (h: RuleWriterHarness) => Promise<unknown>;
     readonly secondInit?: (event: Extract<SessionEvent, { type: 'init' }>) => SessionEvent;
+    /** 재판단 세션의 결과 subtype (판단 없이 한도로 끝나는 세션, 없으면 폐기 시나리오) */
+    readonly limitSubtype?: 'error_max_turns' | 'error_max_budget_usd';
   };
   const FAILURES: FailureCase[] = [
+    {
+      name: '턴 한도',
+      endReason: 'error_max_turns',
+      state: 'ended',
+      opened: true,
+      limitSubtype: 'error_max_turns',
+    },
+    {
+      name: '예산 한도',
+      endReason: 'error_max_budget_usd',
+      state: 'ended',
+      opened: true,
+      limitSubtype: 'error_max_budget_usd',
+    },
     {
       name: '세션 가드 위반',
       endReason: 'guard_violation',
@@ -2822,7 +2872,7 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
   ];
 
   it.each(FAILURES)(
-    '수정의 재판단이 $name으로 끝나도 자식 규칙은 모두 판단 없음 → 유지($endReason)로 기록되고 폐기 · 대체되지 않는다',
+    '수정의 재판단이 끝난 사정 [$name · $endReason]: 자식 규칙은 모두 판단 없음 → 유지로 기록되고 폐기 · 대체되지 않는다',
     async (failure) => {
       let inits = 0;
       const h = await startHarness({
@@ -2837,12 +2887,28 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
       await saveSettings(h);
       const { requirement, rule1, rule2 } = await seedChildren(h);
       await failure.prepare?.(h);
-      // 세션이 열려 돌았다면 폐기하려 했을 시나리오 (실패 · 생략이면 아무것도 바뀌지 않아야 한다)
+      // 세션이 열려 돌았다면 폐기하려 했을 시나리오 (실패 · 생략이면 아무것도 바뀌지 않아야 한다). 한도로 끝나는 경우는 판단
+      // 없이 한도 subtype의 결과로 끝나는 세션이다
       h.useScenario(
-        ruleWriterScenario([
-          { tool: 'retire_rule', args: { ruleId: 'RULE-001', grounds: GROUNDS_1 } },
-          { tool: 'retire_rule', args: { ruleId: 'RULE-002', grounds: GROUNDS_2 } },
-        ]),
+        failure.limitSubtype === undefined
+          ? ruleWriterScenario([
+              { tool: 'retire_rule', args: { ruleId: 'RULE-001', grounds: GROUNDS_1 } },
+              { tool: 'retire_rule', args: { ruleId: 'RULE-002', grounds: GROUNDS_2 } },
+            ])
+          : ScenarioSchema.parse({
+              name: 'rule-writer-limit',
+              description: '판단 없이 한도로 끝나는 재판단 세션',
+              roles: {
+                'rule-writer': {
+                  sessions: [
+                    {
+                      turns: [{ message: '자식 규칙을 읽는 중' }],
+                      result: { ...SCENARIO_RESULT, subtype: failure.limitSubtype },
+                    },
+                  ],
+                },
+              },
+            }),
       );
       await editRequirement(h, requirement.id, BODY_3);
       await h.service.whenSettled(h.project.id, requirement.id);
@@ -2932,6 +2998,7 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
     const h = await startHarness();
     await saveSettings(h);
     const { requirement, rule1, rule2 } = await seedChildren(h);
+    const { other, builtin } = seedOthers(h);
     await h.client.call('confirmation.set', {
       projectId: h.project.id,
       target: { entity: 'Rule', id: rule1.id },
@@ -2945,6 +3012,11 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
           args: { ...validArgs(RULE_3), ruleId: 'RULE-001', grounds: GROUNDS_1 },
         },
         { tool: 'propose_rule', args: validArgs(RULE_3) },
+        // 자식이 아닌 규칙(다른 요구사항의 효력 규칙 · 내장 규칙)은 폐기 · 유지할 수 없다. 근거는 인용 검사를 통과하는 글이다
+        // (거부가 인용 검사가 아니라 대상 검사에서 남을 보이려고)
+        { tool: 'retire_rule', args: { ruleId: 'RULE-003', grounds: OTHER_GROUNDS } },
+        { tool: 'retire_rule', args: { ruleId: 'RULE-004', grounds: BUILTIN_GROUNDS } },
+        { tool: 'uphold_rule', args: { ruleId: 'RULE-003', grounds: UPHOLD } },
         { tool: 'retire_rule', args: { ruleId: 'RULE-001', grounds: GROUNDS_1 } },
         {
           tool: 'uphold_rule',
@@ -2958,7 +3030,7 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
     expect(deleted.deletedAt).toBe(iso(T0 + 2000));
     // 응답은 세션을 기다리지 않는다. 세션이 도는 동안 자식 규칙은 효력이 있고(검사 대상) 부모는 해제됐다 (ADR-050)
     await waitFor(() => existsSync(gatePath(h)), 5000, '재판단 세션이 관문에서 대기');
-    expect(await effectiveDisplayIds(h)).toEqual(['RULE-001', 'RULE-002']);
+    expect(await effectiveDisplayIds(h)).toEqual(['RULE-001', 'RULE-002', 'RULE-003', 'RULE-004']);
     expect(h.read((store) => store.rules.get(rule1.id))).toMatchObject({
       parentRequirementId: null,
       parentDetachedAt: iso(T0 + 2000),
@@ -2980,10 +3052,26 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
     expect(record.toolCalls.map((call) => [call.name, call.status, call.reason])).toEqual([
       ['supersede_rule', 'denied', 'invalid_args'],
       ['propose_rule', 'denied', 'invalid_args'],
+      ['retire_rule', 'denied', 'invalid_args'],
+      ['retire_rule', 'denied', 'invalid_args'],
+      ['uphold_rule', 'denied', 'invalid_args'],
       ['retire_rule', 'ok', undefined],
       ['uphold_rule', 'ok', undefined],
       ['uphold_rule', 'denied', 'session_closed'],
     ]);
+    // 이 근거들은 인용 검사를 통과한다: 거부는 대상 검사(자식 규칙만)에서 났다
+    h.read((store) => {
+      for (const [rule, grounds] of [
+        [other, OTHER_GROUNDS],
+        [builtin, BUILTIN_GROUNDS],
+      ] as const) {
+        expect(quotesRule(grounds, [rule.statement]), rule.displayId).toBe(true);
+        expect(store.normChanges.list().filter((entry) => entry.targetRef.id === rule.id)).toEqual(
+          [],
+        );
+        expect(store.ruleRetirements.get(rule.id)).toBeNull();
+      }
+    });
     expect(record.ruleIds).toEqual([]);
     const cause = {
       requirement: { id: requirement.id, displayId: 'REQ-001' },
@@ -3004,7 +3092,8 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
         ['unconfirmed', rule1.id],
         ['judgment', rule2.id],
       ]);
-      expect(store.rules.list()).toHaveLength(2);
+      expect(store.rules.list()).toHaveLength(4);
+      expect(store.ruleRetirements.list().map((row) => row.ruleId)).toEqual([rule1.id]);
       expect(store.rules.get(rule1.id)?.confirmation).toEqual({ state: 'unconfirmed' });
       // 유지된 규칙은 부모 없는 효력 규칙으로 남는다
       expect(store.rules.get(rule2.id)).toMatchObject({
@@ -3016,7 +3105,114 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
       expect.objectContaining({ verdict: 'retired', requirementChange: cause }),
       expect.objectContaining({ verdict: 'upheld', requirementChange: cause }),
     ]);
-    expect(await effectiveDisplayIds(h)).toEqual(['RULE-002']);
+    expect(await effectiveDisplayIds(h)).toEqual(['RULE-002', 'RULE-003', 'RULE-004']);
+  });
+
+  it('수정의 재판단도 자식이 아닌 규칙은 유지할 수 없다: 다른 요구사항의 효력 규칙에 uphold_rule을 부르면 invalid_args이고 판단 기록이 없다 (검토 1회차 B2)', async () => {
+    const h = await startHarness();
+    await saveSettings(h);
+    const { requirement } = await seedChildren(h);
+    const { other } = seedOthers(h);
+    h.useScenario(
+      ruleWriterScenario([
+        { tool: 'uphold_rule', args: { ruleId: 'RULE-003', grounds: UPHOLD } },
+        { tool: 'uphold_rule', args: { ruleId: other.id, grounds: UPHOLD } },
+      ]),
+    );
+    await editRequirement(h, requirement.id, BODY_3);
+    await h.service.whenSettled(h.project.id, requirement.id);
+    expect(
+      lastRecord(h, requirement.id).toolCalls.map((call) => [call.name, call.status, call.reason]),
+    ).toEqual([
+      ['uphold_rule', 'denied', 'invalid_args'],
+      ['uphold_rule', 'denied', 'invalid_args'],
+    ]);
+    expect(
+      h.read((store) =>
+        store.normChanges.list().filter((entry) => entry.targetRef.id === other.id),
+      ),
+    ).toEqual([]);
+    // 자식 규칙 둘은 판단 없음 → 유지
+    expect(changeJudgments(h).map((entry) => entry.actor.kind)).toEqual([
+      'orchestrator',
+      'orchestrator',
+    ]);
+  });
+
+  it('대기하는 사이 고친 본문을 고치기 전 본문으로 되돌리면(A → B → A) 세션을 열지 않고 판단 없음 기록도 남기지 않는다 (검토 1회차 N1)', async () => {
+    const h = await startHarness();
+    await saveSettings(h);
+    const { requirement } = await seedChildren(h);
+    // 앞 세션(다른 요구사항의 규칙 작성)을 관문에 세워 재판단을 대기열에 둔다
+    h.useScenario(ruleWriterScenario([gateTurn]));
+    const blocker = await createRequirement(h, BODY_4);
+    await waitFor(() => existsSync(gatePath(h)), 5000, '앞 세션이 관문에서 대기');
+    h.useScenario(upholdAllScenario(['RULE-001', 'RULE-002']));
+    await editRequirement(h, requirement.id, BODY_2);
+    expect(lastRecord(h, requirement.id)).toMatchObject({ status: 'queued' });
+    await editRequirement(h, requirement.id, BODY_1);
+    rmSync(gatePath(h));
+    await h.service.whenSettled(h.project.id, blocker.id);
+    await h.service.whenSettled(h.project.id, requirement.id);
+    await h.service.idle();
+    expect(h.specs).toHaveLength(2);
+    expect(lastRecord(h, requirement.id)).toMatchObject({
+      status: 'skipped',
+      skipReason: 'requirement_unavailable',
+      error: '고친 본문이 고치기 전 본문과 같아 판단할 변경 없음',
+    });
+    expect(changeJudgments(h)).toEqual([]);
+  });
+
+  it('같은 시각의 수정 뒤 삭제: 두 재판단의 판단 없음 기록이 겹치지 않고 각각 남는다 (원인 키 = 요구사항 · 변경 종류 · 시각 · 본문 해시, 검토 1회차 N2)', async () => {
+    const h = await startHarness();
+    await saveSettings(h);
+    const { requirement, rule1, rule2 } = await seedChildren(h);
+    await h.client.call('settings.update', {
+      projectId: h.project.id,
+      patch: { dailyBudgetUsd: 0 },
+      author: human,
+    });
+    h.clock.now = T0 + 7000;
+    await editRequirement(h, requirement.id, BODY_2);
+    await deleteRequirement(h, requirement.id);
+    await h.service.idle();
+    expect(
+      changeJudgments(h).map((entry) => [
+        entry.targetRef.id,
+        entry.detail.judgment?.requirementChange?.change,
+        entry.detail.judgment?.requirementChange?.at,
+        entry.detail.judgment?.undecided?.endReason,
+      ]),
+    ).toEqual([
+      [rule1.id, 'updated', iso(T0 + 7000), 'project_daily_budget_exceeded'],
+      [rule2.id, 'updated', iso(T0 + 7000), 'project_daily_budget_exceeded'],
+      [rule1.id, 'deleted', iso(T0 + 7000), 'project_daily_budget_exceeded'],
+      [rule2.id, 'deleted', iso(T0 + 7000), 'project_daily_budget_exceeded'],
+    ]);
+  });
+
+  it('부모가 있는 내장 규칙은 자식이어도 재판단 대상이 아니다: 자식이 내장 규칙뿐인 요구사항을 고쳐도 세션이 뜨지 않는다 (검토 1회차 N3)', async () => {
+    const h = await startHarness();
+    await saveSettings(h);
+    const { requirement, builtin } = h.read((store) => {
+      const owner = seedNormRequirement(store, BODY_1, T0);
+      const rule = seedNormRule(store, {
+        title: '공개 API로만 접근',
+        statement: 'WHEN 모듈이 다른 블록을 가져오면 THE SYSTEM SHALL 그 블록의 공개 API만 쓴다',
+        parent: owner,
+        builtin: true,
+        at: T0 + 1,
+      });
+      return { requirement: owner, builtin: rule };
+    });
+    expect(builtin).toMatchObject({ builtin: true, parentRequirementId: requirement.id });
+    await editRequirement(h, requirement.id, BODY_2);
+    await h.service.idle();
+    expect(h.specs).toEqual([]);
+    expect(h.service.recordsFor(h.project.id, requirement.id)).toEqual([]);
+    expect(h.logs.some((line) => line.startsWith('재판단'))).toBe(false);
+    expect(changeJudgments(h)).toEqual([]);
   });
 
   it('삭제의 재판단이 생략(하루 한도) · 실패(가드 위반)하면 지금의 부모 해제만 남는다: 자식 규칙은 효력 그대로 · 부모 없음, 판단 없음 → 유지 기록, 생략은 그 요구사항의 시도 기록(상태 줄 조회)에 남는다', async () => {

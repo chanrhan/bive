@@ -891,6 +891,18 @@ export class RuleWriterService implements RuleWriterLauncher {
     const rejudge = this.#rejudges.get(record.id) ?? null;
     // 재판단이면 원인을 다시 읽은 요구사항으로 바꾼다 (하루 한도 생략의 판단 없음도 그 변경의 것이다)
     if (rejudge !== null) rejudge.cause = requirementChangeOf(requirement, rejudge.change);
+    // 대기하는 사이 고치기 전 본문으로 되돌렸으면(A → B → A) 판단할 변경이 없다: 세션을 열지 않고 판단 없음 기록도 남기지 않는다
+    if (rejudge?.change === 'updated' && rejudge.previousText === requirement.text) {
+      rejudge.settled = true;
+      const detail = '고친 본문이 고치기 전 본문과 같아 판단할 변경 없음';
+      record.status = 'skipped';
+      record.skipReason = 'requirement_unavailable';
+      record.error = detail;
+      record.endedAt = this.#timestamp();
+      this.#log(`재판단 생략 (${record.requirementDisplayId}, ${detail})`);
+      this.#saveSkip(record, 'requirement_unavailable', detail);
+      return;
+    }
     const { model } = record;
     if (model === null || record.budget === null) {
       this.#end(record, 'error_during_execution', '세션 설정 없음');
