@@ -51,7 +51,7 @@ describe('최근 판정 커밋의 인수 테스트 파일 읽기 (ADR-121)', () 
     const repo = initAcceptanceRepo(makeBiveHome());
     const first = commitAcceptanceFiles(repo, {
       'bive-acceptance/RULE-001/a.acc.ts': caseFileText(['첫 커밋의 이름']),
-      'bive-acceptance/RULE-002/b.acc.ts': caseFileText(['다른 규칙 폴더의 이름']),
+      'bive-acceptance/RULE-002/old.acc.ts': caseFileText(['다른 규칙 폴더의 이름']),
     });
     const second = commitAcceptanceFiles(repo, {
       'bive-acceptance/RULE-002/b.acc.ts': caseFileText(['둘째 커밋의 이름']),
