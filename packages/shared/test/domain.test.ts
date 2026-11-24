@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AgentRole,
   APPROVAL_LOG_GENESIS_HASH,
+  ApprovalAction,
   ApprovalLogEntry,
   Author,
   CODE_OPEN_REASON_LABELS,
@@ -507,6 +508,55 @@ describe('규범', () => {
     ).toBe(true);
     expect(ApprovalLogEntry.safeParse({ ...entry, actor: testWriter }).success).toBe(false);
     expect(ApprovalLogEntry.safeParse({ ...entry, prevHash: 'x' }).success).toBe(false);
+  });
+
+  it('반영 규범(appliedRef)은 제안 승인(approve · approve_edited)에만 있고 그 밖의 행동은 모두 거부한다 (M3-36 #264, ADR-120)', () => {
+    const appliedRef = { entity: 'Rule', id: ID.rule };
+    const base = {
+      seq: 1,
+      at: AT,
+      actor: human,
+      targetRef: { entity: 'Proposal', id: ID.proposal },
+      clientId: 'pipe-1',
+      prevHash: APPROVAL_LOG_GENESIS_HASH,
+      hash: 'f'.repeat(64),
+    };
+    const diff = { before: { text: 'a' }, after: { text: 'b' } };
+    const ruleDiff = {
+      before: { title: 'a', statement: 'WHEN a THE SYSTEM SHALL b' },
+      after: { title: 'b', statement: 'WHEN a THE SYSTEM SHALL b' },
+    };
+    // 행동마다 그 행동의 필수 칸을 갖춘 상세 (반영 규범만 빼면 통과한다)
+    const valid = {
+      approve: { action: 'approve', detail: {} },
+      approve_edited: { action: 'approve_edited', detail: { diff } },
+      reject: { action: 'reject', detail: { reason: '범위 밖' } },
+      run_start: { action: 'run_start', detail: { ruleIds: [ID.rule] } },
+      provisional_grant: { action: 'provisional_grant', detail: {} },
+      confirm: { action: 'confirm', detail: {}, targetRef: { entity: 'Rule', id: ID.rule } },
+      rule_edit: {
+        action: 'rule_edit',
+        detail: { diff: ruleDiff },
+        targetRef: { entity: 'Rule', id: ID.rule },
+      },
+      contract_edit: { action: 'contract_edit', detail: { diff } },
+    } as const;
+    expect(Object.keys(valid)).toEqual(ApprovalAction.options);
+    for (const [action, row] of Object.entries(valid)) {
+      const entry = { ...base, ...row };
+      expect(ApprovalLogEntry.safeParse(entry).success, action).toBe(true);
+      const withRef = ApprovalLogEntry.safeParse({
+        ...entry,
+        detail: { ...row.detail, appliedRef },
+      });
+      const allowed = action === 'approve' || action === 'approve_edited';
+      expect(withRef.success, action).toBe(allowed);
+      if (!withRef.success) {
+        expect(withRef.error.issues.map((issue) => [issue.path, issue.message])).toEqual([
+          [['detail', 'appliedRef'], '반영 규범은 제안 승인에만 있습니다'],
+        ]);
+      }
+    }
   });
 
   it('확인 기록(confirm)은 요구사항 · 규칙 대상만, 반영 규범 · diff 없음. 직접 편집(rule_edit · contract_edit)은 diff 필수 (ADR-100 A2)', () => {

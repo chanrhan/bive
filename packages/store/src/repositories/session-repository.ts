@@ -7,12 +7,14 @@ import {
   type ModelUsage,
   Session,
   type SessionEndReason,
+  SessionNormInput,
   ToolCall,
   type ToolManifestEntry,
 } from '@bive/shared';
 
 import { withTransaction, type SqliteDatabase } from '../database.js';
 import { ConflictError, NotFoundError } from '../errors.js';
+import { warnOnce } from '../read-warnings.js';
 
 /**
  * 새 세션. 결과 필드는 `end`가 채운다. `budget`은 어댑터에 넘긴 한도(실행 세션, ADR-067), `normInput`은 작업 지시에 실은
@@ -116,8 +118,28 @@ const toSessionRow = (session: Session): SessionRow => ({
   ended_at: session.endedAt,
 });
 
-const toSession = (row: SessionRow): Session =>
-  Session.parse({
+/**
+ * 저장된 규범 입력 기록 (ADR-108). 저장 형식(JSON · `SessionNormInput`)에 맞지 않으면(저장소 밖에서 고친 행) `null`로 읽고
+ * `unreadable`을 알린다: 기록 하나가 그 세션을 읽는 `run.get` · 하루 예산 합산 · 재기동 복구 전체를 실패시키지 않게 한다
+ * (ADR-120). 비용 · 한도 등 다른 칸은 그대로 읽으므로 합산에서 세션이 빠지지 않는다. 저장된 값은 바꾸지 않는다(칸은 바꿀 수 없다).
+ */
+const storedNormInput = (raw: string | null): { value: unknown; unreadable: boolean } => {
+  if (raw === null) return { value: null, unreadable: false };
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { value: null, unreadable: true };
+  }
+  return SessionNormInput.safeParse(value).success
+    ? { value, unreadable: false }
+    : { value: null, unreadable: true };
+};
+
+const toSession = (row: SessionRow, onUnreadableNormInput: (row: SessionRow) => void): Session => {
+  const normInput = storedNormInput(row.norm_input);
+  if (normInput.unreadable) onUnreadableNormInput(row);
+  return Session.parse({
     id: row.id,
     runId: row.run_id,
     stepId: row.step_id,
@@ -136,12 +158,13 @@ const toSession = (row: SessionRow): Session =>
       row.budget_max_usd === null && row.budget_max_turns === null
         ? null
         : { maxBudgetUsd: row.budget_max_usd, maxTurns: row.budget_max_turns },
-    normInput: row.norm_input === null ? null : (JSON.parse(row.norm_input) as unknown),
+    normInput: normInput.value,
     tools: JSON.parse(row.tools) as unknown,
     mcpServers: JSON.parse(row.mcp_servers) as unknown,
     startedAt: row.started_at,
     endedAt: row.ended_at,
   });
+};
 
 const toToolCall = (row: ToolCallRow): ToolCall =>
   ToolCall.parse({
@@ -166,6 +189,7 @@ export const JUDGMENT_SESSION_ROLE = 'rule-writer';
 
 export class SessionRepository {
   readonly #db: SqliteDatabase;
+  readonly #projectId: string | null;
   readonly #insert;
   readonly #update;
   readonly #select;
@@ -181,8 +205,10 @@ export class SessionRepository {
   readonly #selectCalls;
   readonly #selectCallsLimited;
 
-  constructor(db: SqliteDatabase) {
+  /** `projectId`는 경고 문장에만 쓴다 (프로젝트 저장소가 넘긴다). */
+  constructor(db: SqliteDatabase, projectId: string | null = null) {
     this.#db = db;
+    this.#projectId = projectId;
     this.#insert = db.prepare<[SessionRow]>(
       `INSERT INTO sessions (${SESSION_COLUMNS}) VALUES (@id, @run_id, @step_id, @requirement_id, @role, @model,
        @sdk_session_id, @work_dir, @end_reason, @error, @total_cost_usd, @num_turns, @model_usage,
@@ -305,22 +331,22 @@ export class SessionRepository {
 
   get(id: string): Session | null {
     const row = this.#select.get(id);
-    return row === undefined ? null : toSession(row);
+    return row === undefined ? null : this.#toSession(row);
   }
 
   /** 실행의 세션을 시작 순으로. */
   listByRun(runId: string): Session[] {
-    return this.#selectByRun.all(runId).map(toSession);
+    return this.#selectByRun.all(runId).map(this.#toSession);
   }
 
   /** 끝나지 않은 세션 전부 (시작 순). 재기동 때 앞 프로세스가 남긴 세션을 닫는 데 쓴다. */
   listUnended(): Session[] {
-    return this.#selectUnended.all().map(toSession);
+    return this.#selectUnended.all().map(this.#toSession);
   }
 
   /** 실행 밖 세션 포함, 요구사항을 대상으로 한 세션 (시작 순). */
   listByRequirement(requirementId: string): Session[] {
-    return this.#selectByRequirement.all(requirementId).map(toSession);
+    return this.#selectByRequirement.all(requirementId).map(this.#toSession);
   }
 
   /**
@@ -335,7 +361,7 @@ export class SessionRepository {
     const upper = new Date(to + day).toISOString().slice(0, 10);
     return this.#selectStartedAround
       .all(lower, upper)
-      .map(toSession)
+      .map(this.#toSession)
       .filter((session) => {
         const at = Date.parse(session.startedAt);
         return at >= from && at < to;
@@ -400,6 +426,16 @@ export class SessionRepository {
     if (!Number.isInteger(limit) || limit < 0) throw new RangeError('limit은 0 이상 정수');
     return this.#selectCallsLimited.all(runId, limit).map(toToolCall);
   }
+
+  readonly #toSession = (row: SessionRow): Session =>
+    toSession(row, (unreadable) => {
+      const project = this.#projectId ?? '알 수 없음';
+      warnOnce(
+        `sessions.norm_input:${project}:${unreadable.id}`,
+        '1',
+        `세션 기록의 규범 입력 1건이 저장 형식에 맞지 않아 비워 읽음 (프로젝트 ${project})`,
+      );
+    });
 
   #patch(id: string, patch: Partial<Session>): Session {
     return withTransaction(this.#db, () => {
