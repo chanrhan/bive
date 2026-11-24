@@ -1,7 +1,7 @@
 // 개발용 CLI의 블록 선언 저장 · 예제 블록 선언 (M3-01 #46 수용 기준 4, NRM-09 · ADR-005 · ADR-122).
 // 제한: 실제 pnpm · 오케스트레이터를 띄우는 묶음은 60초(cli.test.ts와 같다, #122).
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -140,7 +140,8 @@ describe('예제 블록 선언이 픽스처에 맞는다 (fixtures/blocks/sample
       },
     )
       .split('\0')
-      .filter((file) => file !== '');
+      // 지워진(추적만 남은) 파일은 빼고 지금 있는 파일만
+      .filter((file) => file !== '' && existsSync(path.join(FIXTURE, file)));
 
   it('스키마 · 저장 규칙을 지나고 auth는 위험도 high, lib는 low다', () => {
     const declaration = BlockDeclaration.parse(JSON.parse(readFileSync(EXAMPLE, 'utf8')));
