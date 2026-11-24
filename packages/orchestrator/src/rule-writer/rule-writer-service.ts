@@ -87,6 +87,11 @@ import {
   upholdAgentRule,
 } from '../norms/agent-rule.js';
 import {
+  type CaseNameFilter,
+  latestJudgedCaseFilter,
+  NO_KNOWN_CASES,
+} from '../norms/case-names.js';
+import {
   collectNormInput,
   effectiveRules,
   type NormInput,
@@ -298,6 +303,8 @@ interface JudgmentSession {
   readonly context:
     { readonly objection: AgentObjectionJudgment } | { readonly check: AgentCheckJudgment };
   readonly normInput: NormInputSummary;
+  /** 규범 자료 · 인용 출처의 케이스 이름 기준 (M3-37, ADR-121) */
+  readonly isKnownCase: CaseNameFilter;
   tools: FixedToolExecutor | null;
 }
 
@@ -395,6 +402,11 @@ export class RuleWriterService implements RuleWriterLauncher {
   readonly #pending = new Map<string, PendingRejudge>();
   /** 기록 ID → 세션 시작 때 읽은 요구사항 본문 (접어 둔 재판단을 띄울지 비교한다) */
   readonly #usedText = new Map<string, string>();
+  /**
+   * 기록 ID → 세션 시작 때 만든 케이스 이름 기준 (규범 자료와 폐기 · 대체 근거의 인용 출처가 같은 함수를 쓴다, M3-37 · ADR-121).
+   * 없으면 아무 이름도 모른다
+   */
+  readonly #caseFilters = new Map<string, CaseNameFilter>();
   readonly #controllers = new Set<AbortController>();
   /** 세션을 하나씩 돌리는 대기열 */
   #chain: Promise<void> = Promise.resolve();
@@ -979,8 +991,11 @@ export class RuleWriterService implements RuleWriterLauncher {
     try {
       // rule-writer는 파일 도구가 없으므로 작업 폴더는 비어 있다 (ADR-024 허용 목록 방식)
       mkdirSync(workDir, { recursive: true, mode: 0o700 });
-      // 효력 있는 규범은 작업 지시로만 준다 (도구 목록은 그대로, ADR-100 K1 · D4). 읽지 못하면 세션을 열지 않는다
-      const norms = this.#readNormInput(record, requirement, rejudge);
+      // 효력 있는 규범은 작업 지시로만 준다 (도구 목록은 그대로, ADR-100 K1 · D4). 읽지 못하면 세션을 열지 않는다. 케이스
+      // 이름은 최근 판정 커밋의 인수 테스트 파일에 적힌 것만 싣고 인용 출처로 쓴다 (M3-37, ADR-121)
+      const isKnownCase = await this.#caseFilter(record.projectId);
+      this.#caseFilters.set(record.id, isKnownCase);
+      const norms = this.#readNormInput(record, requirement, rejudge, isKnownCase);
       const prompt =
         rejudge === null
           ? ruleWriterTaskPrompt(requirement, norms)
@@ -1170,13 +1185,18 @@ export class RuleWriterService implements RuleWriterLauncher {
     record: RuleWriterSessionRecord,
     requirement: RuleWriterStartInput['requirement'],
     rejudge: RejudgeContext | null,
+    isKnownCase: CaseNameFilter,
   ): NormInput {
     // 재판단은 자식 규칙도 초점이다 (지운 요구사항은 효력이 없어 자료에 없다)
     const norms = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
-      collectNormInput(store, {
-        requirementIds: rejudge?.change === 'deleted' ? [] : [requirement.id],
-        ruleIds: rejudge?.rules.map((rule) => rule.id) ?? [],
-      }),
+      collectNormInput(
+        store,
+        {
+          requirementIds: rejudge?.change === 'deleted' ? [] : [requirement.id],
+          ruleIds: rejudge?.rules.map((rule) => rule.id) ?? [],
+        },
+        { isKnownCase },
+      ),
     );
     record.normInput = normInputRecord(norms);
     if (rejudge !== null) rejudge.normInput = norms.summary;
@@ -1185,6 +1205,29 @@ export class RuleWriterService implements RuleWriterLauncher {
       `규칙 작성 규범 입력${truncated} (${record.requirementDisplayId}, ${normInputSummaryText(norms.summary)})`,
     );
     return norms;
+  }
+
+  /** 세션의 케이스 이름 기준 (세션 시작 때 만든 것, 없으면 아무 이름도 모른다). */
+  #caseFilterOf(record: RuleWriterSessionRecord): CaseNameFilter {
+    return this.#caseFilters.get(record.id) ?? NO_KNOWN_CASES;
+  }
+
+  /**
+   * 케이스 이름 기준 (M3-37, ADR-121): 규칙마다 최근 판정 커밋의 인수 테스트 파일(프로젝트 git 객체)과 대조한다. 프로젝트 폴더가
+   * 없으면 아무 이름도 모른다.
+   * @throws 저장소를 읽지 못함
+   */
+  async #caseFilter(projectId: string): Promise<CaseNameFilter> {
+    const rootPath = withRegisteredProjectStore(
+      this.#biveHome,
+      projectId,
+      (store) => store.getProject()?.rootPath ?? null,
+    );
+    if (rootPath === null) return NO_KNOWN_CASES;
+    return latestJudgedCaseFilter(
+      (fn) => withRegisteredProjectStore(this.#biveHome, projectId, fn),
+      rootPath,
+    );
   }
 
   /** 세션 기록을 프로젝트 저장소에 남긴다 (실패는 로그만). 세션 행을 만든 기록은 `#persisted`에 둔다. */
@@ -1218,6 +1261,7 @@ export class RuleWriterService implements RuleWriterLauncher {
   }
 
   #end(record: RuleWriterSessionRecord, endReason: SessionEndReason, detail: string | null): void {
+    this.#caseFilters.delete(record.id);
     record.status = 'ended';
     record.endReason = endReason;
     record.error = detail;
@@ -1383,6 +1427,7 @@ export class RuleWriterService implements RuleWriterLauncher {
             grounds: input.grounds,
             author: { kind: 'agent', role: RULE_WRITER_ROLE },
             sessionId: record.id,
+            isKnownCase: this.#caseFilterOf(record),
           },
           { now: this.#now },
         ),
@@ -1425,6 +1470,7 @@ export class RuleWriterService implements RuleWriterLauncher {
               normInput,
               ruleId,
               grounds,
+              isKnownCase: this.#caseFilterOf(record),
             },
             { now: this.#now, newId: this.#newId },
           ),
@@ -1551,6 +1597,7 @@ export class RuleWriterService implements RuleWriterLauncher {
             author: { kind: 'agent', role: RULE_WRITER_ROLE },
             sessionId: record.id,
             requirementChange: judgment,
+            isKnownCase: this.#caseFilterOf(record),
           },
           { now: this.#now },
         ),
@@ -1599,6 +1646,7 @@ export class RuleWriterService implements RuleWriterLauncher {
             ruleId,
             grounds,
             requirementChange: judgment,
+            isKnownCase: this.#caseFilterOf(record),
           },
           { now: this.#now, newId: this.#newId },
         ),
@@ -1666,9 +1714,16 @@ export class RuleWriterService implements RuleWriterLauncher {
     const id = this.#newId();
     const workDir = path.join(this.#biveHome, 'work', request.projectId, 'sessions', id);
     let prepared;
+    let isKnownCase: CaseNameFilter;
     try {
+      // 케이스 이름의 기준: 검사 실패 판단은 판정한 체크아웃의 인수 테스트 파일, 이의 판단은 규칙마다 최근 판정 커밋의 파일
+      // (규범 자료와 인용 출처가 같은 함수를 쓴다, M3-37 · ADR-121)
+      isKnownCase =
+        cause.kind === 'check_failure'
+          ? cause.isKnownCase
+          : await this.#caseFilter(request.projectId);
       prepared = withRegisteredProjectStore(this.#biveHome, request.projectId, (store) =>
-        this.#prepareJudgment(store, request, id, workDir),
+        this.#prepareJudgment(store, request, id, workDir, isKnownCase),
       );
     } catch (error) {
       this.#log(`판단 세션 시작 실패 (${label}): ${errorMessage(error)}`);
@@ -1700,6 +1755,7 @@ export class RuleWriterService implements RuleWriterLauncher {
               },
             },
       normInput: norms.summary,
+      isKnownCase,
       tools: null,
     };
     const controller = new AbortController();
@@ -1852,6 +1908,7 @@ export class RuleWriterService implements RuleWriterLauncher {
     request: NormJudgeRequest,
     id: string,
     workDir: string,
+    isKnownCase: CaseNameFilter,
   ):
     | Extract<NormJudgeOutcome, { status: 'not_opened' }>
     | {
@@ -1909,18 +1966,19 @@ export class RuleWriterService implements RuleWriterLauncher {
     const rules = promptRules(request.ruleIds);
     const runTargets = store.runs.get(request.run.id)?.targetRuleIds ?? [];
     const targets = cause.kind === 'check_failure' ? promptRules(runTargets) : [];
-    // 검사 실패 판단: 초점은 두 쪽 규칙, 케이스 이름은 인수 테스트 파일에 적힌 것만 싣는다 (ADR-100 A5, ADR-118)
-    const norms =
-      cause.kind === 'check_failure'
-        ? collectNormInput(
-            store,
-            {
-              requirementIds: [],
-              ruleIds: [...targets.map((rule) => rule.id), ...request.ruleIds],
-            },
-            { isKnownCase: cause.isKnownCase },
-          )
-        : collectNormInput(store, { requirementIds: [], ruleIds: request.ruleIds });
+    // 검사 실패 판단의 초점은 두 쪽 규칙. 케이스 이름은 두 원인 모두 인수 테스트 파일에 적힌 것만 싣는다 (ADR-100 A5, ADR-118,
+    // ADR-121)
+    const norms = collectNormInput(
+      store,
+      {
+        requirementIds: [],
+        ruleIds:
+          cause.kind === 'check_failure'
+            ? [...targets.map((rule) => rule.id), ...request.ruleIds]
+            : request.ruleIds,
+      },
+      { isKnownCase },
+    );
     // 세션 행은 이 실행 · 판단을 청한 단계 시도에 묶는다(실행 안 판단 세션, 저장소가 규칙 작성 역할만 단계 역할과 달라도 받는다):
     // 하루 합계와 실행 합계 모두에 들고 `run.get`의 세션 목록에 나온다. 재기동 때는 그 실행의 세션으로 닫힌다 (M7-12, ADR-118)
     store.sessions.start({
@@ -2005,6 +2063,7 @@ export class RuleWriterService implements RuleWriterLauncher {
             author: { kind: 'agent', role: RULE_WRITER_ROLE },
             sessionId: session.id,
             ...session.context,
+            isKnownCase: session.isKnownCase,
           },
           { now: this.#now },
         ),
@@ -2047,6 +2106,7 @@ export class RuleWriterService implements RuleWriterLauncher {
             ruleId,
             grounds,
             ...session.context,
+            isKnownCase: session.isKnownCase,
           },
           { now: this.#now, newId: this.#newId },
         ),

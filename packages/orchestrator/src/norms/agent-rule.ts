@@ -46,6 +46,7 @@ import {
 import type { ProjectStore } from '@bive/store';
 
 import { releaseConfirmation } from '../confirmations/confirmation-service.js';
+import { type CaseNameFilter, NO_KNOWN_CASES } from './case-names.js';
 import {
   checkFailureCause,
   checkJudgmentsOf,
@@ -329,9 +330,15 @@ export const quotesRule = (
   return !uniqueExists && sharedQuoted;
 };
 
-/** 인용 대조에 쓰는 규칙의 글: 진술 · 최근 판정의 케이스 이름, 각각 원문과 규범 입력의 표시 값. */
-const quoteSources = (store: ProjectStore, rule: Rule): string[] => {
-  const names = store.judgments.latestByRule(rule.id)?.cases.map((testCase) => testCase.name) ?? [];
+/**
+ * 인용 대조에 쓰는 규칙의 글: 진술 · 최근 판정의 케이스 이름, 각각 원문과 규범 입력의 표시 값. 케이스 이름은 규범 자료와 같은
+ * 기준(`isKnownCase`, 그 규칙의 인수 테스트 파일에 적힌 이름)을 지난 것만 쓴다: 모르는 이름은 인용 출처가 될 수 없다(M3-37,
+ * ADR-121).
+ */
+const quoteSources = (store: ProjectStore, rule: Rule, isKnownCase: CaseNameFilter): string[] => {
+  const names = (
+    store.judgments.latestByRule(rule.id)?.cases.map((testCase) => testCase.name) ?? []
+  ).filter((name) => isKnownCase(rule.displayId, name));
   return [
     rule.statement,
     displayText(rule.statement, NORM_INPUT_LIMITS.ruleStatement).text,
@@ -371,12 +378,17 @@ const resolveTarget = (store: ProjectStore, given: string): Rule => {
 };
 
 /** @throws {NormRetirementInputError} 근거가 대상 규칙의 글을 인용하지 않음 */
-const assertQuoted = (store: ProjectStore, rule: Rule, grounds: string): void => {
-  // 고유 조각의 기준: 효력 있는 다른 규칙의 글 (ADR-115)
+const assertQuoted = (
+  store: ProjectStore,
+  rule: Rule,
+  grounds: string,
+  isKnownCase: CaseNameFilter,
+): void => {
+  // 고유 조각의 기준: 효력 있는 다른 규칙의 글 (ADR-115). 다른 규칙의 케이스 이름도 같은 기준으로 거른다
   const others = effectiveRules(store)
     .filter((other) => other.id !== rule.id)
-    .flatMap((other) => quoteSources(store, other));
-  if (!quotesRule(grounds, quoteSources(store, rule), others)) {
+    .flatMap((other) => quoteSources(store, other, isKnownCase));
+  if (!quotesRule(grounds, quoteSources(store, rule, isKnownCase), others)) {
     throw new NormRetirementInputError(
       'invalid_args',
       `grounds가 ${rule.displayId}의 진술이나 최근 판정의 인수 테스트 케이스 이름을 인용하지 않음 (EARS 틀 글자 · 공백을 뺀 연속 ${String(MIN_QUOTE_LENGTH)}자 이상을 글자 그대로 옮긴다. 효력 있는 다른 규칙에도 있는 조각은 세지 않는다)`,
@@ -475,6 +487,11 @@ export interface AgentRetireInput {
   readonly check?: AgentCheckJudgment;
   /** 요구사항 변경 판단이면 그 원인 (M7-10, ADR-116). `objection`과 함께 줄 수 없다 */
   readonly requirementChange?: AgentRequirementChangeJudgment;
+  /**
+   * 인용 출처로 쓸 케이스 이름의 기준 (세션이 받은 규범 자료와 같은 `knownCaseMatcher`, M3-37 · ADR-121). 없으면 케이스 이름을
+   * 인용 출처로 쓰지 않는다(진술만)
+   */
+  readonly isKnownCase?: CaseNameFilter;
 }
 
 /** 요구사항 변경 재판단 세션의 판단 문맥 (M7-10, ADR-116). */
@@ -759,7 +776,7 @@ export const retireAgentRule = (
   assertOneCause(input);
   return store.transaction(() => {
     const rule = resolveTarget(store, input.ruleId);
-    assertQuoted(store, rule, input.grounds);
+    assertQuoted(store, rule, input.grounds, input.isKnownCase ?? NO_KNOWN_CASES);
     const at = new Date(clock.now()).toISOString();
     const runJudgment = runJudgmentOf(input);
     // 이의 · 검사 실패 · 요구사항 변경 판단은 폐기 쪽 쓰기 앞에 둔다 (폐기 기록 → 폐기 행 → 확인 풀림의 순서 사이에 끼우지 않는다,
@@ -801,6 +818,11 @@ export interface AgentSupersedeInput extends AgentRuleInput {
   readonly check?: AgentCheckJudgment;
   /** 요구사항 변경 판단이면 그 원인 (M7-10, ADR-116). 삭제의 판단은 대체할 수 없다 */
   readonly requirementChange?: AgentRequirementChangeJudgment;
+  /**
+   * 인용 출처로 쓸 케이스 이름의 기준 (세션이 받은 규범 자료와 같은 `knownCaseMatcher`, M3-37 · ADR-121). 없으면 케이스 이름을
+   * 인용 출처로 쓰지 않는다(진술만)
+   */
+  readonly isKnownCase?: CaseNameFilter;
 }
 
 export interface AgentSupersedeResult extends AgentRuleResult {
@@ -833,7 +855,7 @@ export const supersedeAgentRule = (
   return store.transaction(() => {
     // 대상 · 인용 · 모순 대상은 새 규칙을 만들기 전에 확인한다 (같은 호출이 만들 규칙은 대상이 될 수 없다)
     const target = resolveTarget(store, input.ruleId);
-    assertQuoted(store, target, input.grounds);
+    assertQuoted(store, target, input.grounds, input.isKnownCase ?? NO_KNOWN_CASES);
     const others = resolveContradicts(store, input.contradiction, target);
     const at = new Date(clock.now()).toISOString();
     const runJudgment = runJudgmentOf(input);

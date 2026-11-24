@@ -23,6 +23,7 @@ import {
   SDK_DENIED_REASON,
   sdkToolName,
 } from '../src/agent/claude-sdk-adapter.js';
+import { NO_KNOWN_CASES } from '../src/norms/case-names.js';
 import { collectNormInput } from '../src/norms/norm-input.js';
 import { RULE_WRITER_SYSTEM_PROMPT, ruleWriterTaskPrompt } from '../src/rule-writer/prompts.js';
 import { BIVE_MCP_SERVER, roleToolNames } from '../src/tools/definitions.js';
@@ -391,7 +392,11 @@ describe('실제 CLI에 실리는 규칙 작성 작업 지시 (M7-07 #219, ADR-1
         });
         prompt = ruleWriterTaskPrompt(
           target,
-          collectNormInput(store, { requirementIds: [target.id], ruleIds: [] }),
+          collectNormInput(
+            store,
+            { requirementIds: [target.id], ruleIds: [] },
+            { isKnownCase: NO_KNOWN_CASES },
+          ),
         );
       } finally {
         store.close();
