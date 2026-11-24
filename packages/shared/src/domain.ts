@@ -837,10 +837,17 @@ const NormChangeSeqList = z
  * 판단함. `supersede` = 규칙 작성 역할이 기존 규칙을 대체하며 새 규칙이 그 규칙(과 다른 효력 있는 규칙)과 모순이라고 판단함
  * (M7-09 #221, ADR-112: 결과는 늘 모순이고 대체된 규칙이 `contradicts`의 첫 항목). `objection` = 규칙 작성 역할(또는 판단
  * 없이 끝난 경우의 오케스트레이터)이 구현 역할의 이의(종류 `objection` 기록) 대상 규칙 하나를 폐기 · 대체 · 유지로 판단함
- * (M7-11 #223, ADR-115: 결과는 `upheld` · `retired` · `superseded`, 원인 이의 기록 순번 `causeSeq` 필수). 검사 단계의 기존 규칙
- * 실패(M7-12)는 그 이슈가 값을 더한다(넓히기만).
+ * (M7-11 #223, ADR-115: 결과는 `upheld` · `retired` · `superseded`, 원인 이의 기록 순번 `causeSeq` 필수). `requirement_change` =
+ * 사람이 자식 규칙 있는 요구사항을 고치거나 지워 규칙 작성 역할(또는 판단 없이 끝난 경우의 오케스트레이터)이 그 자식 규칙 하나를
+ * 폐기 · 대체 · 유지로 다시 판단함(M7-10 #222, ADR-116: 결과는 이의 판단과 같은 세 값, 원인은 `requirementChange` 필수, 삭제에는
+ * 대체가 없다). 검사 단계의 기존 규칙 실패(M7-12)는 그 이슈가 값을 더한다(넓히기만).
  */
-export const NormJudgmentSubject = z.enum(['new_rule', 'supersede', 'objection']);
+export const NormJudgmentSubject = z.enum([
+  'new_rule',
+  'supersede',
+  'objection',
+  'requirement_change',
+]);
 export type NormJudgmentSubject = z.infer<typeof NormJudgmentSubject>;
 
 /**
@@ -855,14 +862,35 @@ export const NormJudgmentVerdict = z.enum([
   'superseded',
 ]);
 
-/** 이의 판단의 결과 (주제 `objection`의 `verdict`). */
+/** 이의 판단의 결과 (주제 `objection`의 `verdict`. 요구사항 변경 판단 `requirement_change`도 같은 세 값, ADR-116). */
 export const OBJECTION_VERDICTS = ['upheld', 'retired', 'superseded'] as const;
+
+/** 규칙 하나를 유지 · 폐기 · 대체로 판단하는 주제 (결과가 {@link OBJECTION_VERDICTS}이고 판단 없음 `undecided`를 받는다). */
+export const RULE_DECISION_SUBJECTS = ['objection', 'requirement_change'] as const;
+
+/** 요구사항 변경의 종류 (사람의 수정 · 삭제, M7-10 #222, ADR-116). */
+export const NormRequirementChangeKind = z.enum(['updated', 'deleted']);
+export type NormRequirementChangeKind = z.infer<typeof NormRequirementChangeKind>;
+
+/**
+ * 요구사항 변경 판단의 원인 (M7-10 #222, ADR-116). 사람의 요구사항 편집은 승인 기록 · 규범 변경 기록에 남지 않고 요구사항 자체의
+ * 수정 시각에 남으므로(ADR-100) 기록 순번 대신 그 요구사항 · 변경 종류 · 시각(수정이면 `updatedAt`, 삭제면 `deletedAt`) · 판단에
+ * 쓴 본문의 SHA-256(UTF-8)을 싣는다.
+ */
+export const NormJudgmentRequirementChange = z.strictObject({
+  requirement: z.strictObject({ id: Ulid, displayId: displayIdSchema('REQ') }),
+  change: NormRequirementChangeKind,
+  at: Timestamp,
+  textHash: Sha256Hex,
+});
+export type NormJudgmentRequirementChange = z.infer<typeof NormJudgmentRequirementChange>;
 
 /** 판단 주제 표시명 (화면의 변경 이력, 앱이 같은 표를 다시 적고 시험이 대조한다, ADR-115 검토 1회차). */
 export const NORM_JUDGMENT_SUBJECT_LABELS = {
   new_rule: '모순 판단',
   supersede: '모순 판단',
   objection: '이의 판단',
+  requirement_change: '요구사항 변경 판단',
 } as const satisfies Record<NormJudgmentSubject, string>;
 
 /** 판단 결과 표시명 (화면의 변경 이력). */
@@ -927,6 +955,8 @@ export const NormJudgmentDetail = z
      * 오케스트레이터에만, M7-11). `endReason`은 판단 세션의 종료 사유 또는 세션을 열지 못한 사유
      */
     undecided: z.strictObject({ endReason: z.string().min(1).max(64) }).optional(),
+    /** 원인 요구사항 변경 (주제 `requirement_change`이면 필수, 다른 판단에는 없음. M7-10) */
+    requirementChange: NormJudgmentRequirementChange.optional(),
     input: z.strictObject({
       requirements: NormJudgmentInputCount,
       rules: NormJudgmentInputCount,
@@ -960,13 +990,46 @@ export const NormJudgmentDetail = z
         path: ['verdict'],
       });
     }
-    // 이의 판단 (M7-11, ADR-115): 결과는 유지 · 폐기 · 대체만, 원인 이의 기록 필수. 그 결과 값 · 원인 · 판단 없음은 이의 판단에만
-    const objectionVerdict = (OBJECTION_VERDICTS as readonly string[]).includes(judgment.verdict);
-    if ((judgment.subject === 'objection') !== objectionVerdict) {
+    // 이의 판단 (M7-11, ADR-115) · 요구사항 변경 판단 (M7-10, ADR-116): 결과는 유지 · 폐기 · 대체만. 그 결과 값 · 판단 없음은
+    // 두 주제에만, 원인은 주제마다 하나(이의 기록 순번 · 요구사항 변경)
+    const decisionVerdict = (OBJECTION_VERDICTS as readonly string[]).includes(judgment.verdict);
+    const decisionSubject = (RULE_DECISION_SUBJECTS as readonly string[]).includes(
+      judgment.subject,
+    );
+    if (decisionSubject !== decisionVerdict) {
       ctx.addIssue({
         code: 'custom',
-        message: '이의 판단의 결과는 유지 · 폐기 · 대체이고, 그 결과는 이의 판단에만 있습니다',
+        message:
+          '이의 · 요구사항 변경 판단의 결과는 유지 · 폐기 · 대체이고, 그 결과는 두 판단에만 있습니다',
         path: ['verdict'],
+      });
+    }
+    if (
+      (judgment.subject === 'requirement_change') !==
+      (judgment.requirementChange !== undefined)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '요구사항 변경 판단에는 원인 요구사항 변경이 필요하고, 다른 판단에는 없습니다',
+        path: ['requirementChange'],
+      });
+    }
+    if (judgment.requirementChange?.change === 'deleted' && judgment.verdict === 'superseded') {
+      ctx.addIssue({
+        code: 'custom',
+        message: '지운 요구사항의 자식 규칙은 대체할 수 없습니다 (새 규칙의 부모가 없다)',
+        path: ['verdict'],
+      });
+    }
+    if (
+      judgment.subject === 'requirement_change' &&
+      (judgment.verdict === 'superseded') !== (judgment.createdSeq !== undefined)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          '요구사항 변경 판단의 대체에는 새 규칙의 신규 기록 순번이 필요하고, 유지 · 폐기에는 없습니다',
+        path: ['createdSeq'],
       });
     }
     if ((judgment.subject === 'objection') !== (judgment.causeSeq !== undefined)) {
@@ -980,6 +1043,13 @@ export const NormJudgmentDetail = z
       ctx.addIssue({
         code: 'custom',
         message: '판단 없이 끝난 이의는 유지로만 남깁니다 (판단 없음을 폐기로 보지 않는다)',
+        path: ['undecided'],
+      });
+    }
+    if (judgment.undecided !== undefined && !decisionSubject) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '판단 없음은 이의 · 요구사항 변경 판단에만 있습니다',
         path: ['undecided'],
       });
     }
@@ -1339,6 +1409,13 @@ export const NormChangeEntry = z
           path: ['targetRef'],
         });
       }
+    }
+    // 이의 · 요구사항 변경 판단의 주체: 판단 없음은 오케스트레이터만, 판단은 규칙 작성 역할만
+    if (
+      entry.kind === 'judgment' &&
+      judged !== undefined &&
+      (RULE_DECISION_SUBJECTS as readonly string[]).includes(judged.subject)
+    ) {
       const fallback = judged.undecided !== undefined;
       const actorOk = fallback
         ? entry.actor.kind === 'orchestrator'
@@ -1347,8 +1424,18 @@ export const NormChangeEntry = z
         ctx.addIssue({
           code: 'custom',
           message:
-            '이의 판단의 주체는 규칙 작성 역할이고, 판단 없이 끝난 유지는 오케스트레이터입니다',
+            '이의 · 요구사항 변경 판단의 주체는 규칙 작성 역할이고, 판단 없이 끝난 유지는 오케스트레이터입니다',
           path: ['actor'],
+        });
+      }
+    }
+    // 요구사항 변경 판단 (M7-10, ADR-116): 대상은 판단한 규칙, 실행 밖 세션이라 연결 실행이 없다
+    if (entry.kind === 'judgment' && judged?.subject === 'requirement_change') {
+      if (entry.targetRef.entity !== 'Rule' || entry.runId !== null) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '요구사항 변경 판단의 대상은 규칙이고 연결 실행이 없습니다',
+          path: ['targetRef'],
         });
       }
     }
