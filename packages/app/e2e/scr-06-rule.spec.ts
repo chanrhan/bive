@@ -479,21 +479,29 @@ test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
       // 동작 묶음은 머리 오른쪽 끝
       expect(boxes.actions.x + boxes.actions.width, `${width}`).toBeCloseTo(boxes.head.width, 0);
       const middle = (box: { y: number; height: number }): number => box.y + box.height / 2;
-      // 줄 바꿈 위치는 글꼴 폭에 따라 다르다(CI와 이 VM의 한글 글꼴 폭이 다름). 그래서 어느 경우든 지켜지는 이전 배치를 본다:
-      // 표시 ID는 제목과 같은 줄이면 제목 바로 뒤 8px, 아니면 다음 줄 왼쪽 끝. 판정 배지는 표시 ID와 같은 줄 바로 뒤 8px
-      const idSameRow = Math.abs(middle(boxes.id) - middle(boxes.title)) < 4;
-      if (idSameRow) {
-        expect(boxes.id.x, `${width}`).toBeCloseTo(boxes.title.x + boxes.title.width + 8, 0);
-      } else {
-        expect(boxes.id.x, `${width}`).toBe(0);
-        expect(boxes.id.y, `${width}`).toBeGreaterThanOrEqual(
-          boxes.title.y + boxes.title.height - 1,
-        );
+      // 줄 바꿈 위치는 글꼴 폭에 따라 다르다(CI와 이 VM의 한글 글꼴 폭이 다름). 그래서 어느 경우든 지켜지는 이전 배치(줄바꿈하는
+      // 한 줄 배치)를 본다: 제목 → 표시 ID → 판정 배지 순서로, 각 칸은 앞 칸과 같은 줄이면 앞 칸 바로 뒤 8px, 아니면 앞 칸 아래
+      // 줄의 왼쪽 끝에서 시작한다
+      const order = [
+        ['제목', boxes.title],
+        ['표시 ID', boxes.id],
+        ['판정 배지', boxes.badge],
+      ] as const;
+      const rows: boolean[] = [];
+      for (let i = 1; i < order.length; i += 1) {
+        const [, prev] = order[i - 1] ?? order[0];
+        const [name, cur] = order[i] ?? order[0];
+        const sameRow = Math.abs(middle(cur) - middle(prev)) < 6;
+        rows.push(sameRow);
+        if (sameRow) {
+          expect(cur.x, `${width} ${name}`).toBeCloseTo(prev.x + prev.width + 8, 0);
+        } else {
+          expect(cur.x, `${width} ${name}`).toBe(0);
+          expect(cur.y, `${width} ${name}`).toBeGreaterThanOrEqual(prev.y + prev.height - 1);
+        }
       }
-      expect(Math.abs(middle(boxes.badge) - middle(boxes.id)), `${width}`).toBeLessThan(4);
-      expect(boxes.badge.x, `${width}`).toBeCloseTo(boxes.id.x + boxes.id.width + 8, 0);
-      // 448px 상세(1440px 창)에서는 표시 ID가 제목 옆에 들어간다
-      if (width === WIDE_WIDTH) expect(idSameRow).toBe(true);
+      // 448px 상세(1440px 창)에서는 표시 ID · 판정 배지가 제목 옆에 들어간다
+      if (width === WIDE_WIDTH) expect(rows).toEqual([true, true]);
       await page.screenshot({
         path: `${SCREENSHOT_DIR}SCR-06/규칙-머리-보통-제목-${width}.png`,
         fullPage: true,
