@@ -165,9 +165,16 @@ test.describe('목록', () => {
     await expect(normal).toHaveAttribute('data-tone', 'normal');
     await expect(normal).toHaveText('');
     await expect(normal).toHaveAttribute('title', '통과');
-    // 말줄임 툴팁: 2줄 전체 문구
-    await expect(lines.nth(0)).toHaveAttribute(
-      'title',
+    // 말줄임 툴팁: 잘린 2줄째에 마우스를 올리면 2줄 전체 문구 (공통 툴팁, #201 · ADR-124)
+    expect(
+      await lines
+        .nth(0)
+        .getByTestId('card-note')
+        .evaluate((el) => el.scrollWidth > el.clientWidth),
+    ).toBe(true);
+    await expect(lines.nth(0)).not.toHaveAttribute('title');
+    await lines.nth(0).hover();
+    await expect(page.getByRole('tooltip')).toHaveText(
       'RULE-002 · WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면 · 실패 · 미확인',
     );
   });

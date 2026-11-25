@@ -28,6 +28,11 @@ export const IDE_TEXT = {
   /** 선택지 묶음 이름 */
   group: 'IDE',
   template: 'URL 틀',
+  /**
+   * 사용자 지정 틀 입력 아래 안내 (설정 IDE 섹션, #201 · ADR-124). 자리 표시 `{path}` · `{line}`은 사용자가 입력에 그대로 적는 글자라
+   * 내장 틀 표기(`vscode://file/{path}:{line}`)와 같은 모양으로 보인다. 값의 형태는 ADR-087(맨 앞 `/` 하나를 뺀 절대 경로)
+   */
+  pathHint: '{path}: 맨 앞 / 뺀 절대 경로 · {line}: 줄 번호',
   unset: 'IDE 미설정',
   confirm: '확인',
 } as const;

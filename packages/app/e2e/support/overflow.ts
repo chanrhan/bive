@@ -168,10 +168,12 @@ export const hitProblems = (pane: Locator, testIds: readonly string[]): Promise<
 
 /**
  * 목록 칸 넘침 검사 (#179, screens.md 1.4): 목록 칸에 가로 스크롤이 없고, 도구 줄(검색 · 필터 칩 · 토글)과 카드가
- * 칸 안에 들어오며, 넘치는 카드 글자 · 칩 문구는 말줄임 + 툴팁(`title`)이다. 비어 있으면 통과.
+ * 칸 안에 들어오며, 넘치는 카드 글자 · 칩 문구는 말줄임 + 툴팁이다. 비어 있으면 통과.
+ * 툴팁: 칩 문구는 `title`, 카드 글자는 공통 툴팁(#201 · ADR-124)이다. 카드 글자는 그 줄(제목 · 2줄째)에 마우스를 올린 것과 같은
+ * 이벤트를 보내 실제로 열린 툴팁(`role="tooltip"`)에 그 글자 전체가 있는지 보고 닫는다.
  */
 export const listPaneOverflow = (pane: Locator): Promise<string[]> =>
-  pane.evaluate((el) => {
+  pane.evaluate(async (el) => {
     const problems: string[] = [];
     if (el.scrollWidth > el.clientWidth) {
       problems.push(`목록 칸 가로 스크롤 (내용 ${el.scrollWidth}px > 폭 ${el.clientWidth}px)`);
@@ -273,15 +275,34 @@ export const listPaneOverflow = (pane: Locator): Promise<string[]> =>
     const texts = el.querySelectorAll<HTMLElement>(
       '.card-title, .card-id, .card-note, .card-time, .filter-chip-text',
     );
-    texts.forEach((text) => {
-      if (text.scrollWidth <= text.clientWidth + 0.5) return;
+    const frame = (): Promise<void> =>
+      new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    for (const text of texts) {
+      if (text.scrollWidth <= text.clientWidth + 0.5) continue;
       const id = text.className;
+      const content = text.textContent ?? '';
       if (getComputedStyle(text).textOverflow !== 'ellipsis') {
-        problems.push(`${id}: 넘치는데 말줄임 없음 (${text.textContent ?? ''})`);
+        problems.push(`${id}: 넘치는데 말줄임 없음 (${content})`);
       }
-      const tip = text.closest('[title]')?.getAttribute('title') ?? '';
-      if (tip.trim() === '') problems.push(`${id}: 넘치는데 툴팁 없음 (${text.textContent ?? ''})`);
-    });
+      const hover = text.closest<HTMLElement>('.card-title, .card-line-2');
+      if (hover === null) {
+        const tip = text.closest('[title]')?.getAttribute('title') ?? '';
+        if (tip.trim() === '') problems.push(`${id}: 넘치는데 툴팁 없음 (${content})`);
+        continue;
+      }
+      hover.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, relatedTarget: document.body }),
+      );
+      await frame();
+      const tip = document.querySelector('[role="tooltip"]')?.textContent ?? '';
+      if (!tip.includes(content)) {
+        problems.push(`${id}: 넘치는데 툴팁에 글자 전체 없음 (${content}, 툴팁 "${tip}")`);
+      }
+      hover.dispatchEvent(
+        new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body }),
+      );
+      await frame();
+    }
     return problems;
   });
 

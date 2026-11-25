@@ -17,6 +17,17 @@
   font-size: var(--font-size-2);
 }
 
+/* 화면에서만 숨김: 접근 가능한 이름(fieldset 이름)은 그대로 legend에서 온다 (#201 · ADR-124) */
+.ide-choice-legend.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .ide-choice-option {
   display: flex;
   align-items: center;
@@ -55,6 +66,12 @@
   color: var(--color-text);
   font-family: var(--font-mono);
   font-size: var(--font-size-1);
+}
+
+.ide-choice-hint {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  overflow-wrap: anywhere;
 }
 
 .ide-choice-input:focus-visible {

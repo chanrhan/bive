@@ -495,3 +495,247 @@ test.describe('2줄째 끝 칸은 남는 폭이 최소 폭보다 작을 때만 �
     }
   }
 });
+
+/** 제목이 400px 목록에서 말줄임되는 규칙 (테스트 전용 데이터) */
+const LONG_TITLE =
+  '주문 취소는 결제 승인 후 24시간 이내에만 허용하고 부분 환불은 관리자 승인 뒤에만 처리하며 기록을 남긴다';
+const LONG_RULE: RuleWithJudgment = (() => {
+  const sample = EXTRA[1];
+  if (sample === undefined) throw new Error('규칙 시험 데이터 없음');
+  return {
+    ...sample,
+    rule: {
+      ...sample.rule,
+      id: '01JC0000000000000000000199',
+      displayId: 'RULE-199',
+      title: LONG_TITLE,
+    },
+  };
+})();
+
+const tooltip = (page: Page) => page.getByRole('tooltip');
+const cardOf = (page: Page, id: string) => page.locator(`[data-testid="card"][data-id="${id}"]`);
+
+/** 키보드로 카드에 초점을 옮긴다: 목록에서 바로 앞 카드에 초점을 두고 Tab 한 번. */
+const tabToCard = async (page: Page, id: string): Promise<void> => {
+  await page.getByTestId('list-items').evaluate((list, target) => {
+    const cards = [...list.querySelectorAll<HTMLElement>('[data-testid="card"]')];
+    const index = cards.findIndex((card) => card.getAttribute('data-id') === target);
+    if (index < 1) throw new Error(`앞 카드 없음: ${target}`);
+    cards[index - 1]?.focus();
+  }, id);
+  await page.keyboard.press('Tab');
+  await expect(cardOf(page, id)).toBeFocused();
+};
+
+/** 카드 높이 · 줄 위치 (카드 기준 상대 좌표). 툴팁이 열려도 같아야 한다. */
+const cardGeometry = (pane: Locator): Promise<number[][]> =>
+  pane.evaluate((el) =>
+    [...el.querySelectorAll<HTMLElement>('[data-testid="card"]')].map((card) => {
+      const box = card.getBoundingClientRect();
+      const lines = [...card.querySelectorAll<HTMLElement>('.card-line')].map(
+        (line) => line.getBoundingClientRect().top - box.top,
+      );
+      return [box.height, ...lines];
+    }),
+  );
+
+const clippedOf = (locator: Locator): Promise<boolean> =>
+  locator.evaluate((el) => el.scrollWidth > el.clientWidth);
+
+test.describe('카드의 잘린 제목 · 2줄째 툴팁 (#201, ADR-124, screens.md 1.4 "말줄임 + 툴팁")', () => {
+  test('400px 목록: 키보드 초점이 닿은 카드의 잘린 제목이 공통 툴팁으로 보이고 Esc로 닫힌다. 잘리지 않은 카드는 툴팁이 없고 탭은 카드마다 한 번이다. 카드 배치는 그대로다', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openRules(page, [...RULES, ...EXTRA, LONG_RULE]);
+    const pane = listPane(page);
+    expect((await pane.boundingBox())?.width).toBe(400);
+    await expectScrollbar(page);
+    // 바꾸기 전과 같은 배치 (카드 높이 59px · 2줄째 한 줄 · 칸 간격, 이전 main에서 잰 값)
+    expect(await wideLayoutProblems(pane)).toEqual([]);
+    // 잘린 카드 글자는 모두 툴팁에 전체가 보인다 (올림으로 열어 보고 닫는다)
+    expect(await listPaneOverflow(pane)).toEqual([]);
+    await expect(tooltip(page)).toHaveCount(0);
+    const before = await cardGeometry(pane);
+    for (const [height] of before) expect(height).toBeCloseTo(CARD_HEIGHT, 1);
+
+    const long = cardOf(page, 'RULE-199');
+    // title 속성은 없다 (공통 툴팁으로 바꿈)
+    await expect(long.getByTestId('card-title')).not.toHaveAttribute('title');
+    await expect(long.getByTestId('card-line-2')).not.toHaveAttribute('title');
+    expect(await clippedOf(long.getByTestId('card-title'))).toBe(true);
+    await tabToCard(page, 'RULE-199');
+    await expect(tooltip(page)).toHaveCount(1);
+    await expect(tooltip(page).getByTestId('tooltip-line')).toHaveText([LONG_TITLE]);
+    await expect(long).toHaveAttribute('aria-describedby', 'bive-tooltip');
+    await expect(long).toHaveAccessibleDescription(LONG_TITLE);
+    // 툴팁이 열려도 카드 배치는 그대로다
+    expect(await cardGeometry(pane)).toEqual(before);
+    expect(await wideLayoutProblems(pane)).toEqual([]);
+    await shot(page, '카드-툴팁-1280');
+
+    await page.keyboard.press('Escape');
+    await expect(tooltip(page)).toHaveCount(0);
+    await expect(long).toBeFocused();
+    await expect(long).not.toHaveAttribute('aria-describedby');
+
+    // 다음 Tab은 다음 카드로 간다(카드 안 줄에는 멈추지 않는다). 잘리지 않은 카드에는 툴팁이 없다
+    const next = await page.getByTestId('list-items').evaluate((list) => {
+      const cards = [...list.querySelectorAll<HTMLElement>('[data-testid="card"]')];
+      const index = cards.findIndex((card) => card.getAttribute('data-id') === 'RULE-199');
+      return cards[index + 1]?.getAttribute('data-id') ?? '';
+    });
+    expect(next).not.toBe('');
+    await page.keyboard.press('Tab');
+    await expect(cardOf(page, next)).toBeFocused();
+    await expect(tooltip(page)).toHaveCount(0);
+    await expect(cardOf(page, next)).not.toHaveAttribute('aria-describedby');
+    expect(await clippedOf(cardOf(page, next).getByTestId('card-title'))).toBe(false);
+  });
+
+  test('400px 목록: 마우스를 잘린 제목에 올리면 보이고 떠나면 닫힌다. 잘리지 않은 제목 · 2줄째에는 뜨지 않는다. 마우스 누름 초점으로는 열지 않는다', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openRules(page, [...RULES, ...EXTRA, LONG_RULE]);
+    const long = cardOf(page, 'RULE-199');
+    await long.getByTestId('card-title').hover();
+    await expect(tooltip(page)).toHaveText(LONG_TITLE);
+    await expect(tooltip(page)).toHaveAttribute('data-reason', 'hover');
+    await expect(long.getByTestId('card-title')).toHaveAttribute(
+      'aria-describedby',
+      'bive-tooltip',
+    );
+    await page.mouse.move(0, 0);
+    await expect(tooltip(page)).toHaveCount(0);
+
+    const short = cardOf(page, 'RULE-001');
+    await short.getByTestId('card-title').hover();
+    await short.getByTestId('card-line-2').hover();
+    await long.getByTestId('card-line-2').hover();
+    await expect(tooltip(page)).toHaveCount(0);
+
+    // 마우스로 누른 카드(선택): 제목이 잘린 카드라도 누름 초점에는 열지 않는다 (마우스는 올림이 연다. 잘리지 않은 2줄째를 누름)
+    await long.getByTestId('card-line-2').click();
+    await expect(long).toHaveAttribute('aria-current', 'true');
+    await expect(long).toBeFocused();
+    await expect(tooltip(page)).toHaveCount(0);
+  });
+
+  test('220px 목록(1100px 창): 잘린 2줄째에 마우스를 올리면 2줄째 전체가, 키보드 초점이면 잘린 줄 전부가 한 툴팁에 보이고 창 안에 있다', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1100, height: 800 });
+    await openRules(page, [...RULES, ...EXTRA, LONG_RULE]);
+    const card = cardOf(page, 'RULE-199');
+    expect(await clippedOf(card.getByTestId('card-note'))).toBe(true);
+    const note = (await card.getByTestId('card-note').textContent()) ?? '';
+    const exceptions = await card.getByTestId('card-exception').allTextContents();
+    const line2 = ['RULE-199', note, ...exceptions].join(' · ');
+    await card.getByTestId('card-line-2').hover();
+    await expect(tooltip(page).getByTestId('tooltip-line')).toHaveText([line2]);
+    await page.mouse.move(0, 0);
+    await expect(tooltip(page)).toHaveCount(0);
+
+    await tabToCard(page, 'RULE-199');
+    await expect(tooltip(page).getByTestId('tooltip-line')).toHaveText([LONG_TITLE, line2]);
+    const place = await tooltip(page).evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      const root = document.documentElement;
+      return {
+        left: box.left,
+        right: box.right,
+        width: root.clientWidth,
+        scroll: root.scrollWidth - root.clientWidth,
+      };
+    });
+    expect(place.left).toBeGreaterThanOrEqual(0);
+    expect(place.right).toBeLessThanOrEqual(place.width);
+    expect(place.scroll).toBe(0);
+    await shot(page, '카드-툴팁-1100');
+  });
+
+  test('카드 수만큼 툴팁 요소 · DOM 리스너가 늘지 않는다: 카드에는 리스너가 없고, 툴팁은 열린 것 하나만 있다', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openRules(page, [...RULES, ...EXTRA, LONG_RULE]);
+    await expect(tooltip(page)).toHaveCount(0);
+    await expect(
+      page
+        .getByTestId('list-items')
+        .locator('[data-testid="card-title"][title], [data-testid="card-line-2"][title]'),
+    ).toHaveCount(0);
+    const session = await page.context().newCDPSession(page);
+    const listenersOf = async (expression: string): Promise<string[]> => {
+      const { result } = await session.send('Runtime.evaluate', { expression });
+      if (result.objectId === undefined) throw new Error(`대상 없음: ${expression}`);
+      const { listeners } = await session.send('DOMDebugger.getEventListeners', {
+        objectId: result.objectId,
+      });
+      return listeners.map((listener) => listener.type);
+    };
+    // 카드 · 카드 안 줄에는 툴팁용 DOM 리스너(올림 · 초점 · 키)가 없다 (React 이벤트 속성은 뿌리에서 한 번 받는다. 선택 버튼의
+    // click은 React가 원래 다는 것이라 세지 않는다)
+    const TOOLTIP_EVENTS = /^(mouse|pointer|focus|blur|key)/;
+    for (const testId of ['card', 'card-title', 'card-line-2']) {
+      const types = await listenersOf(
+        `document.querySelector('[data-id="RULE-199"] [data-testid="${testId}"], [data-id="RULE-199"][data-testid="${testId}"]')`,
+      );
+      expect(
+        types.filter((type) => TOOLTIP_EVENTS.test(type)),
+        testId,
+      ).toEqual([]);
+    }
+    // 문서 리스너(Esc · 밖 누름)는 툴팁이 열린 동안만 더해지고 닫히면 빠진다
+    const documentListeners = async (): Promise<number> =>
+      (await listenersOf('document')).filter((type) => type === 'keydown' || type === 'pointerdown')
+        .length;
+    const closed = await documentListeners();
+    await tabToCard(page, 'RULE-199');
+    await expect(tooltip(page)).toHaveCount(1);
+    expect(await documentListeners()).toBe(closed + 2);
+    // 여러 카드를 오가도 툴팁은 하나
+    for (const id of ['RULE-101', 'RULE-199', 'RULE-102']) {
+      await cardOf(page, id).getByTestId('card-title').hover();
+      expect(await page.getByRole('tooltip').count()).toBeLessThanOrEqual(1);
+    }
+    await page.keyboard.press('Escape');
+    await page.mouse.move(0, 0);
+    await expect(tooltip(page)).toHaveCount(0);
+    expect(await documentListeners()).toBe(closed);
+  });
+
+  test('툴팁 문구는 표시 값 도우미를 거친 글자 노드다: 숨은 글자는 보이는 표기, 꺾쇠 글은 글자 그대로 (요구사항 카드)', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const sample = REQUIREMENTS[0];
+    if (sample === undefined) throw new Error('요구사항 시험 데이터 없음');
+    const text =
+      '로그인 실패가 다섯 번 이어지면 계정을 잠그고 ‮관리자에게 알린다 <b>굵게</b> <img src=x onerror="window.__xss=1"> 끝까지 긴 요구사항 본문';
+    await mockBive(page, {
+      responses: {
+        'system.status': { result: STATUS },
+        'project.current': { result: { project: PROJECT } },
+        'requirement.list': { result: { requirements: [{ ...sample, text }] } },
+        'rule.list': { result: { rules: [] } },
+        'judgment.list': { result: { judgments: [] } },
+      },
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: '요구사항', exact: true }).click();
+    const title = page.getByTestId('card-title');
+    await expect(title).toHaveCount(1);
+    expect(await clippedOf(title)).toBe(true);
+    await title.hover();
+    await expect(tooltip(page)).toHaveText(text.replace('‮', '\\u202e'));
+    const inner = await tooltip(page).evaluate((el) => ({
+      elements: [...el.querySelectorAll('*')].map((child) => child.tagName.toLowerCase()),
+      hidden: /[‪-‮⁦-⁩]/.test(el.textContent ?? ''),
+    }));
+    expect(inner).toEqual({ elements: ['span'], hidden: false });
+    expect(await page.evaluate(() => (window as { __xss?: number }).__xss)).toBeUndefined();
+  });
+});

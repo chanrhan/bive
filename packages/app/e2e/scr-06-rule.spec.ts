@@ -389,6 +389,115 @@ test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
     });
   }
 
+  /** 머리줄 상자들: 머리 · 제목 · 표시 ID · 판정 배지 · 동작 묶음 (머리 기준 상대 좌표) */
+  const headBoxes = async (page: Page) => {
+    const head = page.locator('.rule-detail-head');
+    const boxOf = async (locator: ReturnType<Page['locator']>) => {
+      const box = await locator.boundingBox();
+      if (box === null) throw new Error('상자 없음');
+      return box;
+    };
+    const headBox = await boxOf(head);
+    const rel = async (locator: ReturnType<Page['locator']>) => {
+      const box = await boxOf(locator);
+      return { x: box.x - headBox.x, y: box.y - headBox.y, width: box.width, height: box.height };
+    };
+    const contentWidth = await page.getByTestId('rule-detail-body').evaluate((el) => {
+      const style = getComputedStyle(el);
+      return (
+        el.clientWidth -
+        Number.parseFloat(style.paddingLeft) -
+        Number.parseFloat(style.paddingRight)
+      );
+    });
+    return {
+      head: headBox,
+      contentWidth,
+      title: await rel(page.getByTestId('rule-detail-title')),
+      id: await rel(page.getByTestId('rule-detail-id')),
+      badge: await rel(head.getByTestId('status-badge')),
+      actions: await rel(page.getByTestId('rule-detail-actions')),
+    };
+  };
+
+  /** 줄을 바꾸는 긴 제목 · 한 줄에 들어가는 보통 제목 (테스트 전용 데이터) */
+  const HEAD_TITLES = {
+    long: '결제 시각 기준 12시간 초과 주문의 부분 환불 · 전액 환불 요청 모두 포함하여 취소를 거절한다',
+    medium: '결제 24시간 뒤 주문 취소 거절',
+  } as const;
+  const withTitle = (title: string): RuleWithJudgment[] =>
+    RULES.map((item) =>
+      item.rule.id === FAILING_RULE.id ? { ...item, rule: { ...item.rule, title } } : item,
+    );
+
+  for (const width of NARROW_WIDTHS) {
+    test(`${width}×800: 규칙 상세 머리의 긴 제목은 상세 내용 폭의 절반 이상을 쓰고 표시 ID · 판정 배지 · 버튼은 다음 줄로 간다 (#201)`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      const bive = await openRules(page, {
+        'rule.list': { result: { rules: withTitle(HEAD_TITLES.long) } },
+      });
+      await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+      const boxes = await headBoxes(page);
+      // 상세 칸은 최소 288px이고 머리는 상세 내용 폭 전체다
+      expect(boxes.head.width).toBeCloseTo(boxes.contentWidth, 0);
+      expect(boxes.title.width / boxes.contentWidth).toBeGreaterThanOrEqual(0.5);
+      // 제목은 몇 줄로 접혀도 기둥이 되지 않는다(한 줄 24px, 5줄 아래)
+      expect(boxes.title.height).toBeLessThan(24 * 5);
+      // 표시 ID · 판정 배지 · 버튼은 제목 아래 줄이고 잘리지 않는다
+      for (const part of [boxes.id, boxes.badge, boxes.actions]) {
+        expect(part.y).toBeGreaterThanOrEqual(boxes.title.y + boxes.title.height - 1);
+      }
+      expect(boxes.actions.x + boxes.actions.width).toBeCloseTo(boxes.head.width, 0);
+      expect(
+        await textClipping(detailPane(page), ['rule-detail-id', 'rule-edit', 'run-start']),
+      ).toEqual([]);
+      expect(await brokenWords(page.getByTestId('rule-detail-title'))).toEqual([]);
+      expect(await horizontalOverflow(detailPane(page), '.rule-detail-head')).toEqual([]);
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}SCR-06/규칙-머리-긴-제목-${width}.png`,
+        fullPage: true,
+      });
+    });
+  }
+
+  for (const width of [1280, WIDE_WIDTH] as const) {
+    test(`${width}px 창의 머리 배치는 이전과 같다: 보통 제목은 한 줄, 1440px에서는 표시 ID · 판정 배지가 제목 옆, 버튼은 오른쪽 끝 (#201)`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      const bive = await openRules(page, {
+        'rule.list': { result: { rules: withTitle(HEAD_TITLES.medium) } },
+      });
+      await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+      const boxes = await headBoxes(page);
+      // 보통 제목은 한 줄이고 머리 왼쪽 위에서 시작한다
+      expect(boxes.title.x, `${width}`).toBe(0);
+      expect(boxes.title.y, `${width}`).toBe(0);
+      expect(boxes.title.height, `${width}`).toBeLessThan(30);
+      // 동작 묶음은 머리 오른쪽 끝
+      expect(boxes.actions.x + boxes.actions.width, `${width}`).toBeCloseTo(boxes.head.width, 0);
+      const middle = (box: { y: number; height: number }): number => box.y + box.height / 2;
+      if (width === WIDE_WIDTH) {
+        // 448px 상세: 표시 ID · 판정 배지는 제목과 같은 줄, 제목 바로 뒤 8px
+        expect(Math.abs(middle(boxes.id) - middle(boxes.title))).toBeLessThan(4);
+        expect(Math.abs(middle(boxes.badge) - middle(boxes.title))).toBeLessThan(4);
+        expect(boxes.id.x).toBeCloseTo(boxes.title.x + boxes.title.width + 8, 0);
+      } else {
+        // 288px 상세: 표시 ID부터 다음 줄 왼쪽에서 시작하고 판정 배지 · 버튼과 한 줄
+        expect(boxes.id.x).toBe(0);
+        expect(boxes.id.y).toBeGreaterThanOrEqual(boxes.title.y + boxes.title.height - 1);
+        expect(Math.abs(middle(boxes.badge) - middle(boxes.id))).toBeLessThan(4);
+        expect(Math.abs(middle(boxes.actions) - middle(boxes.id))).toBeLessThan(8);
+      }
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}SCR-06/규칙-머리-보통-제목-${width}.png`,
+        fullPage: true,
+      });
+    });
+  }
+
   test(`${WIDE_WIDTH}px 창: 목록 칸은 ${LIST_PANE_MAX}px 그대로다`, async ({ page }) => {
     await page.setViewportSize({ width: WIDE_WIDTH, height: 900 });
     const bive = await openRules(page);

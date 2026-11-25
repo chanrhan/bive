@@ -21,6 +21,7 @@ import {
   MUTATION_LABELS,
   StatusBadge,
 } from '../../src/renderer/src/components/StatusBadge/index.js';
+import { TooltipHost } from '../../src/renderer/src/components/Tooltip/index.js';
 
 interface Row {
   key: string;
@@ -264,5 +265,6 @@ if (container === null) throw new Error('#root 요소 없음');
 createRoot(container).render(
   <StrictMode>
     <Playground />
+    <TooltipHost />
   </StrictMode>,
 );
