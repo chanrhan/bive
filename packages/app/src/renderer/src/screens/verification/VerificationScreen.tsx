@@ -23,6 +23,7 @@ import { useCallback, useState } from 'react';
 import type { FilterState } from '../../components/ListView/filter.js';
 import { setListFilter } from '../../components/ListView/filterStore.js';
 import { StatusBadge } from '../../components/StatusBadge/StatusBadge.js';
+import { tooltipTrigger } from '../../components/Tooltip/tooltipStore.js';
 import { visibleText } from '../../components/VisibleText/visibleText.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { useNavigation } from '../../navigation/NavigationContext.js';
@@ -127,7 +128,8 @@ const VerificationContent = ({
         {basisText(summary.basis)}
       </p>
       <section className="verification-metrics" aria-label={TEXT.metrics}>
-        {/* 준수 카드: 두 기준을 함께 보이고 기준마다 그 분모 목록으로 이동한다 (ADR-100 D7, ADR-117) */}
+        {/* 준수 카드: 두 기준을 함께 보이고 기준마다 그 분모 목록으로 이동한다 (ADR-100 D7, ADR-117). 기준의 한계 문구는 공통
+            툴팁(올림 · 키보드 초점)이고 누름은 원래 동작(이동)만 한다 (#201 · ADR-124) */}
         <div
           className="metric-card metric-card-group"
           data-testid="metric-compliance"
@@ -142,7 +144,7 @@ const VerificationContent = ({
               type="button"
               className="metric-part"
               data-testid="metric-compliance-all"
-              title={TEXT.complianceHint}
+              {...tooltipTrigger(TEXT.complianceHint, 'action')}
               onClick={() => openRules(COMPLIANCE_FILTER)}
             >
               <span className="metric-part-label" data-testid="metric-part-label">
@@ -157,7 +159,7 @@ const VerificationContent = ({
               className="metric-part"
               data-testid="metric-compliance-confirmed"
               data-state={confirmedState}
-              title={TEXT.complianceConfirmedHint}
+              {...tooltipTrigger(TEXT.complianceConfirmedHint, 'action')}
               onClick={() => openRules(CONFIRMED_COMPLIANCE_FILTER)}
             >
               <span className="metric-part-label" data-testid="metric-part-label">
@@ -224,12 +226,13 @@ const VerificationContent = ({
 const CodeOpenArea = ({ load }: { load: CodeOpenSummaryLoad }): React.JSX.Element => (
   <section className="verification-code-open" data-testid="code-open" aria-label={TEXT.codeOpen}>
     <h2 className="verification-heading">
-      {/* 한계 문구는 준수 카드처럼 초점을 받는 버튼의 툴팁(설명)에 둔다. 키보드 초점으로도 닿는다 (ADR-088, #191) */}
+      {/* 한계 문구는 준수 카드처럼 초점을 받는 버튼의 공통 툴팁(설명)에 둔다. 키보드 초점 · 올림으로 열리고, 원래 동작이 없는
+          버튼이라 누름(Enter · Space)으로도 연다 (ADR-088, #191 · #201 · ADR-124) */}
       <button
         type="button"
         className="verification-hint"
         data-testid="code-open-hint"
-        title={TEXT.codeOpenHint}
+        {...tooltipTrigger(TEXT.codeOpenHint, 'press')}
       >
         {TEXT.codeOpen}
       </button>

@@ -165,11 +165,21 @@ test.describe('목록', () => {
     await expect(normal).toHaveAttribute('data-tone', 'normal');
     await expect(normal).toHaveText('');
     await expect(normal).toHaveAttribute('title', '통과');
-    // 말줄임 툴팁: 2줄 전체 문구
-    await expect(lines.nth(0)).toHaveAttribute(
-      'title',
-      'RULE-002 · WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면 · 실패 · 미확인',
-    );
+    // 말줄임 툴팁: 2줄째가 잘렸으면 마우스를 올릴 때 2줄 전체 문구, 잘리지 않았으면 툴팁 없음 (공통 툴팁, #201 · ADR-124).
+    // 잘림 여부는 글꼴에 따라 다르다(CI와 이 VM의 한글 글꼴 폭이 다름). 잘리는 경우는 card-line.spec.ts가 데이터로 고정한다
+    const clipped = await lines
+      .nth(0)
+      .getByTestId('card-note')
+      .evaluate((el) => el.scrollWidth > el.clientWidth);
+    await expect(lines.nth(0)).not.toHaveAttribute('title');
+    await lines.nth(0).hover();
+    if (clipped) {
+      await expect(page.getByRole('tooltip')).toHaveText(
+        'RULE-002 · WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면 · 실패 · 미확인',
+      );
+    } else {
+      await expect(page.getByRole('tooltip')).toHaveCount(0);
+    }
   });
 
   test('폐기된 규칙은 기본 목록에 없고 [폐기 포함]을 켜면 예외 "폐기"와 함께 보인다, 끄면 다시 빠진다 (수용 기준 4)', async ({

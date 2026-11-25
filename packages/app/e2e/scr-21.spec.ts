@@ -497,6 +497,72 @@ test.describe('IDE (코드 열기, #45 수용 기준 1)', () => {
     expect(await updates(bive)).toHaveLength(1);
   });
 
+  test('보이는 "IDE" 글자는 섹션 제목 하나이고 선택지 묶음의 접근 가능한 이름은 "IDE" 그대로다 (#201)', async ({
+    page,
+  }) => {
+    await openIde(page, EMPTY);
+    const section = ideSection(page);
+    // 글자 그대로 "IDE"인 요소 가운데 화면에 보이는 것(1px 넘는 상자)
+    const visible = await section.evaluate((el) =>
+      [...el.querySelectorAll<HTMLElement>('*')]
+        .filter((node) => (node.textContent ?? '').trim() === 'IDE')
+        .filter((node) => node.children.length === 0)
+        .filter((node) => {
+          const box = node.getBoundingClientRect();
+          return node.checkVisibility() && box.width > 1 && box.height > 1;
+        })
+        .map((node) => node.tagName.toLowerCase()),
+    );
+    expect(visible).toEqual(['h3']);
+    await expect(section.getByRole('heading', { name: IDE_TEXT.section })).toBeVisible();
+    // 묶음 이름(legend)은 DOM에 남아 접근 가능한 이름이 "IDE"다
+    const group = section.getByRole('group', { name: IDE_TEXT.section, exact: true });
+    await expect(group).toHaveCount(1);
+    await expect(group).toHaveAccessibleName(IDE_TEXT.section);
+    await expect(section.getByTestId('ide-choice-legend')).toHaveText(IDE_TEXT.section);
+    await expect(group.getByRole('radio')).toHaveCount(3);
+    // 브라우저(Chromium) 접근성 트리가 계산한 묶음 이름도 "IDE"다 (화면에서만 숨김이라 이름이 남는다)
+    const session = await page.context().newCDPSession(page);
+    const { root } = await session.send('DOM.getDocument', { depth: 0 });
+    const { nodeId } = await session.send('DOM.querySelector', {
+      nodeId: root.nodeId,
+      selector: '[data-testid="settings-section-ide"] [data-testid="ide-choice"]',
+    });
+    const { nodes } = await session.send('Accessibility.getPartialAXTree', {
+      nodeId,
+      fetchRelatives: false,
+    });
+    expect(nodes[0]?.role?.value).toBe('group');
+    expect(nodes[0]?.name?.value).toBe(IDE_TEXT.section);
+    expect(findForbiddenText([{ source: 'IDE 섹션', text: await section.innerText() }])).toEqual(
+      [],
+    );
+  });
+
+  test('사용자 지정 URL 틀 입력 아래에 자리 표시 안내가 보이고 입력의 설명으로 이어진다 (#201, ADR-087)', async ({
+    page,
+  }) => {
+    await openIde(page, settingsWith({ ide: { kind: 'cursor' } }));
+    const hint = ideSection(page).getByTestId('ide-path-hint');
+    await expect(hint).toBeVisible();
+    await expect(hint).toHaveText(IDE_TEXT.pathHint);
+    // 입력란에 그대로 적는 자리 표시는 내장 틀 표기와 같은 모양이다
+    await expect(page.getByTestId('ide-template-vscode')).toContainText('{path}');
+    await expect(hint).toContainText('{path}');
+    // 사용자 지정을 고르지 않아 입력이 꺼져 있어도 안내는 보이고, 입력의 설명이다
+    await expect(template(page)).toBeDisabled();
+    await expect(template(page)).toHaveAccessibleDescription(IDE_TEXT.pathHint);
+    const inputBox = await template(page).boundingBox();
+    const hintBox = await hint.boundingBox();
+    if (inputBox === null || hintBox === null) throw new Error('상자 없음');
+    expect(hintBox.y).toBeGreaterThanOrEqual(inputBox.y + inputBox.height);
+    // 입력과 같은 왼쪽 끝 (입력 테두리 1px 안쪽 차이까지)
+    expect(Math.abs(hintBox.x - inputBox.x)).toBeLessThanOrEqual(2);
+    // 1.1 원칙: 코드 표기 · 이모지 없음, 서술형 끝맺음 없음
+    expect(findForbiddenText([{ source: '안내', text: IDE_TEXT.pathHint }])).toEqual([]);
+    expect(IDE_TEXT.pathHint).not.toMatch(/(다|요)\.?$/);
+  });
+
   test('1280 × 800 창에서 IDE 항목이 잘리거나 가로 스크롤을 만들지 않는다', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     const bive = await openIde(page, EMPTY);
@@ -519,6 +585,7 @@ test.describe('IDE (코드 열기, #45 수용 기준 1)', () => {
         'ide-template-vscode',
         'ide-template-cursor',
         'settings-ide-unset',
+        'ide-path-hint',
         'settings-ide-save-status',
         'settings-ide-save',
       ]),

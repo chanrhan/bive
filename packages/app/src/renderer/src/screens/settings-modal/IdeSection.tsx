@@ -1,5 +1,6 @@
 // 설정 IDE 섹션 (MET-01 코드 열기, ADR-018 · ADR-087). 화면 정의서 SCR-21에는 없고 ADR-018이 더한 항목이다.
 // VS Code · Cursor · 사용자 지정 URL 틀 중 하나. 미설정이면 VS Code를 미리 고르고 "IDE 미설정"을 보인다.
+// 섹션 제목 "IDE" 바로 아래라 선택지 묶음 이름(같은 글자)은 화면에서만 숨기고, 틀 입력 아래에 자리 표시 안내를 둔다 (#201 · ADR-124).
 // [저장] → `settings.update { patch: { ide } }`(사람 주체). 틀의 허용 범위는 오케스트레이터가 검사한다(-32602 → "입력 오류").
 // 값은 오케스트레이터 응답에서만 만든다 (NFR-03).
 import type { IdeSetting, JsonRpcErrorObject } from '@bive/shared';
@@ -107,6 +108,8 @@ export const IdeSection = ({ projectId }: { projectId: string }): React.JSX.Elem
         onChange={change}
         disabled={save === 'saving'}
         invalid={save === 'invalid' && load.choice.kind === 'custom'}
+        legendHidden
+        pathHint
       />
       <footer className="settings-footer">
         <p className="settings-status">
