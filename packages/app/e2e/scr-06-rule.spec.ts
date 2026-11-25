@@ -23,6 +23,7 @@ import {
   FAILING_HISTORY,
   FAILING_RULE,
   HISTORY,
+  LATEST_RUN,
   NO_BLOCKS,
   NO_CHANGES,
   PARENT,
@@ -35,6 +36,7 @@ import {
   RULES,
   RUN_HISTORY_JUDGMENTS,
   RUN_HISTORY_RUNS,
+  ruleGetOf,
   SUPERSEDE_GROUNDS,
   UNJUDGED_RULE,
 } from './checklists/scr-06.js';
@@ -42,6 +44,7 @@ import type {
   NormChangeView,
   ApprovalLogEntry,
   ConfirmationSetResult,
+  RuleLatestRun,
   RuleUpdateResult,
   RuleWithJudgment,
 } from '@bive/shared';
@@ -91,6 +94,7 @@ const openRules = async (
       'requirement.get': { result: { requirement: PARENT } },
       'normChange.list': { result: NO_CHANGES },
       'blocks.get': { result: BLOCKS },
+      'rule.get': { result: ruleGetOf(RULES[1] as RuleWithJudgment) },
       ...responses,
     },
   });
@@ -1768,6 +1772,7 @@ test.describe('대상 블록 · 위험도 (#64 수용 기준 1, NRM-09, ADR-126)
       'rule-field-risk',
       'rule-field-author',
       'rule-field-confirmation',
+      'rule-field-latest-run',
     ]);
     await allSettled(bive, 'blocks.get');
     const declarationCalls = await callsOf(bive, 'blocks.get');
@@ -1903,4 +1908,262 @@ test.describe('대상 블록 · 위험도 (#64 수용 기준 1, NRM-09, ADR-126)
       });
     });
   }
+});
+
+test.describe('최신 실행 링크의 비용 · 턴 (M3-16 #61 수용 기준 2, COST-02 · SCR-03, ADR-134)', () => {
+  const field = (page: Page) => page.getByTestId('rule-field-latest-run');
+  const runEvent = {
+    projectId: PROJECT.id,
+    runId: LATEST_RUN.id,
+    displayId: LATEST_RUN.displayId,
+    status: 'running',
+    currentStep: 'implementation',
+    regressionCount: 0,
+    costUsd: null,
+  } as const;
+
+  /** RULE-002 상세를 연다. `latestRun`은 rule.get 응답의 최신 실행 링크다. */
+  const openLatest = async (
+    page: Page,
+    latestRun: RuleLatestRun | null,
+    responses: MockResponses = {},
+  ): Promise<BiveMock> => {
+    const bive = await openRules(page, {
+      'rule.get': { result: ruleGetOf(RULES[1] as RuleWithJudgment, latestRun) },
+      ...responses,
+    });
+    await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+    return bive;
+  };
+
+  test('값이 있으면 확인 상태 다음 줄에 최신 실행의 표시 ID · 실행 합계 비용 · 턴이 보이고, 누를 수 없다', async ({
+    page,
+  }) => {
+    const bive = await openLatest(page, LATEST_RUN);
+    await expect(field(page)).toHaveText('최신 실행EXE-003비용 $0.35턴 11');
+    await expect(field(page).getByTestId('rule-latest-run-id')).toHaveText('EXE-003');
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 $0.35');
+    await expect(field(page).getByTestId('rule-latest-run-turns')).toHaveText('턴 11');
+    await expect(field(page).getByTestId('rule-latest-run')).toHaveAttribute(
+      'data-run-id',
+      LATEST_RUN.id,
+    );
+    // 이동 대상 화면이 문서에 없고 실행 추적 화면이 아직 없어 글자로만 보인다
+    await expect(field(page).getByRole('button')).toHaveCount(0);
+    await expect(field(page).getByRole('link')).toHaveCount(0);
+    // 자리: 속성 줄에서 확인 상태 바로 다음
+    const order = await page
+      .locator('.rule-fields')
+      .first()
+      .evaluate((el) => [...el.children].map((child) => child.getAttribute('data-testid')));
+    const at = order.indexOf('rule-field-latest-run');
+    expect(at).toBeGreaterThan(0);
+    expect(order[at - 1]).toBe('rule-field-confirmation');
+    // 그 규칙 1건으로 rule.get을 부른다
+    expect((await callsOf(bive, 'rule.get')).map((call) => call.params)).toContainEqual({
+      projectId: PROJECT.id,
+      id: FAILING_RULE.id,
+    });
+    expect(findForbiddenText(await collectVisibleText(page))).toEqual([]);
+  });
+
+  const unknownCases = [
+    {
+      name: '비용만 모름',
+      run: { ...LATEST_RUN, costUsd: null },
+      cost: '비용 없음',
+      turns: '턴 11',
+    },
+    {
+      name: '턴만 모름',
+      run: { ...LATEST_RUN, turns: null },
+      cost: '비용 $0.35',
+      turns: '턴 없음',
+    },
+    {
+      name: '비용 · 턴 모두 모름',
+      run: { ...LATEST_RUN, costUsd: null, turns: null },
+      cost: '비용 없음',
+      turns: '턴 없음',
+    },
+  ] as const;
+  for (const item of unknownCases) {
+    test(`${item.name}: 그 값은 "없음"이고 0으로 보이지 않는다`, async ({ page }) => {
+      await openLatest(page, item.run);
+      await expect(field(page).getByTestId('rule-latest-run-id')).toHaveText('EXE-003');
+      await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText(item.cost);
+      await expect(field(page).getByTestId('rule-latest-run-turns')).toHaveText(item.turns);
+      // 모르는 값이 0으로 보이지 않는다
+      await expect(field(page)).not.toHaveText(/비용 \$0(?![.0-9])|턴 0(?![0-9])/);
+    });
+  }
+
+  test('대상으로 한 실행이 없으면 최신 실행 "없음" (표시 ID · 비용 · 턴 · 0이 없다)', async ({
+    page,
+  }) => {
+    await openLatest(page, null);
+    await expect(field(page)).toHaveText('최신 실행없음');
+    await expect(field(page).getByTestId('rule-latest-run-none')).toHaveText('없음');
+    await expect(field(page).getByTestId('rule-latest-run')).toHaveCount(0);
+    await expect(field(page)).not.toContainText('0');
+  });
+
+  test('기록이 실제로 0이면 0으로 보인다 ("없음"이 아니다)', async ({ page }) => {
+    await openLatest(page, { ...LATEST_RUN, costUsd: 0, turns: 0 });
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 $0');
+    await expect(field(page).getByTestId('rule-latest-run-turns')).toHaveText('턴 0');
+    await expect(field(page)).not.toContainText('없음');
+  });
+
+  test('읽는 중에는 자리만 비우고, 못 읽으면 "최신 실행 불러오기 실패" ("없음"으로 보이지 않는다)', async ({
+    page,
+  }) => {
+    const bive = await openLatest(page, LATEST_RUN, { 'rule.get': { pending: true } });
+    await expect(field(page).getByTestId('rule-latest-run-loading')).toHaveAttribute(
+      'aria-busy',
+      'true',
+    );
+    await expect(field(page)).toHaveText('최신 실행');
+    await bive.setResponse('rule.get', { error: { code: -32603, message: '내부 오류' } });
+    await page.getByTestId('card').filter({ hasText: 'RULE-001' }).click();
+    await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+    await expect(field(page).getByTestId('rule-latest-run-error')).toHaveText(
+      '최신 실행 불러오기 실패',
+    );
+    await expect(field(page)).not.toContainText('없음');
+  });
+
+  test('응답에 최신 실행 칸이 없으면(옛 오케스트레이터) "없음"이 아니라 불러오기 실패로 보인다', async ({
+    page,
+  }) => {
+    await openLatest(page, LATEST_RUN, {
+      'rule.get': { result: RULES[1] as RuleWithJudgment },
+    });
+    await expect(field(page).getByTestId('rule-latest-run-error')).toHaveText(
+      '최신 실행 불러오기 실패',
+    );
+    await expect(field(page).getByTestId('rule-latest-run-none')).toHaveCount(0);
+  });
+
+  test('실행 알림 · 단계 알림이 오면 다시 읽어 새 비용 · 턴이 보인다 (다른 프로젝트 알림으로는 읽지 않는다)', async ({
+    page,
+  }) => {
+    const bive = await openLatest(page, { ...LATEST_RUN, costUsd: null, turns: null });
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 없음');
+    await allSettled(bive, 'rule.get');
+    const before = (await callsOf(bive, 'rule.get')).length;
+
+    // 다른 프로젝트의 알림: 다시 읽지 않는다 (뒤의 알림 결과가 그려진 뒤 센다)
+    await bive.emit('event.run.updated', { ...runEvent, projectId: '01JP9999999999999999999999' });
+
+    // 단계 알림(세션이 끝나 단계 합계가 바뀜) → 다시 읽기
+    await bive.setResponse('rule.get', {
+      result: ruleGetOf(RULES[1] as RuleWithJudgment, { ...LATEST_RUN, costUsd: 0.2, turns: 4 }),
+    });
+    await bive.emit('event.step.updated', {
+      projectId: PROJECT.id,
+      runId: LATEST_RUN.id,
+      stepId: '01JF0000000000000000000001',
+      kind: 'test_writing',
+      attempt: 1,
+      status: 'passed',
+    });
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 $0.20');
+    await expect(field(page).getByTestId('rule-latest-run-turns')).toHaveText('턴 4');
+
+    // 실행 알림(새 실행 · 실행 종료) → 다시 읽기
+    await bive.setResponse('rule.get', {
+      result: ruleGetOf(RULES[1] as RuleWithJudgment, {
+        id: '01JE0000000000000000000004',
+        displayId: 'EXE-004',
+        costUsd: null,
+        turns: null,
+      }),
+    });
+    await bive.emit('event.run.updated', runEvent);
+    await expect(field(page).getByTestId('rule-latest-run-id')).toHaveText('EXE-004');
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 없음');
+    await allSettled(bive, 'rule.get');
+    await nextFrame(page);
+    expect(await callsOf(bive, 'rule.get')).toHaveLength(before + 2);
+  });
+
+  test('오케스트레이터에 다시 붙으면(끊김 → 연결됨) rule.get을 다시 읽어 새 비용 · 턴이 보인다', async ({
+    page,
+  }) => {
+    const bive = await openLatest(page, { ...LATEST_RUN, costUsd: null, turns: null });
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 없음');
+    // 끊긴 동안 잃은 알림을 회복하는지: 응답을 재접속 전에 바꿔 두고 알림 없이 재접속만 한다
+    await bive.setResponse('rule.get', {
+      result: ruleGetOf(RULES[1] as RuleWithJudgment, { ...LATEST_RUN, costUsd: 0.42, turns: 6 }),
+    });
+    const connection = page.getByTestId('connection-status');
+    await bive.emit('system.connection', { state: 'disconnected' });
+    await expect(connection).toHaveAttribute('data-state', 'disconnected');
+    await bive.emit('system.connection', { state: 'connected', status: STATUS });
+    await expect(connection).toHaveAttribute('data-state', 'connected');
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 $0.42');
+    await expect(field(page).getByTestId('rule-latest-run-turns')).toHaveText('턴 6');
+  });
+
+  test('늦게 온 옛 응답은 먼저 온 새 응답을 덮지 않는다', async ({ page }) => {
+    // 처음 읽기(옛 값)는 늦게, 실행 알림 뒤 읽기(새 값)는 바로 온다
+    const bive = await openLatest(page, LATEST_RUN, {
+      'rule.get': {
+        result: ruleGetOf(RULES[1] as RuleWithJudgment, { ...LATEST_RUN, costUsd: null }),
+        delayMs: 1500,
+      },
+    });
+    await bive.setResponse('rule.get', {
+      result: ruleGetOf(RULES[1] as RuleWithJudgment, { ...LATEST_RUN, costUsd: 0.5, turns: 9 }),
+    });
+    await bive.emit('event.run.updated', runEvent);
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 $0.50');
+    // 옛 응답이 도착해 그린 뒤에도 새 값 그대로다
+    await allSettled(bive, 'rule.get');
+    await nextFrame(page);
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 $0.50');
+    await expect(field(page).getByTestId('rule-latest-run-turns')).toHaveText('턴 9');
+  });
+
+  test('다른 규칙을 고르면 그 규칙으로 다시 읽고, 앞 규칙의 늦은 응답은 보이지 않는다', async ({
+    page,
+  }) => {
+    const bive = await openLatest(page, LATEST_RUN, {
+      'rule.get': {
+        result: ruleGetOf(RULES[1] as RuleWithJudgment, { ...LATEST_RUN, costUsd: 7 }),
+        delayMs: 1500,
+      },
+    });
+    await bive.setResponse('rule.get', { result: ruleGetOf(RULES[0] as RuleWithJudgment, null) });
+    await selectRule(page, bive, 'RULE-001', PASSING_RULE.id);
+    await expect(field(page)).toHaveText('최신 실행없음');
+    await allSettled(bive, 'rule.get');
+    await nextFrame(page);
+    await expect(field(page)).toHaveText('최신 실행없음');
+    // 이 프로젝트 · 고른 규칙으로만 부르고, 마지막 읽기는 새로 고른 규칙이다 (개발 모드는 마운트 효과가 두 번 돈다)
+    const ids = (await callsOf(bive, 'rule.get')).map((call) => {
+      expect(call.params).toMatchObject({ projectId: PROJECT.id });
+      return (call.params as { id: string }).id;
+    });
+    expect(new Set(ids)).toEqual(new Set([FAILING_RULE.id, PASSING_RULE.id]));
+    expect(ids.indexOf(PASSING_RULE.id)).toBeGreaterThan(ids.lastIndexOf(FAILING_RULE.id));
+  });
+
+  test('820×800: 최신 실행 줄이 상세 안에 들어오고 잘리지 않는다', async ({ page }) => {
+    await page.setViewportSize({ width: 820, height: 800 });
+    await openLatest(page, { ...LATEST_RUN, costUsd: 0.000_012_3, turns: 1234 });
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 $0.000012');
+    const pane = page.getByTestId('rule-detail');
+    expect(await horizontalOverflow(pane, '[data-testid="rule-field-latest-run"]')).toEqual([]);
+    await field(page).scrollIntoViewIfNeeded();
+    expect(
+      await textClipping(pane, [
+        'rule-latest-run-id',
+        'rule-latest-run-cost',
+        'rule-latest-run-turns',
+      ]),
+    ).toEqual([]);
+    await page.screenshot({ path: `${SCREENSHOT_DIR}SCR-06/최신-실행-820.png`, fullPage: true });
+  });
 });

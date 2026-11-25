@@ -3,11 +3,19 @@
 //   판정 없이 끝난 실행 (실행 하나가 한 줄, runHistoryView.ts, ADR-123)
 // - 부모 요구사항: 부모가 있으면 `requirement.get` 1회 → 표시 ID · 문장. 실패하면 보이지 않는다
 // - 변경 이력: `normChange.list` 1회 → 이 규칙이 대상인 규범 변경 기록 (M7-15, ADR-114)
+// - 최신 실행 링크: `rule.get` 1회 → 이 규칙이 대상인 최신 실행의 표시 ID · 실행 합계 비용 · 턴 (M3-16, ADR-134)
 // 규칙이 바뀌면 다시 읽고, 늦게 온 이전 응답은 버린다. 실행 이력은 규칙의 최신 판정이 바뀌어도(실행 알림으로 규칙
 // 목록을 다시 읽어 새 판정이 생김, M1-19 · ADR-076) 다시 읽는다. 다시 읽는 동안은 지금 이력을 그대로 보인다.
-import type { NormChangeView, Requirement, RuleJudgmentEntry, Run } from '@bive/shared';
+import type {
+  NormChangeView,
+  Requirement,
+  RuleJudgmentEntry,
+  RuleLatestRun,
+  Run,
+} from '@bive/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { RUN_EVENT_NAMES } from '../../runs/refreshCoalescer.js';
 import { useEventRefresh } from '../../runs/useEventRefresh.js';
 
 export type RuleHistoryLoad =
@@ -80,6 +88,43 @@ const LOADING_RUNS: ProjectRunsLoad = { state: 'loading' };
 
 /** 실행 목록을 다시 읽는 알림: 실행 상태 바뀜만 (단계 알림마다 다시 읽지 않는다). */
 const RUN_STATUS_EVENT_NAMES = ['event.run.updated'] as const;
+
+export type RuleLatestRunLoad =
+  { state: 'loading' } | { state: 'ready'; latestRun: RuleLatestRun | null } | { state: 'error' };
+
+const LATEST_RUN_LOADING: RuleLatestRunLoad = { state: 'loading' };
+
+/**
+ * 규칙의 최신 실행 링크 (`rule.get` 1회의 `latestRun`, COST-02 · M3-16 · ADR-134). 실행 알림(`event.run.updated` ·
+ * `event.step.updated`: 세션이 끝나 단계 · 실행 합계가 바뀜) · 재접속 때 다시 읽는다. 다시 읽는 동안은 지금 값을 그대로
+ * 보이고, 늦게 온 이전 요청의 응답은 요청 순번으로 버린다(새 값을 덮지 않는다, M3-35). 응답에 `latestRun` 칸이 없으면(옛
+ * 오케스트레이터) "없음"으로 보이지 않게 실패로 다룬다.
+ */
+export const useRuleLatestRun = (projectId: string, ruleId: string): RuleLatestRunLoad => {
+  const [loaded, setLoaded] = useState<{ key: string; load: RuleLatestRunLoad } | null>(null);
+  const seq = useRef(0);
+  const key = `${projectId}\n${ruleId}`;
+  const fetchLatest = useCallback((): Promise<void> => {
+    seq.current += 1;
+    const mine = seq.current;
+    const settle = (load: RuleLatestRunLoad): void => {
+      if (seq.current === mine) setLoaded({ key: `${projectId}\n${ruleId}`, load });
+    };
+    return window.bive.invoke('rule.get', { projectId, id: ruleId }).then(
+      ({ latestRun }) =>
+        settle(latestRun === undefined ? { state: 'error' } : { state: 'ready', latestRun }),
+      () => settle({ state: 'error' }),
+    );
+  }, [projectId, ruleId]);
+  useEffect(() => {
+    void fetchLatest();
+    return () => {
+      seq.current += 1;
+    };
+  }, [fetchLatest]);
+  useEventRefresh(projectId, RUN_EVENT_NAMES, fetchLatest);
+  return loaded !== null && loaded.key === key ? loaded.load : LATEST_RUN_LOADING;
+};
 
 /** 규칙의 부모 요구사항. 부모가 없거나(해제됨) 조회 전 · 실패면 null. */
 export const useRuleParent = (projectId: string, parentId: string | null): Requirement | null => {

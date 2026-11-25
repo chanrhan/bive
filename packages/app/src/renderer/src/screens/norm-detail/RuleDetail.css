@@ -361,6 +361,14 @@
   gap: var(--space-2);
 }
 
+/* 최신 실행 링크 (M3-16 · ADR-134): 표시 ID · 비용 · 턴을 한 줄에, 좁으면 낱말 단위로 줄바꿈 */
+.rule-latest-run {
+  display: inline-flex;
+  flex-wrap: wrap;
+  column-gap: var(--space-3);
+  font-variant-numeric: tabular-nums;
+}
+
 .rule-changes {
   min-width: 0;
 }
