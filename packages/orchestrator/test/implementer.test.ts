@@ -33,6 +33,7 @@ import {
   type NormInput,
 } from '../src/norms/norm-input.js';
 import { retireAgentRule } from '../src/norms/agent-rule.js';
+import { readContractSource, registerHumanContract } from '../src/norms/contract.js';
 import { NORM_INTEGRITY_STAGE } from '../src/steps/judging.js';
 import {
   human,
@@ -1183,6 +1184,97 @@ describe('구현 세션의 규범 입력: 효력 있는 요구사항 · 규칙�
       requirementDisplayIds: ['REQ-001', 'REQ-002'],
       ruleDisplayIds: ['RULE-001', 'RULE-002', 'RULE-003', 'RULE-005'],
     });
+  }, 60_000);
+
+  it('효력 있는 계약(표시 ID · 종류 · 원본 파일)이 규칙 작성 역할과 같은 계약 절로 실리고, 계약 검사 규칙(내장, 인수 테스트 없음)이 있어도 실행은 그대로 병합되며, 받은 계약 표시 ID가 세션 기록에 남는다 (M3-04 #49 수용 기준 4, 프롬프트 스냅샷)', async () => {
+    const h = setup();
+    // 픽스처의 실제 Prisma 스키마 파일을 기준 브랜치 커밋에서 읽어 사람이 등록한 계약으로 둔다
+    const source = await readContractSource(h.repo, 'main', 'prisma/schema.prisma');
+    if (!source.ok) throw new Error(source.code);
+    const registered = withProject(h.biveHome, h.project.id, (store) =>
+      registerHumanContract(store, {
+        file: 'prisma/schema.prisma',
+        kind: 'db-schema',
+        source,
+        requirementId: null,
+        at: new Date(T0 + 1000).toISOString(),
+        newId,
+        by: human,
+        clientId: null,
+      }),
+    );
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({ status: 'merged' });
+    const prompt = implementerSpecs(h)[0]?.prompt ?? '';
+    expect(prompt).toBe(
+      [
+        '실행: EXE-001',
+        '',
+        '대상 규칙',
+        '- RULE-001 헬스 체크 서버 시각',
+        '  진술: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 time 필드에 서버 시각을 담는다',
+        '',
+        '대상 인수 테스트',
+        `- ${ACC_FILE}`,
+        '',
+        NORM_INPUT_FRAME,
+        NORM_INPUT_BEGIN,
+        '요구사항 (효력 1건 중 1건)',
+        '- REQ-001 (이번 작업 대상)',
+        '  본문: 헬스 체크 응답에 서버 시각 포함',
+        '규칙 (효력 2건 중 2건)',
+        '- RULE-001 (이번 작업 대상)',
+        '  제목: 헬스 체크 서버 시각',
+        '  진술: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 time 필드에 서버 시각을 담는다',
+        '  부모 요구사항: REQ-001',
+        '  최근 판정의 인수 테스트 케이스: 판정 기록 없음',
+        '- RULE-002',
+        '  제목: 계약 일치: CON-001',
+        '  진술: WHILE 계약 CON-001이 등록되어 있으면 THE SYSTEM SHALL 그 계약의 원본 파일이 형식에 맞고 구현이 그 계약과 일치한다',
+        '  부모 요구사항: 없음 (계약 CON-001의 검사 규칙)',
+        '  최근 판정의 인수 테스트 케이스: 판정 기록 없음',
+        '계약 (효력 1건 중 1건)',
+        '- CON-001',
+        '  종류: db-schema',
+        '  원본 파일: prisma/schema.prisma',
+        NORM_INPUT_END,
+        '',
+        '대상 인수 테스트가 통과하도록 구현하라.',
+      ].join('\n'),
+    );
+    expect(markerLines(prompt)).toEqual([NORM_INPUT_BEGIN, NORM_INPUT_END]);
+    // 계약 파일 본문은 싣지 않는다 (목록만)
+    expect(prompt).not.toContain('datasource');
+    expect(implementerSpecs(h)[0]?.systemPrompt).toBe(IMPLEMENTER_SYSTEM_PROMPT);
+    const [session] = storedSessions(h, 'implementer');
+    expect(session?.normInput).toEqual({
+      summary: {
+        requirements: { total: 1, included: 1, omitted: 0 },
+        rules: { total: 2, included: 2, omitted: 0 },
+        contracts: { total: 1, included: 1, omitted: 0 },
+        truncated: false,
+      },
+      requirementDisplayIds: ['REQ-001'],
+      ruleDisplayIds: ['RULE-001', 'RULE-002'],
+      contractDisplayIds: ['CON-001'],
+    });
+    // 테스트 작성 역할도 같은 계약 절을 받는다 (모든 역할 세션, ADR-100 K1)
+    const writer = h.sessions.find((s) => s.role === 'test-writer')?.prompt ?? '';
+    expect(writer).toContain(
+      [
+        '계약 (효력 1건 중 1건)',
+        '- CON-001',
+        '  종류: db-schema',
+        '  원본 파일: prisma/schema.prisma',
+        NORM_INPUT_END,
+      ].join('\n'),
+    );
+    // 계약 검사 규칙은 인수 테스트가 없어 판정되지 않는다 (판정 실행기는 M3-06)
+    expect(
+      withProject(h.biveHome, h.project.id, (store) =>
+        store.judgments.listByRule(registered.rule.id),
+      ),
+    ).toEqual([]);
   }, 60_000);
 
   it('대상 규칙의 제목 · 진술이 줄 나눔 글자(LF · CR · U+2028 · U+0085)와 표시 줄 모양의 글을 담아도, 작업 지시 머리는 표시 값 한 줄이라 줄 첫머리의 시작 · 끝 표시 줄은 틀의 각 1개다 (ADR-108)', async () => {

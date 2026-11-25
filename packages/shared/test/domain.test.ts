@@ -16,7 +16,9 @@ import {
   CodeOpenSummaryResult,
   CommitSha,
   Confirmation,
+  ConfirmationBasis,
   compareSteps,
+  Contract,
   defaultSettings,
   EntityName,
   findMissingSettings,
@@ -47,6 +49,7 @@ import {
   RUN_STEP_PLANS,
   ScreenId,
   Session,
+  SessionNormInput,
   Settings,
   Step,
   StoredCodeOpenRecord,
@@ -71,6 +74,17 @@ const AT = '2026-10-15T00:00:00.000Z';
 const SHA = 'a'.repeat(40);
 const human = { kind: 'human' } as const;
 const testWriter = { kind: 'agent', role: 'test-writer' } as const;
+/** 사람의 계약 등록이 남기는 계약 편집 diff (M3-04 #49): 이전 없음 */
+const CONTRACT_DIFF = {
+  before: null,
+  after: {
+    kind: 'openapi',
+    sourceFile: 'openapi.yaml',
+    contentHash: 'c'.repeat(64),
+    sourceCommit: SHA,
+    parentRequirementId: null,
+  },
+} as const;
 
 const requirement = {
   id: ID.req,
@@ -539,7 +553,11 @@ describe('규범', () => {
         detail: { diff: ruleDiff },
         targetRef: { entity: 'Rule', id: ID.rule },
       },
-      contract_edit: { action: 'contract_edit', detail: { diff } },
+      contract_edit: {
+        action: 'contract_edit',
+        detail: { diff: CONTRACT_DIFF },
+        targetRef: { entity: 'Contract', id: ID.rule },
+      },
     } as const;
     expect(Object.keys(valid)).toEqual(ApprovalAction.options);
     for (const [action, row] of Object.entries(valid)) {
@@ -592,19 +610,60 @@ describe('규범', () => {
     expect(ApprovalLogEntry.safeParse({ ...confirm, actor: testWriter }).success).toBe(false);
     const diff = { before: { title: 'a' }, after: { title: 'b' } };
     expect(ApprovalLogEntry.safeParse({ ...confirm, detail: { diff } }).success).toBe(false);
-    // 규칙 직접 편집의 diff는 제목 · 진술 전후 (M7-03, 아래 시험). 계약 편집은 M3-10이 정한다
+    // 규칙 직접 편집의 diff는 제목 · 진술 전후 (M7-03, 아래 시험), 계약 편집은 계약 대상 · 계약 편집 diff (M3-04, 아래 시험)
     const ruleDiff = {
       before: { title: 'a', statement: 'WHEN a THE SYSTEM SHALL b' },
       after: { title: 'b', statement: 'WHEN a THE SYSTEM SHALL b' },
     };
-    for (const [action, edited] of [
-      ['rule_edit', ruleDiff],
-      ['contract_edit', diff],
+    for (const [action, edited, targetRef] of [
+      ['rule_edit', ruleDiff, confirm.targetRef],
+      ['contract_edit', CONTRACT_DIFF, { entity: 'Contract', id: ID.rule }],
     ] as const) {
-      expect(ApprovalLogEntry.safeParse({ ...confirm, action }).success).toBe(false);
+      expect(ApprovalLogEntry.safeParse({ ...confirm, action, targetRef }).success).toBe(false);
       expect(
-        ApprovalLogEntry.safeParse({ ...confirm, action, detail: { diff: edited } }).success,
+        ApprovalLogEntry.safeParse({ ...confirm, action, targetRef, detail: { diff: edited } })
+          .success,
       ).toBe(true);
+    }
+  });
+
+  it('계약 편집(contract_edit): 대상은 계약, diff는 계약 편집 diff(등록은 이전 없음), 반영 규범 없음 (M3-04 #49 · ADR-129)', () => {
+    const entry = {
+      seq: 1,
+      at: AT,
+      action: 'contract_edit',
+      actor: human,
+      targetRef: { entity: 'Contract', id: ID.rule },
+      clientId: 'pipe-1',
+      detail: { diff: CONTRACT_DIFF },
+      prevHash: APPROVAL_LOG_GENESIS_HASH,
+      hash: 'f'.repeat(64),
+    };
+    expect(ApprovalLogEntry.parse(entry)).toEqual(entry);
+    // 변경(이전 있음)도 같은 모양이다 (M3-10이 넓힌다)
+    expect(
+      ApprovalLogEntry.safeParse({
+        ...entry,
+        detail: { diff: { before: CONTRACT_DIFF.after, after: CONTRACT_DIFF.after } },
+      }).success,
+    ).toBe(true);
+    const rejected: [string, object][] = [
+      ['대상이 규칙', { targetRef: { entity: 'Rule', id: ID.rule } }],
+      ['diff 없음', { detail: {} }],
+      ['다른 모양의 diff', { detail: { diff: { before: { text: 'a' }, after: { text: 'b' } } } }],
+      ['이후 없음', { detail: { diff: { before: null, after: null } } }],
+      [
+        '모르는 칸',
+        { detail: { diff: { before: null, after: { ...CONTRACT_DIFF.after, body: 'x' } } } },
+      ],
+      [
+        '해시 형식',
+        { detail: { diff: { before: null, after: { ...CONTRACT_DIFF.after, contentHash: 'x' } } } },
+      ],
+      ['주체가 에이전트', { actor: testWriter }],
+    ];
+    for (const [label, patch] of rejected) {
+      expect(ApprovalLogEntry.safeParse({ ...entry, ...patch }).success, label).toBe(false);
     }
   });
 
@@ -1594,6 +1653,95 @@ describe('코드 열기 IDE 선택 (ADR-018 · ADR-087)', () => {
       'javascript:alert(1)',
     ]) {
       expect(isAllowedIdeUrl(url), url).toBe(false);
+    }
+  });
+});
+
+describe('계약 (M3-04 #49, NRM-03 · ADR-019, ADR-129)', () => {
+  const contract = {
+    id: ID.rule,
+    displayId: 'CON-001',
+    kind: 'openapi',
+    sourceFile: 'docs/openapi.yaml',
+    contentHash: 'c'.repeat(64),
+    sourceCommit: SHA,
+    parentRequirementId: ID.req,
+    author: human,
+    createdAt: AT,
+    confirmation: {
+      state: 'confirmed',
+      at: AT,
+      by: human,
+      basis: { kind: 'contract_record', at: AT },
+    },
+  } as const;
+
+  it('계약 = 원본 파일 1개(내용 해시 · 기준 커밋) · 부모 요구사항 0~1개 · 작성 주체 · 확인 상태. 모르는 칸 · 다른 접두 · 해시 형식은 거부한다', () => {
+    expect(Contract.parse(contract)).toEqual(contract);
+    expect(Contract.safeParse({ ...contract, parentRequirementId: null }).success).toBe(true);
+    expect(
+      Contract.safeParse({
+        ...contract,
+        author: testWriter,
+        confirmation: { state: 'unconfirmed' },
+      }).success,
+    ).toBe(true);
+    for (const [label, patch] of [
+      ['표시 ID 접두', { displayId: 'RULE-001' }],
+      ['종류', { kind: 'graphql' }],
+      ['빈 파일', { sourceFile: '' }],
+      ['긴 파일', { sourceFile: 'a'.repeat(1025) }],
+      ['해시', { contentHash: 'x' }],
+      ['커밋', { sourceCommit: 'main' }],
+      ['엔드포인트 단위 칸', { endpoint: 'GET /api/health' }],
+    ] as const) {
+      expect(Contract.safeParse({ ...contract, ...patch }).success, label).toBe(false);
+    }
+    expect(EntityName.options).toContain('Contract');
+    expect(RESERVED_ENTITY_NAMES).not.toContain('Contract');
+  });
+
+  it('확인 근거에 계약의 작성 기록(contract_record)이 더해졌고, 옛 근거 두 종류는 그대로다', () => {
+    expect(ConfirmationBasis.parse({ kind: 'contract_record', at: AT })).toEqual({
+      kind: 'contract_record',
+      at: AT,
+    });
+    expect(ConfirmationBasis.safeParse({ kind: 'contract_record' }).success).toBe(false);
+    expect(ConfirmationBasis.safeParse({ kind: 'requirement_record', at: AT }).success).toBe(true);
+    expect(ConfirmationBasis.safeParse({ kind: 'approval_log', seq: 1 }).success).toBe(true);
+  });
+
+  it('세션의 규범 입력 기록: 계약의 수 · 표시 ID는 두 칸이 함께 있거나 함께 없고(옛 모양 그대로 받음), 실은 수 · 잘림이 맞아야 한다', () => {
+    const count = (total: number, included: number) => ({
+      total,
+      included,
+      omitted: total - included,
+    });
+    const old = {
+      summary: { requirements: count(1, 1), rules: count(0, 0), truncated: false },
+      requirementDisplayIds: ['REQ-001'],
+      ruleDisplayIds: [],
+    };
+    expect(SessionNormInput.parse(old)).toEqual(old);
+    const withContracts = {
+      ...old,
+      summary: { ...old.summary, contracts: count(2, 2) },
+      contractDisplayIds: ['CON-001', 'CON-002'],
+    };
+    expect(SessionNormInput.parse(withContracts)).toEqual(withContracts);
+    const truncated = {
+      ...withContracts,
+      summary: { ...withContracts.summary, contracts: count(3, 2), truncated: true },
+    };
+    expect(SessionNormInput.safeParse(truncated).success).toBe(true);
+    for (const [label, value] of [
+      ['표시 ID만', { ...old, contractDisplayIds: [] }],
+      ['수만', { ...old, summary: { ...old.summary, contracts: count(0, 0) } }],
+      ['수가 다름', { ...withContracts, contractDisplayIds: ['CON-001'] }],
+      ['잘림 표시 없음', { ...truncated, summary: { ...truncated.summary, truncated: false } }],
+      ['접두', { ...withContracts, contractDisplayIds: ['RULE-001', 'CON-002'] }],
+    ] as const) {
+      expect(SessionNormInput.safeParse(value).success, label).toBe(false);
     }
   });
 });

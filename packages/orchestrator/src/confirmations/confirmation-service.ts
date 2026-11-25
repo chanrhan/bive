@@ -1,7 +1,7 @@
 // 확인 상태를 확인됨으로 쓰는 유일한 창구 (NFR-01, ADR-100 D2 · I1 · B① · C2 · A1 · A2, M7-01 #213, ADR-101).
 // - 확인됨이 생기는 경로는 넷뿐이다: 사람의 확인 RPC(`confirmation.set`), 사람의 요구사항 작성 · 편집(`requirement.create` ·
 //   `requirement.update`), 사람의 제안 승인(`proposal.approve` · `proposal.amend`), 사람의 규칙 직접 편집(`rule.update`,
-//   M7-03 · ADR-109). 그 밖에는 이행 마이그레이션(0012)뿐이다
+//   M7-03 · ADR-109), 사람의 계약 등록(`contract.register`, M3-04 · ADR-129). 그 밖에는 이행 마이그레이션(0012)뿐이다
 // - 이 모듈을 부르는 곳은 위 네 경로의 파이프 처리기 · 제안 승인 함수뿐이고, 함수마다 사람 주체(`HumanAuthor`)를 인자로
 //   받는다. 오케스트레이터 내부(엔진 · 단계 실행기 · 규칙 작성 서비스)와 에이전트 도구에는 이 모듈을 부르는 경로가 없다
 //   (`integrity.test.ts`가 가져오는 파일을 단언한다)
@@ -14,6 +14,7 @@ import {
   type Author,
   type Confirmation,
   type ConfirmationTarget,
+  type Contract,
   ErrorCode,
   type HumanAuthor,
   type NormChangeEntry,
@@ -164,6 +165,26 @@ export const confirmHumanRuleEdit = (
     { entity: 'Rule', id: approvalLog.targetRef.id },
     { by, at: approvalLog.at, basis: { kind: 'approval_log', seq: approvalLog.seq } },
   );
+};
+
+/**
+ * 사람이 등록한 계약을 확인됨으로 둔다 (ADR-100 B② · D2, M3-04 · ADR-129). 근거는 계약 자체의 작성 주체 · 시각
+ * (`contract_record`)이다. 그 등록은 같은 트랜잭션의 승인 기록 `contract_edit`에도 남는다(C2). 계약 저장과 같은 트랜잭션 안에서 부른다.
+ * @throws {RpcError} -32020 계약의 작성 주체가 사람이 아님
+ */
+export const confirmHumanContractRegistration = (
+  store: ProjectStore,
+  contract: Contract,
+): Contract => {
+  const by = requireHuman(
+    contract.author,
+    '사람이 등록한 계약만 등록으로 확인됨이 됩니다 (ADR-100 B②)',
+  );
+  const confirmation = store.confirmations.confirm(
+    { entity: 'Contract', id: contract.id },
+    { by, at: contract.createdAt, basis: { kind: 'contract_record', at: contract.createdAt } },
+  );
+  return { ...contract, confirmation };
 };
 
 /**

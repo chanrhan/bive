@@ -38,6 +38,7 @@ import {
 } from '../src/norms/agent-rule.js';
 import { BUILTIN_RULE_CREATED_REASON } from '../src/norms/builtin-rules.js';
 import { CHECK_UNDECIDED_REASON } from '../src/norms/check-contradiction.js';
+import { CONTRACT_RULE_CREATED_REASON } from '../src/norms/contract.js';
 import { NORM_INPUT_BEGIN } from '../src/norms/norm-input.js';
 import { recordObjection, UNDECIDED_REASON } from '../src/norms/objection.js';
 import { RuleWriterService } from '../src/rule-writer/rule-writer-service.js';
@@ -777,7 +778,7 @@ describe('확인됨을 쓰는 경로는 사람 RPC · 사람의 제안 승인뿐
       'confirmations/confirmation-service.ts',
     ]);
     // 확인 서비스를 가져오는 파일 = 확인 RPC · 요구사항 RPC(사람의 작성 · 편집) · 규칙 RPC(사람의 직접 편집, M7-03) · 제안 승인 ·
-    // 폐기 · 대체 반영 모듈(확인 풀림만, M7-13 · ADR-113: 아래 시험이 가져오는 이름을 묶는다)
+    // 폐기 · 대체 반영 모듈(확인 풀림만, M7-13 · ADR-113: 아래 시험이 가져오는 이름을 묶는다) · 계약 RPC(사람의 등록, M3-04 · ADR-129)
     expect(
       files
         .filter((f) => /from '[./]+\/?confirmations\/confirmation-service\.js'/.test(f.text))
@@ -785,6 +786,7 @@ describe('확인됨을 쓰는 경로는 사람 RPC · 사람의 제안 승인뿐
         .sort(),
     ).toEqual([
       'ipc/confirmation-handlers.ts',
+      'ipc/contract-handlers.ts',
       'ipc/requirement-handlers.ts',
       'ipc/rule-handlers.ts',
       'norms/agent-rule.ts',
@@ -833,6 +835,7 @@ describe('확인됨을 만드는 경로는 사람 RPC뿐, 확인 풀림은 폐�
     );
     expect(imports).toEqual({
       'ipc/confirmation-handlers.ts': ['confirmByHuman', 'requireHuman'],
+      'ipc/contract-handlers.ts': ['confirmHumanContractRegistration', 'requireHuman'],
       'ipc/requirement-handlers.ts': ['confirmHumanRequirementWrite'],
       'ipc/rule-handlers.ts': ['confirmHumanRuleEdit', 'requireHuman'],
       'norms/agent-rule.ts': ['releaseConfirmation'],
@@ -844,9 +847,10 @@ describe('확인됨을 만드는 경로는 사람 RPC뿐, 확인 풀림은 폐�
         /import\s*\*\s*as\s+\w+\s+from\s*['"][^'"]*confirmation-service|export\s*\*[^;]*confirmation-service|export\s*\{[^}]*\}\s*from\s*['"][^'"]*confirmation-service|import\s*\(\s*['"`][^'"`]*confirmation-service|from\s*"[^"]*confirmation-service/,
       ),
     ).toEqual([]);
-    // 확인 서비스 모듈 이름이 나오는 파일 = 위의 가져오는 다섯 파일뿐 (다른 길로 가져오는 파일이 없다)
+    // 확인 서비스 모듈 이름이 나오는 파일 = 위의 가져오는 여섯 파일뿐 (다른 길로 가져오는 파일이 없다)
     expect(using(/confirmation-service/)).toEqual([
       'ipc/confirmation-handlers.ts',
+      'ipc/contract-handlers.ts',
       'ipc/requirement-handlers.ts',
       'ipc/rule-handlers.ts',
       'norms/agent-rule.ts',
@@ -855,10 +859,11 @@ describe('확인됨을 만드는 경로는 사람 RPC뿐, 확인 풀림은 폐�
     // 확인됨을 만드는 함수의 호출은 확인 서비스와 사람 경로에만 있다 (오케스트레이터 · 에이전트 경로에는 없다)
     expect(
       using(
-        /\b(confirmByHuman|confirmHumanRequirementWrite|confirmApprovedNorm|confirmHumanRuleEdit)\(/,
+        /\b(confirmByHuman|confirmHumanRequirementWrite|confirmApprovedNorm|confirmHumanRuleEdit|confirmHumanContractRegistration)\(/,
       ),
     ).toEqual([
       'ipc/confirmation-handlers.ts',
+      'ipc/contract-handlers.ts',
       'ipc/requirement-handlers.ts',
       'ipc/rule-handlers.ts',
       'proposals/proposal-service.ts',
@@ -1015,6 +1020,68 @@ describe('블록 선언을 쓰는 경로는 사람의 blocks.set 처리기뿐 (M
   });
 });
 
+describe('계약을 쓰는 경로는 사람의 contract.register 처리기와 계약 모듈뿐 (M3-04 #49, ADR-100 C2 · I1 · B⑨, ADR-129, 코드 구조)', () => {
+  it('저장소의 계약 쓰기 · 계약 검사 규칙 생성 · 승인 기록 contract_edit는 계약 모듈 하나이고, 그 모듈을 가져오는 곳은 계약 RPC 처리기뿐이며, 에이전트 세션이 닿는 코드와 어느 역할의 도구에도 계약 쓰기가 없다', () => {
+    const files = sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+    const using = (pattern: RegExp) =>
+      files
+        .filter((f) => pattern.test(f.text))
+        .map((f) => f.rel)
+        .sort();
+    // 쓰기: 저장소의 계약 만들기는 계약 모듈 하나, 계약 편집 승인 기록도 그 모듈 하나
+    expect(using(/\.contracts\.create\(/)).toEqual(['norms/contract.ts']);
+    expect(using(/action: 'contract_edit'/)).toEqual(['norms/contract.ts']);
+    // 읽기: 계약 모듈 · 효력 판정(규범 입력의 계약) · 조회 처리기뿐
+    expect(using(/\.contracts\.(?:create|get|list)\(/)).toEqual([
+      'ipc/contract-handlers.ts',
+      'norms/contract.ts',
+      'norms/effective.ts',
+    ]);
+    // 계약 모듈을 가져오는 곳 = 사람의 계약 RPC 처리기뿐(에이전트 반영 함수를 부르는 도구는 아직 없다), 처리기는 처리기 묶음만
+    expect(using(/from '[./]+\/?(?:norms\/)?contract\.js'/)).toEqual(['ipc/contract-handlers.ts']);
+    expect(using(/from '[./]+\/?(?:ipc\/)?contract-handlers\.js'/)).toEqual(['ipc/handlers.ts']);
+    // 에이전트 반영 함수는 정의만 있고 제품 코드에서 부르는 곳이 없다 (도구 배선은 뒤 이슈, ADR-129)
+    expect(using(/\breflectAgentContract\b/)).toEqual(['norms/contract.ts']);
+    expect(using(/\breflectAgentContract\(/)).toEqual([]);
+    expect(using(/'contract\.register'/)).toEqual(['ipc/contract-handlers.ts']);
+    // 계약 모듈: 규칙 생성은 한 곳 · 내장 · 부모 없음 · 검사 종류 계약뿐이고, 그 규칙의 신규 기록은 오케스트레이터 주체다.
+    // 확인 서비스 · 확인 상태 저장소에는 닿지 않는다(확인됨은 처리기가 확인 서비스로 둔다)
+    const contract = files.find((f) => f.rel === 'norms/contract.ts')?.text ?? '';
+    expect(contract.match(/\.rules\.create\(/g)).toHaveLength(1);
+    expect(contract.match(/builtin: (true|false)/g)).toEqual(['builtin: true']);
+    expect(contract).toMatch(/parentRequirementId: null,(\s|\/\/[^\n]*)+builtin: true/);
+    expect(contract).toMatch(/checkKinds: \['contract'\]/);
+    expect(contract.match(/\.normChanges\.append\(/g)).toHaveLength(2);
+    expect(contract.match(/actor: \{ kind: 'orchestrator' \}/g)).toHaveLength(1);
+    expect(/confirmation|\.confirmations\b/i.test(contract)).toBe(false);
+    // 에이전트 세션이 닿는 코드(도구 · 세션 · 역할 · 엔진 · 단계 · 실행 · 판정)는 계약 쓰기 경로를 모른다
+    for (const { rel, text } of files) {
+      if (
+        /^(tools|agent|rule-writer|test-writer|implementer|engine|steps|runs|judge)\//.test(rel)
+      ) {
+        expect(
+          /'contract\.register'|contract-handlers|norms\/contract\.js|\.contracts\.(?:create|get|list)\(|reflectAgentContract/.test(
+            text,
+          ),
+          rel,
+        ).toBe(false);
+      }
+    }
+    // 도구: 어느 역할의 도구 목록 · MCP 목록에도 계약 이름이 없고, 계약 쓰기 RPC 이름은 금지 판별에 걸린다
+    expect(isForbiddenTool('contract.register')).toBe(true);
+    for (const role of ROLES) {
+      const names = [...roleToolNames(role), ...biveMcpToolList(role).map((tool) => tool.name)];
+      expect(
+        names.filter((name) => /contract/i.test(name)),
+        role,
+      ).toEqual([]);
+    }
+  });
+});
+
 describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경로 (M7-02 #214, ADR-100 C2 · A1, 코드 구조)', () => {
   it('규칙 생성은 규칙 바로 반영 모듈과 옛 제안 승인뿐이고, 규범 변경 기록 추가는 바로 반영 모듈뿐이며, 제품 경로에서 제안을 등록하지 않는다', () => {
     const files = sourceFiles(SRC_DIR).map((file) => ({
@@ -1028,9 +1095,11 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
         .sort();
     // 저장소의 규칙 생성
     // 내장 구조 규칙 모듈(M3-03 #48, ADR-127)은 사람의 블록 선언 저장과 같은 트랜잭션에서 내장 규칙(부모 없음)만 만든다 (아래 시험)
+    // 계약 모듈(M3-04 #49, ADR-129)은 계약 등록과 같은 트랜잭션에서 그 계약의 검사 규칙(내장 · 부모 없음)만 만든다 (아래 시험)
     expect(using(/\.rules\.create\(/)).toEqual([
       'norms/agent-rule.ts',
       'norms/builtin-rules.ts',
+      'norms/contract.ts',
       'proposals/proposal-service.ts',
     ]);
     // 규범 변경 기록 쓰기 = 바로 반영 모듈(신규)과 실행 자동 시작 모듈(자동 시작, M7-05). 읽기는 조회 처리기 · 규칙 작성 상태 ·
@@ -1040,10 +1109,12 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
     // 이의 기록 모듈(M7-11, ADR-115)은 구현 역할의 이의와 판단 없는 유지를 쓴다 (규칙 · 폐기 · 판정은 쓰지 않는다, 아래 시험)
     // 검사 실패 판단 모듈(M7-12, ADR-118)은 판단 없는 검사 실패 판단(모순 없음)만 쓴다 (규칙 · 폐기 · 판정은 쓰지 않는다, 아래 시험)
     // 내장 구조 규칙 모듈(M3-03 #48)은 그 규칙의 신규 기록(주체 오케스트레이터)만 쓴다
+    // 계약 모듈(M3-04 #49)은 계약 검사 규칙의 신규 기록(주체 오케스트레이터)과 에이전트 반영의 계약 신규 기록만 쓴다
     expect(using(/\.normChanges\.append\(/)).toEqual([
       'norms/agent-rule.ts',
       'norms/builtin-rules.ts',
       'norms/check-contradiction.ts',
+      'norms/contract.ts',
       'norms/objection.ts',
       'norms/test-change.ts',
       'runs/auto-start.ts',
@@ -1062,6 +1133,7 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
       'norms/agent-rule.ts',
       'norms/builtin-rules.ts',
       'norms/check-contradiction.ts',
+      'norms/contract.ts',
       'norms/objection.ts',
       'norms/test-change.ts',
       'runs/auto-start.ts',
@@ -1113,6 +1185,7 @@ const NORM_CHANGE_FIXED_REASONS: Readonly<Record<string, string>> = {
   CONTRADICTION_RESTART_REASON,
   RULE_EDIT_START_REASON,
   BUILTIN_RULE_CREATED_REASON,
+  CONTRACT_RULE_CREATED_REASON,
 };
 
 /** 문서 기호 꼴: ADR · SCR · NFR 번호, PRD, PRD 요구사항 ID(`RUN-08` 등 대문자 2~5자 + 숫자 2자리) */
@@ -1295,6 +1368,8 @@ describe('규칙 폐기 · 대체와 효력 판정의 코드 경로 (M7-09 #221,
       'engine/pipeline-engine.ts',
       'ipc/rule-handlers.ts',
       'norms/agent-rule.ts',
+      // 계약 등록: 부모 요구사항이 효력 있는지 (M3-04 #49, ADR-129)
+      'norms/contract.ts',
       'norms/norm-input.ts',
       'norms/objection.ts',
       // 기존 규칙 모순으로 끝난 실행의 대상 규칙 다시 시작: 효력 없어진 대상 규칙을 건너뛴다 (M7-12, ADR-118)

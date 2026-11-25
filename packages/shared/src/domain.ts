@@ -11,6 +11,7 @@ import {
   CheckKind,
   CodeOpenReason,
   ConfirmationState,
+  ContractKind,
   JudgeRunner,
   JudgmentStatus,
   NormChangeKind,
@@ -62,7 +63,6 @@ export type EntityName = z.infer<typeof EntityName>;
 
 /** 스키마가 아직 없는 예약 엔터티 이름. */
 export const RESERVED_ENTITY_NAMES = [
-  'Contract',
   'Adr',
   'CodeChange',
   'MutationResult',
@@ -111,7 +111,11 @@ export type EntityRef = z.infer<typeof EntityRef>;
 
 // ── 확인 상태 (ADR-100 D2 · C1 · A1, M7-01) ─────────────────
 
-/** 확인 상태를 두는 엔터티. 계약 · 블록 선언 · ADR은 그 이슈가 더한다 (M3-04 · M3-05 · M4-01 · M4-13). */
+/**
+ * 사람이 확인 RPC(`confirmation.set`)로 확인하고 확인할 것 목록(`confirmation.list`)에 오르는 엔터티. 블록 선언 · ADR은 그 이슈가
+ * 더한다 (M3-05 · M4-01 · M4-13). 계약은 확인 상태를 저장하지만(아래 {@link ConfirmationRecordEntity}) 사람의 확인 RPC · 확인할 것
+ * 목록에는 아직 없다(M3-04 #49, ADR-129: 미확인 계약이 생기는 제품 경로가 없고, 그 항목을 그릴 화면이 M3-05다)
+ */
 export const ConfirmationEntity = z.enum(['Requirement', 'Rule']);
 export type ConfirmationEntity = z.infer<typeof ConfirmationEntity>;
 
@@ -119,16 +123,30 @@ export type ConfirmationEntity = z.infer<typeof ConfirmationEntity>;
 export const ConfirmationTarget = EntityRef.extend({ entity: ConfirmationEntity, id: Ulid });
 export type ConfirmationTarget = z.infer<typeof ConfirmationTarget>;
 
+/** 확인 상태를 저장하는 엔터티 (`confirmations` 표, 0024가 계약을 더함. M3-04 #49, ADR-129). */
+export const ConfirmationRecordEntity = z.enum([...ConfirmationEntity.options, 'Contract']);
+export type ConfirmationRecordEntity = z.infer<typeof ConfirmationRecordEntity>;
+
+/** 확인 상태 저장의 대상: {@link ConfirmationTarget}에 계약을 더한 것 (저장소 · 확인 서비스 안에서만 쓴다). */
+export const ConfirmationRecordTarget = EntityRef.extend({
+  entity: ConfirmationRecordEntity,
+  id: Ulid,
+});
+export type ConfirmationRecordTarget = z.infer<typeof ConfirmationRecordTarget>;
+
 /**
  * 확인됨의 근거 (ADR-100 A1).
  * - `approval_log`: 승인 기록의 사람 행동 1건(`seq`). 확인(`confirm`), 제안 승인(`approve` · `approve_edited`),
  *   규칙 직접 편집(`rule_edit`, M7-03)
  * - `requirement_record`: 요구사항 자체의 작성 · 수정 주체(사람)와 그 시각(`createdAt` 또는 `updatedAt`, NRM-01).
  *   사람이 쓰거나 고친 요구사항이고, 승인 기록에는 항목이 없다
+ * - `contract_record`: 계약 자체의 작성 주체(사람)와 그 시각(`createdAt`, M3-04 #49 · ADR-129). 사람이 등록한 계약이다(그 등록은
+ *   승인 기록 `contract_edit`에도 남는다). 계약에만 쓴다(DB CHECK)
  */
 export const ConfirmationBasis = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('approval_log'), seq: z.int().positive() }),
   z.strictObject({ kind: z.literal('requirement_record'), at: Timestamp }),
+  z.strictObject({ kind: z.literal('contract_record'), at: Timestamp }),
 ]);
 export type ConfirmationBasis = z.infer<typeof ConfirmationBasis>;
 
@@ -700,6 +718,55 @@ export type RuleEditSnapshot = z.infer<typeof RuleEditSnapshot>;
 export const RuleEditDiff = z.strictObject({ before: RuleEditSnapshot, after: RuleEditSnapshot });
 export type RuleEditDiff = z.infer<typeof RuleEditDiff>;
 
+// ── 계약 (NRM-03, ADR-019 · ADR-033 · ADR-100 C2 · K1 · A14, M3-04 #49, ADR-129) ─────
+
+/** 계약 원본 파일 경로의 길이 상한 (UTF-16 코드 단위). */
+export const CONTRACT_SOURCE_FILE_MAX = 1024;
+
+/** 계약 원본 파일 (프로젝트 루트 기준 상대 경로, `/` 구분). 형식 규칙은 등록 모듈이 보고 읽기 스키마는 길이만 본다. */
+export const ContractSourceFile = z.string().min(1).max(CONTRACT_SOURCE_FILE_MAX);
+
+/**
+ * 계약 (NRM-03 · ADR-019). 등록 단위 = 파일이고 요구사항과의 연결 단위도 파일이다(부모 요구사항 0~1개).
+ * - `contentHash`: 등록 때 기준 브랜치 커밋(`sourceCommit`)에 든 그 파일 내용의 SHA-256(바이트 그대로). 계약 내용 자체는
+ *   저장하지 않는다(원본은 저장소의 파일이다)
+ * - `author`: 등록 주체(사람의 CLI 등록 · 에이전트 반영). 확인 상태는 저장 칸이 아니라 확인 기록(`confirmations`)에서 읽는다
+ * - 계약은 지금 고치거나 지우지 않는다(변경 반영은 M3-10)
+ */
+export const Contract = z.strictObject({
+  id: Ulid,
+  displayId: displayIdSchema('CON'),
+  kind: ContractKind,
+  sourceFile: ContractSourceFile,
+  contentHash: Sha256Hex,
+  sourceCommit: CommitSha,
+  parentRequirementId: Ulid.nullable(),
+  author: Author,
+  createdAt: Timestamp,
+  confirmation: Confirmation,
+});
+export type Contract = z.infer<typeof Contract>;
+
+/** 계약 편집 diff의 한쪽: 등록 단위인 파일과 그 내용 해시 · 종류 · 부모 요구사항 (M3-04 #49, ADR-129). */
+export const ContractEditSnapshot = z.strictObject({
+  kind: ContractKind,
+  sourceFile: ContractSourceFile,
+  contentHash: Sha256Hex,
+  sourceCommit: CommitSha,
+  parentRequirementId: Ulid.nullable(),
+});
+export type ContractEditSnapshot = z.infer<typeof ContractEditSnapshot>;
+
+/**
+ * 승인 기록 `contract_edit`의 diff. 사람의 계약 등록은 이전이 없는 편집(`before: null`)이다(ADR-129: 승인 기록 표를 다시 만들어
+ * 행동 값을 더하지 않고 계약 편집 값과 diff의 빈 이전으로 구별한다). 계약 변경(M3-10)은 이 모양을 넓힌다.
+ */
+export const ContractEditDiff = z.strictObject({
+  before: ContractEditSnapshot.nullable(),
+  after: ContractEditSnapshot,
+});
+export type ContractEditDiff = z.infer<typeof ContractEditDiff>;
+
 /** 수정 diff를 남기는 행동: 수정 후 승인과 사람의 직접 편집 (ADR-100 A2 · A8). */
 const EDIT_ACTIONS: readonly ApprovalAction[] = ['approve_edited', 'rule_edit', 'contract_edit'];
 
@@ -762,6 +829,24 @@ export const ApprovalLogEntry = z
         ctx.addIssue({
           code: 'custom',
           message: '규칙 직접 편집의 대상은 규칙이어야 합니다',
+          path: ['targetRef'],
+        });
+      }
+    }
+    // 사람의 계약 등록 · 편집은 계약을 대상으로 하고 diff는 계약 편집 diff다 (M3-04 #49, ADR-129). 이 값을 쓰는 제품 코드는 이 변경이
+    // 처음이라 옛 행이 형식 위반이 되지 않는다
+    if (action === 'contract_edit') {
+      if (detail.diff !== undefined && !ContractEditDiff.safeParse(detail.diff).success) {
+        ctx.addIssue({
+          code: 'custom',
+          message: '계약 편집의 diff는 계약 파일 · 내용 해시 · 종류의 전후입니다',
+          path: ['detail', 'diff'],
+        });
+      }
+      if (entry.targetRef.entity !== 'Contract') {
+        ctx.addIssue({
+          code: 'custom',
+          message: '계약 편집의 대상은 계약이어야 합니다',
           path: ['targetRef'],
         });
       }
@@ -1703,27 +1788,34 @@ export type SessionNormInputCount = z.infer<typeof SessionNormInputCount>;
 /**
  * 세션이 작업 지시로 받은 규범 입력의 기록 (ADR-100 K1 · A15, ADR-106 · ADR-108): 수 · 잘린 사실과 실은 항목의 표시 ID
  * (자료에 실린 순서 = 표시 ID 순). 세션을 열 때 정해지고 바뀌지 않는다. 표시 ID는 형식이 정해진 값이라 그대로 표시 값이다.
+ * 계약(M3-04 #49, ADR-129)의 수 · 표시 ID는 효력 있는 계약이 있을 때만 두 칸이 함께 있다(계약이 없는 세션의 기록은 옛 모양 그대로).
  */
 export const SessionNormInput = z
   .strictObject({
     summary: z.strictObject({
       requirements: SessionNormInputCount,
       rules: SessionNormInputCount,
+      contracts: SessionNormInputCount.optional(),
       truncated: z.boolean(),
     }),
     requirementDisplayIds: z.array(displayIdSchema('REQ')),
     ruleDisplayIds: z.array(displayIdSchema('RULE')),
+    contractDisplayIds: z.array(displayIdSchema('CON')).optional(),
   })
   .refine(
     (input) =>
       input.summary.requirements.included === input.requirementDisplayIds.length &&
-      input.summary.rules.included === input.ruleDisplayIds.length,
+      input.summary.rules.included === input.ruleDisplayIds.length &&
+      (input.summary.contracts?.included ?? 0) === (input.contractDisplayIds?.length ?? 0) &&
+      (input.summary.contracts === undefined) === (input.contractDisplayIds === undefined),
     '실은 수와 표시 ID 수가 같다',
   )
   .refine(
     (input) =>
       input.summary.truncated ===
-      (input.summary.requirements.omitted > 0 || input.summary.rules.omitted > 0),
+      (input.summary.requirements.omitted > 0 ||
+        input.summary.rules.omitted > 0 ||
+        (input.summary.contracts?.omitted ?? 0) > 0),
     '잘림은 빠진 항목이 있을 때만',
   );
 export type SessionNormInput = z.infer<typeof SessionNormInput>;

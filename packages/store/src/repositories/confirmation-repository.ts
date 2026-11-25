@@ -1,5 +1,5 @@
 // 확인 상태 리포지토리 (NFR-01, ADR-100 D2 · I1 · C1, M7-01 #213, ADR-101). 테이블 `confirmations`(0012).
-// - 규범 항목(요구사항 · 규칙)마다 1행. 행이 없으면 미확인(기본)이다
+// - 규범 항목(요구사항 · 규칙 · 계약)마다 1행. 행이 없으면 미확인(기본)이다. 계약은 0024가 더했다(M3-04 #49, ADR-129)
 // - 확인됨을 쓰는 함수는 `confirm` 하나이고 확인한 사람(`HumanAuthor`)을 인자로 받는다. 사람이 아닌 주체는 스키마 ·
 //   DB CHECK가 모두 거부한다. 누가 부를 수 있는지(사람 RPC · 사람의 요구사항 저장 · 사람의 제안 승인)는 오케스트레이터의
 //   확인 서비스(`orchestrator/src/confirmations/confirmation-service.ts`)가 정한다
@@ -9,8 +9,8 @@
 import {
   Confirmation,
   ConfirmationBasis,
-  type ConfirmationEntity,
-  ConfirmationTarget,
+  type ConfirmationRecordEntity,
+  ConfirmationRecordTarget,
   type HumanAuthor,
   HumanAuthor as HumanAuthorSchema,
   Timestamp,
@@ -32,7 +32,7 @@ export interface ConfirmationColumns {
  * 확인 상태는 대상 행의 저장 필드가 아니라 이 표에서 읽는다.
  */
 export const confirmationJoin = (
-  entity: ConfirmationEntity,
+  entity: ConfirmationRecordEntity,
   alias: string,
 ): { columns: string; join: string } => ({
   columns: `c.state AS confirmation_state, c.confirmed_at AS confirmation_at,
@@ -97,8 +97,8 @@ export class ConfirmationRepository {
    * 대상의 확인 상태. 기록이 없으면 미확인. 대상이 있는지는 보지 않는다(호출한 쪽이 확인한다).
    * @throws {ZodError} 대상 형식 위반
    */
-  get(target: ConfirmationTarget): Confirmation {
-    const { entity, id } = ConfirmationTarget.parse(target);
+  get(target: ConfirmationRecordTarget): Confirmation {
+    const { entity, id } = ConfirmationRecordTarget.parse(target);
     const row = this.#select.get({ entity, target_id: id });
     if (row === undefined) return Confirmation.parse(UNCONFIRMED);
     return toConfirmation({
@@ -115,8 +115,8 @@ export class ConfirmationRepository {
    * @throws {ZodError} 대상 · 주체(사람 아님) · 시각 · 근거 형식 위반
    * @throws {SqliteError} 없는 대상 (트리거)
    */
-  confirm(target: ConfirmationTarget, input: ConfirmInput): Confirmation {
-    const { entity, id } = ConfirmationTarget.parse(target);
+  confirm(target: ConfirmationRecordTarget, input: ConfirmInput): Confirmation {
+    const { entity, id } = ConfirmationRecordTarget.parse(target);
     const confirmation = Confirmation.parse({
       state: 'confirmed',
       at: Timestamp.parse(input.at),
@@ -147,8 +147,8 @@ export class ConfirmationRepository {
    * @throws {Error} 대상이 확인됨이 아님
    * @throws {SqliteError} 바로 앞의 규범 변경 기록이 그 대상의 확인 풀림이 아님 (트리거)
    */
-  release(target: ConfirmationTarget): Confirmation {
-    const { entity, id } = ConfirmationTarget.parse(target);
+  release(target: ConfirmationRecordTarget): Confirmation {
+    const { entity, id } = ConfirmationRecordTarget.parse(target);
     return withTransaction(this.#db, () => {
       const previous = this.get({ entity, id });
       if (previous.state !== 'confirmed') throw new Error('확인됨이 아니라 풀 확인이 없습니다');
