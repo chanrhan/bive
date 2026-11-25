@@ -2423,6 +2423,7 @@ describe('0024 contracts: 계약 · 계약 검사 규칙 제약 · 확인 상태
       contract: string | null;
       builtin?: number;
       parent?: string | null;
+      detached?: string | null;
       checks?: string;
       display?: string;
     },
@@ -2431,7 +2432,7 @@ describe('0024 contracts: 계약 · 계약 검사 규칙 제약 · 확인 상태
       .prepare(
         `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
          parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
-         updated_at, deleted_at) VALUES (?, ?, '계약 규칙', '진술', 'tech-constraint', ?, ?, NULL, ?, '[]',
+         updated_at, deleted_at) VALUES (?, ?, '계약 규칙', '진술', 'tech-constraint', ?, ?, ?, ?, '[]',
          NULL, ?, ?, 'approved', ?, ?, NULL)`,
       )
       .run(
@@ -2439,6 +2440,7 @@ describe('0024 contracts: 계약 · 계약 검사 규칙 제약 · 확인 상태
         row.display ?? 'RULE-009',
         row.checks ?? '["contract"]',
         row.parent ?? null,
+        row.detached ?? null,
         row.builtin ?? 1,
         row.contract,
         human,
@@ -2638,7 +2640,8 @@ describe('0024 contracts: 계약 · 계약 검사 규칙 제약 · 확인 상태
       // 계약 검사 규칙
       const cases: [string, Parameters<typeof insertRule>[1]][] = [
         ['없는 계약', { contract: newId() }],
-        ['내장 아님', { contract, builtin: 0, parent: req }],
+        // 부모가 해제된 일반 규칙 꼴 (부모 없음 · 검사 종류 계약을 지켜도 내장이 아니면 거부)
+        ['내장 아님', { contract, builtin: 0, detached: T(9) }],
         ['부모 있음', { contract, parent: req }],
         ['검사 종류', { contract, checks: '["test"]' }],
         ['검사 종류 여럿', { contract, checks: '["contract","test"]' }],
