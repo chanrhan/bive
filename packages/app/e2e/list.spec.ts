@@ -310,13 +310,18 @@ test.describe('카드 · 상태 배지 · 상세 접힘 (수용 기준 4)', () =
     const fullTitle =
       '주문 취소는 결제 승인 후 24시간 이내에만 허용하고 부분 환불은 관리자 승인 뒤에만 처리한다';
     const title = long.getByTestId('card-title');
-    await expect(title).toHaveAttribute('title', fullTitle);
     const overflow = await title.evaluate((el) => ({
       ellipsis: getComputedStyle(el).textOverflow,
       whiteSpace: getComputedStyle(el).whiteSpace,
       clipped: el.scrollWidth > el.clientWidth,
     }));
     expect(overflow).toEqual({ ellipsis: 'ellipsis', whiteSpace: 'nowrap', clipped: true });
+    // 잘린 제목은 공통 툴팁에 전체 문구 (#201 · ADR-124, title 속성 대신)
+    await expect(title).not.toHaveAttribute('title');
+    await title.hover();
+    await expect(page.getByRole('tooltip')).toHaveText(fullTitle);
+    await page.mouse.move(0, 0);
+    await expect(page.getByRole('tooltip')).toHaveCount(0);
 
     // 2줄: 제목 줄 아래에 ID · 예외 · 시각 줄
     const line1 = await long.locator('.card-line-1').boundingBox();
@@ -326,10 +331,10 @@ test.describe('카드 · 상태 배지 · 상세 접힘 (수용 기준 4)', () =
     await expect(long.getByTestId('card-id')).toHaveText('RULE-002');
     await expect(long.getByTestId('card-exception')).toHaveText(['실패']);
     await expect(long.locator('time')).toHaveText('2026-10-02 09:00');
-    await expect(long.getByTestId('card-line-2')).toHaveAttribute(
-      'title',
-      'RULE-002 · 실패 · 2026-10-02 09:00',
-    );
+    // 2줄째는 잘리지 않았으므로 툴팁이 없다 (1.4 "긴 텍스트는 말줄임 + 툴팁": 잘린 것만)
+    await expect(long.getByTestId('card-line-2')).not.toHaveAttribute('title');
+    await long.getByTestId('card-line-2').hover();
+    await expect(page.getByRole('tooltip')).toHaveCount(0);
     // 생성 주체는 아이콘만 (접근 가능한 이름 = 주체 이름)
     const author = long.getByTestId('author-mark');
     await expect(author).toHaveAttribute('aria-label', '에이전트');
@@ -340,10 +345,7 @@ test.describe('카드 · 상태 배지 · 상세 접힘 (수용 기준 4)', () =
     await expect(normal.getByTestId('card-exception')).toHaveCount(0);
     await expect(normal.getByTestId('card-id')).toHaveText('RULE-001');
     await expect(normal.locator('time')).toHaveText('2026-10-01 09:00');
-    await expect(normal.getByTestId('card-line-2')).toHaveAttribute(
-      'title',
-      'RULE-001 · 2026-10-01 09:00',
-    );
+    await expect(normal.getByTestId('card-line-2')).not.toHaveAttribute('title');
     await expect(normal.getByRole('img', { name: '통과' })).toBeVisible();
     await expect(normal.getByRole('img', { name: '사람' })).toBeVisible();
 

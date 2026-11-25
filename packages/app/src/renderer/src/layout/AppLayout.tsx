@@ -1,6 +1,7 @@
 // 앱 레이아웃 (screens.md 1.2): 왼쪽 사이드바 · 중앙 영역 · 오른쪽 채팅(고정).
 import { useMemo } from 'react';
 
+import { TooltipHost } from '../components/Tooltip/TooltipHost.js';
 import { useConnection } from '../connection/useConnection.js';
 import { useProject } from '../project/ProjectContext.js';
 import { todoBadgeTotal, todoBreakdown } from '../screens/todo/confirmationView.js';
@@ -40,6 +41,8 @@ const LayoutBody = (): React.JSX.Element => {
       />
       <MainArea />
       <ChatPanel collapsed={collapsed} />
+      {/* 공통 툴팁은 앱에 하나 (열린 것만 그린다, ADR-124) */}
+      <TooltipHost />
     </div>
   );
 };

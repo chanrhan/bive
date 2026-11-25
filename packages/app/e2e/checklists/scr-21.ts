@@ -26,6 +26,8 @@ export const IDE_TEXT = {
   section: 'IDE',
   unset: 'IDE 미설정',
   customField: '사용자 지정 URL 틀',
+  /** 사용자 지정 틀 입력 아래 자리 표시 안내 (#201 · ADR-124, ADR-087의 `{path}` 값 형태) */
+  pathHint: '{path}: 맨 앞 / 뺀 절대 경로 · {line}: 줄 번호',
 } as const;
 
 /** 보이는 역할 행 (화면 정의서 명칭). */

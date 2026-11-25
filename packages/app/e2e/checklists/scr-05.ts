@@ -286,6 +286,17 @@ const hidden: ElementCheck[] = [
   { label: '준수 추이 미노출', text: /추이/, absent: true },
 ];
 
+/**
+ * 공통 툴팁 문구 (#201 · ADR-124, screens.md 1.1 명사형 · 코드 표기 없음): 대상의 `data-testid` → 툴팁 문구. 화면 문구와 글자까지
+ * 같아야 한다(scr-05.spec.ts가 열린 툴팁의 글자와 대조). `kind`는 누름의 뜻: `action` = 원래 동작(규칙 화면 이동)이 있어 툴팁은
+ * 올림 · 키보드 초점으로만, `press` = 원래 동작이 없어 누름(Enter · Space)으로도 연다.
+ */
+export const TOOLTIPS = {
+  'metric-compliance-all': { text: '통과 / 판정 가능', kind: 'action' },
+  'metric-compliance-confirmed': { text: '통과 / 판정 가능 · 확인됨 규칙만', kind: 'action' },
+  'code-open-hint': { text: '링크 경유 열기 시도 수 · 링크 밖 열람 미집계', kind: 'press' },
+} as const satisfies Record<string, { text: string; kind: 'action' | 'press' }>;
+
 const metrics = (
   { all, confirmed, retired }: { all: string; confirmed: string; retired: string },
   cost: string,
@@ -300,14 +311,12 @@ const metrics = (
     testId: 'metric-compliance-all',
     role: 'button',
     text: `전체 기준 ${all}`,
-    attributes: { title: '통과 / 판정 가능' },
   },
   {
     label: '준수 사람 확인 기준',
     testId: 'metric-compliance-confirmed',
     role: 'button',
     text: `사람 확인 기준 ${confirmed}`,
-    attributes: { title: '통과 / 판정 가능 · 확인됨 규칙만' },
   },
   {
     label: '에이전트 폐기 규칙 카드',

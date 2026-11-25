@@ -24,10 +24,17 @@ import {
   STAGE_LABELS,
   stages,
   SUMMARY,
+  TOOLTIPS,
   verificationScreenUpdateFailedChecklist,
   verificationSkippedChecklist,
 } from './checklists/scr-05.js';
-import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
+import {
+  type BiveMock,
+  type MockCall,
+  mockBive,
+  type MockResponses,
+  nextFrame,
+} from './support/bive-mock.js';
 import {
   collectVisibleText,
   expectScreen,
@@ -333,18 +340,17 @@ test.describe('코드 열람 영역 (#44 수용 기준 1 · 2, MET-01 · ADR-088
     await expect(page.getByTestId('verification-basis')).toHaveText('판정 기준 main@a1f26b1');
   });
 
-  test('한계 문구 "링크 경유 열기 시도 수 · 링크 밖 열람 미집계"는 제목의 툴팁이고 키보드 초점으로 닿는다 (#191)', async ({
+  test('한계 문구 "링크 경유 열기 시도 수 · 링크 밖 열람 미집계"는 제목의 공통 툴팁이고 키보드 초점으로 닿는다 (#191 · #201)', async ({
     page,
   }) => {
     await openScreen(page);
     const heading = area(page).getByRole('heading', { name: '코드 열람' });
     await expect(heading).toBeVisible();
     const hint = heading.getByTestId('code-open-hint');
-    // 준수 카드와 같은 방식: 초점을 받는 버튼, 이름은 제목 글자, 한계 문구는 툴팁 · 접근 가능한 설명
+    // 준수 카드와 같은 방식: 초점을 받는 버튼, 이름은 제목 글자, 한계 문구는 공통 툴팁 · 접근 가능한 설명 (title 속성 없음)
     await expect(hint).toHaveRole('button');
     await expect(hint).toHaveAccessibleName('코드 열람');
-    await expect(hint).toHaveAttribute('title', '링크 경유 열기 시도 수 · 링크 밖 열람 미집계');
-    await expect(hint).toHaveAccessibleDescription('링크 경유 열기 시도 수 · 링크 밖 열람 미집계');
+    await expect(hint).not.toHaveAttribute('title');
     // 지표 카드의 버튼(준수 두 기준 → 에이전트 폐기 규칙) 다음 Tab 한 번으로 닿는다 (실행당 비용 카드는 초점을 받지 않는다)
     await page.getByTestId('metric-compliance-all').focus();
     await page.keyboard.press('Tab');
@@ -353,7 +359,9 @@ test.describe('코드 열람 영역 (#44 수용 기준 1 · 2, MET-01 · ADR-088
     await expect(page.getByTestId('metric-agent-retired')).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(hint).toBeFocused();
-    // 보이는 문구는 더하지 않는다 (ADR-088: 화면 정의서에 없는 문구)
+    await expect(page.getByRole('tooltip')).toHaveText(TOOLTIPS['code-open-hint'].text);
+    await expect(hint).toHaveAccessibleDescription(TOOLTIPS['code-open-hint'].text);
+    // 영역 안에 보이는 문구는 더하지 않는다 (ADR-088: 화면 정의서에 없는 문구. 툴팁은 영역 밖 한 곳에 뜬다)
     await expect(area(page).getByText('링크 경유 열기 시도 수', { exact: false })).toHaveCount(0);
   });
 
@@ -835,6 +843,267 @@ test.describe('이동 · 재개 (수용 기준 4)', () => {
     await expect(page.getByRole('button', { name: '재개', exact: true })).toBeEnabled();
     expect(await callsOf(bive, 'run.resume')).toHaveLength(1);
   });
+});
+
+test.describe('공통 툴팁: 준수 카드의 기준 · 코드 열람 한계 문구 (#201, ADR-124)', () => {
+  type Target = keyof typeof TOOLTIPS;
+  const TARGETS = Object.keys(TOOLTIPS) as Target[];
+  const tooltip = (page: Page) => page.getByRole('tooltip');
+
+  /** 키보드로 대상에 초점을 옮긴다: 탭 순서의 이웃에서 Tab · Shift+Tab 한 번 (마우스 누름 초점이 아닌 키보드 초점). */
+  const NEIGHBOR: Record<Target, { from: string; key: 'Tab' | 'Shift+Tab' }> = {
+    'metric-compliance-all': { from: 'metric-compliance-confirmed', key: 'Shift+Tab' },
+    'metric-compliance-confirmed': { from: 'metric-compliance-all', key: 'Tab' },
+    'code-open-hint': { from: 'metric-agent-retired', key: 'Tab' },
+  };
+  const keyboardFocus = async (page: Page, target: Target): Promise<void> => {
+    const { from, key } = NEIGHBOR[target];
+    await page.getByTestId(from).focus();
+    await page.keyboard.press(key);
+    await expect(page.getByTestId(target)).toBeFocused();
+  };
+
+  test('문구는 체크리스트와 글자까지 같고 명사형 · 코드 표기 없음 (화면 정의서 1.1)', () => {
+    for (const { text } of Object.values(TOOLTIPS)) {
+      expect(findForbiddenText([{ source: '툴팁', text }])).toEqual([]);
+      // 서술형 문장 끝맺음이 없다
+      expect(text).not.toMatch(/(다|요)\.?$/);
+    }
+  });
+
+  for (const target of TARGETS) {
+    test(`${target}: 키보드 초점으로 보이고 aria-describedby로 이어지며, Esc로 닫히고 초점은 대상에 남는다. title 속성은 없다`, async ({
+      page,
+    }) => {
+      await openScreen(page);
+      const anchor = page.getByTestId(target);
+      await expect(anchor).not.toHaveAttribute('title');
+      await expect(tooltip(page)).toHaveCount(0);
+      await expect(anchor).not.toHaveAttribute('aria-describedby');
+
+      await keyboardFocus(page, target);
+      await expect(tooltip(page)).toHaveCount(1);
+      await expect(tooltip(page)).toHaveText(TOOLTIPS[target].text);
+      await expect(tooltip(page)).toHaveAttribute('data-reason', 'focus');
+      const id = await tooltip(page).getAttribute('id');
+      expect(id).not.toBeNull();
+      await expect(anchor).toHaveAttribute('aria-describedby', id ?? '');
+      await expect(anchor).toHaveAccessibleDescription(TOOLTIPS[target].text);
+
+      await page.keyboard.press('Escape');
+      await expect(tooltip(page)).toHaveCount(0);
+      await expect(anchor).toBeFocused();
+      await expect(anchor).not.toHaveAttribute('aria-describedby');
+      // Esc는 원래 동작을 부르지 않는다 (검증 화면 그대로)
+      await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'verification');
+    });
+  }
+
+  test('초점이 떠나면(Tab) 닫히고 다음 대상의 툴팁이 열린다. 한 번에 하나만 열린다', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    await keyboardFocus(page, 'metric-compliance-all');
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['metric-compliance-all'].text);
+    await page.keyboard.press('Tab');
+    await expect(tooltip(page)).toHaveCount(1);
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['metric-compliance-confirmed'].text);
+    await expect(page.getByTestId('metric-compliance-all')).not.toHaveAttribute('aria-describedby');
+    // 초점 툴팁이 열린 채 다른 대상에 마우스를 올리면 그 대상 것 하나로 바뀐다
+    await page.getByTestId('code-open-hint').hover();
+    await expect(tooltip(page)).toHaveCount(1);
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['code-open-hint'].text);
+    await expect(page.getByTestId('metric-compliance-confirmed')).not.toHaveAttribute(
+      'aria-describedby',
+    );
+    await expect(page.getByTestId('code-open-hint')).toHaveAttribute(
+      'aria-describedby',
+      'bive-tooltip',
+    );
+    // 초점이 버튼 밖(머리줄 글자)으로 가면 닫힌다
+    await page.getByTestId('verification-basis').click();
+    await expect(tooltip(page)).toHaveCount(0);
+  });
+
+  test('코드 열람(원래 동작 없음): 누르면 열리고 밖을 누르면 닫힌다. Enter · Space로도 열린다', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    const hint = page.getByTestId('code-open-hint');
+    await hint.click();
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['code-open-hint'].text);
+    await expect(tooltip(page)).toHaveAttribute('data-reason', 'press');
+    // 누름으로 연 툴팁은 마우스가 떠나도 남는다
+    await page.mouse.move(0, 0);
+    await expect(tooltip(page)).toHaveCount(1);
+    await page.getByTestId('verification-basis').click();
+    await expect(tooltip(page)).toHaveCount(0);
+
+    for (const key of ['Enter', 'Space']) {
+      await keyboardFocus(page, 'code-open-hint');
+      await page.keyboard.press('Escape');
+      await expect(tooltip(page)).toHaveCount(0);
+      await page.keyboard.press(key);
+      await expect(tooltip(page), key).toHaveText(TOOLTIPS['code-open-hint'].text);
+      await expect(tooltip(page)).toHaveAttribute('data-reason', 'press');
+      await page.keyboard.press('Escape');
+      await expect(tooltip(page)).toHaveCount(0);
+      await expect(hint).toBeFocused();
+    }
+  });
+
+  test('준수 기준(원래 동작 있음): 마우스를 올리면 열리고 떠나면 닫힌다. 누름은 툴팁이 아니라 규칙 화면 이동이다', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    const all = page.getByTestId('metric-compliance-all');
+    await all.hover();
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['metric-compliance-all'].text);
+    await expect(tooltip(page)).toHaveAttribute('data-reason', 'hover');
+    await page.mouse.move(0, 0);
+    await expect(tooltip(page)).toHaveCount(0);
+
+    await all.click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    // 대상이 사라지면 툴팁도 남지 않는다
+    await expect(tooltip(page)).toHaveCount(0);
+
+    // 키보드: 초점으로 열린 뒤 Enter는 원래 동작(이동)
+    await page.getByRole('button', { name: '검증', exact: true }).click();
+    await keyboardFocus(page, 'metric-compliance-confirmed');
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['metric-compliance-confirmed'].text);
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(
+      page.getByTestId('filter-chip-confirmation').getByTestId('filter-chip-button'),
+    ).toHaveText('확인: 확인됨');
+    await expect(tooltip(page)).toHaveCount(0);
+  });
+
+  test('Esc 한 번은 열린 툴팁만 닫는다: 겹쳐 연 채팅은 그대로이고, 두 번째 Esc가 채팅을 닫는다 (#275 검토 B1)', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1000, height: 800 });
+    await openScreen(page);
+    const chat = page.getByTestId('chat-panel');
+    await page.getByTestId('chat-strip').click();
+    await expect(chat).toHaveAttribute('data-mode', 'overlay');
+    await keyboardFocus(page, 'code-open-hint');
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['code-open-hint'].text);
+    await page.keyboard.press('Escape');
+    await expect(tooltip(page)).toHaveCount(0);
+    await expect(page.getByTestId('code-open-hint')).toBeFocused();
+    await expect(chat).toHaveAttribute('data-mode', 'overlay');
+    // 툴팁이 닫혀 있으면 Esc는 평소대로 채팅 겹침을 닫는다
+    await page.keyboard.press('Escape');
+    await expect(chat).toHaveAttribute('data-mode', 'strip');
+  });
+
+  test('IME 조합 중의 Esc는 툴팁이 삼키지 않는다: 툴팁은 남고 키는 막히지 않는다 (#275 검토 2회차)', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    await keyboardFocus(page, 'code-open-hint');
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['code-open-hint'].text);
+    const prevented = await page.getByTestId('code-open-hint').evaluate((el) => {
+      const event = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        isComposing: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      el.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+    expect(prevented).toBe(false);
+    await nextFrame(page);
+    await expect(tooltip(page)).toHaveCount(1);
+    // 조합이 아닌 Esc는 닫는다
+    await page.keyboard.press('Escape');
+    await expect(tooltip(page)).toHaveCount(0);
+  });
+
+  test('툴팁이 닫혀 있으면 Esc 한 번에 모달(설정)이 닫힌다 (#275 검토 B1)', async ({ page }) => {
+    await openScreen(page);
+    // 툴팁을 한 번 열고 닫아 둔다(닫힌 뒤 Esc를 삼키는 리스너가 남지 않음을 본다)
+    await keyboardFocus(page, 'code-open-hint');
+    await page.keyboard.press('Escape');
+    await expect(tooltip(page)).toHaveCount(0);
+    await page.getByRole('button', { name: '설정', exact: true }).click();
+    await expect(page.getByTestId('settings-modal')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('settings-modal')).toHaveCount(0);
+  });
+
+  test('창 오른쪽 끝의 대상: 툴팁은 창 안으로 당겨지고 가로 스크롤을 만들지 않는다 (#275 검토 N4)', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 820, height: 600 });
+    await openScreen(page);
+    // 대상(코드 열람 한계 문구 버튼)을 창 오른쪽 끝(접힌 채팅 띠 44px 바로 왼쪽)에 붙인다 (시험 전용 배치)
+    await page.addStyleTag({
+      content:
+        '[data-testid="code-open-hint"] { position: fixed; right: 60px; top: 200px; z-index: 1; }',
+    });
+    await page.getByTestId('code-open-hint').click();
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['code-open-hint'].text);
+    const place = await tooltip(page).evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      const anchor = document
+        .querySelector('[data-testid="code-open-hint"]')
+        ?.getBoundingClientRect();
+      const root = document.documentElement;
+      return {
+        left: box.left,
+        right: box.right,
+        width: box.width,
+        anchorLeft: anchor?.left ?? 0,
+        viewport: root.clientWidth,
+        scroll: root.scrollWidth - root.clientWidth,
+      };
+    });
+    // 대상 왼쪽 끝에 맞추면 창 밖으로 나가는 폭이다(당김이 실제로 일어남)
+    expect(place.anchorLeft + place.width).toBeGreaterThan(place.viewport - 8);
+    expect(place.right).toBeLessThanOrEqual(place.viewport - 8 + 0.5);
+    expect(place.left).toBeGreaterThanOrEqual(8 - 0.5);
+    expect(place.scroll).toBe(0);
+  });
+
+  for (const width of [820, 1100, 1280, 1440] as const) {
+    test(`${width}×800: 툴팁은 창 안에 있고 가로 스크롤을 만들지 않는다`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await openScreen(page);
+      for (const target of TARGETS) {
+        await keyboardFocus(page, target);
+        await expect(tooltip(page)).toHaveText(TOOLTIPS[target].text);
+        const place = await tooltip(page).evaluate((el) => {
+          const box = el.getBoundingClientRect();
+          const root = document.documentElement;
+          return {
+            left: box.left,
+            right: box.right,
+            top: box.top,
+            bottom: box.bottom,
+            width: root.clientWidth,
+            height: root.clientHeight,
+            scroll: root.scrollWidth - root.clientWidth,
+            // 글자가 툴팁 안에서 잘리지 않는다
+            clipped: el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight,
+          };
+        });
+        expect(place.left, target).toBeGreaterThanOrEqual(0);
+        expect(place.top, target).toBeGreaterThanOrEqual(0);
+        expect(place.right, target).toBeLessThanOrEqual(place.width);
+        expect(place.bottom, target).toBeLessThanOrEqual(place.height);
+        expect(place.scroll, target).toBe(0);
+        expect(place.clipped, target).toBe(false);
+        await page.keyboard.press('Escape');
+      }
+      await page.screenshot({
+        path: path.join(SCREENSHOT_DIR, 'SCR-05', `툴팁-${String(width)}.png`),
+      });
+    });
+  }
 });
 
 test.describe('화면 문구', () => {
