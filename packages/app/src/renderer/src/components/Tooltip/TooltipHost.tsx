@@ -44,6 +44,7 @@ const removeToken = (anchor: HTMLElement): void => {
 /**
  * 대상 상자가 보이는 영역 안에 조금이라도 있는지: 창과, 넘침을 자르는 조상(목록 스크롤 칸 등)의 상자를 모두 겹친 영역.
  */
+// `position: fixed` 대상과 모달 안 대상은 지금 없어 다루지 않는다(그런 대상이 생기면 조상 자르기 판정을 다시 본다).
 const isAnchorVisible = (anchor: HTMLElement): boolean => {
   const box = anchor.getBoundingClientRect();
   if (box.width === 0 && box.height === 0) return false;
@@ -95,7 +96,8 @@ const TooltipBubble = ({ state }: { state: TooltipState }): React.JSX.Element =>
     // Esc: 툴팁을 실제로 닫을 때만 키를 삼킨다(창 캡처 단계라 채팅 겹침 · 모달의 Esc보다 먼저 받는다). 툴팁이 닫혀 있을 때는
     // 이 리스너가 없으므로 Esc는 평소대로 모달 · 채팅을 닫는다 (#275 검토 B1)
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return;
+      // IME 조합 중의 Esc는 조합 취소라 삼키지 않는다
+      if (event.key !== 'Escape' || event.isComposing) return;
       event.preventDefault();
       event.stopPropagation();
       hideTooltip(anchor);

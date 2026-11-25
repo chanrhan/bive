@@ -28,7 +28,13 @@ import {
   verificationScreenUpdateFailedChecklist,
   verificationSkippedChecklist,
 } from './checklists/scr-05.js';
-import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
+import {
+  type BiveMock,
+  type MockCall,
+  mockBive,
+  type MockResponses,
+  nextFrame,
+} from './support/bive-mock.js';
 import {
   collectVisibleText,
   expectScreen,
@@ -991,6 +997,30 @@ test.describe('공통 툴팁: 준수 카드의 기준 · 코드 열람 한계 �
     // 툴팁이 닫혀 있으면 Esc는 평소대로 채팅 겹침을 닫는다
     await page.keyboard.press('Escape');
     await expect(chat).toHaveAttribute('data-mode', 'strip');
+  });
+
+  test('IME 조합 중의 Esc는 툴팁이 삼키지 않는다: 툴팁은 남고 키는 막히지 않는다 (#275 검토 2회차)', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    await keyboardFocus(page, 'code-open-hint');
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['code-open-hint'].text);
+    const prevented = await page.getByTestId('code-open-hint').evaluate((el) => {
+      const event = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        isComposing: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      el.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+    expect(prevented).toBe(false);
+    await nextFrame(page);
+    await expect(tooltip(page)).toHaveCount(1);
+    // 조합이 아닌 Esc는 닫는다
+    await page.keyboard.press('Escape');
+    await expect(tooltip(page)).toHaveCount(0);
   });
 
   test('툴팁이 닫혀 있으면 Esc 한 번에 모달(설정)이 닫힌다 (#275 검토 B1)', async ({ page }) => {

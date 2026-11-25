@@ -778,6 +778,58 @@ test.describe('카드의 잘린 제목 · 2줄째 툴팁 (#201, ADR-124, screens
     await expect(long.getByTestId('card-title')).not.toHaveAttribute('aria-describedby');
   });
 
+  test('창 안이지만 목록 칸 밖(위 끝 바로 위)으로 스크롤된 대상은 닫히고, 그 자리의 대상에는 열지 않는다: 넘침을 자르는 조상까지 본다 (#275 검토 2회차)', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 500 });
+    // 대상 카드 아래로 스크롤할 자리가 남도록 정상 규칙 카드를 뒤에 더 둔다 (테스트 전용 데이터)
+    const pad: RuleWithJudgment[] = Array.from({ length: 12 }, (_, i) => {
+      const sample = RULES[0];
+      if (sample === undefined) throw new Error('규칙 시험 데이터 없음');
+      return {
+        ...sample,
+        rule: {
+          ...sample.rule,
+          id: `01JC00000000000000000003${String(10 + i)}`,
+          displayId: `RULE-3${String(10 + i)}`,
+        },
+      };
+    });
+    await openRules(page, [...RULES, ...EXTRA, LONG_RULE, ...pad]);
+    const long = cardOf(page, 'RULE-199');
+    const items = page.getByTestId('list-items');
+    await tabToCard(page, 'RULE-199');
+    await expect(tooltip(page)).toHaveText(LONG_TITLE);
+
+    // 카드 아래 끝이 목록 위 끝보다 3px 위로 가게 스크롤한다 (잰 상자 위치에서 계산)
+    const place = await items.evaluate((el, id) => {
+      const card = el.querySelector(`[data-id="${id}"]`);
+      if (!(card instanceof HTMLElement)) throw new Error('카드 없음');
+      el.scrollTop += card.getBoundingClientRect().bottom - el.getBoundingClientRect().top + 3;
+      const box = card.getBoundingClientRect();
+      return {
+        top: box.top,
+        bottom: box.bottom,
+        listTop: el.getBoundingClientRect().top,
+        viewport: document.documentElement.clientHeight,
+      };
+    }, 'RULE-199');
+    // 창 안이지만 목록 칸 밖
+    expect(place.top).toBeGreaterThanOrEqual(0);
+    expect(place.bottom).toBeLessThanOrEqual(place.viewport);
+    expect(place.bottom).toBeLessThanOrEqual(place.listTop);
+    await expect(tooltip(page)).toHaveCount(0);
+    await expect(long).not.toHaveAttribute('aria-describedby');
+
+    // 같은 자리(창 안 · 목록 밖)의 대상에 올림 이벤트가 와도 열지 않는다
+    await long
+      .getByTestId('card-title')
+      .dispatchEvent('mouseover', { relatedTarget: null, bubbles: true });
+    await nextFrame(page);
+    await expect(tooltip(page)).toHaveCount(0);
+    await expect(long.getByTestId('card-title')).not.toHaveAttribute('aria-describedby');
+  });
+
   test('툴팁 문구는 표시 값 도우미를 거친 글자 노드다: 숨은 글자는 보이는 표기, 꺾쇠 글은 글자 그대로 (요구사항 카드)', async ({
     page,
   }) => {
