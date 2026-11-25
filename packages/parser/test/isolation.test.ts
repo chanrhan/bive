@@ -353,6 +353,32 @@ describe('실행기 실패는 닫힌 쪽이다 ("위반 0건"으로 읽히지 �
     expect(() => process.kill(pid, 0)).toThrow();
   });
 
+  it('중단 신호가 오면 실행기를 죽이고 신호의 사유로 거부한다 (ParserError가 아니다). 이미 중단된 신호면 띄우지 않는다 (M3-03 #48)', async () => {
+    const pidFile = path.join(tempDir(), 'pid');
+    const runner = fake(
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`,
+    );
+    const controller = new AbortController();
+    const reason = new Error('판정 중단');
+    const pending = analyze(runner, { signal: controller.signal, timeoutMs: 30_000 });
+    for (let i = 0; i < 100 && !existsSync(pidFile); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+    const pid = Number(execFileSync('cat', [pidFile]).toString());
+    expect(() => process.kill(pid, 0)).toThrow();
+
+    const neverFile = path.join(tempDir(), 'never');
+    const never = fake(
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(neverFile)}, 'x');\n`,
+    );
+    const done = new AbortController();
+    done.abort(reason);
+    await expect(analyze(never, { signal: done.signal })).rejects.toBe(reason);
+    expect(existsSync(neverFile)).toBe(false);
+  });
+
   it('출력이 크기 상한을 넘으면 오류다', async () => {
     const runner = fake("process.stdout.write('x'.repeat(100000));\n");
     await expect(analyze(runner, { maxOutputBytes: 1000 })).rejects.toMatchObject({

@@ -258,6 +258,11 @@ export interface PipelineSetupOptions {
   onEvent?: (biveHome: string) => (event: EngineEvent) => void | Promise<void>;
   /** 실제 설치 · 판정 러너 (판정 1회 제한 시간 ms). 지정하면 `decide` · `onJudge`는 쓰지 않는다 */
   realJudgeTimeoutMs?: number;
+  /** 구조 검사의 파서 호출 · 제한 시간 (기본 실제 파서, M3-03), 설치 바꿔 끼우기 (기본 `fakeInstall`, 호출 순서 기록용) */
+  structure?: Pick<
+    JudgingOptions,
+    'analyzeStructure' | 'structureTimeoutMs' | 'installDependencies'
+  >;
   /**
    * 실행 안 판단 세션 배선 (M7-11). 같은 하네스의 엔진들이 하나를 같이 쓴다. `adapter`는 하네스의 기록 어댑터, `engine`은 지금
    * 하네스의 엔진(자동 시작 배선용)
@@ -324,13 +329,15 @@ export const setupPipeline = (options: PipelineSetupOptions): PipelineHarness =>
       return ref.harness;
     }) ?? recording;
   const judgeCalls: JudgeCall[] = [];
-  const judging: JudgingOptions =
-    options.realJudgeTimeoutMs === undefined
+  const judging: JudgingOptions = {
+    ...(options.realJudgeTimeoutMs === undefined
       ? {
           judge: injectedJudge(judgeCalls, options.decide, options.onJudge),
           installDependencies: fakeInstall,
         }
-      : { judgeTimeoutMs: options.realJudgeTimeoutMs };
+      : { judgeTimeoutMs: options.realJudgeTimeoutMs }),
+    ...options.structure,
+  };
   const defaults = {
     test_writing: createTestWritingExecutor(),
     red_check: createRedCheckExecutor(judging),

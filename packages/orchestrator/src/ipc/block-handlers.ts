@@ -2,6 +2,7 @@
 // - `blocks.get`: 지금 블록 선언(가장 큰 판). 없으면 `current: null`
 // - `blocks.set`: 사람 주체만(-32020은 저장소를 열기 전). 선언을 검사해 어긴 곳을 -32001(`BLOCKS_INVALID`)로 돌려주고, 통과하면
 //   새 판으로 저장한다. 바꾼 기록은 판 목록 자체다(저장 주체 · 시각 · 본문, 추가 전용)
+// - 같은 트랜잭션에서 내장 구조 규칙 두 개를 없으면 만든다(`norms/builtin-rules.ts`, M3-03 #48 · ADR-127). 있으면 그대로 둔다
 // - 블록 선언을 쓰는 곳은 이 처리기 하나다. 에이전트 도구 · 세션 · 엔진 · 단계는 이 처리기도 저장소의 선언 쓰기도 모른다
 //   (구조 시험 `integrity.test.ts`, ADR-005)
 import {
@@ -9,9 +10,11 @@ import {
   BlockDeclaration,
   BLOCKS_INVALID_REASON,
   type BlocksInvalidData,
+  createUlidGenerator,
   ErrorCode,
 } from '@bive/shared';
 
+import { ensureBuiltinStructureRules } from '../norms/builtin-rules.js';
 import { withProjectStore } from './project-store-access.js';
 import { RpcError, type MethodHandlers } from './server.js';
 
@@ -20,6 +23,8 @@ export interface BlockHandlerDeps {
   biveHome: string;
   /** 시계 (ms). 저장 시각에 쓴다 */
   now: () => number;
+  /** 내장 구조 규칙의 ID (기본 ULID 생성기) */
+  newId?: () => string;
 }
 
 type BlockMethods = Pick<MethodHandlers, 'blocks.get' | 'blocks.set'>;
@@ -50,7 +55,11 @@ const parseDeclaration = (declaration: unknown): BlockDeclaration => {
   throw new RpcError(ErrorCode.ValidationFailed, `블록 선언 검증 실패: ${summary}`, data);
 };
 
-export const createBlockHandlers = ({ biveHome, now }: BlockHandlerDeps): BlockMethods => ({
+export const createBlockHandlers = ({
+  biveHome,
+  now,
+  newId = createUlidGenerator(),
+}: BlockHandlerDeps): BlockMethods => ({
   'blocks.get': ({ projectId }) =>
     withProjectStore(biveHome, projectId, (store) => ({
       current: store.blockDeclarations.current(),
@@ -58,11 +67,13 @@ export const createBlockHandlers = ({ biveHome, now }: BlockHandlerDeps): BlockM
   'blocks.set': ({ projectId, author, declaration }) => {
     assertHuman(author);
     const parsed = parseDeclaration(declaration);
-    return withProjectStore(biveHome, projectId, (store) => ({
-      current: store.blockDeclarations.set(parsed, {
-        at: new Date(now()).toISOString(),
-        by: author,
+    return withProjectStore(biveHome, projectId, (store) =>
+      store.transaction(() => {
+        const at = new Date(now()).toISOString();
+        const current = store.blockDeclarations.set(parsed, { at, by: author });
+        ensureBuiltinStructureRules(store, { declaration: current, at, newId });
+        return { current };
       }),
-    }));
+    );
   },
 });

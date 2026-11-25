@@ -24,6 +24,9 @@
 //   연다). 모순이면 `failed`(`existing_rule_contradiction`), 모순 없음이면 지금처럼 재검사 실패로 끝난다(병합 단계에는 구현 회귀가
 //   없다). 병합 커밋이 기록된 뒤의 실패는 이 판단과 무관하게 `merged`로 끝난다(ADR-091 · ADR-094). 이 실행에 모순 판단이 이미
 //   있으면(재기동 · 재개) 병합하지 않고 끝낸다
+// - 병합 재검사의 구조 검사 (M3-03 #48, ADR-127): 블록 선언이 있으면 검사 단계와 같은 구조 검사를 병합 커밋의 깨끗한 체크아웃에서 설치
+//   전에 하고 내장 구조 규칙의 판정 기록을 남긴다(선언은 단계를 열 때 읽은 판). 내장 규칙이 실패하거나 구조 검사가 판정하지 못하면
+//   재검사 실패(병합 없음)다
 import type { JudgmentResult, Rule } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
@@ -45,6 +48,13 @@ import {
   normHalt,
   recordJudgments,
 } from './judging.js';
+import {
+  missingStructureJudgments,
+  readStructurePlan,
+  STRUCTURE_STAGE,
+  structureJudgmentsFrom,
+  structureRuleIds,
+} from './structure-check.js';
 import type { NormMismatch } from '@bive/store';
 
 /** 체크아웃 · 정리에 더하는 검사 제한 시간 여유. */
@@ -260,6 +270,12 @@ export const createMergeExecutor =
     if (contradicted !== null) return contradicted;
     const norms = createNormGuard(context);
     const rules: Rule[] = approvedRules(context);
+    // 구조 검사 계획: 단계를 열 때 읽은 선언의 판 · 내장 구조 규칙 (검사 단계와 같다)
+    const planned = readStructurePlan(context, rules);
+    if (planned.kind === 'halt') return planned.outcome;
+    const plan = planned.kind === 'plan' ? planned.plan : null;
+    const structureIds = structureRuleIds(plan);
+    const testedRules = rules.filter((rule) => !structureIds.includes(rule.id));
     let retiredDuringCheck: string[] = [];
     /** 재검사 판정이 끝났고 통과하지 못한 규칙이 있을 때의 판정 기록 · 인수 테스트 내용 (기존 규칙 판단용) */
     let failedRecheck: {
@@ -279,10 +295,13 @@ export const createMergeExecutor =
         {
           commit: merge.mergeCommit,
           selectRules: (dirs) =>
-            rules.filter((rule) => dirs.includes(rule.displayId)).map((rule) => rule.displayId),
+            testedRules
+              .filter((rule) => dirs.includes(rule.displayId))
+              .map((rule) => rule.displayId),
           norms,
           signal: merge.signal,
           readAcceptanceTexts: true,
+          ...(plan === null ? {} : { structure: plan }),
         },
         options,
       );
@@ -304,18 +323,43 @@ export const createMergeExecutor =
         case 'no_rules':
           recheck = { stage: 'no_rules', ruleDirs: judged.ruleDirs };
           return { passed: false, detail: '판정할 승인된 규칙의 인수 테스트가 없습니다' };
+        case 'structure_halt':
+          // 구조 검사가 판정하지 못했다(겹침 · 실행기 오류): 통과가 아니다
+          recheck = {
+            stage: STRUCTURE_STAGE,
+            reason: judged.structure.reason,
+            message: judged.structure.message,
+            structure: judged.structure.summary,
+          };
+          return { passed: false, detail: `${STRUCTURE_STAGE}: ${judged.structure.reason}` };
         case 'judged':
           break;
       }
-      const judgedRules = rules.filter((rule) => judged.ruleIds.includes(rule.displayId));
-      const recorded = recordJudgments(
-        context,
-        judgmentsFrom(judged.result, judgedRules, {
-          runId: context.run.id,
-          stepId: context.step.id,
-          commit: merge.mergeCommit,
-        }),
-      );
+      const testJudged = testedRules.filter((rule) => judged.ruleIds.includes(rule.displayId));
+      const judgedRules = [
+        ...testJudged,
+        ...rules.filter((rule) => structureIds.includes(rule.id)),
+      ];
+      const meta = { runId: context.run.id, stepId: context.step.id, commit: merge.mergeCommit };
+      const structureJudgments = structureJudgmentsFrom(judged.structure, {
+        ...meta,
+        judgedAt: judged.result.endedAt,
+      });
+      // 선언이 있으면 두 내장 규칙의 판정이 모두 있어야 한다 (없으면 기록 없이 재검사 실패: 병합하지 않는다)
+      const uncovered = missingStructureJudgments(plan, structureJudgments);
+      if (uncovered.length > 0) {
+        recheck = {
+          stage: STRUCTURE_STAGE,
+          message: '구조 검사 판정이 내장 구조 규칙을 모두 덮지 않습니다',
+          missingRuleIds: uncovered,
+        };
+        return { passed: false, detail: `${STRUCTURE_STAGE}: uncovered` };
+      }
+      const recorded = recordJudgments(context, [
+        ...judgmentsFrom(judged.result, testJudged, meta),
+        // 인수 테스트 판정이 케이스 결과를 냈을 때만 남긴다 (검사 단계와 같다: 판정 1회 = 기록 1묶음)
+        ...(judged.result.status === 'completed' ? structureJudgments : []),
+      ]);
       // 재검사가 도는 동안 대상 규칙이 폐기됐으면 통과여도 병합하지 않는다 (병합 직전, ADR-112)
       retiredDuringCheck = retiredTargets();
       const passed =
@@ -338,6 +382,7 @@ export const createMergeExecutor =
         ruleIds: judged.ruleIds,
         ...judgeSummary(judged.result),
         judgments: judgmentDigest(recorded, judgedRules),
+        ...(judged.structure === undefined ? {} : { structure: judged.structure.summary }),
       };
       return {
         passed,

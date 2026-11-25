@@ -73,6 +73,11 @@ export interface ProcessOptions {
   maxOutputBytes?: number;
   /** 시험용: 다른 실행기 */
   runnerPath?: string;
+  /**
+   * 중단 신호 (M3-03 #48: 판정 단계의 중단을 잇는다). 신호가 오면 실행기를 죽이고 신호의 사유(`signal.reason`)로 거부한다. 이미
+   * 중단된 신호면 실행기를 띄우지 않는다. 중단은 `ParserError`가 아니다(분석 결과도 오류 종류도 아닌, 부른 쪽의 멈춤이다)
+   */
+  signal?: AbortSignal;
 }
 
 /** 실행기에 넘길 입력 (cruise 옵션). */
@@ -107,7 +112,12 @@ export const runCruiseProcess = (input: unknown, options: ProcessOptions = {}): 
   const timeoutMs = options.timeoutMs ?? PARSER_LIMITS.timeoutMs;
   const maxOutputBytes = options.maxOutputBytes ?? PARSER_LIMITS.maxOutputBytes;
   const runner = options.runnerPath ?? RUNNER_PATH;
+  const { signal } = options;
   return new Promise((resolve, reject) => {
+    if (signal?.aborted === true) {
+      reject(signal.reason);
+      return;
+    }
     const child = spawn(process.execPath, [runner], {
       cwd: path.dirname(runner),
       env: childEnv(),
@@ -117,11 +127,18 @@ export const runCruiseProcess = (input: unknown, options: ProcessOptions = {}): 
     let size = 0;
     let stderr = '';
     let failure: ParserError | null = null;
+    let aborted = false;
     const stop = (error: ParserError): void => {
-      if (failure !== null) return;
+      if (failure !== null || aborted) return;
       failure = error;
       child.kill('SIGKILL');
     };
+    const onAbort = (): void => {
+      if (failure !== null || aborted) return;
+      aborted = true;
+      child.kill('SIGKILL');
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
     const timer = setTimeout(() => {
       stop(
         new ParserError(
@@ -151,18 +168,22 @@ export const runCruiseProcess = (input: unknown, options: ProcessOptions = {}): 
     });
     child.on('error', () => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       reject(new ParserError('cruise_failed', 'dependency-cruiser 실행기를 띄우지 못했습니다'));
     });
-    child.on('close', (code, signal) => {
+    child.on('close', (code, exitSignal) => {
       clearTimeout(timer);
-      if (failure !== null) {
+      signal?.removeEventListener('abort', onAbort);
+      if (aborted) {
+        reject(signal?.reason);
+      } else if (failure !== null) {
         reject(failure);
       } else if (code !== 0) {
         const line = stderr.split('\n')[0]?.slice(0, 200) ?? '';
         reject(
           new ParserError(
             'cruise_failed',
-            `dependency-cruiser 실행기가 실패했습니다 (종료 ${String(code ?? signal)}): ${line}`,
+            `dependency-cruiser 실행기가 실패했습니다 (종료 ${String(code ?? exitSignal)}): ${line}`,
           ),
         );
       } else {
