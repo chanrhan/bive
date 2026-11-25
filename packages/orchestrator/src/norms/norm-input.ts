@@ -368,11 +368,21 @@ export const collectNormInput = (
   };
 };
 
-const heading = (label: string, counted: NormInputCount, limit: number): string =>
+/** 요구사항 · 규칙 절의 줄이기 순서 (A15). */
+const NORM_TRIM_ORDER = '대상과 같은 부모의 항목을 먼저 넣고 나머지는 최근 변경 순';
+/** 계약 절의 줄이기 순서 (초점이 없다, M3-04). */
+const CONTRACT_TRIM_ORDER = '최근 등록 순';
+
+const heading = (
+  label: string,
+  counted: NormInputCount,
+  limit: number,
+  order: string = NORM_TRIM_ORDER,
+): string =>
   counted.omitted === 0
     ? `${label} (효력 ${String(counted.total)}건 중 ${String(counted.included)}건)`
     : `${label} (효력 ${String(counted.total)}건 중 ${String(counted.included)}건만 실음, ` +
-      `${String(counted.omitted)}건 빠짐: 상한 ${String(limit)}건, 대상과 같은 부모의 항목을 먼저 넣고 나머지는 최근 변경 순)`;
+      `${String(counted.omitted)}건 빠짐: 상한 ${String(limit)}건, ${order})`;
 
 const parentText = (parent: NormInputParent): string => {
   if (parent.kind === 'requirement') return parent.displayId;
@@ -420,7 +430,9 @@ export const renderNormInput = (input: NormInput, focusLabel: string): string =>
     }
   }
   if (input.contracts !== undefined && input.summary.contracts !== undefined) {
-    lines.push(heading('계약', input.summary.contracts, NORM_INPUT_LIMITS.contracts));
+    lines.push(
+      heading('계약', input.summary.contracts, NORM_INPUT_LIMITS.contracts, CONTRACT_TRIM_ORDER),
+    );
     for (const contract of input.contracts) {
       lines.push(`- ${contract.displayId}`);
       lines.push(`  종류: ${contract.kind}`);

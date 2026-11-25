@@ -2031,9 +2031,11 @@ describe('규칙 작성 세션의 기존 규범 입력 · 모순 판단 기록 (
       ),
     );
     const rendered = renderNormInput(input, '대상');
-    expect(rendered).toContain(
-      `계약 (효력 ${String(NORM_INPUT_LIMITS.contracts + 2)}건 중 ${String(NORM_INPUT_LIMITS.contracts)}건만 실음, 2건 빠짐`,
-    );
+    // 계약 절의 잘림 머리줄은 계약에 맞는 순서 글이다 (요구사항 · 규칙 절의 "대상과 같은 부모" 글이 아니다)
+    expect(rendered.split('\n').filter((line) => line.startsWith('계약 ('))).toEqual([
+      `계약 (효력 ${String(NORM_INPUT_LIMITS.contracts + 2)}건 중 ${String(NORM_INPUT_LIMITS.contracts)}건만 실음, 2건 빠짐: 상한 ${String(NORM_INPUT_LIMITS.contracts)}건, 최근 등록 순)`,
+    ]);
+    expect(rendered).not.toContain('대상과 같은 부모');
     // 상한 안의 계약 하나의 경로가 표시 값 상한에서 잘린다 (가장 오래된 계약이 아니라 상한 안에 든 계약으로 다시 본다)
     const long = collectNormInput(
       {
