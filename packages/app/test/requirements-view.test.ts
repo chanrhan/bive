@@ -4,12 +4,13 @@ import { describe, expect, it } from 'vitest';
 
 import {
   countOptions,
+  filterEntries,
   EMPTY_FILTER,
   type ListEntry,
 } from '../src/renderer/src/components/ListView/filter.js';
 import {
   EXCEPTION_LABELS,
-  REQUIREMENT_CRITERIA,
+  requirementCriteria,
   requirementCard,
   requirementExceptions,
   visibleRequirements,
@@ -114,6 +115,7 @@ describe('필터 기준', () => {
     time: null,
     index,
   }));
+  const REQUIREMENT_CRITERIA = requirementCriteria(new Map());
   const counts = countOptions(entries, REQUIREMENT_CRITERIA, EMPTY_FILTER);
 
   it('4종: 상태 · 작성 · 확인 · 블록 순서 (옛 승인 칩이 확인으로)', () => {
@@ -153,8 +155,36 @@ describe('필터 기준', () => {
     expect(counts['confirmation']).toEqual({ unconfirmed: 1, confirmed: 2 });
   });
 
-  it('블록: 값 없음 (0건 비활성, ADR-035)', () => {
+  it('블록: 규칙 목록을 모르면(빈 표) 값 없음 (0건 비활성)', () => {
     expect(REQUIREMENT_CRITERIA[3]?.options).toEqual([]);
     expect(counts['block']).toEqual({});
+  });
+
+  it('블록: 값은 구현 위치 표에서, 블록마다 한 번씩 세고 하나라도 가진 요구사항이 남는다 (ADR-126)', () => {
+    const blocks = new Map<string, readonly string[]>([
+      [NORMAL.id, ['auth', 'lib']],
+      [UNCONFIRMED.id, ['auth']],
+      // 목록에 없는 요구사항의 이름도 값으로는 나오지만 0건이다
+      ['01JA00000000000000000000ZZ', ['gone']],
+    ]);
+    const criteria = requirementCriteria(blocks);
+    expect(criteria[3]?.options.map((o) => o.value)).toEqual(['auth', 'gone', 'lib']);
+    expect(countOptions(entries, criteria, EMPTY_FILTER)['block']).toEqual({
+      auth: 2,
+      gone: 0,
+      lib: 1,
+    });
+    const kept = filterEntries(entries, criteria, {
+      ...EMPTY_FILTER,
+      selected: { block: ['lib'] },
+    }).map((e) => e.item.displayId);
+    expect(kept).toEqual([NORMAL.displayId]);
+    // 구현 위치가 없는 요구사항(UNRULABLE)은 어느 블록 값에도 걸리지 않는다
+    expect(
+      filterEntries(entries, criteria, {
+        ...EMPTY_FILTER,
+        selected: { block: ['auth', 'lib', 'gone'] },
+      }).map((e) => e.item.displayId),
+    ).not.toContain(UNRULABLE.displayId);
   });
 });

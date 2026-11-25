@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import {
   countOptions,
   EMPTY_FILTER,
+  filterEntries,
   type ListEntry,
 } from '../src/renderer/src/components/ListView/filter.js';
 import {
@@ -25,8 +26,9 @@ import {
   isRetiredRule,
   RETIRED_HIDDEN,
   RISK_LABELS,
-  RULE_CRITERIA,
   RULE_KIND_LABELS,
+  riskText,
+  ruleCriteria,
   ruleCard,
   ruleSearchText,
   visibleRules,
@@ -336,6 +338,7 @@ describe('필터 기준', () => {
     time: null,
     index,
   }));
+  const RULE_CRITERIA = ruleCriteria(items);
   const counts = countOptions(entries, RULE_CRITERIA, EMPTY_FILTER);
   const labels = (id: string) =>
     RULE_CRITERIA.find((c) => c.id === id)?.options.map((o) => o.label);
@@ -363,7 +366,7 @@ describe('필터 기준', () => {
     });
   });
 
-  it('변이 · 블록 · 위험도: 값이 없어 전부 0건 (칩 비활성, ADR-035)', () => {
+  it('변이: 값이 없어 전부 0건 (칩 비활성, ADR-035). 블록 · 위험도도 값이 없는 옛 규칙뿐이면 0건', () => {
     expect(labels('mutation')).toEqual(['변이 검증됨', '변이 미검증', '변이 생존']);
     expect(counts['mutation']).toEqual({ verified: 0, unverified: 0, survived: 0 });
     expect(labels('block')).toEqual([]);
@@ -372,17 +375,69 @@ describe('필터 기준', () => {
     expect(counts['risk']).toEqual({ low: 0, medium: 0, high: 0 });
   });
 
-  it('위험도는 규칙에 값이 생기면 그대로 센다', () => {
-    const risky = unjudged(
-      rule({ id: '01JA0000000000000000000007', displayId: 'RULE-007', risk: 'high' }),
-    );
-    const one: ListEntry<RuleWithJudgment>[] = [
-      { item: risky, key: risky.rule.id, searchText: '', problem: false, time: null, index: 0 },
-    ];
-    expect(countOptions(one, RULE_CRITERIA, EMPTY_FILTER)['risk']).toEqual({
-      low: 0,
-      medium: 0,
-      high: 1,
+  describe('블록 · 위험도 (ADR-126)', () => {
+    const withBlocks = (n: number, targetBlockIds: string[], risk: Rule['risk']) =>
+      unjudged(
+        rule({
+          id: `01JA00000000000000000001${String(n).padStart(2, '0')}`,
+          displayId: `RULE-1${String(n).padStart(2, '0')}`,
+          targetBlockIds,
+          risk,
+        }),
+      );
+    const A = withBlocks(1, ['lib', 'auth'], 'high');
+    const B = withBlocks(2, ['auth'], 'low');
+    const C = withBlocks(3, [], null);
+    const D = withBlocks(4, ['zz-legacy'], 'high');
+    const list = [A, B, C, D];
+    const all: ListEntry<RuleWithJudgment>[] = list.map((item, index) => ({
+      item,
+      key: item.rule.id,
+      searchText: item.rule.displayId,
+      problem: false,
+      time: null,
+      index,
+    }));
+    const criteria = ruleCriteria(list);
+
+    it('블록 값은 받은 규칙의 이름 전부(중복 없이 이름 순), 블록마다 한 번씩 센다', () => {
+      expect(criteria.find((c) => c.id === 'block')?.options).toEqual([
+        { value: 'auth', label: 'auth' },
+        { value: 'lib', label: 'lib' },
+        { value: 'zz-legacy', label: 'zz-legacy' },
+      ]);
+      expect(countOptions(all, criteria, EMPTY_FILTER)['block']).toEqual({
+        auth: 2,
+        lib: 1,
+        'zz-legacy': 1,
+      });
+    });
+
+    it('위험도는 규칙의 값을 센다 (null은 값 없음)', () => {
+      expect(countOptions(all, criteria, EMPTY_FILTER)['risk']).toEqual({
+        low: 1,
+        medium: 0,
+        high: 2,
+      });
+    });
+
+    it('여러 블록을 고르면 하나라도 가진 규칙이 남는다 (기준 안 OR), 위험도와는 AND', () => {
+      const keys = (selected: Record<string, string[]>) =>
+        filterEntries(all, criteria, { ...EMPTY_FILTER, selected }).map(
+          (e) => e.item.rule.displayId,
+        );
+      expect(keys({ block: ['lib'] })).toEqual(['RULE-101']);
+      expect(keys({ block: ['lib', 'zz-legacy'] })).toEqual(['RULE-101', 'RULE-104']);
+      expect(keys({ block: ['auth'], risk: ['low'] })).toEqual(['RULE-102']);
+      // 블록이 없는 옛 규칙은 어느 블록 값에도 걸리지 않는다
+      expect(keys({ block: ['auth', 'lib', 'zz-legacy'] })).not.toContain('RULE-103');
+    });
+
+    it('위험도 표시: 표시명, null은 "없음"', () => {
+      expect(riskText('low')).toBe('낮음');
+      expect(riskText('medium')).toBe('보통');
+      expect(riskText('high')).toBe('높음');
+      expect(riskText(null)).toBe('없음');
     });
   });
 

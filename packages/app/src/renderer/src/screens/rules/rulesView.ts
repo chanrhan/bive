@@ -5,7 +5,8 @@
 // - 예외: 판정 상태의 예외(실패 · 미판정 · 격리 · 재검증 필요, 1.4 상태 배지) 다음에 규범 예외(폐기 · 미확인). 미확인은 옛 '잠정'
 //   자리다(ADR-100 명세 변경 목록 SCR-03). 폐기된 규칙은 더 판정하지 않으므로(ADR-112) 판정 예외 없이 폐기 · 미확인만 보인다.
 //   변이 생존은 변이 데이터가 생기면(P1) 더한다. 값은 rule.list 결과(규칙 필드 · 최신 판정 · 폐기 사실)에서만 도출한다(NFR-03)
-// - 필터: 판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류. 변이 · 블록 · 위험도는 지금 값이 없어 0건 비활성 (ADR-035).
+// - 필터: 판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류. 변이는 지금 값이 없어 0건 비활성 (ADR-035). 블록 · 위험도는
+//   규칙의 대상 블록 · 위험도에서 센다(블록 값은 목록 규칙이 가진 이름 전부, 이름 순. M3-19 #64 · ADR-126).
 //   폐기된 규칙은 기본 목록에서 빠지고 [폐기 포함]을 켜야 보인다(ListView `hidden`)
 import type {
   AuthorKind,
@@ -25,6 +26,7 @@ import {
   MUTATION_LABELS,
 } from '../../components/StatusBadge/status.js';
 import { visibleText } from '../../components/VisibleText/visibleText.js';
+import { BLOCK_TEXT, blockOptions } from './blockView.js';
 
 /** 목록 ID = 경로 ID (ADR-048). 필터 상태가 이 ID로 유지된다. */
 export const RULES_LIST_ID = 'rules';
@@ -51,6 +53,10 @@ export const RISK_LABELS = {
   medium: '보통',
   high: '높음',
 } as const satisfies Record<Risk, string>;
+
+/** 위험도 표시 (규칙 상세). 값이 없는 옛 규칙 · 내장 규칙은 "없음"(ADR-126). */
+export const riskText = (risk: Risk | null): string =>
+  risk === null ? BLOCK_TEXT.none : RISK_LABELS[risk];
 
 /**
  * 준수 집계 값 (SCR-03 필터 "판정 가능 = 분모 · 격리", JDG-03, ADR-100 명세 변경 목록 SCR-03 "잠정 → 사람 확인" · D7).
@@ -201,8 +207,13 @@ export const visibleRules = (rules: readonly RuleWithJudgment[]): RuleWithJudgme
 const options = <K extends string>(labels: Record<K, string>) =>
   (Object.keys(labels) as K[]).map((value) => ({ value, label: labels[value] }));
 
-/** 필터 기준 7종 (SCR-03 필터: 판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류, 확인은 ADR-100 I3). 순서가 칩 순서다. */
-export const RULE_CRITERIA: readonly FilterCriterion<RuleWithJudgment>[] = [
+/**
+ * 필터 기준 7종 (SCR-03 필터: 판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류, 확인은 ADR-100 I3). 순서가 칩 순서다.
+ * 블록 값은 받은 규칙(`items`, 폐기 포함)이 가진 이름이라 목록 데이터마다 만든다(ADR-126).
+ */
+export const ruleCriteria = (
+  items: readonly RuleWithJudgment[],
+): readonly FilterCriterion<RuleWithJudgment>[] => [
   {
     id: 'judgment',
     label: '판정',
@@ -232,14 +243,14 @@ export const RULE_CRITERIA: readonly FilterCriterion<RuleWithJudgment>[] = [
   {
     id: 'block',
     label: '블록',
-    // 블록(파서, M2)이 아직 없어 블록 이름을 알 수 없다 → 값 없음 = 0건 비활성 (ADR-035)
-    options: [],
-    values: () => [],
+    // 대상 블록 이름(선언에 없는 이름 포함). 블록 여러 개인 규칙은 블록마다 한 번씩 센다. 빈 목록인 옛 규칙은 값이 없다
+    options: blockOptions(items.flatMap(({ rule }) => rule.targetBlockIds)),
+    values: ({ rule }) => rule.targetBlockIds,
   },
   {
     id: 'risk',
     label: '위험도',
-    // 위험도는 P1(M2)부터 채워진다. 지금은 모든 규칙이 null이라 0건 비활성 (ADR-035)
+    // 값이 없는(null) 옛 규칙 · 내장 규칙은 값이 없다 ("없음" 칩 값은 두지 않는다, 다른 칩과 같음)
     options: options<Risk>(RISK_LABELS),
     values: ({ rule }) => (rule.risk === null ? [] : [rule.risk]),
   },

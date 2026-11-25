@@ -1,18 +1,32 @@
 // SCR-02 요구사항 (이슈 #17 수용 기준 1~3, screens.md SCR-02 · 1.4, ADR-029 · ADR-035 · ADR-053).
 // 1) checklists/scr-02.ts의 기본(카드 1줄 문장, 2줄 ID · 예외 · 시각, 생성 주체 아이콘) · 빈("요구사항 없음") 상태
 // 2) [+ 새 요구사항] → 목록 맨 위 입력 줄, Ctrl+Enter(⌘↵) → requirement.create 1회, Esc → 호출 없이 닫힘
-// 3) 필터 칩 4종(상태 · 작성 · 확인 · 블록), 블록은 값이 없어 0건 비활성
+// 3) 필터 칩 4종(상태 · 작성 · 확인 · 블록)
+// 이슈 #64(M3-19) 수용 기준 3: 블록 칩이 구현 위치(효력 있는 자식 규칙의 대상 블록)의 값 개수와 함께 활성 (ADR-126)
 // 이슈 #227(M7-15) 수용 기준 2: 요구사항 카드 2줄째에 미확인이면 예외 "미확인"(사람이 쓴 요구사항은 확인됨이라 예외 없음),
 // 필터 칩 "승인"이 "확인"(미확인 · 확인됨)으로 바뀜 (ADR-100 I3 · B① · 명세 변경 목록 SCR-02, ADR-114)
-// 데이터는 가짜 브리지의 project.current · requirement.list · requirement.create 응답과
+// 데이터는 가짜 브리지의 project.current · requirement.list · rule.list · requirement.create 응답과
 // project.opened 알림(PROJECT_OPENED_EVENT)으로만 만든다.
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
-import type { Project } from '@bive/shared';
+import type { Project, Requirement, RuleWithJudgment } from '@bive/shared';
 
 import { PROJECT_OPENED_EVENT } from '../src/common/bridge.js';
-import { CHIPS, PROJECT, REQUIREMENTS, VISIBLE_ORDER } from './checklists/scr-02.js';
-import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
+import {
+  CHIPS,
+  PROJECT,
+  REQUIREMENT_RULES,
+  REQUIREMENTS,
+  VISIBLE_ORDER,
+} from './checklists/scr-02.js';
+import {
+  allSettled,
+  type BiveMock,
+  type MockCall,
+  mockBive,
+  type MockResponses,
+  nextFrame,
+} from './support/bive-mock.js';
 import { collectVisibleText, expectScreen, findForbiddenText } from './support/expectScreen.js';
 
 // 카드 시각(로컬 `YYYY-MM-DD HH:mm`)을 고정하려고 시간대를 정한다
@@ -59,6 +73,7 @@ const openScreen = async (
       'system.status': { result: STATUS },
       'project.current': { result: { project: project ? PROJECT : null } },
       'requirement.list': { result: { requirements: REQUIREMENTS } },
+      'rule.list': { result: { rules: REQUIREMENT_RULES } },
       ...responses,
     },
   });
@@ -339,7 +354,7 @@ test.describe('새 요구사항 입력 줄 (수용 기준 2)', () => {
 });
 
 test.describe('필터 칩 (수용 기준 3)', () => {
-  test('칩 4종(상태 · 작성 · 확인 · 블록)이 있고 블록은 값이 없어 0건 비활성, 옛 "승인" 칩은 없다', async ({
+  test('칩 4종(상태 · 작성 · 확인 · 블록)이 모두 활성이고 옛 "승인" 칩 · 위험도 칩은 없다', async ({
     page,
   }) => {
     await openScreen(page);
@@ -347,13 +362,119 @@ test.describe('필터 칩 (수용 기준 3)', () => {
     await expect(chips).toHaveText(['상태', '작성', '확인', '블록']);
     await expect(chips).toHaveText(CHIPS.map((chip) => chip.label));
     await expect(page.getByTestId('filter-chip-approval')).toHaveCount(0);
-    await expect(chipButton(page, 'block')).toBeDisabled();
-    for (const id of ['status', 'author', 'confirmation']) {
+    // SCR-02 필터에는 위험도가 없다 (ADR-126)
+    await expect(page.getByTestId('filter-chip-risk')).toHaveCount(0);
+    for (const id of ['status', 'author', 'confirmation', 'block']) {
       await expect(chipButton(page, id)).toBeEnabled();
     }
-    // 비활성 칩은 눌러도 메뉴가 열리지 않는다
+  });
+
+  test('블록: 값은 구현 위치(효력 있는 자식 규칙의 대상 블록)에서, 블록마다 한 번씩 센다. 폐기 · 잠정 규칙의 블록은 값이 아니다 (#64, ADR-126)', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    await chipButton(page, 'block').click();
+    // REQ-001 auth · lib, REQ-002 auth · legacy-mail
+    expect(await menuOptions(page)).toEqual([
+      ['auth', '2', false],
+      ['legacy-mail', '1', false],
+      ['lib', '1', false],
+    ]);
+    await page.getByTestId('filter-option').filter({ hasText: 'lib' }).click();
+    await page.keyboard.press('Escape');
+    expect(await cardIds(page)).toEqual(['REQ-001']);
+    await chipButton(page, 'block').click();
+    await page.getByTestId('filter-option').filter({ hasText: 'legacy-mail' }).click();
+    await page.keyboard.press('Escape');
+    await expect(chipButton(page, 'block')).toHaveText('블록: legacy-mail, lib');
+    // 하나라도 가진 요구사항 (OR). 구현 위치가 없는 REQ-003은 남지 않는다
+    expect(await cardIds(page)).toEqual(['REQ-002', 'REQ-001']);
+    await expect(page.getByTestId('list-result')).toHaveText('3개 중 2개 · 초기화');
+    // 규칙 목록은 이 프로젝트를 폐기 포함으로 읽는다
+    const lists = await callsOf(bive, 'rule.list');
+    expect(lists.length).toBeGreaterThan(0);
+    for (const call of lists) {
+      expect(call.params).toEqual({ projectId: PROJECT.id, includeRetired: true });
+    }
+  });
+
+  test('블록: 규칙 목록은 실행 알림으로는 다시 읽지 않고 규범 변경 알림 하나에 정확히 한 번 다시 읽는다 (ADR-126)', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    await expect(page.getByTestId('requirement-detail')).toHaveAttribute('data-selected-id', '');
+    await nextFrame(page);
+    await allSettled(bive, 'rule.list');
+    const before = (await callsOf(bive, 'rule.list')).length;
+
+    // 실행 알림(이 프로젝트): 블록 · 폐기는 실행으로 바뀌지 않으므로 다시 읽지 않는다
+    await bive.emit('event.run.updated', {
+      projectId: PROJECT.id,
+      runId: '01JE0000000000000000000001',
+    });
+    await bive.emit('event.step.updated', {
+      projectId: PROJECT.id,
+      runId: '01JE0000000000000000000001',
+    });
+    await nextFrame(page);
+    await allSettled(bive, 'rule.list');
+    expect((await callsOf(bive, 'rule.list')).length).toBe(before);
+
+    // 규범 변경 알림 하나: 정확히 한 번
+    await bive.emit('event.normChange.appended', { projectId: PROJECT.id, lastSeq: 7 });
+    await expect.poll(async () => (await callsOf(bive, 'rule.list')).length).toBe(before + 1);
+    await nextFrame(page);
+    await allSettled(bive, 'rule.list');
+    expect((await callsOf(bive, 'rule.list')).length).toBe(before + 1);
+  });
+
+  test('블록: 규칙 목록을 읽는 동안은 목록 자리가 로딩이다', async ({ page }) => {
+    await openScreen(page, {
+      'rule.list': { result: { rules: REQUIREMENT_RULES }, delayMs: 800 },
+    });
+    await expect(page.getByTestId('requirements-loading')).toBeVisible();
+    await expect(page.getByTestId('list-view')).toHaveCount(0);
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    await expect(chipButton(page, 'block')).toBeEnabled();
+  });
+
+  test('블록: 규칙 목록을 못 읽으면 목록은 보이고 블록 칩만 0건 비활성이다', async ({ page }) => {
+    await openScreen(page, { 'rule.list': { error: { code: -32603, message: '내부 오류' } } });
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    await expect(chipButton(page, 'block')).toBeDisabled();
+    await expect(chipButton(page, 'status')).toBeEnabled();
     await chipButton(page, 'block').click({ force: true });
     await expect(page.getByTestId('filter-menu')).toHaveCount(0);
+  });
+
+  test('블록: 고른 값은 다른 화면에 갔다 와도 유지되고(규칙 목록을 다시 읽는 동안 지워지지 않음), 규범 변경 알림으로 값을 다시 센다', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    await chipButton(page, 'block').click();
+    await page.getByTestId('filter-option').filter({ hasText: 'lib' }).click();
+    await page.keyboard.press('Escape');
+    expect(await cardIds(page)).toEqual(['REQ-001']);
+    await bive.setResponse('rule.list', { result: { rules: REQUIREMENT_RULES }, delayMs: 500 });
+    await page.getByRole('button', { name: '계약', exact: true }).click();
+    await page.getByRole('button', { name: '요구사항', exact: true }).click();
+    await expect(chipButton(page, 'block')).toHaveText('블록: lib');
+    expect(await cardIds(page)).toEqual(['REQ-001']);
+    // 새 규칙이 REQ-003에 lib를 더하면 알림 뒤 다시 센다
+    const added: RuleWithJudgment = {
+      rule: {
+        ...(REQUIREMENT_RULES[0] as RuleWithJudgment).rule,
+        id: '01JC0000000000000000000299',
+        displayId: 'RULE-299',
+        parentRequirementId: (REQUIREMENTS[2] as Requirement).id,
+        targetBlockIds: ['lib'],
+      },
+      judgment: { status: 'unjudged', latest: null },
+    };
+    await bive.setResponse('rule.list', { result: { rules: [...REQUIREMENT_RULES, added] } });
+    await bive.emit('event.normChange.appended', { projectId: PROJECT.id, lastSeq: 3 });
+    await expect.poll(() => cardIds(page)).toEqual(['REQ-003', 'REQ-001']);
   });
 
   test('값별 개수는 요구사항 필드에서 나오고 근거 데이터가 없는 값은 0건 비활성', async ({
