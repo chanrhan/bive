@@ -9,8 +9,8 @@ export const PARSER_LIMITS = {
   maxPathLength: 1_024,
   /** 실행기 시간 제한 기본값 (ms) */
   timeoutMs: 120_000,
-  /** 실행기 출력 크기 (바이트, 넘으면 오류) */
-  maxOutputBytes: 256 * 1024 * 1024,
+  /** 실행기 출력 크기 (바이트, 넘으면 오류). 합성 2천 파일 · 규칙 포함 출력이 1.1 MB라 파일 상한(1만 개)의 약 6 MB에 열 배 여유 */
+  maxOutputBytes: 64 * 1024 * 1024,
   /** 결과 목록: 간선 */
   edges: 50_000,
   /** 결과 목록: 풀지 못한 import */
