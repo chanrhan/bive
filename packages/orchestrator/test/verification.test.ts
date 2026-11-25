@@ -1088,6 +1088,8 @@ describe('준수 두 기준 · 에이전트 폐기 수 (M7-16 #228, ADR-100 D7 �
             statement: `WHEN ${rule.title} 대체 THE SYSTEM SHALL 요청을 받는다`,
             kind: 'business',
             checkKinds: ['test'],
+            targetBlocks: ['health'],
+            risk: 'medium',
             parentRequirementId: rule.parentRequirementId ?? '',
           },
           rationale: '새 요구사항을 옮김',

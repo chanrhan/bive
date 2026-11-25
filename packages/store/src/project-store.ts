@@ -9,6 +9,7 @@ import { PROJECT_MIGRATIONS } from './migrations/project/index.js';
 import { bivePaths, assertProjectId } from './paths.js';
 import { ApprovalLogRepository } from './repositories/approval-log-repository.js';
 import { AutoStartSkipRepository } from './repositories/auto-start-skip-repository.js';
+import { BlockDeclarationRepository } from './repositories/block-declaration-repository.js';
 import { CodeOpenRepository } from './repositories/code-open-repository.js';
 import { ConfirmationRepository } from './repositories/confirmation-repository.js';
 import { DisplayIdSequences } from './repositories/display-id-sequences.js';
@@ -71,6 +72,11 @@ export class ProjectStore {
    * 쓰기는 규범 변경 기록과 같은 트랜잭션에서만 한다(오케스트레이터의 폐기 · 대체 모듈).
    */
   readonly ruleRetirements: RuleRetirementRepository;
+  /**
+   * 블록 선언 판 목록 (NRM-09 · JDG-05, ADR-005, M3-01 #46, ADR-122). 추가 전용이고 저장 주체는 사람만이다(사람의 `blocks.set`
+   * 처리기만 쓴다). 지금 선언은 가장 큰 판이다.
+   */
+  readonly blockDeclarations: BlockDeclarationRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -94,6 +100,7 @@ export class ProjectStore {
     this.normChanges = new NormChangeRepository(db);
     this.autoStartSkips = new AutoStartSkipRepository(db);
     this.ruleRetirements = new RuleRetirementRepository(db);
+    this.blockDeclarations = new BlockDeclarationRepository(db, projectId);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

@@ -844,6 +844,8 @@ const autoRun = (h: QueueHarness, engine: PipelineEngine | null = h.engine): str
           statement: h.rule.statement,
           kind: 'business',
           checkKinds: ['test'],
+          targetBlocks: ['health'],
+          risk: 'medium',
           parentRequirementId: h.rule.parentRequirementId,
         },
         rationale: '시험 근거',

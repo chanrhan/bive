@@ -2183,3 +2183,92 @@ describe('0021 integrity_gaps: 병합 커밋 · 승인 기록 주체 · 대체 �
     });
   });
 });
+
+describe('0022 block_declarations: 블록 선언 판 목록 (M3-01 #46, ADR-122)', () => {
+  const T = (minute: number) => `2026-11-24T05:${String(minute).padStart(2, '0')}:00.000Z`;
+  const human = '{"kind":"human"}';
+  const agent = '{"kind":"agent","role":"rule-writer"}';
+  const NEW_OBJECTS = [
+    ['table', 'block_declarations'],
+    ['trigger', 'block_declarations_next_version'],
+    ['trigger', 'block_declarations_no_delete'],
+    ['trigger', 'block_declarations_no_update'],
+  ];
+
+  it('0021까지의 DB(행 · 두 해시 체인 있음)에 0022만 올리면 기존 행 · 표 · 색인 · 트리거는 글자까지 같고 새 객체는 표 하나와 트리거 셋뿐이며 두 체인 검증 결과가 그대로다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 21), { now: fixedNow });
+      const req = newId();
+      db.prepare(
+        `INSERT INTO requirements (id, display_id, text, author, norm_state, unrulable_reason, created_at,
+         updated_at, updated_by, deleted_at) VALUES (?, 'REQ-001', '본문', ?, 'approved', NULL, ?, ?, ?, NULL)`,
+      ).run(req, human, T(0), T(0), human);
+      const rule = newId();
+      db.prepare(
+        `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
+         parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
+         updated_at, deleted_at) VALUES (?, 'RULE-001', '제목', '진술', 'business', '["test"]', ?, NULL, 0, '[]',
+         NULL, NULL, ?, 'approved', ?, ?, NULL)`,
+      ).run(rule, req, agent, T(1), T(1));
+      new ApprovalLogRepository(db).append({
+        at: T(2),
+        action: 'confirm',
+        actor: { kind: 'human' },
+        targetRef: { entity: 'Rule', id: rule },
+        clientId: 'pipe-1',
+        detail: {},
+      });
+      new NormChangeRepository(db).append({
+        at: T(3),
+        kind: 'created',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        targetRef: { entity: 'Rule', id: rule },
+        sessionId: newId(),
+        runId: null,
+        reason: '근거',
+        detail: { after: { title: '제목' } },
+      });
+      const tables = (
+        db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations'",
+          )
+          .all() as { name: string }[]
+      ).map((row) => row.name);
+      const rowsOf = () =>
+        Object.fromEntries(
+          tables.map((table) => [
+            table,
+            db.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all(),
+          ]),
+        );
+      const before = rowsOf();
+      expect((before.rules as unknown[]).length).toBe(1);
+      const schemaBefore = schemaOf(db);
+      const logBefore = new ApprovalLogRepository(db).verify();
+      const changesBefore = new NormChangeRepository(db).verify();
+      expect(logBefore).toEqual({ valid: true, brokenAtSeq: null, reason: null });
+      expect(changesBefore).toMatchObject({ valid: true });
+
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 22), { now: fixedNow }).applied).toEqual([22]);
+      expect(rowsOf()).toEqual(before);
+      const added = new Set(NEW_OBJECTS.map(([, name]) => name));
+      expect((schemaOf(db) as { name: string }[]).filter((item) => !added.has(item.name))).toEqual(
+        schemaBefore,
+      );
+      expect(
+        (schemaOf(db) as { type: string; name: string }[])
+          .filter((item) => added.has(item.name))
+          .map((item) => [item.type, item.name]),
+      ).toEqual(NEW_OBJECTS);
+      expect(new ApprovalLogRepository(db).verify()).toEqual(logBefore);
+      expect(new NormChangeRepository(db).verify()).toEqual(changesBefore);
+      expect(db.prepare('SELECT count(*) AS n FROM block_declarations').get()).toEqual({ n: 0 });
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+      // 다시 실행해도 스키마가 같다
+      const schema = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 22), { now: fixedNow }).applied).toEqual([]);
+      expect(schemaOf(db)).toEqual(schema);
+    });
+  });
+});

@@ -960,6 +960,54 @@ describe('규칙을 제자리에서 고치는 경로는 사람의 rule.update �
   });
 });
 
+describe('블록 선언을 쓰는 경로는 사람의 blocks.set 처리기뿐 (M3-01 #46, ADR-005 · ADR-122, 코드 구조)', () => {
+  it('저장소의 블록 선언 쓰기는 블록 RPC 처리기 하나이고, 에이전트 세션이 닿는 코드는 그 처리기도 선언 쓰기도 모르며, 어느 역할에도 블록 선언을 쓰는 도구가 없다', () => {
+    const files = sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+    const using = (pattern: RegExp) =>
+      files
+        .filter((f) => pattern.test(f.text))
+        .map((f) => f.rel)
+        .sort();
+    // 쓰기: 저장소의 선언 저장은 사람 주체만 받는 처리기 하나
+    expect(using(/\.blockDeclarations\.set\(/)).toEqual(['ipc/block-handlers.ts']);
+    expect(using(/'blocks\.set'/)).toEqual(['ipc/block-handlers.ts']);
+    // 처리기를 가져오는 곳 = 처리기 묶음뿐
+    expect(using(/from '[./]+\/?(?:ipc\/)?block-handlers\.js'/)).toEqual(['ipc/handlers.ts']);
+    // 읽기: 조회 처리기 · 규칙 반영의 이름 대조 · 세션 입력(규범 자료 · 테스트 작성 사본)뿐 (판만 읽는다)
+    expect(using(/\.blockDeclarations\./)).toEqual([
+      'ipc/block-handlers.ts',
+      'norms/agent-rule.ts',
+      'norms/norm-input.ts',
+      'steps/test-writing.ts',
+    ]);
+    for (const { rel, text } of files) {
+      if (rel === 'ipc/block-handlers.ts') continue;
+      expect(text.match(/\.blockDeclarations\.[A-Za-z]+/g) ?? [], rel).not.toContain(
+        '.blockDeclarations.set',
+      );
+      if (
+        /^(tools|agent|rule-writer|test-writer|implementer|engine|steps|runs|judge|norms)\//.test(
+          rel,
+        )
+      ) {
+        expect(/'blocks\.set'|block-handlers|block_declarations/.test(text), rel).toBe(false);
+      }
+    }
+    // 도구: 어느 역할의 도구 목록 · MCP 목록에도 블록(선언)을 쓰는 이름이 없고, 파이프의 쓰기 RPC 이름은 금지 판별에 걸린다
+    expect(isForbiddenTool('blocks.set')).toBe(true);
+    for (const role of ROLES) {
+      const names = [...roleToolNames(role), ...biveMcpToolList(role).map((tool) => tool.name)];
+      expect(
+        names.filter((name) => /block/i.test(name)),
+        role,
+      ).toEqual([]);
+    }
+  });
+});
+
 describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경로 (M7-02 #214, ADR-100 C2 · A1, 코드 구조)', () => {
   it('규칙 생성은 규칙 바로 반영 모듈과 옛 제안 승인뿐이고, 규범 변경 기록 추가는 바로 반영 모듈뿐이며, 제품 경로에서 제안을 등록하지 않는다', () => {
     const files = sourceFiles(SRC_DIR).map((file) => ({

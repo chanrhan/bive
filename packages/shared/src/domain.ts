@@ -3,6 +3,7 @@
 // 파생 값(요구사항 상태 · 결함, 규칙의 최신 판정 등)은 저장 필드가 아니므로 여기에 없다.
 import { z } from 'zod';
 
+import { BlockDeclaration, BlockName } from './blocks.js';
 import {
   AgentRole,
   ApprovalAction,
@@ -62,7 +63,6 @@ export type EntityName = z.infer<typeof EntityName>;
 /** 스키마가 아직 없는 예약 엔터티 이름. */
 export const RESERVED_ENTITY_NAMES = [
   'Contract',
-  'Block',
   'Adr',
   'CodeChange',
   'MutationResult',
@@ -463,7 +463,9 @@ export const BUILTIN_STRUCTURE_RULES = [
 /**
  * 규칙 (NRM-02, NRM-03, NRM-09). 부모 요구사항이 없는 것은 내장 구조 규칙뿐이다.
  * 예외: 부모 요구사항이 삭제되면 규칙은 남고 `parentRequirementId`가 `null`, `parentDetachedAt`이 삭제 시각이 된다
- * (추적성 결함, 표시는 M3-11 · ADR-050). 대상 블록 · 위험도는 P1(M2)부터 채워진다.
+ * (추적성 결함, 표시는 M3-11 · ADR-050).
+ * 대상 블록(`targetBlockIds`, 블록 이름) · 위험도는 규칙 작성 역할이 새로 만드는 규칙에 필수다(M3-01 #46, ADR-122: 도구 · 반영 모듈이
+ * 강제). 읽기 스키마는 그 전에 만들어진 행의 빈 목록 · `null`을 그대로 받는다(옛 행을 지어내지 않는다).
  */
 export const Rule = z
   .strictObject({
@@ -476,7 +478,8 @@ export const Rule = z
     parentRequirementId: Ulid.nullable(),
     parentDetachedAt: Timestamp.nullable(),
     builtin: z.boolean(),
-    targetBlockIds: z.array(Ulid),
+    /** 대상 블록 이름 (칸 이름은 옛 그대로, 블록의 식별자 = 이름. ADR-122) */
+    targetBlockIds: z.array(BlockName),
     risk: Risk.nullable(),
     contractId: Ulid.nullable(),
     author: Author,
@@ -499,6 +502,18 @@ export const Rule = z
     path: ['parentDetachedAt'],
   });
 export type Rule = z.infer<typeof Rule>;
+
+/**
+ * 저장된 블록 선언 한 판 (M3-01 #46, ADR-005 · ADR-122). 사람이 `blocks.set`으로 저장할 때마다 판이 1씩 늘고(1부터) 옛 판은
+ * 지우거나 고치지 않는다(바꾼 기록 = 판 목록). 지금 선언은 가장 큰 판이다.
+ */
+export const BlockDeclarationRecord = z.strictObject({
+  version: z.int().positive(),
+  declaration: BlockDeclaration,
+  setAt: Timestamp,
+  setBy: HumanAuthor,
+});
+export type BlockDeclarationRecord = z.infer<typeof BlockDeclarationRecord>;
 
 /**
  * 규칙 폐기 (NRM-02 · NRM-06, ADR-100 D5 · D6, M7-09 #221, ADR-112). 규칙 1개에 많아야 1건이고 되돌릴 수 없다(DB 트리거).

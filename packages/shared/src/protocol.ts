@@ -7,6 +7,7 @@ import {
   ApprovalLogBreakReason,
   ApprovalLogEntry,
   Author,
+  BlockDeclarationRecord,
   CodeFilePath,
   CodeLine,
   CodeOpenRecord,
@@ -49,6 +50,7 @@ import {
   JudgmentStatus,
   NormChangeKind,
   ProposalKind,
+  Risk,
   ProposalState,
   RuleWriterSkipReason,
   RuleWriterState,
@@ -641,6 +643,8 @@ export const ConfirmationRetirementItem = z.strictObject({
   grounds: z.string().max(NORM_CHANGE_TEXT_DISPLAY_MAX).nullable(),
   rationale: z.string().max(NORM_CHANGE_TEXT_DISPLAY_MAX).nullable(),
   released: z.strictObject({ seq: z.int().positive(), at: Timestamp }).nullable(),
+  /** 대상 규칙의 위험도 (선택 칸, M3-01 #46. 값이 없는 규칙이면 칸이 없다) */
+  risk: Risk.optional(),
   textTruncated: z.boolean(),
 });
 export type ConfirmationRetirementItem = z.infer<typeof ConfirmationRetirementItem>;
@@ -662,6 +666,8 @@ export const ConfirmationTestChangeItem = z.strictObject({
     }),
   ),
   fileCount: z.int().positive(),
+  /** 대상 규칙의 위험도 (선택 칸, M3-01 #46. 값이 없는 규칙이면 칸이 없다) */
+  risk: Risk.optional(),
   textTruncated: z.boolean(),
 });
 export type ConfirmationTestChangeItem = z.infer<typeof ConfirmationTestChangeItem>;
@@ -674,6 +680,8 @@ export const ConfirmationNormItem = z.strictObject({
   displayId: z.string().min(1),
   text: z.string().max(NORM_CHANGE_TEXT_DISPLAY_MAX),
   author: Author,
+  /** 규칙의 위험도 (선택 칸, M3-01 #46. 요구사항 · 값이 없는 규칙이면 칸이 없다) */
+  risk: Risk.optional(),
   textTruncated: z.boolean(),
 });
 export type ConfirmationNormItem = z.infer<typeof ConfirmationNormItem>;
@@ -1226,6 +1234,45 @@ export const CodeOpenSummaryResult = z
   });
 export type CodeOpenSummaryResult = z.infer<typeof CodeOpenSummaryResult>;
 
+// ── 블록 선언 (NRM-09 · JDG-05 · DSN-01, ADR-005, M3-01 #46, ADR-122) ─────
+// - `blocks.get`: 지금 블록 선언(가장 큰 판)과 판 · 저장 시각 · 저장 주체. 한 번도 저장하지 않았으면 `current: null`(블록 선언 없음)
+// - `blocks.set`: 사람(`human`)만. 에이전트 · 오케스트레이터 주체는 -32020(저장소를 열기 전). 선언 전체를 새 판으로 저장한다(고치기 ·
+//   지우기 없음, 옛 판은 남는다). 선언이 스키마 · 저장 규칙(이름 중복, 없는 블록 · 자기 자신을 가리키는 허용 의존, 순환, 두 블록의
+//   같은 포함 경로, 프로젝트 폴더 밖 · 형식이 틀린 패턴)을 어기면 -32001(`data.reason = BLOCKS_INVALID`, `data.issues`)
+// - 에이전트 역할에는 블록 선언을 쓰는 도구가 없다(ADR-005: 선언을 고쳐 구조 검사를 우회하는 길을 막는다)
+
+/** 블록 선언 검증 실패(-32001)의 `error.data.reason` 값. */
+export const BLOCKS_INVALID_REASON = 'BLOCKS_INVALID';
+
+/** -32001 오류의 `data`: 이유 + 어긴 곳(경로 · 메시지). */
+export const BlocksInvalidData = z.strictObject({
+  reason: z.literal(BLOCKS_INVALID_REASON),
+  issues: z
+    .array(
+      z.strictObject({
+        path: z.array(z.union([z.string(), z.int().nonnegative()])),
+        message: z.string(),
+      }),
+    )
+    .min(1),
+});
+export type BlocksInvalidData = z.infer<typeof BlocksInvalidData>;
+
+export const BlocksGetParams = z.strictObject({ projectId: Ulid });
+export type BlocksGetParams = z.infer<typeof BlocksGetParams>;
+export const BlocksResult = z.strictObject({ current: BlockDeclarationRecord.nullable() });
+export type BlocksResult = z.infer<typeof BlocksResult>;
+
+/** `blocks.set`: 선언은 처리기가 검사한다(어긴 곳을 -32001로 돌려주려고 여기서는 모양을 묻지 않는다). */
+export const BlocksSetParams = z.strictObject({
+  projectId: Ulid,
+  author: Author,
+  declaration: z.unknown(),
+});
+export type BlocksSetParams = z.infer<typeof BlocksSetParams>;
+export const BlocksSetResult = z.strictObject({ current: BlockDeclarationRecord });
+export type BlocksSetResult = z.infer<typeof BlocksSetResult>;
+
 /**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
@@ -1257,6 +1304,8 @@ export const METHODS = {
   'project.open': { params: ProjectOpenParams, result: ProjectOpenResult },
   'project.current': { params: ProjectCurrentParams, result: ProjectCurrentResult },
   'project.list': { params: ProjectListParams, result: ProjectListResult },
+  'blocks.get': { params: BlocksGetParams, result: BlocksResult },
+  'blocks.set': { params: BlocksSetParams, result: BlocksSetResult },
   'settings.get': { params: SettingsGetParams, result: SettingsResult },
   'settings.update': { params: SettingsUpdateParams, result: SettingsResult },
   'settings.validateForRun': { params: SettingsValidateParams, result: SettingsValidateResult },

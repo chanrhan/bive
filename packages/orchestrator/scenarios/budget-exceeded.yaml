@@ -15,6 +15,8 @@ roles:
               statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 db 필드에 데이터베이스 연결 상태 문자열 ok를 담는다
               kind: business
               checkKinds: [test]
+              targetBlocks: [health]
+              risk: medium
               rationale: 요구사항의 '데이터베이스 상태 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
               contradiction: { verdict: none }
           - message: 규칙 제안 1건을 등록했습니다.
