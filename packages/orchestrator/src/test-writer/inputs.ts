@@ -1,8 +1,9 @@
 // test-writer 세션 작업 디렉터리 (NFR-02 · RUN-04, ADR-024 · ADR-052 · ADR-068).
 // 허용 목록 방식: 세션 디렉터리에는 아래 입력 사본만 둔다. 소스 코드 · 설정 · `node_modules` · `.git`은 없다.
 // - `rules/<RULE-ID>.md`: 대상 규칙 진술 (저장소의 규칙 값)
-// - `routes.md`: 라우트 목록 (Next.js App Router의 `route.*` · `page.*` 위치에서 만든 경로 · 메서드, 코드 아님)
-// - `prisma/schema.prisma`: Prisma 스키마 사본 (있을 때)
+// - `routes.md`: 라우트 목록 (Next.js App Router의 `route.*` · `page.*` 위치에서 만든 경로 · 메서드, 코드 아님). 안전한 조각
+//   패턴 밖 폴더 이름의 경로는 싣지 않고, 항목 수 · 글자 수 상한이 있다 (ADR-131)
+// - `prisma/schema.prisma`: Prisma 스키마 사본 (있을 때. 크기 상한을 넘거나 `prisma/` · 파일이 링크면 사본 없음, ADR-131)
 // - `bive-acceptance/<규칙 폴더>/**/*.acc.ts`: 다른 규칙의 기존 인수 테스트 사본
 // - `blocks.json`: 블록 선언의 읽기 전용 사본 (지금 판의 선언 그대로, 선언이 없으면 없음. M3-01 #46, ADR-005 · ADR-122). 세션이 고쳐도
 //   경로 가드가 쓰기를 거부하고(테스트 작성 역할은 대상 규칙 폴더 밖 쓰기 불가) 결과로 옮기지도 않는다. 원본은 프로젝트 폴더 밖
@@ -48,6 +49,19 @@ const lstatKind = (target: string): 'file' | 'dir' | 'other' | null => {
   return 'other';
 };
 
+/**
+ * 워크트리 기준 폴더 경로의 모든 구간이 링크가 아닌 실제 폴더인지 (만들지 않고, 던지지 않는다). 마지막 구간만 `lstat`하면
+ * 상위 구간의 링크를 따라가고, 상위 구간이 일반 파일이면 `ENOTDIR`로 던지므로 구간마다 본다.
+ */
+const isRealDirPath = (worktree: string, relDir: string): boolean => {
+  let current = worktree;
+  for (const segment of relDir.split(path.sep).filter((s) => s !== '')) {
+    current = path.join(current, segment);
+    if (lstatKind(current) !== 'dir') return false;
+  }
+  return true;
+};
+
 /** 정렬된 디렉터리 항목 (링크는 따라가지 않는다). 없거나 폴더가 아니면 빈 목록. */
 const entriesOf = (dir: string): fs.Dirent[] => {
   if (lstatKind(dir) !== 'dir') return [];
@@ -89,19 +103,60 @@ export interface RouteEntry {
   methods: string[];
   /** 워크트리 기준 파일 위치 */
   file: string;
+  /** 앱 폴더부터 파일까지 지난 폴더 이름 (경로 그룹 포함, 순서대로). `routes.md`는 이 이름을 모두 조각 패턴으로 본다 */
+  folders: string[];
 }
+
+/**
+ * `routes.md` 상한 (M3-50 #295, ADR-131). 길이는 UTF-16 코드 단위. 조각 · 경로 길이를 넘는 경로는 패턴 밖과 같이 싣지 않고,
+ * 항목 수 · 글자 수는 경로 순으로 앞에서부터 채우다 넘으면 멈춘다.
+ */
+export const ROUTES_LIMITS = {
+  /** 폴더 이름 하나 (패턴 확인 전에 본다) */
+  segment: 100,
+  /** 경로 하나 (`/`로 시작하는 URL 경로) */
+  path: 200,
+  /** 싣는 경로 항목 수 */
+  entries: 50,
+  /** 싣는 항목 줄의 글자 수 합 (줄마다 줄바꿈 1글자 포함) */
+  chars: 4000,
+} as const;
+
+// 안전한 폴더 이름 조각 (ADR-131): 영숫자 · `-` · `_` · `.` · `%`로 된 이름, 동적 조각 `[이름]` · `[...이름]` · `[[...이름]]`,
+// 경로 그룹 `(이름)`, 병렬 슬롯 `@이름`, 가로채기 `(.)이름` · `(..)이름` · `(..)(..)이름` · `(...)이름`. 줄 나눔 · 제어 글자 ·
+// 공백 · 따옴표 · 백틱 · `#` · `*` · `<` · `>` · `|` · `!` · `~` · 비 ASCII는 어느 꼴에도 없다. 겹친 반복이 없는 꼴이라 선형
+// 시간이고, 길이 상한을 먼저 본다.
+const PLAIN = '[A-Za-z0-9._%-]+';
+const PARAM = '[A-Za-z0-9_-]+';
+const SAFE_SEGMENT = new RegExp(
+  `^(?:${PLAIN}|\\[(?:\\.\\.\\.)?${PARAM}\\]|\\[\\[\\.\\.\\.${PARAM}\\]\\]|\\(${PLAIN}\\)|@${PLAIN}` +
+    `|(?:\\(\\.\\)|\\(\\.\\.\\)(?:\\(\\.\\.\\))*|\\(\\.\\.\\.\\))${PLAIN})$`,
+  'u',
+);
+
+/** 폴더 이름이 `routes.md`에 실을 수 있는 조각인지 (길이 상한 → 패턴 순). */
+export const isSafeRouteSegment = (name: string): boolean =>
+  name.length >= 1 && name.length <= ROUTES_LIMITS.segment && SAFE_SEGMENT.test(name);
+
+/** 결정적 순서: 경로 → 종류, UTF-16 코드 단위 비교 (로캘 · 파일 시스템 나열 순서에 기대지 않는다). */
+const compareRoutes = (a: RouteEntry, b: RouteEntry): number => {
+  if (a.path !== b.path) return a.path < b.path ? -1 : 1;
+  if (a.kind !== b.kind) return a.kind < b.kind ? -1 : 1;
+  return 0;
+};
 
 /**
  * Next.js App Router 라우트 목록. 앱 폴더는 루트 `app/`이 있으면 그것, 없으면 `src/app/`(Next.js와 같은 순서).
  * 경로 그룹 `(이름)`은 경로에서 빼고, 비공개 폴더 `_이름` · 병렬 경로 `@슬롯` · 가로채기 경로 `(.)…`는 건너뛴다.
- * 링크 · `node_modules`는 따라가지 않는다. Pages Router(`pages/`)는 M1 범위 밖이다(ADR-068).
+ * 링크 · `node_modules`는 따라가지 않는다(`src/app`은 `src`도 링크가 아닌 폴더여야 한다). Pages Router(`pages/`)는
+ * M1 범위 밖이다(ADR-068). 폴더 이름은 거르지 않고 담는다: 실을지는 {@link renderRoutes}가 정한다.
  */
 export const listAppRoutes = (worktree: string): RouteEntry[] => {
   const candidates = ['app', path.join('src', 'app')];
-  const appRel = candidates.find((rel) => lstatKind(path.join(worktree, rel)) === 'dir');
+  const appRel = candidates.find((rel) => isRealDirPath(worktree, rel));
   if (appRel === undefined) return [];
   const routes: RouteEntry[] = [];
-  const walk = (dirRel: string, segments: string[]): void => {
+  const walk = (dirRel: string, segments: string[], folders: string[]): void => {
     for (const entry of entriesOf(path.join(worktree, dirRel))) {
       const rel = path.join(dirRel, entry.name);
       if (entry.isDirectory()) {
@@ -109,7 +164,7 @@ export const listAppRoutes = (worktree: string): RouteEntry[] => {
         if (name === 'node_modules' || name.startsWith('_') || name.startsWith('@')) continue;
         if (name.startsWith('(.')) continue;
         const group = name.startsWith('(') && name.endsWith(')');
-        walk(rel, group ? segments : [...segments, name]);
+        walk(rel, group ? segments : [...segments, name], [...folders, name]);
         continue;
       }
       if (!entry.isFile()) continue;
@@ -117,33 +172,135 @@ export const listAppRoutes = (worktree: string): RouteEntry[] => {
       const file = rel.split(path.sep).join('/');
       if (ROUTE_FILE.test(entry.name)) {
         const source = fs.readFileSync(path.join(worktree, rel), 'utf8');
-        routes.push({ path: urlPath, kind: 'route', methods: exportedMethods(source), file });
+        routes.push({
+          path: urlPath,
+          kind: 'route',
+          methods: exportedMethods(source),
+          file,
+          folders,
+        });
       } else if (PAGE_FILE.test(entry.name)) {
-        routes.push({ path: urlPath, kind: 'page', methods: [], file });
+        routes.push({ path: urlPath, kind: 'page', methods: [], file, folders });
       }
     }
   };
-  walk(appRel, []);
-  return routes.sort((a, b) => a.path.localeCompare(b.path) || a.kind.localeCompare(b.kind));
+  walk(appRel, [], []);
+  return routes.sort(compareRoutes);
 };
 
-/** `routes.md` 본문. */
-export const renderRoutes = (routes: readonly RouteEntry[]): string => {
+/** 사본을 두지 않은 데이터 스키마의 까닭 (`routes.md` 머리에 고정 문장으로 적는다). */
+export type SchemaOmission = 'too_large' | 'not_regular';
+
+/** `routes.md` 머리에 적는 고정 문장 (ADR-131). 원문(폴더 이름 · 스키마 내용)은 싣지 않는다. */
+export const ROUTES_NOTICES = {
+  unsafe: (count: number): string =>
+    `(싣지 않은 경로 ${String(count)}건: 폴더 이름이 안전한 경로 글자 밖이거나 길이 상한(폴더 이름 ` +
+    `${String(ROUTES_LIMITS.segment)}자 · 경로 ${String(ROUTES_LIMITS.path)}자)을 넘음)`,
+  overflow: (count: number): string =>
+    `(상한을 넘어 싣지 않은 경로 ${String(count)}건: 상한 ${String(ROUTES_LIMITS.entries)}건 · ` +
+    `${String(ROUTES_LIMITS.chars)}자, 경로 순으로 앞에서부터 실음)`,
+  schema: {
+    too_large: (max: number): string =>
+      `(데이터 스키마 사본 없음: prisma/schema.prisma가 크기 상한 ${String(max)}바이트를 넘음)`,
+    not_regular:
+      '(데이터 스키마 사본 없음: prisma 폴더 또는 prisma/schema.prisma가 링크이거나 일반 폴더 · 파일이 아님)',
+  },
+} as const;
+
+const routeLine = (route: RouteEntry): string => {
+  if (route.kind === 'page') return `- 페이지 GET ${route.path}`;
+  const methods = route.methods.length > 0 ? route.methods.join(' · ') : '(메서드 확인 불가)';
+  return `- API ${methods} ${route.path}`;
+};
+
+/** 경로를 실을 수 있는지: 지난 폴더 이름이 모두 안전한 조각이고 경로가 길이 상한 안. */
+const isSafeRoute = (route: RouteEntry): boolean =>
+  route.path.length <= ROUTES_LIMITS.path && route.folders.every(isSafeRouteSegment);
+
+/**
+ * `routes.md` 본문 (ADR-131). 안전하지 않은 경로는 통째로 빼고 수만 적는다. 나머지는 경로 순으로 정렬해 항목 수 ·
+ * 글자 수 상한까지 앞에서부터 싣고, 넘친 수를 머리에 적는다. `schema`는 사본을 두지 않은 데이터 스키마의 까닭.
+ */
+export const renderRoutes = (
+  routes: readonly RouteEntry[],
+  options: { schema?: SchemaOmission | null } = {},
+): string => {
   const lines = [
     '# 라우트 목록',
     '',
     'BIVE가 프로젝트의 Next.js App Router 파일 위치에서 만든 목록이다. 판정 서버에는 이 경로로 HTTP 요청만 보낸다.',
     '',
   ];
-  if (routes.length === 0) lines.push('(라우트 없음)');
-  for (const route of routes) {
-    if (route.kind === 'page') lines.push(`- 페이지 GET ${route.path}`);
-    else {
-      const methods = route.methods.length > 0 ? route.methods.join(' · ') : '(메서드 확인 불가)';
-      lines.push(`- API ${methods} ${route.path}`);
-    }
+  const safe = routes.filter(isSafeRoute).sort(compareRoutes);
+  const unsafe = routes.length - safe.length;
+  const kept: string[] = [];
+  let used = 0;
+  for (const route of safe) {
+    const line = routeLine(route);
+    if (kept.length >= ROUTES_LIMITS.entries || used + line.length + 1 > ROUTES_LIMITS.chars) break;
+    kept.push(line);
+    used += line.length + 1;
   }
+  const overflow = safe.length - kept.length;
+  const notices: string[] = [];
+  if (options.schema === 'too_large') {
+    notices.push(ROUTES_NOTICES.schema.too_large(PRISMA_SCHEMA_MAX_BYTES));
+  } else if (options.schema === 'not_regular') notices.push(ROUTES_NOTICES.schema.not_regular);
+  if (unsafe > 0) notices.push(ROUTES_NOTICES.unsafe(unsafe));
+  if (overflow > 0) notices.push(ROUTES_NOTICES.overflow(overflow));
+  if (notices.length > 0) lines.push(...notices, '');
+  if (kept.length === 0) lines.push('(라우트 없음)');
+  lines.push(...kept);
   return `${lines.join('\n')}\n`;
+};
+
+/**
+ * `prisma/schema.prisma` 사본의 크기 상한 (바이트, ADR-131). 세션의 `read_file` 상한(1 MiB)과 같다: 넘는 파일은 세션이
+ * 읽지 못한다. 넘으면 사본을 두지 않는다(잘린 스키마는 문법이 깨진 채 읽힌다).
+ */
+export const PRISMA_SCHEMA_MAX_BYTES = 1024 * 1024;
+
+/** 스키마 사본으로 쓸 바이트 또는 사본을 두지 않는 까닭 (`absent`: 스키마 없음, 알리지 않는다). */
+type SchemaRead = { kind: 'ok'; bytes: Buffer } | { kind: 'absent' } | { kind: SchemaOmission };
+
+/**
+ * 실행 워크트리의 `prisma/schema.prisma`를 읽는다. `prisma/`와 파일이 모두 링크가 아닌 실제 폴더 · 일반 파일이어야 하고,
+ * 읽기 전에 `lstat` 크기를 보며(상한 넘는 파일을 메모리에 올리지 않는다), 연 뒤에는 링크를 따라가지 않는 핸들의 종류와
+ * 읽은 바이트 수로 다시 막는다(확인과 읽기 사이에 바뀐 파일). 내용은 바이트 그대로다.
+ */
+const readPrismaSchema = (worktree: string): SchemaRead => {
+  const maxBytes = PRISMA_SCHEMA_MAX_BYTES;
+  const dirKind = lstatKind(path.join(worktree, 'prisma'));
+  if (dirKind === null || dirKind === 'file') return { kind: 'absent' };
+  if (dirKind !== 'dir') return { kind: 'not_regular' };
+  const target = path.join(worktree, TEST_WRITER_INPUTS.prismaSchema);
+  const stat = fs.lstatSync(target, { throwIfNoEntry: false });
+  if (stat === undefined) return { kind: 'absent' };
+  if (!stat.isFile()) return { kind: 'not_regular' };
+  if (stat.size > maxBytes) return { kind: 'too_large' };
+  let fd: number;
+  try {
+    fd = fs.openSync(
+      target,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+    );
+  } catch {
+    return { kind: 'not_regular' };
+  }
+  try {
+    if (!fs.fstatSync(fd).isFile()) return { kind: 'not_regular' };
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const read = fs.readSync(fd, buffer, length, buffer.length - length, null);
+      if (read === 0) break;
+      length += read;
+    }
+    if (length > maxBytes) return { kind: 'too_large' };
+    return { kind: 'ok', bytes: buffer.subarray(0, length) };
+  } finally {
+    fs.closeSync(fd);
+  }
 };
 
 /** `rules/<RULE-ID>.md` 본문. */
@@ -213,9 +370,11 @@ export const prepareTestWriterInputs = (input: {
     put(`${TEST_WRITER_INPUTS.rulesDir}/${rule.displayId}.md`, renderRule(rule));
   }
   const routes = listAppRoutes(worktree);
-  put(TEST_WRITER_INPUTS.routes, renderRoutes(routes));
-  const schema = path.join(worktree, TEST_WRITER_INPUTS.prismaSchema);
-  if (lstatKind(schema) === 'file') put(TEST_WRITER_INPUTS.prismaSchema, fs.readFileSync(schema));
+  // 데이터 스키마: 구현 산출이라 내용은 바이트 그대로 싣고, 상한 · 링크면 사본 없이 그 사실만 `routes.md` 머리에 적는다 (ADR-131)
+  const schema = readPrismaSchema(worktree);
+  const omitted = schema.kind === 'too_large' || schema.kind === 'not_regular' ? schema.kind : null;
+  put(TEST_WRITER_INPUTS.routes, renderRoutes(routes, { schema: omitted }));
+  if (schema.kind === 'ok') put(TEST_WRITER_INPUTS.prismaSchema, schema.bytes);
   if (input.blocks !== undefined && input.blocks !== null) {
     put(TEST_WRITER_INPUTS.blocks, renderBlocks(input.blocks));
   }
