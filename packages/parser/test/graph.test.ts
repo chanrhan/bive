@@ -22,6 +22,7 @@ const dep = (module: string, resolved: string, extra: object = {}) => ({
   resolved,
   coreModule: false,
   couldNotResolve: false,
+  dependencyTypes: ['local', 'import'],
   ...extra,
 });
 
@@ -99,7 +100,7 @@ describe('변환만 한다 (출력 → 그래프)', () => {
         },
       ],
     };
-    const input = cruiseInput({ root, exclude: '(^|/)node_modules(/|$)', ruleSet });
+    const input = cruiseInput({ root, doNotFollow: '(^|/)node_modules(/|$)', ruleSet });
     const fromRunner = JSON.parse(await runCruiseProcess(input)) as unknown;
     const { cruise } = await import('dependency-cruiser');
     const report = await cruise(input.args, { ...input.options, outputType: 'json' });
@@ -113,7 +114,13 @@ describe('변환만 한다 (출력 → 그래프)', () => {
       modules: json.modules.map((module) => ({
         source: module.source,
         dependencies: module.dependencies.map((dependency) =>
-          pick(dependency, ['module', 'resolved', 'coreModule', 'couldNotResolve']),
+          pick(dependency, [
+            'module',
+            'resolved',
+            'coreModule',
+            'couldNotResolve',
+            'dependencyTypes',
+          ]),
         ),
       })),
       summary: {
@@ -136,7 +143,13 @@ describe('변환만 한다 (출력 → 그래프)', () => {
           dep('fs', 'fs', { coreModule: true }),
           dep('left-pad', 'left-pad', { couldNotResolve: true }),
           dep('./style.css', 'src/style.css'),
+          dep('./data.json', 'src/data.json'),
           dep('../outside', '../outside.ts'),
+          dep('./relay.es6', 'src/relay.es6'),
+          dep('../.next/x.js', '.next/x.js'),
+          dep('react', 'node_modules/react/index.js', { dependencyTypes: ['npm', 'import'] }),
+          dep('@s/p/deep', 'node_modules/@s/p/deep.js', { dependencyTypes: ['npm-no-pkg'] }),
+          dep('@s/p', 'node_modules/@s/p/index.js', { dependencyTypes: ['npm'] }),
         ],
       },
       { source: 'src/z.ts', dependencies: [dep('./a', 'src/a.ts'), dep('./a', 'src/a.ts')] },
@@ -152,6 +165,22 @@ describe('변환만 한다 (출력 → 그래프)', () => {
         total: 2,
       },
       unresolved: { items: [{ from: 'src/a.ts', module: 'left-pad' }], total: 1 },
+      // 분석하지 않은 파일로 풀린 import는 조용히 버리지 않는다(데이터 형식만 뺀다)
+      unanalyzed: {
+        items: [
+          { from: 'src/a.ts', to: '../outside.ts' },
+          { from: 'src/a.ts', to: '.next/x.js' },
+          { from: 'src/a.ts', to: 'src/relay.es6' },
+        ],
+        total: 3,
+      },
+      packages: {
+        items: [
+          { name: '@s/p', inManifest: false },
+          { name: 'react', inManifest: true },
+        ],
+        total: 2,
+      },
     });
   });
 
@@ -208,9 +237,24 @@ describe('변환만 한다 (출력 → 그래프)', () => {
       fileURLToPath(new URL('../runner/cruise.mjs', import.meta.url)),
       'utf8',
     );
-    expect([...runner.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1])).toEqual([
+    // 주석을 뺀 코드에서: 정적 import는 dependency-cruiser 하나, 동적 import · require · 해석 코드 없음
+    const code = runner
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('//'))
+      .join('\n');
+    expect([...code.matchAll(/^import .* from '([^']+)';$/gm)].map((m) => m[1])).toEqual([
       'dependency-cruiser',
     ]);
+    for (const banned of [
+      'import(',
+      'require',
+      'import.meta.resolve',
+      'compilerOptions',
+      'baseUrl',
+      '/index',
+    ]) {
+      expect(code.includes(banned), `runner: ${banned}`).toBe(false);
+    }
   });
 });
 

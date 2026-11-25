@@ -15,6 +15,10 @@ export const PARSER_LIMITS = {
   edges: 50_000,
   /** 결과 목록: 풀지 못한 import */
   unresolved: 5_000,
+  /** 결과 목록: 분석하지 않은 파일로 풀린 import */
+  unanalyzed: 5_000,
+  /** 결과 목록: 패키지 */
+  packages: 2_000,
   /** 결과 목록: 블록 하나의 파일 · 공개 파일, 미분류 파일, include 밖 공개 파일 */
   files: 5_000,
   /** 결과 목록: 겹침 */

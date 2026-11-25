@@ -2,7 +2,7 @@
 // - 실행 파일: 이 프로세스의 Node(`process.execPath`) + 파서 패키지 안의 실행기. dependency-cruiser는 파서 자신의 의존성에서 찾는다
 //   (대상 프로젝트의 node_modules가 아니다)
 // - 인자는 배열, 입력은 표준 입력의 JSON. 작업 디렉터리는 실행기 폴더(프로젝트 밖), 환경 변수는 비운다(`NODE_OPTIONS` ·
-//   `NODE_PATH` 등이 넘어가지 않음)
+//   `NODE_PATH` 등이 넘어가지 않음. Electron 위에서는 `ELECTRON_RUN_AS_NODE` 하나만, {@link childEnv})
 // - 시간 제한 · 출력 크기 상한. 시간 초과 · 깨진 JSON · 0이 아닌 종료는 오류다("위반 0건"으로 읽히지 않는다)
 // - 대상 프로젝트의 설정 파일(.dependency-cruiser.* · webpack · babel)을 읽는 옵션을 넘기지 않는다. tsconfig는 경로 별칭을 풀려고
 //   넘기고, 데이터(JSON)로만 읽힌다
@@ -26,6 +26,7 @@ const CruiseDependency = z.object({
   resolved: z.string(),
   coreModule: z.boolean(),
   couldNotResolve: z.boolean(),
+  dependencyTypes: z.array(z.string()),
 });
 const CruiseModule = z.object({
   source: z.string(),
@@ -62,8 +63,8 @@ export const parseCruiseOutput = (text: string): CruiseOutput => {
 export interface CruiseRequest {
   /** 프로젝트 폴더의 실제 경로 */
   root: string;
-  /** dependency-cruiser에 제외로 넘길 정규식 */
-  exclude: string;
+  /** dependency-cruiser가 간선은 내되 따라가지 않을 자리의 정규식 (건너뛴 폴더 · 기호 링크 · node_modules · 프로젝트 밖) */
+  doNotFollow: string;
   ruleSet: CruiseRuleSet | null;
 }
 
@@ -81,7 +82,7 @@ export const cruiseInput = (request: CruiseRequest): { args: string[]; options: 
     args: ['.'],
     options: {
       baseDir: request.root,
-      exclude: { path: request.exclude },
+      doNotFollow: { path: request.doNotFollow },
       // 타입 전용 · 동적 import도 TypeScript 구문 그대로 읽어 간선으로 둔다
       tsPreCompilationDeps: true,
       // 규칙에 없는 분석(규칙이 없을 때의 순환 경로 계산 등)을 하지 않는다
@@ -92,6 +93,15 @@ export const cruiseInput = (request: CruiseRequest): { args: string[]; options: 
   };
 };
 
+/**
+ * 실행기 자식의 환경 변수. 비운다(`NODE_OPTIONS` · `NODE_PATH` 등이 넘어가지 않음). 부모가 Electron 바이너리 위에서 Node로 돌 때만
+ * (`process.versions.electron`) `ELECTRON_RUN_AS_NODE=1` 하나를 넘긴다: 없으면 같은 실행 파일이 Node가 아니라 Electron 앱으로 뜬다.
+ */
+export const childEnv = (
+  versions: NodeJS.ProcessVersions = process.versions,
+): Record<string, string> =>
+  typeof versions.electron === 'string' ? { ELECTRON_RUN_AS_NODE: '1' } : {};
+
 /** 실행기를 돌려 출력 글을 받는다. */
 export const runCruiseProcess = (input: unknown, options: ProcessOptions = {}): Promise<string> => {
   const timeoutMs = options.timeoutMs ?? PARSER_LIMITS.timeoutMs;
@@ -100,7 +110,7 @@ export const runCruiseProcess = (input: unknown, options: ProcessOptions = {}): 
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [runner], {
       cwd: path.dirname(runner),
-      env: {},
+      env: childEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const chunks: Buffer[] = [];

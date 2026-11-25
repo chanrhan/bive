@@ -9,7 +9,7 @@ import { cruise, getAvailableTranspilers } from 'dependency-cruiser';
 
 const ALLOWED_OPTION_KEYS = new Set([
   'baseDir',
-  'exclude',
+  'doNotFollow',
   'tsConfig',
   'tsPreCompilationDeps',
   'skipAnalysisNotInRules',
@@ -63,7 +63,13 @@ process.stdout.write(
     modules: (result.modules ?? []).map((module) => ({
       ...pick(module, ['source']),
       dependencies: (module.dependencies ?? []).map((dependency) =>
-        pick(dependency, ['module', 'resolved', 'coreModule', 'couldNotResolve']),
+        pick(dependency, [
+          'module',
+          'resolved',
+          'coreModule',
+          'couldNotResolve',
+          'dependencyTypes',
+        ]),
       ),
     })),
     summary: {

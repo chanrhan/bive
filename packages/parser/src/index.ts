@@ -11,7 +11,7 @@ export {
 } from './analyze.js';
 export type { FileOverlap, PublicOutsideInclude } from './blocks.js';
 export { ParserError, type ParserErrorCode } from './errors.js';
-export type { ImportEdge, ImportGraph, UnresolvedImport } from './graph.js';
+export type { ImportEdge, ImportGraph, PackageImport, UnresolvedImport } from './graph.js';
 export { type Capped, PARSER_LIMITS } from './limits.js';
 export type { ViolationKind } from './rules.js';
 export type { StructureViolation, ViolationEnd } from './violations.js';

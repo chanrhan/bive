@@ -8,7 +8,7 @@ import { escapeRegExpLiteral, exactPathsRegExp } from '../src/regex.js';
 import { buildRuleSet } from '../src/rules.js';
 import { violationsFromCruise } from '../src/violations.js';
 import { PARSER_LIMITS } from '../src/limits.js';
-import { declaration, makeProject } from './helpers.js';
+import { copyFixture, declaration, exampleDeclaration, makeProject } from './helpers.js';
 
 /** auth · health · lib (예제와 같은 방향) + lib 공개 파일 하나. */
 const blocks = () =>
@@ -330,5 +330,104 @@ describe('위반 출력 옮기기', () => {
     expect(result.items).toHaveLength(PARSER_LIMITS.violations);
     expect(result.total).toBe(PARSER_LIMITS.violations + 1);
     expect(result.items[0]?.to.file).toBe(files[0]);
+  });
+});
+
+describe('분석하지 않은 파일로 가는 import는 드러나고, 블록 파일에서면 통과로 읽을 수 없다', () => {
+  const ab = () =>
+    declaration([
+      { name: 'a', include: ['src/a/**'] },
+      { name: 'b', include: ['src/b/**'] },
+    ]);
+  const relayFiles = {
+    'src/b/hidden1.ts': '',
+    'src/a/relay.es6': "require('../b/hidden1');\n",
+    '.next/relay.js': "require('../src/b/hidden1');\n",
+    'node_modules/relay-pkg/package.json': JSON.stringify({ name: 'relay-pkg', main: 'index.js' }),
+    'node_modules/relay-pkg/index.js': "require('../../src/b/hidden1');\n",
+  };
+  const analyzeAb = (files: Record<string, string>) =>
+    analyzeProject({ projectDir: makeProject({ ...relayFiles, ...files }), declaration: ab() });
+
+  it.each([
+    ['소스로 치지 않는 확장자 (블록 include 안)', "import './relay.es6';\n", 'src/a/relay.es6'],
+    ['건너뛰는 폴더 (.next)', "import '../../.next/relay.js';\n", '.next/relay.js'],
+    [
+      '프로젝트 node_modules를 경로로',
+      "import '../../node_modules/relay-pkg/index.js';\n",
+      'node_modules/relay-pkg/index.js',
+    ],
+  ])('%s: incomplete 상태에 그 import가 실리고 그래프에도 있다', async (_label, source, to) => {
+    const result = await analyzeAb({ 'src/a/x.ts': source });
+    expect(result.graph.unanalyzed).toEqual({ items: [{ from: 'src/a/x.ts', to }], total: 1 });
+    expect(result.structure?.outcome).toEqual({
+      status: 'incomplete',
+      violations: { items: [], total: 0 },
+      unanalyzed: { items: [{ from: 'src/a/x.ts', to }], total: 1 },
+    });
+  });
+
+  it('패키지 이름으로 가져온 프로젝트 안 패키지는 패키지 목록에 이름으로 드러난다 (package.json에 없음 표시)', async () => {
+    const result = await analyzeAb({ 'src/a/x.ts': "import 'relay-pkg';\n" });
+    expect(result.graph.packages).toEqual({
+      items: [{ name: 'relay-pkg', inManifest: false }],
+      total: 1,
+    });
+    expect(result.graph.unanalyzed.total).toBe(0);
+    // 진짜 패키지와 심은 패키지를 구별하지 않으므로 이것만으로는 incomplete가 아니다(ADR-125 남는 틈)
+    expect(result.structure?.outcome.status).toBe('checked');
+  });
+
+  it('같은 프로젝트에서 직접 import는 여전히 위반 1건이다 (incomplete 안에서도 위반을 싣는다)', async () => {
+    const result = await analyzeAb({
+      'src/a/x.ts': "import './relay.es6';\nimport '@/b/hidden1';\n",
+    });
+    expect(result.structure?.outcome).toEqual({
+      status: 'incomplete',
+      violations: {
+        items: [
+          edge('structure.declared-direction', ['src/a/x.ts', 'a'], ['src/b/hidden1.ts', 'b']),
+        ],
+        total: 1,
+      },
+      unanalyzed: { items: [{ from: 'src/a/x.ts', to: 'src/a/relay.es6' }], total: 1 },
+    });
+    const direct = await analyzeAb({ 'src/a/x.ts': "import '@/b/hidden1';\n" });
+    expect(direct.structure?.outcome).toEqual({
+      status: 'checked',
+      violations: {
+        items: [
+          edge('structure.declared-direction', ['src/a/x.ts', 'a'], ['src/b/hidden1.ts', 'b']),
+        ],
+        total: 1,
+      },
+    });
+  });
+
+  it('데이터 형식(JSON · CSS · 그림)은 분석하지 않은 대상이 아니고, 미분류 파일에서 간 것은 incomplete로 만들지 않는다', async () => {
+    const result = await analyzeAb({
+      'src/a/x.ts': "import './d.json';\nimport './s.module.css';\nimport './i.svg';\n",
+      'src/a/d.json': '{}',
+      'src/a/s.module.css': '',
+      'src/a/i.svg': '<svg/>',
+      'src/page.ts': "import '../.next/relay.js';\n",
+    });
+    expect(result.graph.unanalyzed).toEqual({
+      items: [{ from: 'src/page.ts', to: '.next/relay.js' }],
+      total: 1,
+    });
+    expect(result.structure?.outcome).toEqual({
+      status: 'checked',
+      violations: { items: [], total: 0 },
+    });
+  });
+
+  it('정상 픽스처(설치하지 않은 사본)에서는 분석하지 않은 대상이 없다', async () => {
+    const result = await analyzeProject({
+      projectDir: copyFixture(),
+      declaration: exampleDeclaration(),
+    });
+    expect(result.graph.unanalyzed).toEqual({ items: [], total: 0 });
+    expect(result.structure?.outcome.status).toBe('checked');
   });
 });

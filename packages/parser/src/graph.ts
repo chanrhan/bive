@@ -15,6 +15,13 @@ export interface UnresolvedImport {
   module: string;
 }
 
+export interface PackageImport {
+  /** 패키지 이름 (모듈 이름의 첫 구간, `@범위/이름`이면 두 구간) */
+  name: string;
+  /** 프로젝트 package.json의 의존성에 있는지 (dependency-cruiser의 의존 종류 그대로) */
+  inManifest: boolean;
+}
+
 export interface ImportGraph {
   /** 분석한 소스 파일 (프로젝트 루트 기준, 정렬) */
   modules: string[];
@@ -22,6 +29,59 @@ export interface ImportGraph {
   edges: Capped<ImportEdge>;
   /** 소스 파일의 import 가운데 dependency-cruiser가 풀지 못한 것 (설치하지 않은 패키지 포함) */
   unresolved: Capped<UnresolvedImport>;
+  /**
+   * 소스 파일의 import 가운데 프로젝트 안팎의 "분석하지 않은 파일"로 풀린 것(정렬, 같은 쌍은 하나): 소스 확장자가 아닌 파일, 건너뛴
+   * 폴더(`.next` · `node_modules` 등) 안 파일을 경로로 가리킨 것, 프로젝트 밖. 그 파일 안의 import는 읽지 않았으므로 그 너머는
+   * 그래프에 없다. 코드를 실을 수 없는 데이터 형식({@link DATA_EXTENSIONS})은 넣지 않는다
+   */
+  unanalyzed: Capped<ImportEdge>;
+  /** 소스 파일이 패키지 이름으로 가져온 패키지 (이름순, 이름마다 하나). 패키지 안은 따라가지 않는다 */
+  packages: Capped<PackageImport>;
+}
+
+/** 코드를 실을 수 없는 데이터 형식 (import해도 그 너머로 이어지는 JS import가 없다): JSON · 스타일시트 · 그림 · 글꼴 */
+export const DATA_EXTENSIONS = [
+  '.json',
+  '.css',
+  '.scss',
+  '.sass',
+  '.less',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.avif',
+  '.ico',
+  '.bmp',
+  '.svg',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.otf',
+  '.eot',
+];
+
+const isData = (file: string): boolean => {
+  const lower = file.toLowerCase();
+  return DATA_EXTENSIONS.some((ext) => lower.endsWith(ext));
+};
+
+/** dependency-cruiser가 패키지 찾기(node_modules)로 푼 의존 종류 (`npm` · `npm-dev` · `npm-no-pkg` 등) */
+const isPackage = (types: readonly string[]): boolean =>
+  types.some((type) => type.startsWith('npm'));
+
+const packageName = (module: string): string => {
+  const parts = module.split('/');
+  return module.startsWith('@') ? parts.slice(0, 2).join('/') : (parts[0] ?? module);
+};
+
+/** 자르기 전 전체 목록 (구조 판정이 쓴다) */
+export interface FullGraph {
+  edges: ImportEdge[];
+  unresolved: UnresolvedImport[];
+  unanalyzed: ImportEdge[];
+  packages: PackageImport[];
 }
 
 const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -29,15 +89,18 @@ const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 /**
  * 출력에서 그래프를 만든다. `files`는 파서가 모은 소스 파일 목록이다.
  * - 소스 파일인데 출력에 모듈로 없으면 오류(분석하지 않은 파일이 "import 없음"으로 읽히지 않게)
- * - 소스 파일 밖으로 풀린 import(패키지 · 프로젝트 밖 · JSON · CSS 등)는 간선에 넣지 않는다
+ * - 소스 파일 밖으로 풀린 import는 간선이 아니다: 패키지 이름으로 가져온 것은 `packages`, 그 밖(소스가 아닌 파일 · 건너뛴 폴더 ·
+ *   프로젝트 밖)은 `unanalyzed`(데이터 형식만 뺀다). 조용히 버리지 않는다
  * - 소스 파일과 대소문자만 다른 경로로 풀린 import는 오류(대소문자를 가리지 않는 파일 시스템에서 간선을 잃지 않게)
  */
-export const graphFromCruise = (output: CruiseOutput, files: readonly string[]): ImportGraph => {
+export const collectGraph = (output: CruiseOutput, files: readonly string[]): FullGraph => {
   const fileSet = new Set(files);
   const lower = new Set(files.map((file) => file.toLowerCase()));
   const seen = new Set<string>();
   const edges = new Map<string, ImportEdge>();
   const unresolved: UnresolvedImport[] = [];
+  const unanalyzed = new Map<string, ImportEdge>();
+  const packages = new Map<string, PackageImport>();
   for (const module of output.modules) {
     if (!fileSet.has(module.source)) continue;
     seen.add(module.source);
@@ -55,6 +118,18 @@ export const graphFromCruise = (output: CruiseOutput, files: readonly string[]):
           'path_case_mismatch',
           `import가 소스 파일과 대소문자만 다른 경로로 풀렸습니다 (${String(dependency.resolved.length)}자 경로)`,
         );
+      } else if (isPackage(dependency.dependencyTypes)) {
+        const name = packageName(dependency.module);
+        const inManifest = !dependency.dependencyTypes.some(
+          (type) => type === 'npm-no-pkg' || type === 'npm-unknown',
+        );
+        const known = packages.get(name);
+        packages.set(name, { name, inManifest: (known?.inManifest ?? true) && inManifest });
+      } else if (!isData(dependency.resolved)) {
+        unanalyzed.set(`${module.source}\n${dependency.resolved}`, {
+          from: module.source,
+          to: dependency.resolved,
+        });
       }
     }
   }
@@ -65,13 +140,25 @@ export const graphFromCruise = (output: CruiseOutput, files: readonly string[]):
       `dependency-cruiser가 소스 파일 ${String(missing)}개를 분석하지 않았습니다`,
     );
   }
-  const sortedEdges = [...edges.values()].sort(
-    (a, b) => compare(a.from, b.from) || compare(a.to, b.to),
-  );
+  const byEnds = (a: ImportEdge, b: ImportEdge): number =>
+    compare(a.from, b.from) || compare(a.to, b.to);
   unresolved.sort((a, b) => compare(a.from, b.from) || compare(a.module, b.module));
   return {
-    modules: [...files],
-    edges: capped(sortedEdges, PARSER_LIMITS.edges),
-    unresolved: capped(unresolved, PARSER_LIMITS.unresolved),
+    edges: [...edges.values()].sort(byEnds),
+    unresolved,
+    unanalyzed: [...unanalyzed.values()].sort(byEnds),
+    packages: [...packages.values()].sort((a, b) => compare(a.name, b.name)),
   };
 };
+
+/** 전체 목록 → 상한으로 자른 그래프. */
+export const cappedGraph = (full: FullGraph, files: readonly string[]): ImportGraph => ({
+  modules: [...files],
+  edges: capped(full.edges, PARSER_LIMITS.edges),
+  unresolved: capped(full.unresolved, PARSER_LIMITS.unresolved),
+  unanalyzed: capped(full.unanalyzed, PARSER_LIMITS.unanalyzed),
+  packages: capped(full.packages, PARSER_LIMITS.packages),
+});
+
+export const graphFromCruise = (output: CruiseOutput, files: readonly string[]): ImportGraph =>
+  cappedGraph(collectGraph(output, files), files);

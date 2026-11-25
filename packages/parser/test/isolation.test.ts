@@ -206,7 +206,7 @@ describe('대상 프로젝트의 코드를 실행하지 않는다', () => {
   it('실행기는 허용 목록 밖의 cruise 옵션을 거부한다 (webpack · babel 설정 · 보고서 플러그인 · 캐시)', async () => {
     const { root, markers } = plantedProject();
     const plugin = path.join(root, 'node_modules/evil-ts-plugin/index.js');
-    const input = cruiseInput({ root, exclude: '(^|/)node_modules(/|$)', ruleSet: null });
+    const input = cruiseInput({ root, doNotFollow: '(^|/)node_modules(/|$)', ruleSet: null });
     for (const extra of [
       { webpackConfig: { fileName: path.join(root, 'webpack.config.js') } },
       { babelConfig: { fileName: path.join(root, 'babel.config.js') } },
@@ -225,14 +225,14 @@ describe('대상 프로젝트의 코드를 실행하지 않는다', () => {
   it('tsconfig 옵션은 프로젝트에 tsconfig.json이 있을 때만 넘기고, 데이터 경로 하나뿐이다', () => {
     const root = path.join(tempDir(), 'p');
     writeFiles(root, { 'src/a.ts': '' });
-    expect(cruiseInput({ root, exclude: 'x', ruleSet: null }).options).toEqual({
+    expect(cruiseInput({ root, doNotFollow: 'x', ruleSet: null }).options).toEqual({
       baseDir: root,
-      exclude: { path: 'x' },
+      doNotFollow: { path: 'x' },
       tsPreCompilationDeps: true,
       skipAnalysisNotInRules: true,
     });
     writeFiles(root, { 'tsconfig.json': '{}' });
-    expect(cruiseInput({ root, exclude: 'x', ruleSet: null }).options).toMatchObject({
+    expect(cruiseInput({ root, doNotFollow: 'x', ruleSet: null }).options).toMatchObject({
       tsConfig: { fileName: path.join(root, 'tsconfig.json') },
     });
   });
