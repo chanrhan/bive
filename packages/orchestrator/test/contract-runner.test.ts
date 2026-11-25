@@ -32,7 +32,6 @@ import { ExchangeRecorder, type RecordedExchange } from '../src/contract-check/r
 import { lintArgs, lintOpenApi, REDOCLY_CONFIG } from '../src/contract-check/redocly.js';
 import {
   ContractToolError,
-  createToolDir,
   PRISM_ENTRY,
   REDOCLY_ENTRY,
   toolEnv,
