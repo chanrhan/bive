@@ -1,5 +1,5 @@
 // 공통 목록 (screens.md 1.4 목록 · 카드, ADR-029 · ADR-034 · ADR-048).
-// 검색(`/` 키로 이동) · 기준별 필터 칩 · [문제만] 토글(기본 꺼짐) · 기본 숨김 항목 토글(화면이 줄 때만, 예: 규칙의 [폐기 포함],
+// 검색(`/` 키로 이동) · 기준별 필터 칩 · [문제만] 토글(기본 꺼짐, 화면이 `problemToggle={false}`를 주면 없음) · 기본 숨김 항목 토글(화면이 줄 때만, 예: 규칙의 [폐기 포함],
 // 기본 꺼짐, ADR-114) · 필터 사용 중 결과 줄("n개 중 m개 · 초기화") ·
 // 문제 항목 우선 정렬(화면이 `keepOrder`를 주면 받은 순서 그대로) · 2줄 카드 · 빈 상태("<대상> 없음"). 화면 동작(새 항목 버튼 · 입력 줄)은 actions · leading으로 넣는다.
 // 데이터와 필터 기준은 화면이 props로 넘긴다(파서 · 실행 결과만, NFR-03). 필터 상태는 목록 ID별로
@@ -64,6 +64,11 @@ export interface ListViewProps<T> {
    * 대체 맨 위, ADR-113 · ADR-119)
    */
   keepOrder?: boolean;
+  /**
+   * 거짓이면 [문제만] 토글을 그리지 않는다. 모든 항목이 예외를 갖는 목록(확인할 것)에서는 켜도 남는 항목이 같아 뜻이 없다
+   * (M3-35, ADR-123). 기본 참
+   */
+  problemToggle?: boolean;
 }
 
 const NO_CRITERIA: readonly never[] = [];
@@ -91,6 +96,7 @@ export const ListView = <T,>({
   leading,
   hidden,
   keepOrder = false,
+  problemToggle = true,
 }: ListViewProps<T>): React.JSX.Element => {
   const [stored, setFilter] = useListFilter(listId);
   // 지금 기준 · 값 목록에 없는 선택은 보이지 않으므로 쓰지 않고, 저장소에서도 지운다
@@ -180,15 +186,17 @@ export const ListView = <T,>({
             onToggle={(id, value) => setFilter((prev) => toggleValue(prev, id, value))}
             onClear={(id) => setFilter((prev) => clearCriterion(prev, id))}
           />
-          <button
-            type="button"
-            className="list-toggle"
-            data-testid="problem-toggle"
-            aria-pressed={filter.problemOnly}
-            onClick={() => setFilter((prev) => ({ ...prev, problemOnly: !prev.problemOnly }))}
-          >
-            문제만
-          </button>
+          {problemToggle && (
+            <button
+              type="button"
+              className="list-toggle"
+              data-testid="problem-toggle"
+              aria-pressed={filter.problemOnly}
+              onClick={() => setFilter((prev) => ({ ...prev, problemOnly: !prev.problemOnly }))}
+            >
+              문제만
+            </button>
+          )}
           {hidden !== undefined && (
             <button
               type="button"

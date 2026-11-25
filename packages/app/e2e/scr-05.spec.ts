@@ -530,6 +530,38 @@ test.describe('이동 · 재개 (수용 기준 4)', () => {
     );
   });
 
+  test('사람 확인 기준 "없음"(확인됨 규칙 없음)을 누르면 규칙 화면이 빈 목록이다 (M3-35 #263)', async ({
+    page,
+  }) => {
+    // 요약과 규칙 목록이 서로 맞는 가짜 데이터: 효력 있는 규칙이 모두 미확인이라 사람 확인 기준이 null이다
+    const unconfirmed = RULES.map((item) => ({
+      ...item,
+      rule: { ...item.rule, confirmation: { state: 'unconfirmed' as const } },
+    }));
+    await openScreen(page, {
+      'verification.summary': {
+        result: {
+          ...NO_CONFIRMED_SUMMARY,
+          rules: NO_CONFIRMED_SUMMARY.rules.map((row) => ({
+            ...row,
+            rule: { ...row.rule, confirmation: { state: 'unconfirmed' as const } },
+          })),
+        },
+      },
+      'rule.list': { result: { rules: unconfirmed } },
+    });
+    const confirmed = page.getByTestId('metric-compliance-confirmed');
+    await expect(confirmed.getByTestId('metric-value')).toHaveText('없음');
+    await confirmed.click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(
+      page.getByTestId('filter-chip-confirmation').getByTestId('filter-chip-button'),
+    ).toHaveText('확인: 확인됨');
+    await expect(page.getByTestId('card')).toHaveCount(0);
+    // 목록에 보이는 규칙(폐기 포함 꺼짐) 5개 가운데 0개 (위 "사람 확인 기준" 시험의 "5개 중 3개"와 같은 목록)
+    await expect(page.getByTestId('list-result-count')).toHaveText('5개 중 0개');
+  });
+
   test('확인됨 규칙은 있는데 판정 가능한 것이 없으면 사람 확인 기준 "없음"이고 상태로 구분된다', async ({
     page,
   }) => {

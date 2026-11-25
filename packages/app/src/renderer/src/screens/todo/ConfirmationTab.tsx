@@ -4,6 +4,8 @@
 // - [확인]: 사람 주체 `confirmation.set` 1회. 대상(규칙 · 요구사항)별로 요청 중을 기억해 같은 틱의 두 번째 요청도 보내지 않는다.
 //   성공하면 목록 · 배지를 다시 읽는다(그 대상에 쌓인 폐기 · 대체 · 테스트 변경 항목이 함께 내려간다, 서버 동작).
 //   이미 확인됨 · 삭제된 대상(-32009)이면 오류를 남기지 않고 다시 읽는다. 그 밖의 실패는 상세에 한 줄
+// - [문제만] 토글은 없다: 모든 항목이 예외(미확인 · 확인 풀림 · 테스트 변경)를 가져 켜도 남는 항목이 같다. 확인 풀림 · 테스트
+//   변경만 보려면 확인 상태 칩을 쓴다(M3-35, ADR-123)
 // - 확인 상태는 아무것도 막지 않는다(ADR-100 D2 · D8): 이 화면에 [승인] · [수정] · [거절] · 상한 머리줄이 없다
 import type { ConfirmationItem } from '@bive/shared';
 import { useCallback, useMemo, useRef, useState } from 'react';
@@ -108,6 +110,7 @@ export const ConfirmationTab = ({ projectId }: { projectId: string }): React.JSX
             selectedKey={selected === null ? null : confirmationKey(selected)}
             onSelect={onSelect}
             keepOrder
+            problemToggle={false}
             {...(result.truncated && {
               leading: (
                 <p className="confirmation-truncated" data-testid="confirmation-truncated">

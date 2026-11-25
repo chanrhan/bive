@@ -3,8 +3,8 @@
 // (테스트 변경) → 판단(규범 담당 역할의 판단 기록 카드) → 대상 링크.
 // - 판단 카드 · 미확인 규칙의 사유와 진술은 그 대상의 `normChange.list {targetRef}`에서 읽는다(대체 항목은 새 규칙도)
 // - 글은 모두 응답의 표시 값을 `visibleDisplayText`로 한 번 더 거친 것이다(confirmationView.ts)
-// - 대상 링크: 규칙 · 요구사항 화면으로 가서 그 표시 ID로 검색한 목록을 연다. 폐기된 규칙은 [폐기 포함]을 켠다(ADR-114의
-//   이동 방식: 목록 필터를 정하고 화면을 옮긴다)
+// - 대상 링크: 규칙 · 요구사항 화면으로 가서 그 표시 ID로 검색한 목록을 열고 그 카드를 고른다. 폐기된 규칙은 [폐기 포함]을
+//   켠다(ADR-114의 이동 방식에 고를 항목 넘기기를 더함, ADR-123)
 import type { ConfirmationItem, ConfirmationTarget, NormChangeView } from '@bive/shared';
 import { useCallback, useEffect, useState } from 'react';
 
@@ -13,6 +13,7 @@ import { EMPTY_FILTER, setListFilter } from '../../components/ListView/index.js'
 import { ExceptionLabel } from '../../components/StatusBadge/StatusBadge.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { useNavigation } from '../../navigation/NavigationContext.js';
+import { requestSelection } from '../../navigation/pendingSelection.js';
 import { NORM_CHANGE_EVENT_NAMES } from '../../runs/refreshCoalescer.js';
 import { useEventRefresh } from '../../runs/useEventRefresh.js';
 import { REQUIREMENTS_LIST_ID } from '../requirements/requirementsView.js';
@@ -319,12 +320,16 @@ const Detail = ({
   );
 };
 
-/** 대상 링크: 그 화면의 목록을 표시 ID로 검색한 상태로 연다. 폐기된 규칙은 [폐기 포함]을 켠다. */
+/**
+ * 대상 링크: 그 화면의 목록을 표시 ID로 검색한 상태로 열고 그 카드를 고른다(상세가 열린다). 폐기된 규칙은 [폐기 포함]을 켠다.
+ * 목록에 없는 대상(지워진 요구사항 · 규칙)이면 검색 결과가 0개이고 아무것도 고르지 않는다(ADR-123).
+ */
 const useOpenLink = (): ((link: TargetLink) => void) => {
   const { navigate } = useNavigation();
   return useCallback(
     (link: TargetLink) => {
       if (link.entity === 'Rule') {
+        requestSelection(RULES_LIST_ID, link.displayId);
         setListFilter(RULES_LIST_ID, {
           ...EMPTY_FILTER,
           query: link.displayId,
@@ -332,6 +337,7 @@ const useOpenLink = (): ((link: TargetLink) => void) => {
         });
         navigate('rules');
       } else {
+        requestSelection(REQUIREMENTS_LIST_ID, link.displayId);
         setListFilter(REQUIREMENTS_LIST_ID, { ...EMPTY_FILTER, query: link.displayId });
         navigate('requirements');
       }

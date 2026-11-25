@@ -4,16 +4,18 @@
 //   (저장 뒤 규칙 제안은 오케스트레이터 쪽 이슈 #21이 붙인다. 화면은 호출만 한다)
 // - 상세(SCR-06 규범 상세, norm-detail/RequirementDetail): 본문 · 생성 주체 · 자식 규칙(그 자리에서 펼침) · 직접 편집 ·
 //   삭제(두 번 눌러 확인). 편집 · 삭제 뒤 목록을 다시 불러온다. 고른 항목이 없거나 삭제되면 "선택 항목 없음" (ADR-078)
+// - 확인할 것 상세의 대상 링크로 열리면 그 요구사항의 카드를 고른 상태다(navigation/pendingSelection.ts, ADR-123)
 // - 상태(ADR-053): 프로젝트 조회 중 = 비움 · 프로젝트 없음 = "프로젝트 없음" · 로딩 = 목록 자리 비움(문구 · 스켈레톤 없음) ·
 //   불러오기 실패 = 목록 자리에 "요구사항 불러오기 실패" · 0건 = "요구사항 없음"(ADR-029)
 import './RequirementsScreen.css';
 
 import type { Requirement } from '@bive/shared';
 import { Plus } from 'lucide-react';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { ListView } from '../../components/ListView/ListView.js';
 import { EmptyState } from '../../layout/EmptyState.js';
+import { clearPendingSelection, peekPendingSelection } from '../../navigation/pendingSelection.js';
 import { useProject } from '../../project/ProjectContext.js';
 import { RequirementDetail } from '../norm-detail/RequirementDetail.js';
 import { NewRequirementInput } from './NewRequirementInput.js';
@@ -62,6 +64,19 @@ const RequirementsPanes = ({ projectId }: { projectId: string }): React.JSX.Elem
     [create],
   );
   const select = useCallback((item: Requirement) => setSelectedId(item.id), []);
+  // 다른 화면의 대상 링크로 열렸으면(이 이동 한 번만) 목록을 다 읽은 뒤 그 표시 ID의 카드를 고른다. 목록에 없으면(지워진
+  // 요구사항) 고르지 않고, 읽기가 실패하거나 화면을 떠나면 버린다(ADR-123)
+  const [wanted, setWanted] = useState(() => peekPendingSelection(REQUIREMENTS_LIST_ID));
+  useEffect(() => {
+    clearPendingSelection(REQUIREMENTS_LIST_ID);
+  }, []);
+  useEffect(() => {
+    if (wanted === null || load.state === 'loading') return;
+    if (load.state === 'ready') {
+      setSelectedId(load.items.find((item) => item.displayId === wanted)?.id ?? null);
+    }
+    setWanted(null);
+  }, [load, wanted]);
 
   return (
     <div className="requirements-screen" data-testid="requirements-screen" data-state={load.state}>

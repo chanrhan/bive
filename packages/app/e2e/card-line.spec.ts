@@ -4,10 +4,9 @@
 // - 400px 목록(1280 · 1440px 창)의 카드는 이전 배치 그대로: 2줄째가 한 줄, ID 온전, ID · 보조 문구 · 예외가 간격 8px로
 //   이어지고, 카드 높이가 이전과 같다
 // - 좁은 목록(1024 ~ 1280px 창)에서도 ID는 말줄임되지 않고 예외 배지는 통째로 보인다(`listPaneOverflow`)
-// - 시각이 있는 카드(요구사항 SCR-02 · 확인할 것 SCR-17 자리, #191 · M7-14): 400px 목록에서 시각은 줄 오른쪽 끝(안 읽음 점이
-//   있으면 점 앞 8px)이고 2줄째가 한 줄 · 카드 높이가 이전과 같다. 좁은 목록에서 보조 문구 · 시각은 최소 3em(모자라면 다음 줄로),
-//   안 읽음 점은 혼자 다음 줄 왼쪽에 남지 않고 시각과 같은 줄 오른쪽 끝에 붙는다(지금 안 읽음 점을 쓰는 화면은 없다: 옛 승인 대기의
-//   점은 확인할 것으로 바뀌며 없어졌다, ADR-119)
+// - 시각이 있는 카드(요구사항 SCR-02 · 확인할 것 SCR-17 자리, #191 · M7-14): 400px 목록에서 시각은 줄 오른쪽 끝이고 2줄째가
+//   한 줄 · 카드 높이가 이전과 같다. 좁은 목록에서 보조 문구 · 시각은 최소 3em(모자라면 다음 줄로). 공용 카드의 안 읽음 점은
+//   쓰는 화면이 없어져 지웠다(ADR-119 · ADR-123)
 // 데이터는 규칙 · 요구사항 · 확인할 것 화면의 가짜 브리지 응답뿐이다 (테스트 전용 데이터, NFR-03).
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -210,8 +209,7 @@ const expectScrollbar = async (page: Page): Promise<void> => {
 /**
  * 400px 목록의 이전 배치: 카드마다 2줄째가 한 줄이고 카드 높이가 이전과 같으며, ID가 온전하고,
  * ID → 보조 문구 → 예외가 간격 8px로 바로 이어진다(보조 문구가 남는 폭을 다 차지해 예외를 오른쪽으로 밀지 않음).
- * 시각 · 안 읽음 점은 줄 오른쪽 끝에 붙는다: 마지막 칸의 오른쪽 끝 = 줄 오른쪽 끝, 시각 → 점은 간격 8px,
- * 시각은 앞 칸과 8px 이상 떨어지고 말줄임되지 않는다 (#191).
+ * 시각은 줄 오른쪽 끝에 붙는다: 시각의 오른쪽 끝 = 줄 오른쪽 끝, 시각은 앞 칸과 8px 이상 떨어지고 말줄임되지 않는다 (#191).
  */
 const wideLayoutProblems = (pane: Locator): Promise<string[]> =>
   pane.evaluate(
@@ -225,10 +223,10 @@ const wideLayoutProblems = (pane: Locator): Promise<string[]> =>
         }
         const line = card.querySelector<HTMLElement>('[data-testid="card-line-2"]');
         if (line === null) return;
-        // 칸: 감싸는 요소가 있어도 보이는 칸(ID · 보조 문구 · 예외 · 시각 · 안 읽음 점)만 DOM 순서로
+        // 칸: 감싸는 요소가 있어도 보이는 칸(ID · 보조 문구 · 예외 · 시각)만 DOM 순서로
         const cells = [
           ...line.querySelectorAll<HTMLElement>(
-            '.card-id, .card-note, [data-testid="card-exception"], .card-time, [data-testid="card-unread"]',
+            '.card-id, .card-note, [data-testid="card-exception"], .card-time',
           ),
         ];
         // 한 줄: 칸들의 세로 가운데가 한 줄 높이(18px) 안에서 맞는다
@@ -251,10 +249,8 @@ const wideLayoutProblems = (pane: Locator): Promise<string[]> =>
         if (id !== null) fullText(id, 'ID');
         const lineBox = line.getBoundingClientRect();
         const lineRight = lineBox.left + line.clientLeft + line.clientWidth;
-        // 앞쪽 칸(ID · 보조 문구 · 예외)은 8px 간격으로 잇고, 시각 · 안 읽음 점은 끝에 붙인다
-        const tailStart = cells.findIndex((c) =>
-          c.matches('.card-time, [data-testid="card-unread"]'),
-        );
+        // 앞쪽 칸(ID · 보조 문구 · 예외)은 8px 간격으로 잇고, 시각은 끝에 붙인다
+        const tailStart = cells.findIndex((c) => c.matches('.card-time'));
         const headEnd = tailStart === -1 ? cells.length : tailStart;
         for (let i = 1; i < headEnd; i += 1) {
           const prev = cells[i - 1]?.getBoundingClientRect();
@@ -299,50 +295,23 @@ const wideLayoutProblems = (pane: Locator): Promise<string[]> =>
 
 /**
  * 좁은 목록의 2줄째 (#191, ADR-090): 보조 문구 · 시각은 보이면 폭이 최소 3em 이상이다(남는 폭이 모자라면 줄지 않고
- * 다음 줄로 넘어간다). 안 읽음 점은 줄 오른쪽 끝에 붙고, 시각이 있는 카드면 시각과 같은 줄에서 시각 뒤 8px이다
- * (점만 다음 줄 왼쪽에 혼자 남지 않음).
+ * 다음 줄로 넘어간다).
  */
 const narrowLineProblems = (pane: Locator): Promise<string[]> =>
-  pane.evaluate(
-    (el, { gap }) => {
-      const problems: string[] = [];
-      el.querySelectorAll<HTMLElement>('[data-testid="card-line-2"]').forEach((line) => {
-        const name = line.closest('[data-testid="card"]')?.getAttribute('data-id') ?? '';
-        line.querySelectorAll<HTMLElement>('.card-note, .card-time').forEach((cell) => {
-          const width = cell.getBoundingClientRect().width;
-          const min = 3 * Number.parseFloat(getComputedStyle(cell).fontSize);
-          if (width > 0 && width < min - 0.01) {
-            problems.push(`${name}: ${cell.className} 폭 ${width.toFixed(2)}px < 최소 ${min}px`);
-          }
-        });
-        const dot = line.querySelector<HTMLElement>('[data-testid="card-unread"]');
-        if (dot === null) return;
-        const dotBox = dot.getBoundingClientRect();
-        const lineRight = line.getBoundingClientRect().left + line.clientLeft + line.clientWidth;
-        if (Math.abs(dotBox.right - lineRight) > 0.5) {
-          problems.push(
-            `${name}: 안 읽음 점 오른쪽 끝 ${dotBox.right} (줄 오른쪽 끝 ${lineRight})`,
-          );
-        }
-        const time = line.querySelector<HTMLElement>('.card-time');
-        if (time === null) return;
-        const timeBox = time.getBoundingClientRect();
-        const middle = (box: DOMRect): number => box.top + box.height / 2;
-        if (Math.abs(middle(dotBox) - middle(timeBox)) > 1) {
-          problems.push(
-            `${name}: 안 읽음 점이 시각과 다른 줄 (가운데 ${Math.round(middle(dotBox))} · ${Math.round(middle(timeBox))})`,
-          );
-        }
-        if (Math.abs(dotBox.left - (timeBox.right + gap)) > 0.5) {
-          problems.push(
-            `${name}: 안 읽음 점 위치 ${dotBox.left} (시각 끝 ${timeBox.right} + ${gap})`,
-          );
+  pane.evaluate((el) => {
+    const problems: string[] = [];
+    el.querySelectorAll<HTMLElement>('[data-testid="card-line-2"]').forEach((line) => {
+      const name = line.closest('[data-testid="card"]')?.getAttribute('data-id') ?? '';
+      line.querySelectorAll<HTMLElement>('.card-note, .card-time').forEach((cell) => {
+        const width = cell.getBoundingClientRect().width;
+        const min = 3 * Number.parseFloat(getComputedStyle(cell).fontSize);
+        if (width > 0 && width < min - 0.01) {
+          problems.push(`${name}: ${cell.className} 폭 ${width.toFixed(2)}px < 최소 ${min}px`);
         }
       });
-      return problems;
-    },
-    { gap: GAP },
-  );
+    });
+    return problems;
+  });
 
 test.describe('스크롤바가 있는 400px 목록: 카드는 이전 배치 그대로 (#179, ADR-090)', () => {
   for (const width of [1280, WIDE_WIDTH]) {
@@ -362,7 +331,7 @@ test.describe('스크롤바가 있는 400px 목록: 카드는 이전 배치 그�
 
   for (const [screen, open] of TIMED_SCREENS) {
     for (const width of [1280, WIDE_WIDTH]) {
-      test(`${screen} ${width}px 창: 시각은 줄 오른쪽 끝(안 읽음 점이 있으면 점 앞), 2줄째가 한 줄, 카드 높이가 같다 (#191)`, async ({
+      test(`${screen} ${width}px 창: 시각은 줄 오른쪽 끝, 2줄째가 한 줄, 카드 높이가 같다 (#191)`, async ({
         page,
       }) => {
         await page.setViewportSize({ width, height: 800 });
@@ -395,9 +364,7 @@ test.describe('스크롤바가 있는 좁은 목록: ID는 말줄임되지 않�
     });
 
     for (const [screen, open] of TIMED_SCREENS) {
-      test(`${width}px 창 ${screen}: 보조 문구 · 시각은 최소 3em, 안 읽음 점은 시각과 같은 줄 오른쪽 끝 (#191)`, async ({
-        page,
-      }) => {
+      test(`${width}px 창 ${screen}: 보조 문구 · 시각은 최소 3em (#191)`, async ({ page }) => {
         await page.setViewportSize({ width, height: 800 });
         const pane = await open(page);
         await expectScrollbar(page);
@@ -436,8 +403,7 @@ test.describe('스크롤바가 있는 좁은 목록: ID는 말줄임되지 않�
 const TRAILING_WIDTHS = [820, 830, ...NARROW_WIDTHS] as const;
 
 /**
- * 2줄째 끝 칸(시각, 안 읽음 점이 있으면 시각 + 점)이 다음 줄로 넘어가는 때 (#173, ADR-090): 앞 칸들 뒤에 남는 폭이 그 칸의
- * 최소 폭보다 작을 때만이다. 최소 폭은 시각만 있으면 시각 최소 3em, 점이 있으면 3em + 간격 8px + 점 폭이다.
+ * 2줄째 끝 칸(시각)이 다음 줄로 넘어가는 때 (#173, ADR-090): 앞 칸들 뒤에 남는 폭이 시각의 최소 폭(3em)보다 작을 때만이다.
  * 남는 폭 = 줄 폭 - 마지막 앞 칸이 있는 줄의 앞 칸들 폭(보조 문구는 줄바꿈 판단 때의 최소 폭 3em) - 칸 사이 간격.
  * 남는 폭이 최소 폭에 0.5px 안으로 붙은 경우는 판단하지 않는다(소수 폭 반올림).
  */
@@ -453,7 +419,6 @@ const trailingWrapProblems = (pane: Locator): Promise<string[]> =>
         const name = line.closest('[data-testid="card"]')?.getAttribute('data-id') ?? '';
         const time = line.querySelector<HTMLElement>('.card-time');
         if (time === null) return;
-        const dot = line.querySelector<HTMLElement>('[data-testid="card-unread"]');
         const head = [
           ...line.querySelectorAll<HTMLElement>(
             '.card-id, .card-note, [data-testid="card-exception"]',
@@ -472,9 +437,9 @@ const trailingWrapProblems = (pane: Locator): Promise<string[]> =>
           gap * (row.length - 1);
         const lineWidth = line.getBoundingClientRect().width;
         const available = lineWidth - used - gap;
-        const need = 3 * em + (dot === null ? 0 : gap + dot.getBoundingClientRect().width);
+        const need = 3 * em;
         const sameRow = Math.abs(middle(time) - middle(last)) <= 1;
-        const label = dot === null ? '시각' : '시각 + 안 읽음 점';
+        const label = '시각';
         if (!sameRow && available >= need + 0.5) {
           problems.push(
             `${name}: ${label}이 남는 폭 ${available.toFixed(2)}px ≥ 최소 ${need}px인데 다음 줄`,
@@ -491,14 +456,12 @@ const trailingWrapProblems = (pane: Locator): Promise<string[]> =>
     { gap: GAP },
   );
 
-/** 시각은 있고 안 읽음 점은 없는 카드 수 */
-const timeOnlyCards = (pane: Locator): Promise<number> =>
+/** 시각이 있는 카드 수 */
+const timedCards = (pane: Locator): Promise<number> =>
   pane.evaluate(
     (el) =>
       [...el.querySelectorAll('[data-testid="card-line-2"]')].filter(
-        (line) =>
-          line.querySelector('.card-time') !== null &&
-          line.querySelector('[data-testid="card-unread"]') === null,
+        (line) => line.querySelector('.card-time') !== null,
       ).length,
   );
 
@@ -511,7 +474,7 @@ test.describe('2줄째 끝 칸은 남는 폭이 최소 폭보다 작을 때만 �
   for (const scrollbar of ['보임', '숨김'] as const) {
     for (const width of TRAILING_WIDTHS) {
       for (const [screen, open] of TIMED_SCREENS) {
-        test(`스크롤바 ${scrollbar} · ${width}px 창 ${screen}: 시각만 있는 카드 · 시각과 안 읽음 점이 있는 카드`, async ({
+        test(`스크롤바 ${scrollbar} · ${width}px 창 ${screen}: 시각이 있는 카드`, async ({
           page,
         }) => {
           await page.setViewportSize({ width, height: 800 });
@@ -522,8 +485,8 @@ test.describe('2줄째 끝 칸은 남는 폭이 최소 폭보다 작을 때만 �
             .evaluate((items: HTMLElement) => items.offsetWidth - items.clientWidth);
           if (scrollbar === '보임') await expectScrollbar(page);
           else expect(bar, '스크롤바 폭').toBe(0);
-          // 시각만 있는 카드를 실제로 본다 (요구사항 카드 전부, 확인할 것은 안 읽음 점 없는 카드 전부)
-          expect(await timeOnlyCards(pane)).toBeGreaterThan(0);
+          // 시각이 있는 카드를 실제로 본다 (요구사항 · 확인할 것 카드 전부)
+          expect(await timedCards(pane)).toBeGreaterThan(0);
           expect(await trailingWrapProblems(pane)).toEqual([]);
           expect(await narrowLineProblems(pane)).toEqual([]);
           expect(await listPaneOverflow(pane)).toEqual([]);

@@ -20,7 +20,7 @@
 // `{ code, message, data? }`로 거부, on은 해제 함수를 돌려준다(구독마다 독립). 응답 표에 없는 메서드는 -32601,
 // main 전용 메서드(MAIN_ONLY_METHODS: system.hello · codeOpen.record)는 -32020으로 거부한다. 한 페이지에 한 번만 부른다.
 import type { JsonRpcErrorObject } from '@bive/shared';
-import type { Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 
 import {
   MAIN_ONLY_METHODS,
@@ -58,6 +58,8 @@ export interface MockCall {
 export interface BiveMock {
   /** 지금까지의 `invoke` 호출 기록 (순서대로). */
   calls(): Promise<MockCall[]>;
+  /** 응답(결과 · 오류)이 호출자에게 건네진 호출의 메서드 이름 (건넨 순서). 지연 응답이 도착했는지 기다릴 때 쓴다. */
+  settled(): Promise<string[]>;
   /** 구독자에게 알림을 발행한다. 구독자가 없으면 아무 일도 없다. */
   emit(event: string, params?: unknown): Promise<void>;
   /** 메서드 응답을 바꾼다. 이미 대기 중인 호출에는 영향이 없다. */
@@ -82,6 +84,7 @@ interface MockState {
 /** 페이지 안 조작 객체의 형태 (page.evaluate에서 쓴다). */
 interface MockControl {
   calls: MockCall[];
+  settled: string[];
   emit(event: string, params: unknown): void;
   setResponse(method: string, response: MockResponse): void;
   listenerCounts(): Record<string, number>;
@@ -97,6 +100,7 @@ const installMock = (state: MockState): void => {
   const listeners = new Map<string, Set<{ listener: (params: unknown) => void }>>();
   const pendingEvents = [...state.events];
   const calls: MockCall[] = [];
+  const settled: string[] = [];
 
   // IPC를 지난 값처럼 호출자와 객체를 공유하지 않게 복제한다
   const clone = <T>(value: T): T => (value === undefined ? value : structuredClone(value));
@@ -120,6 +124,7 @@ const installMock = (state: MockState): void => {
     if ('pending' in response) return new Promise<never>(() => {});
     return new Promise((resolve, reject) => {
       setTimeout(() => {
+        settled.push(method);
         if ('error' in response) reject(clone(response.error));
         else resolve(clone(response.result));
       }, response.delayMs ?? 0);
@@ -148,6 +153,7 @@ const installMock = (state: MockState): void => {
 
   const control: MockControl = {
     calls,
+    settled,
     emit: deliver,
     setResponse: (method, response) => {
       responses.set(method, response);
@@ -199,6 +205,15 @@ export const mockBive = async (page: Page, options: MockBiveOptions = {}): Promi
         },
         [MOCK_GLOBAL, missing] as const,
       ),
+    settled: () =>
+      page.evaluate(
+        ([name, err]) => {
+          const control = (window as unknown as Globals)[name];
+          if (control === undefined) throw new Error(err);
+          return control.settled.slice();
+        },
+        [MOCK_GLOBAL, missing] as const,
+      ),
     emit: (event, params) =>
       page.evaluate(
         ([name, err, e, p]) => {
@@ -228,3 +243,26 @@ export const mockBive = async (page: Page, options: MockBiveOptions = {}): Promi
       ),
   };
 };
+
+/**
+ * 그 메서드의 지금까지 호출이 모두 응답을 받을 때까지 기다린다 (지연 응답의 도착을 시간이 아니라 기록으로 본다).
+ * '부른 수 = 응답한 수'만 보므로 아직 나가지 않은 호출은 잡지 못한다: 그려진 것을 먼저 확인하고 `nextFrame` 뒤에 쓴다.
+ * 응답을 주지 않는 메서드(`pending`)에는 쓰지 않는다(끝나지 않는다).
+ */
+export const allSettled = async (bive: BiveMock, method: string): Promise<void> => {
+  await expect
+    .poll(async () => {
+      const called = (await bive.calls()).filter((c) => c.method === method).length;
+      const done = (await bive.settled()).filter((m) => m === method).length;
+      return called === done;
+    })
+    .toBe(true);
+};
+/** 다음 프레임까지 (그린 뒤의 효과가 돈다). */
+export const nextFrame = (page: Page): Promise<void> =>
+  page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => setTimeout(resolve, 0));
+      }),
+  );
