@@ -15,8 +15,13 @@ import {
   createUlidGenerator,
   type Rule,
 } from '@bive/shared';
-import { ConflictError, type ProjectStore } from '@bive/store';
-import { afterEach, describe, expect, it } from 'vitest';
+import {
+  ApprovalLogRepository,
+  ConfirmationRepository,
+  ConflictError,
+  type ProjectStore,
+} from '@bive/store';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { confirmHumanContractRegistration } from '../src/confirmations/confirmation-service.js';
 import type { PipeServer } from '../src/ipc/server.js';
@@ -29,7 +34,9 @@ import {
   reflectAgentContract,
   registerHumanContract,
 } from '../src/norms/contract.js';
+import { collectNormInput } from '../src/norms/norm-input.js';
 import { createRun } from '../src/runs/run-service.js';
+import { commitAcceptanceFiles } from './helpers/acceptance-commit.js';
 import { RpcCallError, type TestClient } from './helpers/client.js';
 import { cleanup } from './helpers/process.js';
 import { iso, startProjectHarness, T0, type ProjectHarness } from './helpers/project-harness.js';
@@ -821,5 +828,176 @@ describe('contract.list: 표시 ID · 종류 · 원본 파일 · 해시 · 확�
         (entry) => entry.source,
       ),
     ).toEqual([{ status: 'unreadable' }]);
+  });
+});
+
+describe('기준 커밋 읽기의 git 호출: 대체 객체 무시 · 경로 인자 구분 (PR #289 검토 1회차 B1 · B2)', () => {
+  /** 저장소에 blob 하나를 쓰고 그 ID를 돌려준다 (브랜치 · 작업 트리 · 색인은 그대로). */
+  const writeBlob = (repo: string, text: string): string =>
+    execFileSync('git', ['hash-object', '-w', '--stdin'], {
+      cwd: repo,
+      encoding: 'utf8',
+      input: text,
+    }).trim();
+  const blobOf = (repo: string, rev: string, file: string): string =>
+    git(repo, 'rev-parse', `${rev}:${file}`);
+  const FAKE = 'openapi: 3.1.0\ninfo:\n  title: 바꿔 친 내용\n  version: 9.9.9\npaths: {}\n';
+
+  it('blob 대체: 등록 해시는 원래 내용 기준이고, 목록도 원래 내용과 비교한다 (cat-file 자리)', async () => {
+    const repo = makeRepo();
+    const original = blobOf(repo, 'main', 'openapi.yaml');
+    git(repo, 'replace', original, writeBlob(repo, FAKE));
+    // 대조군: 대체 객체가 실제로 걸렸다 (사용자 git은 가짜 내용을 본다)
+    expect(git(repo, 'cat-file', 'blob', original)).toBe(FAKE.trim());
+    const h = await harness(repo);
+    const { contract } = await register(h, 'openapi.yaml');
+    expect(contract.contentHash).toBe(sha256(OPENAPI));
+    expect(
+      (await h.client.call('contract.list', { projectId: h.project.id })).contracts.map(
+        (entry) => entry.source,
+      ),
+    ).toEqual([{ status: 'same' }]);
+    // 기준 브랜치가 실제로 바뀌고 그 새 blob을 원래 내용으로 대체해도 changed로 보인다
+    const changed = `${OPENAPI}# 응답 필드 더함\n`;
+    fs.writeFileSync(path.join(repo, 'openapi.yaml'), changed);
+    git(repo, 'commit', '-q', '-am', '계약 파일 수정');
+    git(repo, 'replace', blobOf(repo, 'main', 'openapi.yaml'), original);
+    expect(
+      (await h.client.call('contract.list', { projectId: h.project.id })).contracts.map(
+        (entry) => entry.source,
+      ),
+    ).toEqual([{ status: 'changed', contentHash: sha256(changed) }]);
+  });
+
+  it('커밋 대체: 기준 커밋을 가짜 내용의 커밋으로 대체해도 원래 커밋의 트리를 읽는다 (ls-tree 자리)', async () => {
+    const repo = makeRepo();
+    const tip = mainTip(repo);
+    const fake = commitAcceptanceFiles(repo, { 'openapi.yaml': FAKE });
+    git(repo, 'replace', tip, fake);
+    expect(git(repo, 'show', 'main:openapi.yaml')).toBe(FAKE.trim());
+    const h = await harness(repo);
+    const { contract } = await register(h, 'openapi.yaml');
+    expect(contract).toMatchObject({ contentHash: sha256(OPENAPI), sourceCommit: tip });
+    expect(
+      (await h.client.call('contract.list', { projectId: h.project.id })).contracts[0]?.source,
+    ).toEqual({ status: 'same' });
+  });
+
+  it('태그 대체: 기준 브랜치가 태그 객체를 가리키고 그 태그를 다른 커밋의 태그로 대체해도 원래 커밋으로 풀린다 (rev-parse 자리)', async () => {
+    const repo = makeRepo();
+    const tip = mainTip(repo);
+    const fake = commitAcceptanceFiles(repo, { 'openapi.yaml': FAKE });
+    git(repo, 'tag', '-a', '-m', '원래', 'real', tip);
+    git(repo, 'tag', '-a', '-m', '가짜', 'fake', fake);
+    const realTag = git(repo, 'rev-parse', 'refs/tags/real');
+    // git은 브랜치가 커밋 아닌 객체를 가리키는 갱신을 거부하므로 참조 파일을 직접 쓴다 (저장소를 고칠 수 있는 쪽의 꼴)
+    fs.writeFileSync(path.join(repo, '.git', 'refs', 'heads', 'main'), `${realTag}\n`);
+    git(repo, 'replace', realTag, git(repo, 'rev-parse', 'refs/tags/fake'));
+    // 대조군: 대체 객체를 따르면 기준 브랜치가 가짜 커밋으로 풀린다
+    expect(git(repo, 'rev-parse', 'refs/heads/main^{commit}')).toBe(fake);
+    const h = await harness(repo);
+    const { contract } = await register(h, 'openapi.yaml');
+    expect(contract).toMatchObject({ contentHash: sha256(OPENAPI), sourceCommit: tip });
+  });
+
+  it('`-`로 시작하는 파일 이름도 경로로 읽는다: git 옵션으로 해석되지 않고 해시가 맞다', async () => {
+    const files = {
+      '-r.yaml': OPENAPI,
+      '--help.yaml': ASYNCAPI,
+      'docs/--stdin.json': '{"openapi":"3.1.0"}',
+    };
+    const repo = makeRepo(files);
+    const h = await harness(repo);
+    for (const [file, content] of Object.entries(files)) {
+      expect(contractFileProblem(file, 'openapi'), file).toBeNull();
+      const { contract } = await register(h, file);
+      expect({ file, hash: contract.contentHash }).toEqual({ file, hash: sha256(content) });
+    }
+    expect(
+      (await h.client.call('contract.list', { projectId: h.project.id })).contracts.map(
+        (entry) => entry.source.status,
+      ),
+    ).toEqual(['same', 'same', 'same']);
+  });
+});
+
+describe('처리기 수준의 트랜잭션 하나: 어느 쓰기가 실패해도 아무것도 남지 않음 (PR #289 검토 1회차 B3)', () => {
+  const nothingLeft = (h: ProjectHarness) =>
+    h.read((store) => {
+      expect(footprint(store)).toEqual(EMPTY);
+      expect(store.db.prepare('SELECT count(*) AS n FROM confirmations').get()).toEqual({ n: 0 });
+      expect(store.sequences.last('CON')).toBe(0);
+      expect(store.sequences.last('RULE')).toBe(0);
+    });
+
+  it('승인 기록 쓰기 · 확인 기록 쓰기가 실패하면 RPC는 실패하고 계약 · 검사 규칙 · 승인 기록 · 규범 변경 기록 · 확인 기록이 하나도 남지 않는다', async () => {
+    const h = await harness(makeRepo());
+    for (const [label, spy] of [
+      ['승인 기록', () => vi.spyOn(ApprovalLogRepository.prototype, 'append')],
+      ['확인 기록', () => vi.spyOn(ConfirmationRepository.prototype, 'confirm')],
+    ] as const) {
+      const mocked = spy().mockImplementation(() => {
+        throw new Error(`${label} 쓰기 실패`);
+      });
+      try {
+        const error = await rpcError(register(h, 'openapi.yaml'));
+        expect(error.code, label).toBe(-32603);
+      } finally {
+        mocked.mockRestore();
+      }
+      nothingLeft(h);
+    }
+    // 대조군: 실패를 넣지 않으면 등록된다
+    await register(h, 'openapi.yaml');
+    expect(h.read(footprint)).toMatchObject({ contracts: 1, approvals: 1 });
+  });
+
+  it('등록 모듈만 불러도 승인 기록 쓰기 실패에 계약 · 검사 규칙 · 규범 변경 기록이 남지 않는다 (모듈 트랜잭션 하나)', async () => {
+    const repo = makeRepo();
+    const h = await harness(repo);
+    const source = await readContractSource(repo, 'main', 'openapi.yaml');
+    if (!source.ok) throw new Error(source.code);
+    h.read((store) => {
+      store.approvalLog.append = () => {
+        throw new Error('승인 기록 쓰기 실패');
+      };
+      expect(() =>
+        registerHumanContract(store, {
+          file: 'openapi.yaml',
+          kind: 'openapi',
+          source,
+          requirementId: null,
+          at: iso(T0),
+          newId,
+          by: human,
+          clientId: null,
+        }),
+      ).toThrow('승인 기록 쓰기 실패');
+    });
+    nothingLeft(h);
+  });
+});
+
+describe('깨진 계약 행: 조용히 건너뛰지 않고 닫힌 쪽 (PR #289 검토 1회차 B4, ADR-120)', () => {
+  it('저장소 밖에서 계약 행을 형식 위반으로 고치면 계약 get · list · contract.list RPC · 규범 입력 수집이 모두 실패한다', async () => {
+    const h = await harness(makeRepo());
+    const { contract } = await register(h, 'openapi.yaml');
+    await register(h, 'prisma/schema.prisma', 'db-schema');
+    h.read((store) => {
+      // 트리거를 지우고 고친다 (저장소 밖 변조): 해시 칸을 64자이지만 16진이 아닌 값으로
+      store.db.exec('DROP TRIGGER contracts_no_update');
+      store.db
+        .prepare('UPDATE contracts SET content_hash = ? WHERE id = ?')
+        .run('z'.repeat(64), contract.id);
+    });
+    h.read((store) => {
+      expect(() => store.contracts.get(contract.id)).toThrow();
+      expect(() => store.contracts.list()).toThrow();
+      expect(() =>
+        collectNormInput(store, { requirementIds: [], ruleIds: [] }, { isKnownCase: () => false }),
+      ).toThrow();
+    });
+    const error = await rpcError(h.client.call('contract.list', { projectId: h.project.id }));
+    expect(error.code).toBe(-32001);
   });
 });
