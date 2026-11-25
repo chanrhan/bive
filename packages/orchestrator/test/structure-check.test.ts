@@ -692,11 +692,28 @@ describe('검사 단계의 구조 검사: undeclared-import 변형에서 방향 
     expect(h.sessions.some((spec) => spec.role === 'rule-writer')).toBe(false);
   }, 120_000);
 
-  it('대조군: 변형이 없으면 두 내장 규칙이 통과하고 병합된다. 선언이 없으면 구조 검사를 하지 않는다 (지금과 같다)', async () => {
-    const h = setup();
+  it('대조군: 변형이 없으면 두 내장 규칙이 통과하고 병합된다. 내장 규칙 폴더가 있어도 인수 테스트로 판정하지 않는다. 선언이 없으면 구조 검사를 하지 않는다 (지금과 같다)', async () => {
+    // 내장 규칙(RULE-002)의 표시 ID 폴더에 인수 테스트가 있어도 구조 검사만 그 규칙을 판정한다
+    const h = setup({
+      prepareRepo: (repo) => {
+        fs.mkdirSync(path.join(repo, 'bive-acceptance', 'RULE-002'), { recursive: true });
+        fs.writeFileSync(
+          path.join(repo, 'bive-acceptance', 'RULE-002', 'x.acc.ts'),
+          "import { it } from 'vitest';\nit('통과', () => undefined);\n",
+        );
+      },
+    });
     const builtin = declare(h);
+    expect(builtin['structure.public-api-only'].displayId).toBe('RULE-002');
     const detail = await runToEnd(h);
     expect(detail.run.status).toBe('merged');
+    expect(exitOf(detail, 'check')).toMatchObject({
+      ruleIds: ['RULE-001'],
+      unjudgedDirs: ['RULE-002'],
+    });
+    expect(
+      h.judgeCalls.filter((call) => call.kind === 'check').map((call) => call.input.ruleIds),
+    ).toEqual([['RULE-001']]);
     expect(
       BUILTIN_STRUCTURE_RULES.map((key) =>
         structureJudgments(h, builtin[key].id).map((judgment) => judgment.status),
@@ -863,28 +880,57 @@ describe('구조 검사가 돌지 않았는데 통과로 저장되는 길이 없
 
   it('판정 도중 사람이 새 판을 저장해도 단계를 열 때 읽은 판으로 판정하고 그 판 번호를 기록한다', async () => {
     const seen: unknown[] = [];
-    let h: PipelineHarness | null = null;
+    const ref: { h?: PipelineHarness } = {};
     const real = (await import('../src/steps/structure-check.js')).defaultStructureAnalyzer;
-    h = setup({
+    const resave = (): void => {
+      const target = ref.h;
+      if (target === undefined) return;
+      withProject(target.biveHome, target.project.id, (store) =>
+        store.blockDeclarations.set(
+          { blocks: SAMPLE.blocks.map((item) => ({ ...item, risk: 'high' })) },
+          { at: new Date().toISOString(), by: human },
+        ),
+      );
+    };
+    const h = setup({
+      // 검사 단계가 선언을 읽은 바로 뒤(체크아웃 · 파서 호출 전)에 사람이 새 판을 저장한다
+      executors: (defaults) => ({
+        ...defaults,
+        check: (context) => {
+          let saved = false;
+          return defaults.check({
+            ...context,
+            read: (fn) => {
+              const value = context.read(fn);
+              const record = value as { version?: unknown; declaration?: unknown } | null;
+              if (
+                !saved &&
+                record !== null &&
+                typeof record === 'object' &&
+                'declaration' in record
+              ) {
+                saved = true;
+                resave();
+              }
+              return value;
+            },
+          });
+        },
+      }),
       structure: {
-        analyzeStructure: async (input) => {
+        analyzeStructure: (input) => {
           seen.push(input.declaration);
-          const current = h;
-          if (current !== null) {
-            withProject(current.biveHome, current.project.id, (store) =>
-              store.blockDeclarations.set(
-                { blocks: SAMPLE.blocks.map((item) => ({ ...item, risk: 'high' })) },
-                { at: new Date().toISOString(), by: human },
-              ),
-            );
-          }
           return real(input);
         },
       },
     });
+    ref.h = h;
     declare(h);
     const detail = await runToEnd(h);
     expect(detail.run.status).toBe('merged');
+    expect(
+      withProject(h.biveHome, h.project.id, (store) => store.blockDeclarations.current()?.version),
+    ).toBe(2);
     expect(seen).toEqual([SAMPLE]);
     expect(exitOf(detail, 'check')).toMatchObject({ structure: { declarationVersion: 1 } });
     expect(
