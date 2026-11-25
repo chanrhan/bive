@@ -404,6 +404,21 @@ export const runStructureCheck = async (
 
 const newId = createUlidGenerator();
 
+/**
+ * 구조 검사 계획이 있는데 판정 기록이 두 내장 규칙을 모두 덮지 않으면 빠진 규칙의 표시 ID (덮으면 `[]`). 검사 단계 · 병합 재검사가
+ * 기록 전에 스스로 확인해, 덮지 않으면 기록 없이 닫힌 쪽으로 끝낸다(구조 검사 결과가 빠진 채 통과로 가는 길을 한 겹 더 막는다).
+ * 계획이 없으면(선언 없음) 늘 `[]`.
+ */
+export const missingStructureJudgments = (
+  plan: StructurePlan | null,
+  judgments: readonly Pick<JudgmentResult, 'ruleId'>[],
+): string[] =>
+  plan === null
+    ? []
+    : BUILTIN_STRUCTURE_RULES.map((key) => plan.rules[key])
+        .filter((rule) => judgments.filter((judgment) => judgment.ruleId === rule.id).length !== 1)
+        .map((rule) => rule.displayId);
+
 /** 구조 검사 결과 → 내장 규칙별 판정 기록 (실행기 `dependency-cruiser`). 판정하지 않았으면 `[]`. */
 export const structureJudgmentsFrom = (
   run: StructureRun | undefined,

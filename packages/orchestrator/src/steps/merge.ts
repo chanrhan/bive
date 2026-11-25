@@ -49,6 +49,7 @@ import {
   recordJudgments,
 } from './judging.js';
 import {
+  missingStructureJudgments,
   readStructurePlan,
   STRUCTURE_STAGE,
   structureJudgmentsFrom,
@@ -340,12 +341,24 @@ export const createMergeExecutor =
         ...rules.filter((rule) => structureIds.includes(rule.id)),
       ];
       const meta = { runId: context.run.id, stepId: context.step.id, commit: merge.mergeCommit };
+      const structureJudgments = structureJudgmentsFrom(judged.structure, {
+        ...meta,
+        judgedAt: judged.result.endedAt,
+      });
+      // 선언이 있으면 두 내장 규칙의 판정이 모두 있어야 한다 (없으면 기록 없이 재검사 실패: 병합하지 않는다)
+      const uncovered = missingStructureJudgments(plan, structureJudgments);
+      if (uncovered.length > 0) {
+        recheck = {
+          stage: STRUCTURE_STAGE,
+          message: '구조 검사 판정이 내장 구조 규칙을 모두 덮지 않습니다',
+          missingRuleIds: uncovered,
+        };
+        return { passed: false, detail: `${STRUCTURE_STAGE}: uncovered` };
+      }
       const recorded = recordJudgments(context, [
         ...judgmentsFrom(judged.result, testJudged, meta),
         // 인수 테스트 판정이 케이스 결과를 냈을 때만 남긴다 (검사 단계와 같다: 판정 1회 = 기록 1묶음)
-        ...(judged.result.status === 'completed'
-          ? structureJudgmentsFrom(judged.structure, { ...meta, judgedAt: judged.result.endedAt })
-          : []),
+        ...(judged.result.status === 'completed' ? structureJudgments : []),
       ]);
       // 재검사가 도는 동안 대상 규칙이 폐기됐으면 통과여도 병합하지 않는다 (병합 직전, ADR-112)
       retiredDuringCheck = retiredTargets();

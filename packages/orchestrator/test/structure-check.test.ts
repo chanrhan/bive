@@ -38,17 +38,27 @@ import { RuleWriterService } from '../src/rule-writer/rule-writer-service.js';
 import { createRun, saveNewRun } from '../src/runs/run-service.js';
 import {
   MAX_STRUCTURE_CASES,
+  missingStructureJudgments,
   runStructureCheck,
+  structureJudgmentsFrom,
   type StructureAnalyzer,
   type StructurePlan,
 } from '../src/steps/structure-check.js';
 import { RpcCallError, type TestClient } from './helpers/client.js';
-import { human, newId as harnessId, userGit, withProject } from './helpers/engine-harness.js';
+import {
+  human,
+  newId as harnessId,
+  seedNormRequirement,
+  seedNormRule,
+  userGit,
+  withProject,
+} from './helpers/engine-harness.js';
 import {
   attempts,
   before,
   detailOf,
   exitOf,
+  fakeInstall,
   type PipelineHarness,
   type PipelineSetupOptions,
   runToEnd,
@@ -320,6 +330,39 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
     );
     expect(rejected.code).toBe(-32009);
     expect(h.read((store) => store.runs.list())).toEqual([]);
+    // 대상이 여럿이면 어느 자리에 있든 거부한다 (일반 규칙 + 내장 규칙, 순서를 바꿔도)
+    const plain = h.read((store) =>
+      seedNormRule(store, {
+        title: '일반 규칙',
+        statement: 'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 200을 돌려준다',
+        parent: seedNormRequirement(store, '헬스 체크', T0),
+        at: T0 + 1,
+      }),
+    );
+    const changesBefore = h.read((store) => store.normChanges.list());
+    for (const builtinRule of rules) {
+      for (const ruleIds of [
+        [plain.id, builtinRule.id],
+        [builtinRule.id, plain.id],
+      ]) {
+        const mixed = await rpcError(
+          h.client.call('run.create', { projectId: h.project.id, ruleIds, author: human }),
+        );
+        expect(mixed.code, ruleIds.join(',')).toBe(-32009);
+      }
+    }
+    h.read((store) => {
+      expect(store.runs.list()).toEqual([]);
+      expect(store.approvalLog.list()).toEqual([]);
+      expect(store.normChanges.list()).toEqual(changesBefore);
+    });
+    // 대조군: 일반 규칙만이면 만들어진다 (거부가 다른 이유가 아니다)
+    await h.client.call('run.create', {
+      projectId: h.project.id,
+      ruleIds: [plain.id],
+      author: human,
+    });
+    expect(h.read((store) => store.runs.list())).toHaveLength(1);
     const edited = await rpcError(
       h.client.call('rule.update', {
         projectId: h.project.id,
@@ -330,7 +373,7 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
       }),
     );
     expect(edited.data).toMatchObject({ reason: 'builtin_rule' });
-    expect(await ruleList(h)).toEqual(rules);
+    expect((await ruleList(h)).filter((item) => item.builtin)).toEqual(rules);
   });
 });
 
@@ -803,6 +846,118 @@ describe('구조 검사가 돌지 않았는데 통과로 저장되는 길이 없
     ).toEqual([]);
   }, 90_000);
 
+  it('선언이 없는데 내장 규칙 행이 있거나, 같은 제목의 내장 행이 둘이면 검사 단계가 state_inconsistent로 끝나고 판정 기록 · 병합이 없다', async () => {
+    // 선언 없이 내장 행만 있는 저장소 (저장소 밖 변조)
+    const orphan = setup();
+    withProject(orphan.biveHome, orphan.project.id, (store) =>
+      ensureBuiltinStructureRules(store, {
+        declaration: {
+          version: 1,
+          declaration: SAMPLE as never,
+          setAt: new Date().toISOString(),
+          setBy: human,
+        },
+        at: new Date().toISOString(),
+        newId,
+      }),
+    );
+    const first = await runToEnd(orphan);
+    expect(first.run).toMatchObject({ status: 'failed', failureReason: 'state_inconsistent' });
+    expect(exitOf(first, 'check').detail).toMatchObject({
+      stage: 'structure',
+      message: '내장 구조 규칙은 있는데 블록 선언이 없습니다',
+    });
+    expect(orphan.judgeCalls.filter((call) => call.kind === 'check')).toEqual([]);
+    expect(
+      judgmentsIn(orphan).filter((judgment) => judgment.stepId === stepOf(first, 'check').id),
+    ).toEqual([]);
+    expect(first.run.mergeCommit).toBeNull();
+
+    // 같은 제목의 내장 행이 둘 (첫 행으로 판정하지 않는다)
+    const twice = setup();
+    const builtin = declare(twice);
+    const duplicate = withProject(twice.biveHome, twice.project.id, (store) =>
+      store.rules.create({
+        ...builtin['structure.declared-direction'],
+        id: newId(),
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const second = await runToEnd(twice);
+    expect(second.run).toMatchObject({ status: 'failed', failureReason: 'state_inconsistent' });
+    expect(exitOf(second, 'check').detail).toMatchObject({
+      stage: 'structure',
+      builtinRules: {
+        'structure.public-api-only': [builtin['structure.public-api-only'].displayId],
+        'structure.declared-direction': [
+          builtin['structure.declared-direction'].displayId,
+          duplicate.displayId,
+        ],
+      },
+    });
+    expect(twice.judgeCalls.filter((call) => call.kind === 'check')).toEqual([]);
+    expect(
+      judgmentsIn(twice).filter((judgment) => judgment.stepId === stepOf(second, 'check').id),
+    ).toEqual([]);
+    expect(Number(userGit(twice.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
+  }, 120_000);
+
+  it('병합 단계를 열 때 같은 제목의 내장 행이 둘이면 병합 재검사도 판정하지 않고 state_inconsistent로 끝나며 병합하지 않는다', async () => {
+    const ref: { builtin?: Rule; h?: PipelineHarness } = {};
+    const h = setup({
+      executors: (defaults) => ({
+        ...defaults,
+        merge: before(defaults.merge, () => {
+          const target = ref.h;
+          const rule = ref.builtin;
+          if (target === undefined || rule === undefined) return;
+          withProject(target.biveHome, target.project.id, (store) =>
+            store.rules.create({ ...rule, id: newId(), createdAt: new Date().toISOString() }),
+          );
+        }),
+      }),
+    });
+    ref.h = h;
+    ref.builtin = declare(h)['structure.public-api-only'];
+    const base = userGit(h.repo, 'rev-parse', 'refs/heads/main');
+    const detail = await runToEnd(h);
+    expect(detail.run).toMatchObject({ status: 'failed', failureReason: 'state_inconsistent' });
+    expect(attempts(detail, 'check', 'merge')).toEqual(['check#1:passed', 'merge#1:failed']);
+    expect(exitOf(detail, 'merge').detail).toMatchObject({ stage: 'structure' });
+    expect(
+      judgmentsIn(h).filter((judgment) => judgment.stepId === stepOf(detail, 'merge').id),
+    ).toEqual([]);
+    expect(userGit(h.repo, 'rev-parse', 'refs/heads/main')).toBe(base);
+  }, 120_000);
+
+  it('구조 검사는 같은 체크아웃의 의존성 설치보다 먼저 돈다 (호출 순서)', async () => {
+    const events: { what: 'structure' | 'install'; dir: string }[] = [];
+    const real = (await import('../src/steps/structure-check.js')).defaultStructureAnalyzer;
+    const h = setup({
+      structure: {
+        analyzeStructure: (input) => {
+          events.push({ what: 'structure', dir: input.projectDir });
+          return real(input);
+        },
+        installDependencies: (dir) => {
+          events.push({ what: 'install', dir });
+          return fakeInstall(dir);
+        },
+      },
+    });
+    declare(h);
+    const detail = await runToEnd(h);
+    expect(detail.run.status).toBe('merged');
+    const analyzed = events.filter((event) => event.what === 'structure');
+    expect(analyzed).toHaveLength(1);
+    const dir = analyzed[0]?.dir ?? '';
+    // 그 체크아웃에서 일어난 일만 순서대로: 구조 검사 → 설치
+    expect(events.filter((event) => event.dir === dir).map((event) => event.what)).toEqual([
+      'structure',
+      'install',
+    ]);
+  }, 90_000);
+
   it('지금 선언을 읽지 못하면(깨진 행) judge_runner_error, 선언은 있는데 내장 규칙 행이 없으면 state_inconsistent로 끝나고 둘 다 판정하지 않는다', async () => {
     // 검사 단계를 열기 직전에 가장 큰 판을 깨뜨린다 (그 전 세션들은 선언을 읽어야 시작한다)
     const ref: { h?: PipelineHarness } = {};
@@ -1234,6 +1389,26 @@ describe('구조 검사 결과 → 내장 규칙 판정 (단위, 파서 출력 �
     });
     late.abort(reason);
     await expect(pending).rejects.toBe(reason);
+  });
+
+  it('두 내장 규칙의 판정이 모두 있는지 확인한다: 하나라도 빠지거나 겹치면 빠진 규칙, 계획이 없으면 늘 빈 목록', async () => {
+    const outcome = await run(analysis({ status: 'checked', violations: capped([]) }));
+    const all = structureJudgmentsFrom(outcome, {
+      runId: newId(),
+      stepId: newId(),
+      commit: 'a'.repeat(40),
+      judgedAt: iso(T0),
+    });
+    expect(all.map((judgment) => judgment.ruleId)).toEqual([
+      plan.rules['structure.public-api-only'].id,
+      plan.rules['structure.declared-direction'].id,
+    ]);
+    expect(missingStructureJudgments(plan, all)).toEqual([]);
+    expect(missingStructureJudgments(plan, all.slice(1))).toEqual(['RULE-001']);
+    expect(missingStructureJudgments(plan, all.slice(0, 1))).toEqual(['RULE-002']);
+    expect(missingStructureJudgments(plan, [])).toEqual(['RULE-001', 'RULE-002']);
+    expect(missingStructureJudgments(plan, [...all, ...all.slice(0, 1)])).toEqual(['RULE-001']);
+    expect(missingStructureJudgments(null, [])).toEqual([]);
   });
 
   it('체크아웃에 추적 중인 node_modules가 있으면 파서를 부르지 않고 두 규칙의 실패다', async () => {

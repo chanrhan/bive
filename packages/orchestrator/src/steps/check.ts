@@ -26,6 +26,7 @@ import { contradictionHalt, judgeExistingRuleFailures } from './existing-rule.js
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
 import {
   BLOCK_DECLARATION_OVERLAP_REASON,
+  missingStructureJudgments,
   readStructurePlan,
   STRUCTURE_STAGE,
   structureJudgmentsFrom,
@@ -190,9 +191,23 @@ export const createCheckExecutor =
     const judgedRules = [...testJudged, ...rules.filter((rule) => structureIds.includes(rule.id))];
     // 인수 테스트 판정과 구조 검사 판정을 한 트랜잭션에 남긴다 (판정 1회)
     const meta = { runId: context.run.id, stepId: context.step.id, commit };
+    const structureJudgments = structureJudgmentsFrom(judged.structure, {
+      ...meta,
+      judgedAt: result.endedAt,
+    });
+    // 선언이 있으면 두 내장 규칙의 판정이 모두 있어야 한다 (없으면 기록 없이 끝낸다: 통과로 가지 않는다)
+    const uncovered = missingStructureJudgments(plan, structureJudgments);
+    if (uncovered.length > 0) {
+      return halt('state_inconsistent', {
+        ...detail,
+        stage: STRUCTURE_STAGE,
+        message: '구조 검사 판정이 내장 구조 규칙을 모두 덮지 않습니다',
+        missingRuleIds: uncovered,
+      });
+    }
     const recorded = recordJudgments(context, [
       ...judgmentsFrom(result, testJudged, meta),
-      ...structureJudgmentsFrom(judged.structure, { ...meta, judgedAt: result.endedAt }),
+      ...structureJudgments,
     ]);
     const judgments = judgmentDigest(recorded, judgedRules);
     if (recorded.some((judgment) => judgment.status !== 'pass')) {
