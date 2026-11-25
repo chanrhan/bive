@@ -1,8 +1,9 @@
 // 구현 · 검사 · 병합 재검사가 함께 쓰는 판정 절차 (JDG-01 · JDG-02 · RUN-08 · NFR-01, ADR-051 · ADR-058 · ADR-068 · ADR-069).
 // 판정은 실행 워크트리가 아니라 판정할 커밋의 깨끗한 체크아웃에서 돈다(`judge/checkout.ts`). 순서:
 //   체크아웃(추적 파일만) → 인수 테스트 해시 대조(Red 확인 기록과, 지정한 경우) → 구조 검사(계획을 넘긴 경우: 검사 · 병합 재검사,
-//   `structure-check.ts`, 설치 전) → 의존성 새로 설치(`node_modules` 비공유)
-//   → 규범 저장소 확인(판정 직전) → 판정 러너 → 규범 저장소 확인(판정 뒤: 판정은 프로젝트 코드를 실행한다) → 체크아웃 삭제
+//   `structure-check.ts`, 설치 전) → 계약 검사 준비(계획을 넘긴 경우: 등록 원본 · 문서 검사, `contract-check.ts`, 설치 전)
+//   → 의존성 새로 설치(`node_modules` 비공유) → 규범 저장소 확인(판정 직전) → 판정 러너(계약 트래픽 검증이 필요하면 판정 서버 앞에
+//   기록 프록시) → 규범 저장소 확인(판정 뒤: 판정은 프로젝트 코드를 실행한다) → 계약 트래픽 검증(판정 서버는 멈춘 뒤) → 체크아웃 삭제
 // 판정 결과의 해석(통과 · 미충족)과 저장은 호출한 단계가 한다. 판정 기록은 판정 러너가 케이스 결과를 낸(`completed`)
 // 판정에서만 만든다: 수집 오류 · 러너 오류는 규칙을 판정하지 못한 것이라 기록하지 않는다(단계 결과에만 남긴다).
 import fs from 'node:fs';
@@ -31,6 +32,15 @@ import {
 import type { JudgeProfileName } from '../judge/profiles/types.js';
 import { ruleIdOfAcceptanceFile } from '../judge/report.js';
 import { type JudgeRunInput, JudgeRunner, type JudgeRunResult } from '../judge/runner.js';
+import { ExchangeRecorder } from '../contract-check/recorder.js';
+import {
+  type ContractPlan,
+  type ContractRun,
+  disposeContracts,
+  finishContracts,
+  prepareContracts,
+  type PreparedContracts,
+} from './contract-check.js';
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
 import {
   runStructureCheck,
@@ -59,6 +69,11 @@ export interface JudgingOptions {
   analyzeStructure?: StructureAnalyzer;
   /** 구조 검사 제한 시간 (기본 파서 기본값) */
   structureTimeoutMs?: number;
+  /** 계약 검사 lint · prism 제한 시간 (기본 실행기 기본값, M3-47) */
+  contractLintTimeoutMs?: number;
+  contractPrismTimeoutMs?: number;
+  /** 계약 검사 도구 폴더의 상위 (기본 시스템 임시 폴더) */
+  contractTempDir?: string;
 }
 
 const newId = createUlidGenerator();
@@ -173,6 +188,8 @@ export type CommitJudgeOutcome =
   | { readonly kind: 'no_rules'; readonly ruleDirs: string[] }
   /** 구조 검사가 판정하지 않고 끝낼 사정 (겹침 · 실행기 오류). 설치 · 판정은 하지 않았다 */
   | { readonly kind: 'structure_halt'; readonly structure: Extract<StructureRun, { kind: 'halt' }> }
+  /** 계약 검사 도구를 끝까지 못 돌렸다 (설치 전 준비 또는 판정 뒤 트래픽 검증) */
+  | { readonly kind: 'contract_halt'; readonly contract: Extract<ContractRun, { kind: 'halt' }> }
   | {
       readonly kind: 'judged';
       readonly result: JudgeRunResult;
@@ -187,6 +204,8 @@ export type CommitJudgeOutcome =
       readonly acceptanceTexts?: Readonly<Record<string, string>>;
       /** 구조 검사 결과 (계획을 넘긴 경우만, 설치 전 체크아웃에서) */
       readonly structure?: Extract<StructureRun, { kind: 'judged' }>;
+      /** 계약 검사 결과 (계획을 넘긴 경우 · 판정 러너가 케이스 결과를 낸 경우만) */
+      readonly contracts?: Extract<ContractRun, { kind: 'judged' }>;
     };
 
 export interface CommitJudgeInput {
@@ -201,6 +220,8 @@ export interface CommitJudgeInput {
   readonly readAcceptanceTexts?: boolean;
   /** 구조 검사 계획 (단계를 열 때 읽은 선언의 판 · 내장 규칙). 있으면 설치 전에 구조 검사를 한다 */
   readonly structure?: StructurePlan;
+  /** 계약 검사 계획 (단계를 열 때 읽은 계약 검사 규칙 · 계약). 있으면 계약 검사를 한다 */
+  readonly contracts?: ContractPlan;
 }
 
 /** 인수 테스트 파일 하나에서 읽는 상한 (넘는 부분은 대조에 쓰지 않는다: 그 뒤의 이름은 모르는 이름이 된다). */
@@ -240,6 +261,7 @@ export const judgeCommit = async (
     if (!(error instanceof JudgeCheckoutError)) throw error;
     return { kind: 'checkout_error', message: error.message };
   }
+  let preparedContracts: PreparedContracts | undefined;
   try {
     // 인수 테스트 보호: 판정 전 커밋 그대로의 해시를 Red 확인 기록과 대조한다
     const acceptanceHashes = hashAcceptanceFiles(checkout.dir);
@@ -268,6 +290,31 @@ export const judgeCommit = async (
       if (run.kind === 'halt') return { kind: 'structure_halt', structure: run };
       structure = run;
     }
+    // 계약 검사 준비: 등록 원본(git 객체) · 문서 검사(lint). 프로젝트 코드가 돌기 전이고, 도구는 체크아웃 밖에서 돈다
+    const contractOptions = {
+      signal: input.signal,
+      ...(options.git === undefined ? {} : { git: options.git }),
+      ...(options.contractLintTimeoutMs === undefined
+        ? {}
+        : { lintTimeoutMs: options.contractLintTimeoutMs }),
+      ...(options.contractPrismTimeoutMs === undefined
+        ? {}
+        : { prismTimeoutMs: options.contractPrismTimeoutMs }),
+      ...(options.contractTempDir === undefined ? {} : { tempDir: options.contractTempDir }),
+    };
+    if (input.contracts !== undefined) {
+      const prepared = await prepareContracts(
+        context.git.repoPath,
+        input.commit,
+        input.contracts,
+        contractOptions,
+      );
+      input.signal.throwIfAborted();
+      if (prepared.kind === 'halt') return { kind: 'contract_halt', contract: prepared };
+      preparedContracts = prepared.prepared;
+    }
+    // 계약 트래픽 검증이 필요하면 판정 서버 앞에 기록 프록시를 끼운다 (인수 테스트가 받는 응답은 그대로다)
+    const recorder = preparedContracts?.needsTraffic === true ? new ExchangeRecorder() : undefined;
     const logFile = installLogFile(context);
     try {
       await (options.installDependencies ?? installDependencies)(checkout.dir, {
@@ -294,6 +341,7 @@ export const judgeCommit = async (
       signal: input.signal,
       // 설치 전 체크아웃 그대로의 인수 테스트 해시. 러너가 시작 · vitest 앞뒤로 지문을 대조한다 (ADR-069)
       acceptanceHashes,
+      ...(recorder === undefined ? {} : { serverProxy: recorder }),
     };
     const result = await (options.judge === undefined
       ? new JudgeRunner({ biveHome: context.biveHome }).run(judgeInput)
@@ -312,6 +360,20 @@ export const judgeCommit = async (
     const after = input.norms.verify();
     if (after.length > 0)
       return { kind: 'norm_mismatch', moment: 'after_judge', mismatches: after };
+    // 계약 판정: 판정 러너가 케이스 결과를 냈을 때만 (기록 1묶음 = 판정 1회). 판정 서버는 이미 멈췄다
+    let contracts: Extract<ContractRun, { kind: 'judged' }> | undefined;
+    if (preparedContracts !== undefined && result.status === 'completed') {
+      const run = await finishContracts(
+        preparedContracts,
+        recorder === undefined
+          ? null
+          : { exchanges: recorder.exchanges(), overflow: recorder.overflow() },
+        contractOptions,
+      );
+      input.signal.throwIfAborted();
+      if (run.kind === 'halt') return { kind: 'contract_halt', contract: run };
+      contracts = run;
+    }
     return {
       kind: 'judged',
       result,
@@ -319,8 +381,10 @@ export const judgeCommit = async (
       acceptanceHashes,
       ...(acceptanceTexts === undefined ? {} : { acceptanceTexts }),
       ...(structure === undefined ? {} : { structure }),
+      ...(contracts === undefined ? {} : { contracts }),
     };
   } finally {
+    disposeContracts(preparedContracts);
     await checkout.dispose();
   }
 };

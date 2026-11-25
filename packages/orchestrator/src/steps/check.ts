@@ -18,10 +18,23 @@
 //   내장 구조 규칙 두 개의 판정 기록을 인수 테스트 판정 기록과 같은 트랜잭션에 남긴다. 내장 규칙은 인수 테스트로 판정하지 않는다.
 //   내장 규칙이 실패하면 판단 세션 없이(폐기 · 대체할 수 없다, B⑨) 구현으로 회귀하고 다음 구현 세션은 위반(규칙 · 파일 쌍)을 앞 시도의
 //   사유로 받는다. 겹침 · 실행기 오류는 판정하지 않고 끝낸다. 선언이 없으면 구조 검사를 하지 않는다(지금과 같다)
+// - 계약 검사 (M3-47 #292, ADR-132 · ADR-130 ⑤, `steps/contract-check.ts`): 계약 검사 규칙이 있으면 같은 체크아웃 · 같은 판정에서 계약
+//   종류의 실행기로 판정하고 판정 기록을 같은 트랜잭션에 남긴다. 계약 검사 규칙은 인수 테스트로 판정하지 않는다. 계약과 다른 응답은 구조
+//   검사 실패와 같이 구현으로 회귀하고, 등록된 문서의 형식 오류는 기록만 하고 단계 통과를 막지 않는다. 실행기가 없는 종류 · 판정할 수 없는
+//   계약은 판정 없음(기록 없음)이고 단계의 통과 · 회귀에 끼지 않는다. 도구를 끝까지 못 돌리면 판정하지 않고 끝낸다
 import type { Rule } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
-import { effectiveRules } from '../norms/effective.js';
+import { effectiveContracts, effectiveRules } from '../norms/effective.js';
+import {
+  CONTRACT_STAGE,
+  contractJudgmentsFrom,
+  contractRuleIds,
+  contractSummary,
+  missingContractVerdicts,
+  nonBlockingContractRuleIds,
+  contractPlanOf,
+} from './contract-check.js';
 import { contradictionHalt, judgeExistingRuleFailures } from './existing-rule.js';
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
 import {
@@ -90,11 +103,20 @@ export const createCheckExecutor =
     if (planned.kind === 'halt') return planned.outcome;
     const plan = planned.kind === 'plan' ? planned.plan : null;
     const structureIds = structureRuleIds(plan);
-    // 인수 테스트로 판정하는 규칙 (내장 구조 규칙은 구조 검사가 판정한다)
-    const testedRules = rules.filter((rule) => !structureIds.includes(rule.id));
+    // 계약 검사 계획: 단계를 열 때 읽은 계약 검사 규칙 · 계약 (없으면 없음)
+    const contractPlanned = contractPlanOf(
+      rules,
+      context.read((store) => effectiveContracts(store)),
+    );
+    if (contractPlanned.kind === 'halt') return contractPlanned.outcome;
+    const contractPlan = contractPlanned.kind === 'plan' ? contractPlanned.plan : null;
+    const contractIds = contractRuleIds(contractPlan);
+    // 인수 테스트로 판정하는 규칙 (내장 구조 규칙은 구조 검사가, 계약 검사 규칙은 계약 검사가 판정한다)
+    const builtinIds = [...structureIds, ...contractIds];
+    const testedRules = rules.filter((rule) => !builtinIds.includes(rule.id));
     const targets = context.read((store) =>
       context.run.targetRuleIds
-        .filter((id) => !structureIds.includes(id))
+        .filter((id) => !builtinIds.includes(id))
         .map((id) => store.rules.get(id)?.displayId ?? id),
     );
     let unjudgedDirs: string[] = [];
@@ -113,6 +135,7 @@ export const createCheckExecutor =
         signal: context.signal,
         readAcceptanceTexts: true,
         ...(plan === null ? {} : { structure: plan }),
+        ...(contractPlan === null ? {} : { contracts: contractPlan }),
       },
       options,
     );
@@ -162,6 +185,15 @@ export const createCheckExecutor =
           ? halt(BLOCK_DECLARATION_OVERLAP_REASON, structure)
           : halt(JUDGE_RUNNER_ERROR_REASON, structure);
       }
+      case 'contract_halt':
+        // 계약 검사 도구를 끝까지 못 돌렸다: 통과로 읽지 않고 판정하지 않는다
+        return halt(JUDGE_RUNNER_ERROR_REASON, {
+          ...base,
+          stage: CONTRACT_STAGE,
+          message: judged.contract.message,
+          code: judged.contract.code,
+          ruleId: judged.contract.ruleId,
+        });
       case 'judged':
         break;
     }
@@ -180,6 +212,9 @@ export const createCheckExecutor =
       ruleIds,
       ...(unjudgedDirs.length > 0 ? { unjudgedDirs } : {}),
       ...(judged.structure === undefined ? {} : { structure: judged.structure.summary }),
+      ...(judged.contracts === undefined
+        ? {}
+        : { contracts: contractSummary(judged.contracts.verdicts) }),
     };
     if (result.status === 'runner_error') {
       return halt(JUDGE_RUNNER_ERROR_REASON, { ...detail, stage: 'judge' });
@@ -188,7 +223,7 @@ export const createCheckExecutor =
       return { status: 'unmet', exitDetail: { ...detail, reason: 'collect_error' } };
     }
     const testJudged = testedRules.filter((rule) => ruleIds.includes(rule.displayId));
-    const judgedRules = [...testJudged, ...rules.filter((rule) => structureIds.includes(rule.id))];
+    const judgedRules = [...testJudged, ...rules.filter((rule) => builtinIds.includes(rule.id))];
     // 인수 테스트 판정과 구조 검사 판정을 한 트랜잭션에 남긴다 (판정 1회)
     const meta = { runId: context.run.id, stepId: context.step.id, commit };
     const structureJudgments = structureJudgmentsFrom(judged.structure, {
@@ -205,16 +240,30 @@ export const createCheckExecutor =
         missingRuleIds: uncovered,
       });
     }
+    // 계약 검사 규칙마다 판정 · 판정 없음이 하나씩 있어야 한다 (없으면 기록 없이 끝낸다: 통과로 가지 않는다)
+    const missingContracts = missingContractVerdicts(contractPlan, judged.contracts);
+    if (missingContracts.length > 0) {
+      return halt('state_inconsistent', {
+        ...detail,
+        stage: CONTRACT_STAGE,
+        message: '계약 검사 판정이 계약 검사 규칙을 모두 덮지 않습니다',
+        missingRuleIds: missingContracts,
+      });
+    }
     const recorded = recordJudgments(context, [
       ...judgmentsFrom(result, testJudged, meta),
       ...structureJudgments,
+      ...contractJudgmentsFrom(judged.contracts, { ...meta, judgedAt: result.endedAt }),
     ]);
     const judgments = judgmentDigest(recorded, judgedRules);
-    if (recorded.some((judgment) => judgment.status !== 'pass')) {
+    // 단계 통과를 막는 판정: 등록된 계약 문서의 형식 오류(구현이 고칠 수 없다)는 기록만 하고 빼고 본다
+    const nonBlocking = nonBlockingContractRuleIds(judged.contracts);
+    const blocking = recorded.filter((judgment) => !nonBlocking.has(judgment.ruleId));
+    if (blocking.some((judgment) => judgment.status !== 'pass')) {
       // 대상 밖 규칙의 실패: 규칙을 맡는 역할의 판단 (판단 입력은 실패한 규칙 ID와 케이스 이름뿐, 실행기 출력은 넘기지 않는다)
       const existing = await judgeExistingRuleFailures(context, {
         stage: 'check',
-        judgments: recorded,
+        judgments: blocking,
         rules: judgedRules,
         acceptanceTexts: judged.acceptanceTexts ?? {},
       });
