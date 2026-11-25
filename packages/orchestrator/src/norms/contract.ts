@@ -13,8 +13,6 @@
 //     규칙의 `created`는 오케스트레이터). 계약은 미확인이다. 이 함수를 부르는 에이전트 도구는 아직 없다(도구 배선은 M3-10 · M5)
 // - 이 모듈이 계약 · 계약 검사 규칙을 쓰는 유일한 곳이다(구조 시험 `integrity.test.ts`). 에이전트 도구 · 세션 · 엔진 · 단계는 이 모듈을
 //   가져오지 않는다
-import { createHash } from 'node:crypto';
-
 import {
   type AgentAuthor,
   type ApprovalLogEntry,
@@ -30,8 +28,16 @@ import {
 } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
-import { createGitRunner, type GitRunner } from '../git/git-exec.js';
+import { type ContractSource } from './contract-source.js';
 import { effectiveRequirements } from './effective.js';
+
+// 원본 읽기는 읽기 전용 모듈에 있다 (계약 검사도 같은 함수를 쓴다, ADR-132)
+export {
+  CONTRACT_SOURCE_MAX_BYTES,
+  type ContractSource,
+  type ContractSourceRead,
+  readContractSource,
+} from './contract-source.js';
 
 /** 지금 등록을 받는 계약 종류: NRM-03 제목의 세 종류 (ADR-033이 검사 도구를 정한 종류). */
 export const REGISTRABLE_CONTRACT_KINDS = ['openapi', 'db-schema', 'asyncapi'] as const;
@@ -45,9 +51,6 @@ export const CONTRACT_FILE_EXTENSIONS: Readonly<
   'db-schema': ['.prisma'],
   asyncapi: ['.yaml', '.yml', '.json'],
 };
-
-/** 계약 원본 파일 크기 상한 (바이트). */
-export const CONTRACT_SOURCE_MAX_BYTES = 4 * 1024 * 1024;
 
 /** 경로 한 구간에 쓸 수 있는 글자: 보이는 ASCII 가운데 영문 · 숫자 · `.` · `_` · `-` · `@` · `+`. */
 const SEGMENT = /^[A-Za-z0-9._@+-]+$/u;
@@ -77,89 +80,6 @@ export const contractFileProblem = (
     return 'extension_mismatch';
   }
   return null;
-};
-
-/** 기준 브랜치 커밋에서 읽은 계약 원본. */
-export interface ContractSource {
-  readonly commit: string;
-  readonly contentHash: string;
-}
-
-export type ContractSourceRead =
-  | ({ readonly ok: true } & ContractSource)
-  | { readonly ok: false; readonly code: ContractInvalidCode };
-
-/** 디코드가 손실이면 생기는 대체 문자 U+FFFD (원문에 있어도 손실과 구별할 수 없어 거부한다). */
-const REPLACEMENT_CHARACTER = String.fromCodePoint(0xfffd);
-
-const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
-
-/**
- * 기준 브랜치 커밋의 계약 원본을 git 객체에서 읽는다 (작업 트리 · 워크트리는 읽지 않는다). `file`은 {@link contractFileProblem}을
- * 지난 경로여야 한다(glob 글자가 없어 `ls-tree`의 경로가 글자 그대로 맞는다). 대체 객체(`refs/replace`)는 따르지 않는다.
- * - 브랜치 · 커밋을 읽지 못함(git 저장소가 아님 등) → `base_unreadable`, 파일 없음 → `file_missing`
- * - 일반 파일(모드 100644 · 100755)이 아님(기호 링크 · 디렉터리 · 하위 모듈) → `not_regular_file`
- * - 상한 초과 → `too_large`(내용을 읽지 않는다), UTF-8 글이 아님(디코드에 대체 문자 U+FFFD가 생기거나 원래 있음) → `not_text`
- * 해시는 그 바이트의 SHA-256이다(UTF-8 디코드는 잘못된 바이트를 대체 문자로만 바꾸므로, 대체 문자가 없으면 디코드가 손실 없고 다시
- * 부호화한 바이트가 원래 바이트와 같다).
- */
-export const readContractSource = async (
-  repoPath: string,
-  baseBranch: string,
-  file: string,
-  git: GitRunner = createGitRunner(),
-): Promise<ContractSourceRead> => {
-  let commit: string;
-  try {
-    commit = (
-      await git(
-        [
-          '--no-replace-objects',
-          'rev-parse',
-          '--verify',
-          '--quiet',
-          `refs/heads/${baseBranch}^{commit}`,
-        ],
-        { cwd: repoPath },
-      )
-    ).stdout.trim();
-  } catch {
-    return { ok: false, code: 'base_unreadable' };
-  }
-  let listing: string;
-  try {
-    listing = (
-      await git(['--no-replace-objects', 'ls-tree', '-z', '-l', commit, '--', file], {
-        cwd: repoPath,
-      })
-    ).stdout;
-  } catch {
-    return { ok: false, code: 'base_unreadable' };
-  }
-  // `<모드> <종류> <객체> <크기>\t<경로>`: 경로가 글자 그대로 같은 항목만
-  const entry = listing
-    .split('\0')
-    .map((line) => {
-      const tab = line.indexOf('\t');
-      return tab < 0 ? null : { head: line.slice(0, tab).split(/ +/u), path: line.slice(tab + 1) };
-    })
-    .find((item) => item !== null && item.path === file);
-  if (entry === undefined || entry === null) return { ok: false, code: 'file_missing' };
-  const [mode, type, object, size] = entry.head;
-  if (type !== 'blob' || (mode !== '100644' && mode !== '100755') || object === undefined) {
-    return { ok: false, code: 'not_regular_file' };
-  }
-  // 크기를 읽지 못하면(숫자가 아님) 상한 초과로 본다 (닫힌 쪽)
-  if (!(Number(size) <= CONTRACT_SOURCE_MAX_BYTES)) return { ok: false, code: 'too_large' };
-  let text: string;
-  try {
-    text = (await git(['--no-replace-objects', 'cat-file', 'blob', object], { cwd: repoPath }))
-      .stdout;
-  } catch {
-    return { ok: false, code: 'base_unreadable' };
-  }
-  if (text.includes(REPLACEMENT_CHARACTER)) return { ok: false, code: 'not_text' };
-  return { ok: true, commit, contentHash: sha256(text) };
 };
 
 /** 계약 검사 규칙을 만든 규범 변경 기록의 사유 (고정 문장). */

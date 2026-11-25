@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 테스트 대상 픽스처 사본에 변형 하나를 커밋한다 (M3-02 #47, ADR-125 ⑥).
+# 테스트 대상 픽스처 사본에 변형 하나를 커밋한다 (M3-02 #47, ADR-125 ⑥. contract-mismatch는 M3-47 #292, ADR-132).
 #
 # 사용법: scripts/make-variant.sh <dir> <이름>
 #   <dir>: scripts/reset-fixture.sh로 만든 픽스처 사본 (저장소 안 · 원본 fixtures/sample-next-app은 거부)
@@ -9,7 +9,7 @@
 # 변형을 더할 때: variant_<이름> 함수 하나를 더하고 VARIANTS에 이름을 적는다. 함수는 <dir> 안에서 돈다
 set -euo pipefail
 
-VARIANTS=(undeclared-import cycle)
+VARIANTS=(undeclared-import cycle contract-mismatch)
 
 usage() {
   echo "사용법: $0 <dir> <이름> (이름: ${VARIANTS[*]})" >&2
@@ -85,6 +85,22 @@ import { cycleA } from './cycle-a';
 /** 변형 cycle: cycle-a와 서로 가져온다. */
 export function cycleB(n: number): number {
   return n <= 0 ? 0 : cycleA(n - 1);
+}
+EOF
+}
+
+# 응답 필드 타입 위반 하나: 계약(openapi.yaml)은 GET /api/health의 ok를 boolean으로 정하지만 글을 돌려준다
+variant_contract_mismatch() {
+  cat > src/app/api/health/route.ts << 'EOF'
+import { getDb } from '@/lib/db';
+
+// 요청마다 실행한다(빌드 시점 정적 생성 금지).
+export const dynamic = 'force-dynamic';
+
+/** 변형 contract-mismatch: 계약(openapi.yaml)은 ok를 boolean으로 정하지만 글을 돌려준다. */
+export async function GET(): Promise<Response> {
+  await getDb().item.count();
+  return Response.json({ ok: 'true' });
 }
 EOF
 }

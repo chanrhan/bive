@@ -1,0 +1,35 @@
+openapi: 3.1.0
+info:
+  title: sample-next-app
+  version: 1.0.0
+paths:
+  /api/health:
+    get:
+      operationId: getHealth
+      summary: 데이터베이스 연결 확인
+      responses:
+        '200':
+          description: 연결됨
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+  /api/auth/session:
+    get:
+      operationId: getSession
+      summary: 로그인 상태
+      responses:
+        '401':
+          description: 로그인되지 않음
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authenticated]
+                properties:
+                  authenticated:
+                    type: boolean
