@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 
 import {
+  type BlocksChangedEvent,
   createRequest,
   type JudgmentResult,
   type NormChangeAppendedEvent,
@@ -65,7 +66,8 @@ type Received =
   | { method: 'event.step.updated'; params: StepUpdatedEvent }
   | { method: 'event.proposal.changed'; params: ProposalChangedEvent }
   | { method: 'event.ruleWriter.changed'; params: RuleWriterChangedEvent }
-  | { method: 'event.normChange.appended'; params: NormChangeAppendedEvent };
+  | { method: 'event.normChange.appended'; params: NormChangeAppendedEvent }
+  | { method: 'event.blocks.changed'; params: BlocksChangedEvent };
 
 /** 받은 알림을 차례대로 모은다. 알림을 받을 때마다 `onNotice`를 부른다(받은 순간의 재조회). */
 const collect = (
@@ -170,6 +172,8 @@ const runState = (notice: Received): string => {
       return `ruleWriter ${notice.params.requirementId}`;
     case 'event.normChange.appended':
       return `normChange ${String(notice.params.lastSeq)}`;
+    case 'event.blocks.changed':
+      return `blocks ${String(notice.params.version)}`;
   }
 };
 
@@ -801,6 +805,108 @@ describe('규범 변경 기록이 늘 때마다 event.normChange.appended (M7-14
       detachOther();
     }
   });
+});
+
+describe('블록 선언이 새 판으로 바뀔 때마다 event.blocks.changed (M3-42 #283, NRM-09 · ADR-135)', () => {
+  /** 블록 선언 (fixtures/blocks/sample-next-app.json과 같은 모양, `extra`면 블록 하나 더) */
+  const declarationOf = (extra: boolean) => ({
+    blocks: [
+      {
+        name: 'auth',
+        kind: 'domain',
+        include: ['src/app/api/auth/**'],
+        public: [],
+        dependsOn: ['lib'],
+        risk: 'high',
+      },
+      {
+        name: 'lib',
+        kind: 'shared',
+        include: ['src/lib/**'],
+        public: ['src/lib/db.ts'],
+        dependsOn: [],
+        risk: 'low',
+      },
+      ...(extra
+        ? [
+            {
+              name: 'health',
+              kind: 'domain',
+              include: ['src/app/api/health/**'],
+              public: [],
+              dependsOn: ['lib'],
+              risk: 'medium',
+            },
+          ]
+        : []),
+    ],
+  });
+
+  it('사람의 blocks.set이 저장한 판마다 커밋 뒤 1개가 가고(첫 판 · 다음 판 모두), 받은 순간 blocks.get이 그 판이다. 거부된 저장 · 조회는 알리지 않는다', async () => {
+    const s = await start();
+    const watcher = await client(s);
+    const caller = await client(s);
+    // 알림을 받은 순간 화면이 다시 조회하는 값 (렌더러의 blocks.get 재조회와 같다)
+    const seen: Promise<{ version: number; current: number | null }>[] = [];
+    const received = collect(watcher, (notice) => {
+      if (notice.method !== 'event.blocks.changed') return;
+      const { projectId, version } = notice.params;
+      seen.push(
+        caller
+          .call('blocks.get', { projectId })
+          .then(({ current }) => ({ version, current: current?.version ?? null })),
+      );
+    });
+    const blocksNotices = () =>
+      received.filter((n) => n.method === 'event.blocks.changed').map((n) => n.params);
+
+    // 첫 판: 내장 구조 규칙도 함께 만들어 규범 변경 알림도 가지만, 블록 선언 알림은 그와 따로 1개
+    await caller.call('blocks.set', {
+      projectId: s.project.id,
+      author: human,
+      declaration: declarationOf(false),
+    });
+    await waitFor(() => seen.length === 1, 10_000, '첫 판 알림');
+    // 다음 판: 내장 규칙이 이미 있어 규범 변경 기록이 늘지 않는다(규범 변경 알림만으로는 다시 읽을 수 없는 경로)
+    const normBefore = received.filter((n) => n.method === 'event.normChange.appended').length;
+    await caller.call('blocks.set', {
+      projectId: s.project.id,
+      author: human,
+      declaration: declarationOf(true),
+    });
+    await waitFor(() => seen.length === 2, 10_000, '다음 판 알림');
+    expect(await Promise.all(seen)).toEqual([
+      { version: 1, current: 1 },
+      { version: 2, current: 2 },
+    ]);
+
+    // 거부된 저장(에이전트 주체 · 규칙 위반)과 조회는 판을 만들지 않아 알리지 않는다
+    await expect(
+      caller.call('blocks.set', {
+        projectId: s.project.id,
+        author: { kind: 'agent', role: 'implementer' },
+        declaration: declarationOf(false),
+      }),
+    ).rejects.toMatchObject({ code: -32020 });
+    await expect(
+      caller.call('blocks.set', {
+        projectId: s.project.id,
+        author: human,
+        declaration: { blocks: [] },
+      }),
+    ).rejects.toMatchObject({ code: -32001 });
+    await caller.call('blocks.get', { projectId: s.project.id });
+    // 같은 연결 순서: 이 응답 뒤에 온 알림이 없으면 위 요청들은 알림을 내지 않았다
+    await caller.call('ping');
+    await watcher.call('ping');
+    expect(blocksNotices()).toEqual([
+      { projectId: s.project.id, version: 1 },
+      { projectId: s.project.id, version: 2 },
+    ]);
+    expect(received.filter((n) => n.method === 'event.normChange.appended')).toHaveLength(
+      normBefore,
+    );
+  }, 60_000);
 });
 
 describe('ProposalEventPublisher', () => {

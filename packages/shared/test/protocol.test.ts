@@ -23,6 +23,8 @@ import {
   METHODS,
   NORM_CHANGE_EVENT_NAMES,
   NormChangeAppendedEvent,
+  BLOCK_EVENT_NAMES,
+  BlocksChangedEvent,
   NOTIFICATIONS,
   parseJsonFrame,
   parseNotification,
@@ -662,6 +664,9 @@ describe('run.* (M1-12, ADR-061)', () => {
     ['run.get', { projectId: PROJECT, id: 'EXE-001' }],
     ['run.list', { projectId: PROJECT }],
     ['run.list', { projectId: PROJECT, status: 'waiting_approval' }],
+    // 규칙 기준 조회 (M3-42 #283, ADR-135)
+    ['run.list', { projectId: PROJECT, ruleId: RULE_A }],
+    ['run.list', { projectId: PROJECT, ruleId: RULE_A, status: 'running' }],
   ])('%s 파라미터 통과', (method, params) => {
     expect(request(method, params).ok).toBe(true);
   });
@@ -679,6 +684,7 @@ describe('run.* (M1-12, ADR-061)', () => {
     ['다른 접두 표시 ID', 'run.get', { projectId: PROJECT, id: 'REQ-001' }],
     ['비정규 표시 ID', 'run.get', { projectId: PROJECT, id: 'EXE-1' }],
     ['모르는 상태', 'run.list', { projectId: PROJECT, status: 'done' }],
+    ['규칙 표시 ID (ULID만 받음)', 'run.list', { projectId: PROJECT, ruleId: 'RULE-001' }],
   ])('%s → -32602', (_, method, params) => {
     expect(code(request(method, params))).toBe(-32602);
   });
@@ -1011,5 +1017,15 @@ describe('event.normChange.appended (M7-14 #226, ADR-119)', () => {
     expect(NOTIFICATIONS['event.normChange.appended'].params.parse(params)).toEqual(params);
     expect(NormChangeAppendedEvent.safeParse({ ...params, lastSeq: 0 }).success).toBe(false);
     expect(NormChangeAppendedEvent.safeParse({ ...params, kind: 'retired' }).success).toBe(false);
+  });
+});
+
+describe('event.blocks.changed (M3-42 #283, ADR-135)', () => {
+  it('알림으로 등록되어 있고 프로젝트 ID와 양의 정수 판 번호만 받는다', () => {
+    expect(BLOCK_EVENT_NAMES).toEqual(['event.blocks.changed']);
+    const params = { projectId: '01ARZ3NDEKTSV4RRFFQ69G5FAV', version: 2 };
+    expect(NOTIFICATIONS['event.blocks.changed'].params.parse(params)).toEqual(params);
+    expect(BlocksChangedEvent.safeParse({ ...params, version: 0 }).success).toBe(false);
+    expect(BlocksChangedEvent.safeParse({ ...params, declaration: {} }).success).toBe(false);
   });
 });
