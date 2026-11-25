@@ -132,9 +132,15 @@ importers:
 
   packages/parser:
     dependencies:
+      '@bive/shared':
+        specifier: workspace:*
+        version: link:../shared
       dependency-cruiser:
         specifier: 18.7.2
         version: 18.7.2
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
     devDependencies:
       '@types/node':
         specifier: 22.20.5

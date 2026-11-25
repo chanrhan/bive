@@ -9,10 +9,8 @@ import { cruise, getAvailableTranspilers } from 'dependency-cruiser';
 const ALLOWED_OPTION_KEYS = new Set([
   'baseDir',
   'exclude',
-  'doNotFollow',
   'tsConfig',
   'tsPreCompilationDeps',
-  'preserveSymlinks',
   'ruleSet',
   'validate',
 ]);
