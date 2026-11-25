@@ -163,7 +163,7 @@ describe('필터 칩 4종 (수용 기준 4)', () => {
     index,
   }));
 
-  it('확인 상태 · 종류 · 위험도 · 생성 주체, 값별 개수는 항목에서만 세고 위험도는 모두 0건이다', () => {
+  it('확인 상태 · 종류 · 위험도 · 생성 주체, 값별 개수는 항목에서만 센다 (위험도는 항목의 `risk`, ADR-126)', () => {
     expect(CONFIRMATION_CRITERIA.map((c) => [c.id, c.label])).toEqual([
       ['confirm', '확인 상태'],
       ['kind', '종류'],
@@ -173,7 +173,8 @@ describe('필터 칩 4종 (수용 기준 4)', () => {
     expect(countOptions(entries, CONFIRMATION_CRITERIA, EMPTY_FILTER)).toEqual({
       confirm: { unconfirmed: 4, released: 1, confirmed: 2 },
       kind: { retired: 1, superseded: 1, test_changed: 2, rule: 2, requirement: 1 },
-      risk: { low: 0, medium: 0, high: 0 },
+      // 대체 · 미확인 RULE-003 높음, 폐기 보통, 테스트 변경 2건 낮음. 칸이 없는 RULE-005 · 요구사항은 세지 않는다
+      risk: { low: 2, medium: 1, high: 2 },
       author: {
         'rule-writer': 4,
         planner: 0,
@@ -195,6 +196,10 @@ describe('필터 칩 4종 (수용 기준 4)', () => {
     });
     // 사람이 쓴 미확인 요구사항 · 오케스트레이터가 아닌 폐기 주체도 그 값으로 센다
     const human = { ...ITEM_REQ2, author: { kind: 'human' as const } };
+    // 위험도 칸이 없는 항목(옛 규칙 · 요구사항)은 값이 없다
+    expect(CONFIRMATION_CRITERIA[2]?.values(ITEM_RULE5)).toEqual([]);
+    expect(CONFIRMATION_CRITERIA[2]?.values(ITEM_REQ2)).toEqual([]);
+    expect(CONFIRMATION_CRITERIA[2]?.values(ITEM_TEST_1)).toEqual(['low']);
     const criterion = CONFIRMATION_CRITERIA[3];
     expect(criterion?.values(human)).toEqual(['human']);
     expect(criterion?.values({ ...ITEM_RETIRED, actor: { kind: 'orchestrator' } })).toEqual([

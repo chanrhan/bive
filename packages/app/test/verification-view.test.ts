@@ -15,7 +15,7 @@ import { type FilterState, filterEntries } from '../src/renderer/src/components/
 import {
   complianceGroup,
   complianceValues,
-  RULE_CRITERIA,
+  ruleCriteria,
 } from '../src/renderer/src/screens/rules/rulesView.js';
 import {
   AGENT_RETIRED_FILTER,
@@ -199,7 +199,7 @@ describe('준수 두 기준 · 에이전트 폐기 규칙 카드 (M7-16 #228, AD
       index,
     }));
     const picked = (filter: FilterState) =>
-      filterEntries(entries, RULE_CRITERIA, filter).map((entry) => entry.key);
+      filterEntries(entries, ruleCriteria([]), filter).map((entry) => entry.key);
     expect(picked(CONFIRMED_COMPLIANCE_FILTER)).toEqual(['pass-confirmed', 'fail-confirmed']);
     expect(picked(CONFIRMED_COMPLIANCE_FILTER)).toEqual(
       items

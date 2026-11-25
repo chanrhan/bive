@@ -5,7 +5,10 @@
 // - 테스트 출력은 기본 접힘, 최신 판정이 실패면 자동 펼침. 안에 실패 원인(케이스 이름 · `file:line` · 메시지) · 전체 케이스
 // - 실패 원인의 `file:line`(판정 기록의 케이스 위치)에 코드 열기 링크(CodeLink)를 붙인다. 출발 화면은 놓는 화면이 정하고
 //   항목은 이 규칙이다 (MET-01, ADR-084). 줄이 없거나 상대 경로가 아니면 글자만 보인다
-// - 변경 이력(P1) · 변이 상태 · 대상 블록 · 위험도는 해당 이슈 전 미노출 (ADR-035)
+// - 변이 상태는 해당 이슈 전 미노출 (ADR-035)
+// - 대상 블록 · 위험도 (NRM-09, M3-19 #64 · ADR-126): 부모 요구사항 다음 줄. 대상 블록은 저장된 순서 그대로의 이름 목록이고
+//   지금 블록 선언(blocks.get)에 없는 이름은 "선언 외", 선언이 없는 프로젝트면 "블록 선언 없음" 한 번(BlockList). 빈 목록 ·
+//   위험도 null(옛 규칙 · 내장 규칙)은 "없음". 놓는 화면이 선언(`blocks`)을 주면 다시 읽지 않는다
 // - 머리 오른쪽 동작(`actions`)은 놓는 화면이 정한다: 규칙 화면은 [실행] (M1-19, ADR-076)
 // - 직접 편집 (ADR-100 B②, M7-03 · ADR-109): 놓는 화면이 `onEdited`를 주면 머리에 [편집](효력 있고 내장 구조 규칙이 아닌
 //   규칙만). [편집] → 제목 · 진술 입력 → [저장](⌘↵ · Ctrl+Enter) 1회 = rule.update(바뀐 칸만), [취소](Esc)는 호출 없음.
@@ -21,7 +24,7 @@
 // - 제목 · 진술 · 테스트 케이스 이름은 숨은 글자를 보이는 표기로 그린다(visibleText). 실패 메시지는 줄을 살리고 숨은 글자만
 //   표기한다(visibleLines). 편집 입력에는 원문을 넣는다. 편집 중에는 [확인]이 없다. 변경 기록 검증이 깨졌으면 변경 이력을 펼친다
 // - 요구사항 상세가 자식 규칙으로 펼칠 때는 부모(`parent`)를 넘겨 requirement.get을 다시 부르지 않는다 (ADR-078)
-// - 값은 rule.list 항목 · judgment.list · requirement.get 결과에서만 (NFR-03)
+// - 값은 rule.list 항목 · judgment.list · requirement.get · blocks.get 결과에서만 (NFR-03)
 import './RuleDetail.css';
 
 import type {
@@ -40,6 +43,9 @@ import { linkableLine } from '../../components/CodeLink/codeLinkView.js';
 import { CollapsibleDetail } from '../../components/CollapsibleDetail/CollapsibleDetail.js';
 import { StatusBadge } from '../../components/StatusBadge/StatusBadge.js';
 import { visibleLines, visibleText } from '../../components/VisibleText/visibleText.js';
+import { type BlockDeclarationLoad, BLOCK_TEXT, blockListView } from '../rules/blockView.js';
+import { riskText } from '../rules/rulesView.js';
+import { BlockList } from './BlockList.js';
 import { NORM_CHANGE_TEXT, normChangeRow } from './normChangeView.js';
 import {
   CASE_STATUS_LABELS,
@@ -79,6 +85,7 @@ import {
   useRuleNormChanges,
   useRuleParent,
 } from './useRuleDetailData.js';
+import { useBlockDeclaration } from './useBlockDeclaration.js';
 
 export interface RuleDetailProps {
   projectId: string;
@@ -95,6 +102,8 @@ export interface RuleDetailProps {
   onEdited?: (item: RuleWithJudgment) => void;
   /** 다른 규칙(대체한 규칙 · 대체된 규칙)의 상세로 간다. 없으면 규칙 표시 ID는 글자만 */
   onOpenRule?: (ruleId: string) => void;
+  /** 이미 읽은 지금 블록 선언 (요구사항 상세에서 펼칠 때). 주면 `blocks.get`을 부르지 않는다 */
+  blocks?: BlockDeclarationLoad;
 }
 
 const isMac = (): boolean => /Mac|iPhone|iPad/.test(navigator.userAgent);
@@ -109,6 +118,7 @@ export const RuleDetail = ({
   parent: knownParent,
   onEdited,
   onOpenRule,
+  blocks: knownBlocks,
 }: RuleDetailProps): React.JSX.Element => {
   const { rule, judgment, retirement } = item;
   const retired = retirement !== undefined;
@@ -225,6 +235,7 @@ export const RuleDetail = ({
   const knownMatches = knownParent !== undefined && knownParent.id === rule.parentRequirementId;
   const fetchedParent = useRuleParent(projectId, knownMatches ? null : rule.parentRequirementId);
   const parent = knownMatches ? knownParent : fetchedParent;
+  const declaration = useBlockDeclaration(projectId, knownBlocks);
   const entries = history.state === 'ready' ? history.entries : null;
   const runId = latestRunDisplayId(latest, entries);
   const counts = latest === null ? null : caseCountText(latest.cases);
@@ -372,6 +383,14 @@ export const RuleDetail = ({
             </Field>
           )
         )}
+        <Field id="blocks" label={BLOCK_TEXT.blocks}>
+          <BlockList view={blockListView(rule.targetBlockIds, declaration)} testId="rule-blocks" />
+        </Field>
+        <Field id="risk" label={BLOCK_TEXT.risk}>
+          <span data-testid="rule-risk" data-risk={rule.risk ?? ''}>
+            {riskText(rule.risk)}
+          </span>
+        </Field>
         <Field id="author" label={TEXT.author}>
           <AuthorMark kind={rule.author.kind} showLabel name={ruleAuthorName(rule.author)} />
         </Field>
