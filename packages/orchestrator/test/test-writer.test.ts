@@ -1882,7 +1882,33 @@ describe('테스트 작성 세션의 앞 시도 사유: Red 확인 결과의 케
       'Red 확인: 테스트 파일을 불러오거나 수집하지 못했다',
       `- ${FILE} ${RED_PROBLEM_WITHHELD}`,
     ]);
-    // 대상 규칙이 아닌 규칙 폴더는 읽지 않는다
+    // 고정 문구 뒤에 글을 덧붙인 메시지는 고정 문구가 아니다 (글자 그대로 같을 때만 싣는다)
+    expect(
+      describeUnmet(
+        {
+          reason: 'collect_error',
+          problems: [{ file: FILE, message: '수집된 테스트 0개 RED_APPENDED_TEXT' }],
+        },
+        known,
+      )?.split('\n'),
+    ).toEqual([
+      'Red 확인: 테스트 파일을 불러오거나 수집하지 못했다',
+      `- ${FILE} ${RED_PROBLEM_WITHHELD}`,
+    ]);
+    // 줄 번호는 양의 정수일 때만 싣는다 (글 · 소수 · 0 · 음수는 줄 자리에 실리지 않는다)
+    for (const line of ['7 RED_LINE_TEXT', 1.5, 0, -1, null, undefined]) {
+      expect(
+        describeUnmet(
+          { reason: 'not_red', notFailedCases: [{ name: KNOWN, file: FILE, line }] },
+          known,
+        )?.split('\n'),
+        String(line),
+      ).toEqual([
+        'Red 확인: 구현 전에 실패하지 않은 케이스가 있다 (모든 케이스가 실패해야 한다)',
+        `- ${FILE} ${KNOWN}`,
+      ]);
+    }
+    // 대상 규칙 폴더 밖 규칙 폴더는 읽지 않는다
     const other = await writtenAcceptanceOf(repo, commit, ['RULE-002']);
     expect(other.files.size).toBe(0);
     for (const unreadable of ['0'.repeat(40), 'HEAD', commit.slice(0, 12), null, undefined, 7]) {
@@ -1897,5 +1923,36 @@ describe('테스트 작성 세션의 앞 시도 사유: Red 확인 결과의 케
         `- ${RED_PROBLEM_WITHHELD} ${RED_PROBLEM_OUTSIDE}`,
       ]);
     }
+  });
+
+  it('대상 규칙이 둘이면 케이스 이름은 그 케이스 위치의 규칙 폴더 리터럴과만 대조한다: 다른 대상 규칙 폴더에만 적힌 이름은 "알 수 없는 케이스"다', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bive-red-feedback-'));
+    temps.push(tmp);
+    const repo = initAcceptanceRepo(tmp);
+    const OTHER_FILE = 'bive-acceptance/RULE-002/version.acc.ts';
+    const ONLY_IN_RULE_002 = '둘째 규칙에만 적힌 이름 RED_OTHER_RULE_NAME';
+    const commit = commitAcceptanceFiles(repo, {
+      [FILE]: caseFileText([KNOWN]),
+      [OTHER_FILE]: caseFileText([ONLY_IN_RULE_002]),
+    });
+    const written = await writtenAcceptanceOf(repo, commit, ['RULE-001', 'RULE-002']);
+    const text = describeUnmet(
+      {
+        reason: 'not_red',
+        notFailedCases: [
+          { name: KNOWN, file: FILE, line: 2, status: 'passed' },
+          { name: ONLY_IN_RULE_002, file: FILE, line: 3, status: 'passed' },
+          { name: ONLY_IN_RULE_002, file: OTHER_FILE, line: 2, status: 'passed' },
+        ],
+      },
+      written,
+    );
+    expect(text?.split('\n')).toEqual([
+      'Red 확인: 구현 전에 실패하지 않은 케이스가 있다 (모든 케이스가 실패해야 한다)',
+      `- ${FILE}:2 ${KNOWN}`,
+      `- ${OTHER_FILE}:2 ${ONLY_IN_RULE_002}`,
+      '- (알 수 없는 케이스 1건: 인수 테스트 파일에서 이름을 찾지 못해 싣지 않음)',
+    ]);
+    expect(text).not.toContain(`${FILE}:3`);
   });
 });
