@@ -1,16 +1,19 @@
 // 요구사항 상세 (screens.md SCR-02 상세 · SCR-06 규범 상세, 1.4, ADR-035 · ADR-078).
 // 요구사항 목록 + 상세 2단의 상세 영역에 들어간다(별도 화면 아님).
-// - 순서: 표시 ID · [편집] · [삭제] → 본문 · 생성 주체(이름) → 자식 규칙
+// - 순서: 표시 ID · [편집] · [삭제] → 본문 · 생성 주체(이름) → 자식 규칙 → 구현 위치
 // - 자식 규칙을 누르면 그 자리에서 규칙 상세(RuleDetail: 진술 · 속성 · 테스트 출력 · 실행 이력)를 펼친다. 펼친 규칙의 [편집]으로
 //   저장하면 응답의 규칙으로 자식 규칙 줄을 바꾼다(옛 제목을 남기지 않음, M7-03 · ADR-109)
 // - 직접 편집: [편집] → 본문 입력 → [저장](⌘↵ · Ctrl+Enter) 1회 = requirement.update, [취소](Esc)는 호출 없음.
 //   저장 중에는 다시 부르지 않고, 실패하면 입력을 남긴 채 "요구사항 저장 실패"
 // - 삭제: 두 번 눌러 확인(SCR-02). 첫 클릭은 [삭제 확인]으로 바뀌기만 하고(호출 없음), 두 번째 클릭에서
 //   requirement.delete 1회. 버튼을 벗어나면 확인 대기가 풀린다. 실패하면 "요구사항 삭제 실패"
-// - 변경 이력(P1) · 구현 위치(대상 블록, P1) · 자식 계약(P1)은 해당 이슈 전 미노출 (ADR-035)
+// - 변경 이력(P1) · 자식 계약(P1)은 해당 이슈 전 미노출 (ADR-035)
+// - 구현 위치 (SCR-02 상세 "자식 규칙의 대상 블록만", M3-19 #64 · ADR-126): 자식 규칙(rule.list 1회, 위와 같은 결과) 가운데 효력
+//   있는 것의 대상 블록을 중복 없이, 지금 블록 선언(blocks.get) 순서로(선언에 없는 이름은 뒤에 이름 순, "선언 외"). 없으면 "없음".
+//   자식 규칙 · 선언을 읽는 동안은 비움, 자식 규칙을 못 읽으면 "구현 위치 불러오기 실패". 읽은 선언은 펼친 자식 규칙에 넘긴다
 // - 자식 규칙 위에 가장 최근 규칙 작성 시도의 상태(대기 · 진행 중 · 생략 · 실패)를 한 줄 보인다. 정상 종료면 없음.
 //   값은 ruleWriter.status에서만, 알림 event.ruleWriter.changed · 재접속 · 직접 편집 저장 때 다시 읽는다 (M3-26, ADR-099)
-// - 값은 requirement.list 항목 · rule.list · ruleWriter.status 결과에서만 (NFR-03)
+// - 값은 requirement.list 항목 · rule.list · ruleWriter.status · blocks.get 결과에서만 (NFR-03)
 import './RequirementDetail.css';
 
 import type { Requirement, RuleWithJudgment } from '@bive/shared';
@@ -20,10 +23,18 @@ import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { AuthorMark } from '../../components/AuthorMark/AuthorMark.js';
 import { StatusBadge } from '../../components/StatusBadge/StatusBadge.js';
 import { visibleText } from '../../components/VisibleText/visibleText.js';
+import {
+  type BlockDeclarationLoad,
+  BLOCK_TEXT,
+  blockListView,
+  implementationBlocks,
+} from '../rules/blockView.js';
+import { BlockList } from './BlockList.js';
 import { canSaveEdit, REQUIREMENT_DETAIL_TEXT as TEXT } from './requirementDetailView.js';
 import { RuleDetail } from './RuleDetail.js';
 import { ruleAuthorName } from './ruleDetailView.js';
 import { type RuleWriterStatusView, ruleWriterStatusView } from './ruleWriterStatusView.js';
+import { useBlockDeclaration } from './useBlockDeclaration.js';
 import { type ChildRulesLoad, useChildRules } from './useChildRules.js';
 import { useRuleWriterStatus } from './useRuleWriterStatus.js';
 
@@ -49,6 +60,7 @@ export const RequirementDetail = ({
 }: RequirementDetailProps): React.JSX.Element => {
   const children = useChildRules(projectId, requirement.id, requirement.updatedAt);
   const writer = useRuleWriterStatus(projectId, requirement.id, requirement.updatedAt);
+  const declaration = useBlockDeclaration(projectId);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [armed, setArmed] = useState(false);
@@ -262,10 +274,53 @@ export const RequirementDetail = ({
           requirement={requirement}
           load={children.load}
           onEdited={children.replace}
+          blocks={declaration}
         />
+      </section>
+
+      <section
+        className="rule-section"
+        data-testid="requirement-implementation"
+        aria-labelledby="requirement-implementation-heading"
+      >
+        <h3 id="requirement-implementation-heading" className="rule-section-heading">
+          {BLOCK_TEXT.implementation}
+        </h3>
+        <Implementation load={children.load} declaration={declaration} />
       </section>
     </div>
   );
+};
+
+/** 구현 위치: 효력 있는 자식 규칙의 대상 블록 (선언 순서, 중복 없음). */
+const Implementation = ({
+  load,
+  declaration,
+}: {
+  load: ChildRulesLoad;
+  declaration: BlockDeclarationLoad;
+}): React.JSX.Element => {
+  if (load.state === 'error') {
+    return (
+      <p className="rule-detail-muted" data-testid="requirement-implementation-error">
+        {BLOCK_TEXT.implementationFailed}
+      </p>
+    );
+  }
+  if (load.state === 'loading' || declaration.state === 'loading') {
+    return (
+      <div
+        className="rule-history-loading"
+        data-testid="requirement-implementation-loading"
+        aria-busy="true"
+      />
+    );
+  }
+  const names = implementationBlocks(
+    load.items,
+    declaration.state === 'ready' ? declaration.names : null,
+  );
+  return <BlockList view={blockListView(names, declaration)} testId="requirement-blocks" />;
 };
 
 const Field = ({
@@ -320,11 +375,13 @@ const ChildRules = ({
   requirement,
   load,
   onEdited,
+  blocks,
 }: {
   projectId: string;
   requirement: Requirement;
   load: ChildRulesLoad;
   onEdited: (item: RuleWithJudgment) => void;
+  blocks: BlockDeclarationLoad;
 }): React.JSX.Element => {
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
 
@@ -394,6 +451,7 @@ const ChildRules = ({
                   sourceScreen="SCR-02"
                   parent={requirement}
                   onEdited={onEdited}
+                  blocks={blocks}
                 />
               </div>
             )}

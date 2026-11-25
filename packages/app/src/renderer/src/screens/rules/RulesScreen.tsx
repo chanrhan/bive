@@ -1,6 +1,7 @@
 // 규칙 화면 (screens.md SCR-03): 중앙 목록 + 상세 2단.
 // - 목록: rule.list 결과(효력 있는 규칙 + 폐기된 규칙 + 최신 판정)만 그린다(NFR-03). 카드 · 필터 규칙은 rulesView.ts.
-//   폐기된 규칙은 [폐기 포함]을 켜야 목록에 보인다(ADR-100 명세 변경 목록 SCR-03, M7-15 · ADR-114)
+//   폐기된 규칙은 [폐기 포함]을 켜야 목록에 보인다(ADR-100 명세 변경 목록 SCR-03, M7-15 · ADR-114). 블록 칩의 값은 받은 규칙의
+//   대상 블록 이름이다(ADR-126)
 // - 상세(SCR-06 규범 상세, norm-detail/RuleDetail): 카드를 고르면 진술 · 테스트 실행 결과 · 테스트 출력(접힘) · 실행 이력.
 //   고른 항목이 없으면 "선택 항목 없음"
 // - [실행](RunStart): 고른 규칙의 상세 머리에 있다. 누르면 실행 시작 확인 대화 → [시작]이면 run.create (ADR-076).
@@ -15,7 +16,7 @@
 import './RulesScreen.css';
 
 import type { RuleWithJudgment } from '@bive/shared';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { useListFilter } from '../../components/ListView/filterStore.js';
 import { ListView } from '../../components/ListView/ListView.js';
@@ -28,9 +29,9 @@ import { type CreatedRun, RunStart } from './RunStart.js';
 import {
   isRetiredRule,
   RETIRED_HIDDEN,
-  RULE_CRITERIA,
-  RULES_LIST_ID,
   ruleCard,
+  ruleCriteria,
+  RULES_LIST_ID,
   ruleKey,
   ruleSearchText,
   TEXT,
@@ -62,6 +63,8 @@ const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => 
   const [created, setCreated] = useState<{ ruleId: string; run: CreatedRun } | null>(null);
 
   const items = load.state === 'ready' ? load.items : [];
+  // 블록 칩 값은 받은 규칙의 대상 블록 이름에서 나온다(ADR-126)
+  const criteria = useMemo(() => ruleCriteria(load.state === 'ready' ? load.items : []), [load]);
   const [filter, setFilter] = useListFilter(RULES_LIST_ID);
   // 목록에서 사라진 항목은 고른 것으로 보지 않는다. [폐기 포함]이 꺼져 카드가 숨은 폐기 규칙도 같다
   const found = items.find((item) => item.rule.id === selectedId) ?? null;
@@ -110,7 +113,7 @@ const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => 
             itemKey={ruleKey}
             card={ruleCard}
             searchText={ruleSearchText}
-            criteria={RULE_CRITERIA}
+            criteria={criteria}
             emptyText={TEXT.empty}
             hidden={RETIRED_HIDDEN}
             selectedKey={selected?.rule.id ?? null}

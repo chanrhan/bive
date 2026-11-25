@@ -261,8 +261,8 @@ const AUTHOR_FILTER_TEXT = {
 /**
  * 필터 칩 4종 (ADR-100 명세 변경 SCR-17, 화면 정의서 SCR-17 필터의 "처리 상태"는 확인 상태로, "제안자"는 생성 주체로 바뀐다):
  * 확인 상태 · 종류 · 위험도 · 생성 주체. 값별 개수는 목록 항목에서만 센다(ListView, NFR-03).
- * 위험도는 규칙의 위험도(NRM-09)인데 `confirmation.list` 항목에 그 칸이 없고 지금 규칙의 위험도를 채우는 제품 코드도 없어
- * 값을 갖는 항목이 없다(모든 값 0건 비활성, ADR-119). 지어내지 않는다.
+ * 위험도는 대상 규칙의 위험도(NRM-09): 항목의 선택 칸 `risk`(폐기 · 대체 · 테스트 변경 · 미확인 규칙)에서 센다. 칸이 없는 항목
+ * (요구사항, 위험도가 없는 옛 규칙)은 값이 없다(M3-19 #64, ADR-126이 ADR-119의 "0건 비활성"을 대체). 지어내지 않는다.
  */
 export const CONFIRMATION_CRITERIA: readonly FilterCriterion<ConfirmationItem>[] = [
   {
@@ -281,7 +281,7 @@ export const CONFIRMATION_CRITERIA: readonly FilterCriterion<ConfirmationItem>[]
     id: 'risk',
     label: '위험도',
     options: options<Risk>(RISK_LABELS),
-    values: () => [],
+    values: (item) => (item.risk === undefined ? [] : [item.risk]),
   },
   {
     id: 'author',

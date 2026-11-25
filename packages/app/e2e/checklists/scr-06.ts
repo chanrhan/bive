@@ -3,12 +3,13 @@
 // 규칙 상세는 `ruleDetailChecklist`(index.ts에 등록), 요구사항 상세는 `requirementDetailChecklist`(spec이 넘김)
 // - 기본(규칙): 진술 · 종류 · 검사 · 부모 요구사항 · 생성 주체(이름), 테스트 실행 결과(판정 · 시각 · 커밋 · 실행 · 케이스),
 //   테스트 출력(최신 판정이 실패라 자동 펼침: 실패 원인 = 케이스 이름 · `file:line` · 메시지), 실행 이력(최신부터).
-//   변이 상태는 미노출 (ADR-035). 규칙 화면 상세의 머리에는 [편집] · [실행] (ADR-076 · ADR-109),
+//   대상 블록(저장 순서, 지금 선언에 없는 이름은 "선언 외") · 위험도(M3-19 · ADR-126). 변이 상태는 미노출 (ADR-035). 규칙 화면 상세의 머리에는 [편집] · [실행] (ADR-076 · ADR-109),
 //   속성 줄에 확인 상태와 (미확인이면) [확인], 맨 아래 변경 이력(규범 변경 기록, 기본 접힘) (M7-03 · M7-15 · ADR-114)
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-073 (실행 이력 자리만 비움 · "실행 이력 불러오기 실패", 나머지 상세는 그대로)
-// - 기본(요구사항): 표시 ID · [편집] · [삭제], 본문, 생성 주체(이름), 자식 규칙 목록(접힘). 변경 이력 · 구현 위치(P1)는
-//   미노출 (ADR-035). 로딩 · 에러는 ADR-078 (자식 규칙 자리만 비움 · "자식 규칙 불러오기 실패", 나머지 상세는 그대로)
+// - 기본(요구사항): 표시 ID · [편집] · [삭제], 본문, 생성 주체(이름), 자식 규칙 목록(접힘), 구현 위치(효력 있는 자식 규칙의
+//   대상 블록, 중복 없이 선언 순서, ADR-126). 변경 이력(P1)은 미노출 (ADR-035). 로딩 · 에러는 ADR-078 (자식 규칙 자리만 비움 · "자식 규칙 불러오기 실패", 나머지 상세는 그대로)
 import type {
+  BlocksResult,
   JudgmentCase,
   JudgmentResult,
   NormChangeListResult,
@@ -80,6 +81,29 @@ const judgmentOf = (
   ...patch,
 });
 
+/**
+ * 지금 블록 선언 (`blocks.get` 가짜 응답, 테스트 전용 데이터): health · auth · lib 순서. `legacy-mail`은 선언에 없다.
+ */
+export const BLOCKS: BlocksResult = {
+  current: {
+    version: 1,
+    setAt: '2026-10-14T00:00:00.000Z',
+    setBy: { kind: 'human' },
+    declaration: {
+      blocks: (['health', 'auth', 'lib'] as const).map((name) => ({
+        name,
+        kind: name === 'lib' ? 'shared' : 'domain',
+        include: [`src/${name}/**`],
+        public: [],
+        dependsOn: [],
+        risk: name === 'auth' ? 'high' : 'low',
+      })),
+    },
+  },
+};
+/** 블록 선언이 없는 프로젝트 (`blocks.get`의 `current: null`). */
+export const NO_BLOCKS: BlocksResult = { current: null };
+
 const failingRule: Rule = {
   ...base,
   id: '01JC0000000000000000000002',
@@ -87,6 +111,9 @@ const failingRule: Rule = {
   title: '결제 24시간 뒤 주문 취소 거절',
   statement: 'WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면 THE SYSTEM SHALL 요청을 거절한다',
   kind: 'business',
+  // 저장된 순서 그대로 보인다. legacy-mail은 지금 선언에 없다
+  targetBlockIds: ['lib', 'auth', 'legacy-mail'],
+  risk: 'medium',
 };
 
 const passingRule: Rule = {
@@ -96,6 +123,8 @@ const passingRule: Rule = {
   title: '로그인 5회 실패 시 계정 잠금',
   statement: 'WHEN 같은 계정으로 로그인이 5회 연속 실패하면 THE SYSTEM SHALL 계정을 10분간 잠근다',
   kind: 'business',
+  targetBlockIds: ['auth'],
+  risk: 'high',
 };
 
 const unjudgedRule: Rule = {
@@ -374,7 +403,7 @@ export const FAILING_RULE = failingRule;
 export const PASSING_RULE = passingRule;
 export const UNJUDGED_RULE = unjudgedRule;
 
-/** 미노출 요소 (ADR-035): 변이 상태(P1) · 대상 블록 · 위험도(P1). [실행]은 규칙 화면 상세에 있다(ADR-076). */
+/** 미노출 요소 (ADR-035): 변이 상태(P1). [실행]은 규칙 화면 상세에 있다(ADR-076). */
 const hidden: ElementCheck[] = [
   {
     // 정상 변이 상태는 흐린 점(이름만), 예외는 글자 (1.4 상태 배지)
@@ -384,8 +413,20 @@ const hidden: ElementCheck[] = [
     absent: true,
   },
   { label: '변이 상태 미노출 (글자)', text: /변이 생존/, absent: true },
-  { label: '대상 블록 미노출', testId: 'rule-field-blocks', absent: true },
-  { label: '위험도 미노출', testId: 'rule-field-risk', absent: true },
+];
+
+/** 대상 블록 · 위험도 (NRM-09, ADR-126): 부모 요구사항 다음 줄. RULE-002 = lib · auth · legacy-mail(선언 외), 보통. */
+const blocksAndRisk: ElementCheck[] = [
+  { label: '대상 블록 줄', testId: 'rule-field-blocks', text: /^대상 블록/ },
+  { label: '대상 블록 이름 (저장 순서)', testId: 'block-name', count: 3 },
+  {
+    label: '선언에 없는 이름 표시',
+    testId: 'block-undeclared',
+    count: 1,
+    text: '선언 외',
+  },
+  { label: '블록 선언 알림 없음 (선언 있음)', testId: 'block-note', absent: true },
+  { label: '위험도', testId: 'rule-field-risk', text: '위험도보통' },
 ];
 
 /** 실행 이력 밖의 상세 (상태와 무관하게 같다). */
@@ -446,6 +487,7 @@ const detail: ElementCheck[] = [
   { label: '편집 버튼 (규칙 상세 머리, M7-03)', testId: 'rule-edit', role: 'button', name: '편집' },
   { label: '편집 입력 닫힘', testId: 'rule-editor', absent: true },
   ...hidden,
+  ...blocksAndRisk,
 ];
 
 /** 최신 판정의 실행 ID는 실행 이력(`judgment.list`)에서 찾으므로 이력이 있을 때만 보인다. */
@@ -529,9 +571,14 @@ const requirementDetail: ElementCheck[] = [
   { label: '자식 규칙 영역', testId: 'requirement-rules', role: 'region', name: '자식 규칙' },
   { label: '편집 입력 닫힘', testId: 'requirement-editor', absent: true },
   { label: '동작 실패 문구 없음', testId: 'requirement-action-error', absent: true },
-  // 미노출 (ADR-035): 변경 이력(P1) · 구현 위치(자식 규칙의 대상 블록, P1)
+  // 미노출 (ADR-035): 변경 이력(P1)
   { label: '변경 이력 미노출', text: /변경 이력/, absent: true },
-  { label: '구현 위치 미노출', text: /구현 위치/, absent: true },
+  {
+    label: '구현 위치 영역',
+    testId: 'requirement-implementation',
+    role: 'region',
+    name: '구현 위치',
+  },
 ];
 
 export const requirementDetailChecklist = {
@@ -551,6 +598,9 @@ export const requirementDetailChecklist = {
         },
         { label: '펼친 규칙 없음', testId: 'child-rule-detail', absent: true },
         { label: '자식 규칙 불러오기 실패 없음', testId: 'requirement-rules-error', absent: true },
+        // 효력 있는 자식 규칙의 대상 블록, 중복 없이 선언 순서(auth · lib), 선언에 없는 legacy-mail은 뒤
+        { label: '구현 위치 블록 (중복 제거)', testId: 'block-name', count: 3 },
+        { label: '구현 위치의 선언에 없는 이름', testId: 'block-undeclared', count: 1 },
       ],
     },
     로딩: {
@@ -563,6 +613,12 @@ export const requirementDetailChecklist = {
           attributes: { 'aria-busy': 'true' },
         },
         { label: '자식 규칙 없음', testId: 'child-rule', absent: true },
+        {
+          label: '구현 위치 자리 (대기)',
+          testId: 'requirement-implementation-loading',
+          attributes: { 'aria-busy': 'true' },
+        },
+        { label: '구현 위치 블록 없음', testId: 'block-name', absent: true },
       ],
     },
     에러: {
@@ -576,6 +632,11 @@ export const requirementDetailChecklist = {
           text: '자식 규칙 불러오기 실패',
         },
         { label: '자식 규칙 없음', testId: 'child-rule', absent: true },
+        {
+          label: '구현 위치 불러오기 실패',
+          testId: 'requirement-implementation-error',
+          text: '구현 위치 불러오기 실패',
+        },
       ],
     },
   },

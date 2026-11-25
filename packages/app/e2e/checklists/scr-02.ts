@@ -1,10 +1,10 @@
 // SCR-02 요구사항 (screens.md SCR-02 · 1.4, ADR-029 · ADR-035 · ADR-053, ADR-100 I3 · 명세 변경 목록 SCR-02 · ADR-114).
 // - 기본: 목록 + 상세 2단. 카드 1줄 요구사항 문장 · 생성 주체 아이콘, 2줄 ID · 예외(미확인 포함) · 시각. [+ 새 요구사항] ·
-//   검색 · 필터 칩 4종(상태 · 작성 · 확인 · 블록) · [문제만]. 상세 자리는 고른 항목이 없어 "선택 항목 없음"
+//   검색 · 필터 칩 4종(상태 · 작성 · 확인 · 블록, 블록 값은 rule.list에서 만든 구현 위치, ADR-126) · [문제만]. 상세 자리는 고른 항목이 없어 "선택 항목 없음"
 // - 빈: "요구사항 없음"(ADR-029), [+ 새 요구사항]은 그대로
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-053 (로딩 = 목록 자리 비움, 에러 = "요구사항 불러오기 실패")
 // 시각 문구는 e2e가 Asia/Seoul 시간대로 연다는 전제다 (scr-02.spec.ts).
-import type { Project, Requirement } from '@bive/shared';
+import type { Project, Requirement, Rule, RuleWithJudgment } from '@bive/shared';
 
 import type { ElementCheck, ScreenChecklist } from './types.js';
 
@@ -76,6 +76,54 @@ export const REQUIREMENTS: Requirement[] = [
 
 /** 화면에 보이는 순서: 문제 항목(미확인 · 규칙화 불가) 먼저 최신순, 그다음 정상 (ADR-034). */
 export const VISIBLE_ORDER = ['REQ-002', 'REQ-003', 'REQ-001'] as const;
+
+/** 자식 규칙 (테스트 전용 데이터): 목록의 블록 칩 값 = 요구사항의 구현 위치(효력 있는 자식 규칙의 대상 블록, ADR-126). */
+const childRule = (
+  n: number,
+  parent: string,
+  targetBlockIds: string[],
+  patch: Partial<Rule> = {},
+): Rule => ({
+  id: `01JC00000000000000000002${String(n).padStart(2, '0')}`,
+  displayId: `RULE-2${String(n).padStart(2, '0')}`,
+  title: `자식 규칙 ${String(n)}`,
+  statement: 'THE SYSTEM SHALL 동작한다',
+  kind: 'business',
+  checkKinds: ['test'],
+  parentRequirementId: parent,
+  parentDetachedAt: null,
+  builtin: false,
+  targetBlockIds,
+  risk: 'low',
+  contractId: null,
+  author: { kind: 'agent', role: 'rule-writer' },
+  normState: 'approved',
+  createdAt: '2026-10-15T01:00:00.000Z',
+  updatedAt: '2026-10-15T01:00:00.000Z',
+  deletedAt: null,
+  confirmation: { state: 'unconfirmed' },
+  ...patch,
+});
+const unjudgedItem = (rule: Rule): RuleWithJudgment => ({
+  rule,
+  judgment: { status: 'unjudged', latest: null },
+});
+const REQ = (index: number): string => (REQUIREMENTS[index] as Requirement).id;
+
+/**
+ * 요구사항 화면이 읽는 `rule.list` 가짜 응답 (폐기 포함). 구현 위치: REQ-001 auth · lib(두 규칙이 auth를 함께 가져도 한 번),
+ * REQ-002 auth · legacy-mail, REQ-003 없음(폐기 · 잠정 규칙의 블록은 넣지 않는다).
+ */
+export const REQUIREMENT_RULES: RuleWithJudgment[] = [
+  unjudgedItem(childRule(1, REQ(0), ['auth', 'lib'])),
+  unjudgedItem(childRule(2, REQ(0), ['auth'])),
+  unjudgedItem(childRule(3, REQ(1), ['legacy-mail', 'auth'])),
+  {
+    ...unjudgedItem(childRule(4, REQ(2), ['retired-only'])),
+    retirement: { retiredAt: '2026-10-16T00:00:00.000Z', supersededBy: null, normChangeSeq: 1 },
+  },
+  unjudgedItem(childRule(5, REQ(2), ['provisional-only'], { normState: 'provisional' })),
+];
 
 /** 필터 칩 4종 (SCR-02 필터). */
 export const CHIPS = [

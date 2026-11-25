@@ -64,7 +64,8 @@ const unjudged = (item: Rule): RuleWithJudgment => ({
 
 /**
  * `rule.list` 가짜 응답 (테스트 전용 데이터, NFR-03). 삭제된 RULE-004는 화면에 보이면 안 된다. 미확인은 RULE-002(실패와 겹침) ·
- * RULE-006. 폐기된 RULE-007(RULE-006이 대체)은 [폐기 포함]을 켜야 보인다.
+ * RULE-006. 폐기된 RULE-007(RULE-006이 대체)은 [폐기 포함]을 켜야 보인다. 대상 블록 · 위험도: RULE-001 auth · 높음,
+ * RULE-002 auth · lib · 보통, RULE-003 없음(옛 규칙), RULE-005 lib · 낮음, RULE-006 auth · legacy-mail · 높음, RULE-007 auth · 보통.
  */
 export const RULES: RuleWithJudgment[] = [
   judged(
@@ -72,6 +73,8 @@ export const RULES: RuleWithJudgment[] = [
       id: '01JC0000000000000000000001',
       displayId: 'RULE-001',
       title: '로그인 5회 실패 시 계정 잠금',
+      targetBlockIds: ['auth'],
+      risk: 'high',
       statement:
         'WHEN 같은 계정으로 로그인이 5회 연속 실패하면 THE SYSTEM SHALL 계정을 10분간 잠근다',
       kind: 'business',
@@ -83,6 +86,8 @@ export const RULES: RuleWithJudgment[] = [
       id: '01JC0000000000000000000002',
       displayId: 'RULE-002',
       title: '결제 24시간 뒤 주문 취소 거절',
+      targetBlockIds: ['auth', 'lib'],
+      risk: 'medium',
       statement:
         'WHEN 결제 후 24시간이 지난 주문의 취소를 요청하면 THE SYSTEM SHALL 요청을 거절한다',
       kind: 'business',
@@ -114,6 +119,8 @@ export const RULES: RuleWithJudgment[] = [
       id: '01JC0000000000000000000005',
       displayId: 'RULE-005',
       title: 'API 라우트는 서비스 계층만 호출',
+      targetBlockIds: ['lib'],
+      risk: 'low',
       statement: 'WHEN API 라우트가 데이터를 읽으면 THE SYSTEM SHALL 서비스 계층을 거친다',
       kind: 'architecture',
     }),
@@ -124,6 +131,9 @@ export const RULES: RuleWithJudgment[] = [
       id: '01JC0000000000000000000006',
       displayId: 'RULE-006',
       title: '비밀번호 재설정 링크 30분 만료',
+      // legacy-mail은 블록 선언에 없을 수 있는 이름(칩 값은 응답에서 온다)
+      targetBlockIds: ['auth', 'legacy-mail'],
+      risk: 'high',
       statement: 'WHEN 재설정 링크가 발급 후 30분을 넘기면 THE SYSTEM SHALL 링크를 거부한다',
       kind: 'business',
       confirmation: UNCONFIRMED,
@@ -136,6 +146,8 @@ export const RULES: RuleWithJudgment[] = [
         id: '01JC0000000000000000000007',
         displayId: 'RULE-007',
         title: '비밀번호 재설정 링크 1시간 만료',
+        targetBlockIds: ['auth'],
+        risk: 'medium',
         statement: 'WHEN 재설정 링크가 발급 후 1시간을 넘기면 THE SYSTEM SHALL 링크를 거부한다',
         kind: 'business',
         confirmation: UNCONFIRMED,
@@ -170,14 +182,14 @@ export const RUN_START = {
   failed: '실행 시작 실패',
 } as const;
 
-/** 필터 칩 7종 (SCR-03 필터 + 확인, ADR-100 I3). 변이 · 블록 · 위험도는 값이 없어 0건 비활성 (ADR-035). */
+/** 필터 칩 7종 (SCR-03 필터 + 확인, ADR-100 I3). 변이는 값이 없어 0건 비활성 (ADR-035), 블록 · 위험도는 규칙 값에서 (ADR-126). */
 export const CHIPS = [
   { id: 'judgment', label: '판정', enabled: true },
   { id: 'mutation', label: '변이', enabled: false },
   { id: 'compliance', label: '준수 집계', enabled: true },
   { id: 'confirmation', label: '확인', enabled: true },
-  { id: 'block', label: '블록', enabled: false },
-  { id: 'risk', label: '위험도', enabled: false },
+  { id: 'block', label: '블록', enabled: true },
+  { id: 'risk', label: '위험도', enabled: true },
   { id: 'kind', label: '종류', enabled: true },
 ] as const;
 

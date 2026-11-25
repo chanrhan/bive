@@ -115,6 +115,8 @@ export const ITEM_SUPERSEDED = {
   grounds: SUPERSEDE_GROUNDS,
   rationale: RLO_RATIONALE,
   released: { seq: 11, at: at('10:00') },
+  // 대상 규칙의 위험도 (선택 칸, ADR-126에서 위험도 칩이 센다)
+  risk: 'high',
   textTruncated: false,
 } as const satisfies ConfirmationListResult['items'][number];
 
@@ -131,6 +133,7 @@ export const ITEM_RETIRED = {
   grounds: RETIRE_GROUNDS,
   rationale: null,
   released: null,
+  risk: 'medium',
   textTruncated: false,
 } as const satisfies ConfirmationListResult['items'][number];
 
@@ -146,6 +149,7 @@ export const ITEM_TEST_1 = {
   sessionId: ID.session,
   files: [{ path: 'bive-acceptance/RULE-004/uptime.acc.ts', change: 'modified' }],
   fileCount: 1,
+  risk: 'low',
   textTruncated: false,
 } as const satisfies ConfirmationListResult['items'][number];
 
@@ -163,10 +167,14 @@ export const ITEM_TEST_2 = {
     { path: 'bive-acceptance/RULE-004/old-helper.acc.ts', change: 'removed' },
   ],
   fileCount: 3,
+  risk: 'low',
   textTruncated: false,
 } as const satisfies ConfirmationListResult['items'][number];
 
-/** 미확인 규범: 대체로 생긴 새 규칙 · 규칙 작성 역할의 규칙 · 에이전트의 요구사항. */
+/**
+ * 미확인 규범: 대체로 생긴 새 규칙 · 규칙 작성 역할의 규칙 · 에이전트의 요구사항. RULE-005는 위험도가 없는 옛 규칙이라 `risk`
+ * 칸이 없다(요구사항도 없다).
+ */
 export const ITEM_RULE3 = {
   kind: 'unconfirmed_norm',
   at: at('10:00'),
@@ -174,6 +182,7 @@ export const ITEM_RULE3 = {
   displayId: 'RULE-003',
   text: RULE3_AFTER.title,
   author: RULE_WRITER,
+  risk: 'high',
   textTruncated: false,
 } as const satisfies ConfirmationListResult['items'][number];
 

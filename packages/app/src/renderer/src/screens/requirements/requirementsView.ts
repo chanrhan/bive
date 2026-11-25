@@ -4,8 +4,9 @@
 // - 예외: 추적성 결함 · 규칙화 불가 · 미확인 · 실패. 미확인은 옛 '잠정' 자리다(ADR-100 명세 변경 목록 SCR-02). 사람이 쓴
 //   요구사항은 저장 즉시 확인됨이라 예외가 없다(B①). 값은 Requirement 필드에서만 도출한다(NFR-03).
 //   추적성 결함(규칙 없는 요구사항)과 실패(자식 규칙 판정)는 규칙 · 판정 데이터가 아직 없어 도출하지 않는다
-// - 필터: 상태 · 작성 · 확인 · 블록. 옛 "승인"(승인 · 대기 · 잠정) 칩은 "확인"(미확인 · 확인됨)으로 바뀌었다. 블록은 값이 없어
-//   0건 비활성 (ADR-035)
+// - 필터: 상태 · 작성 · 확인 · 블록. 옛 "승인"(승인 · 대기 · 잠정) 칩은 "확인"(미확인 · 확인됨)으로 바뀌었다. 블록 값은 그
+//   요구사항의 구현 위치(효력 있는 자식 규칙의 대상 블록, rule.list에서 만든다. M3-19 #64 · ADR-126). 위험도 칩은 SCR-02 필터에
+//   없어 두지 않는다
 import type { AuthorKind, ConfirmationState, Requirement } from '@bive/shared';
 
 import { AUTHOR_LABELS } from '../../components/AuthorMark/labels.js';
@@ -15,6 +16,7 @@ import {
   type ExceptionMark,
   type ExceptionTone,
 } from '../../components/StatusBadge/status.js';
+import { blockOptions } from '../rules/blockView.js';
 
 /** 목록 ID = 경로 ID (ADR-048). 필터 상태가 이 ID로 유지된다. */
 export const REQUIREMENTS_LIST_ID = 'requirements';
@@ -90,8 +92,13 @@ export const requirementCard = (requirement: Requirement): RequirementCardData =
 
 export const requirementKey = (requirement: Requirement): string => requirement.id;
 
-/** 필터 기준 4종 (SCR-02 필터: 상태 · 작성 · 확인 · 블록, 확인은 ADR-100 명세 변경 목록 SCR-02). 순서가 칩 순서다. */
-export const REQUIREMENT_CRITERIA: readonly FilterCriterion<Requirement>[] = [
+/**
+ * 필터 기준 4종 (SCR-02 필터: 상태 · 작성 · 확인 · 블록, 확인은 ADR-100 명세 변경 목록 SCR-02). 순서가 칩 순서다.
+ * `blocks` = 요구사항 ID → 구현 위치(`implementationBlocksByRequirement`). 규칙 목록을 모르면(읽는 중 · 실패) 빈 표 = 블록 0건 비활성.
+ */
+export const requirementCriteria = (
+  blocks: ReadonlyMap<string, readonly string[]>,
+): readonly FilterCriterion<Requirement>[] => [
   {
     id: 'status',
     label: '상태',
@@ -128,8 +135,8 @@ export const REQUIREMENT_CRITERIA: readonly FilterCriterion<Requirement>[] = [
   {
     id: 'block',
     label: '블록',
-    // 블록(파서, M2)과 자식 규칙의 대상 블록 데이터가 아직 없다 → 값 없음 = 0건 비활성 (ADR-035)
-    options: [],
-    values: () => [],
+    // 구현 위치의 블록마다 한 번씩 센다. 자식 규칙이 없거나 블록이 없는 요구사항은 값이 없다
+    options: blockOptions([...blocks.values()].flat()),
+    values: (requirement) => blocks.get(requirement.id) ?? [],
   },
 ];
