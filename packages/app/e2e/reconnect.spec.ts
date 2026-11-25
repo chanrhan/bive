@@ -174,8 +174,9 @@ test.describe('합치기 (수용 기준 3)', () => {
     await expect(page.getByTestId('pipeline-current')).toHaveText('구현');
     // 사이드바 연결 표시 1 + 배지 1 + 검증 화면 1
     await expect.poll(async () => (await bive.listenerCounts())['system.connection']).toBe(3);
-    // 구독이 없는 화면(계약)으로 간다. 요구사항 화면은 블록 칩의 규칙 목록이 재접속을 구독한다(ADR-126)
-    await page.getByRole('button', { name: '계약', exact: true }).click();
+    // 구독이 없는 화면(추적성 맵)으로 간다. 요구사항 화면은 블록 칩의 규칙 목록이, 계약 화면은 계약 목록이 재접속을 구독한다
+    // (ADR-126 · ADR-133)
+    await page.getByRole('button', { name: '추적성 맵', exact: true }).click();
     await expect.poll(async () => (await bive.listenerCounts())['system.connection']).toBe(2);
   });
 });

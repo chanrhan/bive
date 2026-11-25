@@ -116,6 +116,6 @@ const Field = ({
 }): React.JSX.Element => (
   <div className="rule-field" data-testid={`contract-field-${id}`}>
     <dt>{label}</dt>
-    <dd>{children}</dd>
+    <dd data-testid={`contract-value-${id}`}>{children}</dd>
   </div>
 );
