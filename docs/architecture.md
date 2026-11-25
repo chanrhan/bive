@@ -49,7 +49,7 @@ pnpm 워크스페이스 · TypeScript strict · ESM. 경계는 ESLint `no-restri
 |---|---|---|---|
 | `packages/shared` | 도메인 타입 · 상태 enum · IPC 프로토콜 zod 스키마 · ID 생성 | `zod`, `ulid` | 다른 워크스페이스 패키지 전부, Node 전용 모듈 |
 | `packages/store` | 폴더 밖 저장소. better-sqlite3 · 마이그레이션 · 리포지토리 | `shared`, `better-sqlite3` | `orchestrator`, `parser`, `app` |
-| `packages/parser` (M2) | import 그래프 · 블록 판정 · Prisma→ERD · jscpd · 테스트 요청 경로 스캔 · OpenAPI 대조 | `shared` | `store`, `orchestrator`, `app` (순수 함수: 파일 입력 → 결과) |
+| `packages/parser` (M2) | import 그래프 · 블록 판정 · Prisma→ERD · jscpd · 테스트 요청 경로 스캔 · OpenAPI 대조 | `shared`, `dependency-cruiser`(자기 실행기를 자식 프로세스로, ADR-125), `zod` | `store`, `orchestrator`, `app` (순수 함수: 파일 입력 → 결과) |
 | `packages/orchestrator` | 파이프 서버 · 실행 엔진 · 에이전트 어댑터 · 고정 도구 · 판정기 · 예산 · git · 감시자 | `shared`, `store`, `parser`, `@anthropic-ai/claude-agent-sdk` | `app` |
 | `packages/app` main | 창 · 파이프 클라이언트 · 오케스트레이터 기동 · 폴더 선택 대화상자 | `shared`, `electron` | `store`, `orchestrator`, `parser` (프로세스 경계 넘는 import 금지, 실행 파일 경로로만 기동) |
 | `packages/app` preload | `window.bive` 노출(`invoke` · `on`만). 메서드 허용 목록은 main (ADR-042) | `electron`, `shared` (타입만) | Node 모듈 직접 노출 |
