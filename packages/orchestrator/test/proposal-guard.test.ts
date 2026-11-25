@@ -150,11 +150,11 @@ describe('규칙 · 계약 쓰기 RPC는 사람의 규칙 직접 편집뿐 (NRM-
     await expect(h.client.call('ping')).resolves.toMatchObject({ pong: true });
   });
 
-  it('메서드 레지스트리의 규칙 · 계약 쓰기는 rule.update 하나이고 제안 등록 메서드가 없다', () => {
+  it('메서드 레지스트리의 규칙 · 계약 쓰기는 rule.update(사람의 규칙 편집)와 contract.register(사람의 계약 등록, M3-04 · ADR-129)뿐이고 제안 등록 메서드가 없다', () => {
     const writes = METHOD_NAMES.filter(
       (name) => /^(rule|contract)\./.test(name) && !/\.(list|get)$/.test(name),
     );
-    expect(writes).toEqual(['rule.update']);
+    expect(writes).toEqual(['rule.update', 'contract.register']);
     expect(METHOD_NAMES).not.toContain('proposal.create');
     expect(METHOD_NAMES).not.toContain('proposal.submit');
     expectUntouched();

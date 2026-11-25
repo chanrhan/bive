@@ -15,13 +15,16 @@
 // - 블록 선언이 있으면 자료 끝에 지금 판의 선언(이름 · 종류 · 위험도 · 포함 경로 · 공개 API · 허용 의존)을 싣는다(M3-01 #46,
 //   ADR-122): 규칙 작성 역할이 대상 블록을 고르고, 테스트 작성 · 구현 역할이 블록 경계를 안다. 값은 저장소가 읽을 때 스키마로 본
 //   선언이라(깨진 행은 읽지 못하고 던진다) 보이는 ASCII만이다. 그래서 표시 값 변환을 거치지 않는다. 선언이 없으면 아무것도 싣지 않는다(지금까지의 작업 지시 그대로)
-// - 저장소를 읽기만 한다. 계약(M3-04)과 대상 블록으로 고르기(M3-29)는 뒤 이슈가 더한다
+// - 효력 있는 계약이 있으면 규칙 절 뒤에 계약 절(표시 ID · 종류 · 원본 파일)을 싣는다(M3-04 #49, ADR-100 K1 · A14, ADR-129). 같은
+//   표시 값 변환 · 상한 · 줄이기(최근 등록 순으로 상한까지)를 따른다. 계약 내용은 싣지 않는다(목록만). 계약이 없으면 절이 없다
+//   (지금까지의 작업 지시 그대로). 계약 검사 규칙의 부모 줄은 그 계약을 가리킨다
+// - 저장소를 읽기만 한다. 대상 블록으로 고르기(M3-29)는 뒤 이슈가 더한다
 import type { BlockDeclarationRecord, SessionNormInput } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
 import { displayText } from '../text-limit.js';
 import type { CaseNameFilter } from './case-names.js';
-import { effectiveRequirements, effectiveRules } from './effective.js';
+import { effectiveContracts, effectiveRequirements, effectiveRules } from './effective.js';
 
 /** 규범 입력의 상한 (ADR-106). 길이는 표시 값 기준 UTF-16 코드 단위. */
 export const NORM_INPUT_LIMITS = {
@@ -39,6 +42,10 @@ export const NORM_INPUT_LIMITS = {
   caseName: 200,
   /** 규칙 하나에 싣는 케이스 수 */
   casesPerRule: 20,
+  /** 싣는 계약 수 (M3-04) */
+  contracts: 50,
+  /** 계약 원본 파일 경로 (M3-04) */
+  contractSourceFile: 1024,
 } as const;
 
 /** 자료 시작 표시 줄 (줄 첫머리에 홀로 있다). */
@@ -95,10 +102,14 @@ export const normInputRecord = (input: NormInput): SessionNormInput => ({
   summary: {
     requirements: { ...input.summary.requirements },
     rules: { ...input.summary.rules },
+    ...(input.summary.contracts === undefined ? {} : { contracts: { ...input.summary.contracts } }),
     truncated: input.summary.truncated,
   },
   requirementDisplayIds: input.requirements.map((entry) => entry.displayId),
   ruleDisplayIds: input.rules.map((entry) => entry.displayId),
+  ...(input.contracts === undefined
+    ? {}
+    : { contractDisplayIds: input.contracts.map((entry) => entry.displayId) }),
 });
 
 /** 초점: 상한으로 줄일 때 먼저 남길 대상 (A15). */
@@ -120,6 +131,8 @@ export interface NormInputCount {
 export interface NormInputSummary {
   readonly requirements: NormInputCount;
   readonly rules: NormInputCount;
+  /** 효력 있는 계약이 있을 때만 (M3-04) */
+  readonly contracts?: NormInputCount;
   /** 상한 때문에 빠진 항목이 있는지 */
   readonly truncated: boolean;
 }
@@ -134,11 +147,21 @@ export interface NormInputRequirement {
   readonly focus: boolean;
 }
 
-/** 규칙의 부모: 요구사항 표시 ID, 부모 해제, 내장 규칙. */
+/** 규칙의 부모: 요구사항 표시 ID, 부모 해제, 내장 구조 규칙, 계약 검사 규칙의 계약 (M3-04). */
 export type NormInputParent =
   | { readonly kind: 'requirement'; readonly displayId: string }
   | { readonly kind: 'detached' }
-  | { readonly kind: 'builtin' };
+  | { readonly kind: 'builtin' }
+  | { readonly kind: 'contract'; readonly displayId: string };
+
+/** 실은 계약 하나 (M3-04). 종류는 정해진 값이고 원본 파일은 표시 값이다. */
+export interface NormInputContract {
+  readonly id: string;
+  readonly displayId: string;
+  readonly kind: string;
+  /** 원본 파일 (표시 값) */
+  readonly sourceFile: string;
+}
 
 /** 실은 규칙 하나 (표시 값). */
 export interface NormInputRule {
@@ -168,6 +191,8 @@ export interface NormInput {
   readonly summary: NormInputSummary;
   /** 지금 블록 선언 (M3-01 #46). 선언이 없으면 칸이 없다 */
   readonly blocks?: BlockDeclarationRecord;
+  /** 실은 계약 (표시 ID 순, M3-04). 효력 있는 계약이 없으면 칸이 없다 */
+  readonly contracts?: readonly NormInputContract[];
 }
 
 // 효력 판정은 `norms/effective.ts` 한 곳에 있다 (폐기된 규칙은 효력이 없다, M7-09 #221 · ADR-112)
@@ -256,6 +281,10 @@ export const collectNormInput = (
   const displayIdOf = new Map(
     store.requirements.list().map((requirement) => [requirement.id, requirement.displayId]),
   );
+  const contracts = effectiveContracts(store);
+  const contractDisplayIdOf = new Map(
+    contracts.map((contract) => [contract.id, contract.displayId]),
+  );
   const latest = store.judgments.latestForRules();
   const shownRequirements = requirements
     .filter((requirement) => keptRequirements.has(requirement.id))
@@ -278,6 +307,11 @@ export const collectNormInput = (
         parent = {
           kind: 'requirement',
           displayId: displayIdOf.get(rule.parentRequirementId) ?? rule.parentRequirementId,
+        };
+      } else if (rule.contractId !== null) {
+        parent = {
+          kind: 'contract',
+          displayId: contractDisplayIdOf.get(rule.contractId) ?? rule.contractId,
         };
       } else {
         parent = rule.builtin ? { kind: 'builtin' } : { kind: 'detached' };
@@ -302,27 +336,57 @@ export const collectNormInput = (
     });
   const requirementCount = count(requirements.length, shownRequirements.length);
   const ruleCount = count(rules.length, shownRules.length);
+  // 계약: 최근 등록 순으로 상한까지 고르고 표시 ID 순으로 싣는다 (초점이 없다)
+  const keptContracts = pick(
+    contracts.map((contract) => ({ ...contract, updatedAt: contract.createdAt })),
+    () => false,
+    limits.contracts,
+  );
+  const shownContracts = contracts
+    .filter((contract) => keptContracts.has(contract.id))
+    .map((contract): NormInputContract => ({
+      id: contract.id,
+      displayId: contract.displayId,
+      kind: contract.kind,
+      sourceFile: displayText(contract.sourceFile, NORM_INPUT_LIMITS.contractSourceFile).text,
+    }));
+  const contractCount =
+    contracts.length === 0 ? null : count(contracts.length, shownContracts.length);
   const blocks = store.blockDeclarations.current();
   return {
     ...(blocks === null ? {} : { blocks }),
     requirements: shownRequirements,
     rules: shownRules,
+    ...(contractCount === null ? {} : { contracts: shownContracts }),
     summary: {
       requirements: requirementCount,
       rules: ruleCount,
-      truncated: requirementCount.omitted > 0 || ruleCount.omitted > 0,
+      ...(contractCount === null ? {} : { contracts: contractCount }),
+      truncated:
+        requirementCount.omitted > 0 || ruleCount.omitted > 0 || (contractCount?.omitted ?? 0) > 0,
     },
   };
 };
 
-const heading = (label: string, counted: NormInputCount, limit: number): string =>
+/** 요구사항 · 규칙 절의 줄이기 순서 (A15). */
+const NORM_TRIM_ORDER = '대상과 같은 부모의 항목을 먼저 넣고 나머지는 최근 변경 순';
+/** 계약 절의 줄이기 순서 (초점이 없다, M3-04). */
+const CONTRACT_TRIM_ORDER = '최근 등록 순';
+
+const heading = (
+  label: string,
+  counted: NormInputCount,
+  limit: number,
+  order: string = NORM_TRIM_ORDER,
+): string =>
   counted.omitted === 0
     ? `${label} (효력 ${String(counted.total)}건 중 ${String(counted.included)}건)`
     : `${label} (효력 ${String(counted.total)}건 중 ${String(counted.included)}건만 실음, ` +
-      `${String(counted.omitted)}건 빠짐: 상한 ${String(limit)}건, 대상과 같은 부모의 항목을 먼저 넣고 나머지는 최근 변경 순)`;
+      `${String(counted.omitted)}건 빠짐: 상한 ${String(limit)}건, ${order})`;
 
 const parentText = (parent: NormInputParent): string => {
   if (parent.kind === 'requirement') return parent.displayId;
+  if (parent.kind === 'contract') return `없음 (계약 ${parent.displayId}의 검사 규칙)`;
   return parent.kind === 'detached' ? '없음 (부모 해제)' : '없음 (내장 구조 규칙)';
 };
 
@@ -363,6 +427,16 @@ export const renderNormInput = (input: NormInput, focusLabel: string): string =>
       lines.push(
         `    (알 수 없는 케이스 ${String(unknown)}건: 인수 테스트 파일에서 이름을 찾지 못해 싣지 않음)`,
       );
+    }
+  }
+  if (input.contracts !== undefined && input.summary.contracts !== undefined) {
+    lines.push(
+      heading('계약', input.summary.contracts, NORM_INPUT_LIMITS.contracts, CONTRACT_TRIM_ORDER),
+    );
+    for (const contract of input.contracts) {
+      lines.push(`- ${contract.displayId}`);
+      lines.push(`  종류: ${contract.kind}`);
+      lines.push(`  원본 파일: ${contract.sourceFile}`);
     }
   }
   if (input.blocks !== undefined) lines.push(...blockLines(input.blocks));
