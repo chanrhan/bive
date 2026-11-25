@@ -630,6 +630,28 @@ describe('rule.get: 최신 실행 링크의 비용 · 턴 (M3-16 #61, COST-02 ·
     });
   });
 
+  it('표시 ID 자리수가 넘어가도 순번으로 고른다 (EXE-999보다 EXE-1000이 최신, 사전식 순서가 아니다)', async () => {
+    const req = await createRequirement();
+    const rule = await approveRule(req.id, '중복 이메일 가입 거부');
+    // 실행 순번을 998로 올려 둔다 (다음 실행이 EXE-999 · EXE-1000)
+    h.read((store) =>
+      store.db
+        .prepare(
+          `INSERT INTO display_id_sequences (prefix, last_seq) VALUES ('EXE', 998)
+           ON CONFLICT (prefix) DO UPDATE SET last_seq = 998`,
+        )
+        .run(),
+    );
+    const older = createRun([rule.id]);
+    addSession(older.run, stepOf(older.steps, 'test_writing'), { costUsd: 0.7, turns: 8 });
+    const newer = createRun([rule.id]);
+    addSession(newer.run, stepOf(newer.steps, 'test_writing'), { costUsd: 0.2, turns: 2 });
+    expect([older.run.displayId, newer.run.displayId]).toEqual(['EXE-999', 'EXE-1000']);
+    const latest = await latestRunOf(rule.id);
+    expect(latest?.displayId).toBe('EXE-1000');
+    expect(latest).toEqual({ id: newer.run.id, displayId: 'EXE-1000', costUsd: 0.2, turns: 2 });
+  });
+
   it('다른 규칙만 대상인 실행은 섞이지 않는다 (더 나중에 만들어졌어도)', async () => {
     const req = await createRequirement();
     const mine = await approveRule(req.id, '이 규칙');

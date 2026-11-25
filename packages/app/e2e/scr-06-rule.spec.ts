@@ -2088,6 +2088,24 @@ test.describe('최신 실행 링크의 비용 · 턴 (M3-16 #61 수용 기준 2,
     expect(await callsOf(bive, 'rule.get')).toHaveLength(before + 2);
   });
 
+  test('오케스트레이터에 다시 붙으면(끊김 → 연결됨) rule.get을 다시 읽어 새 비용 · 턴이 보인다', async ({
+    page,
+  }) => {
+    const bive = await openLatest(page, { ...LATEST_RUN, costUsd: null, turns: null });
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 없음');
+    // 끊긴 동안 잃은 알림을 회복하는지: 응답을 재접속 전에 바꿔 두고 알림 없이 재접속만 한다
+    await bive.setResponse('rule.get', {
+      result: ruleGetOf(RULES[1] as RuleWithJudgment, { ...LATEST_RUN, costUsd: 0.42, turns: 6 }),
+    });
+    const connection = page.getByTestId('connection-status');
+    await bive.emit('system.connection', { state: 'disconnected' });
+    await expect(connection).toHaveAttribute('data-state', 'disconnected');
+    await bive.emit('system.connection', { state: 'connected', status: STATUS });
+    await expect(connection).toHaveAttribute('data-state', 'connected');
+    await expect(field(page).getByTestId('rule-latest-run-cost')).toHaveText('비용 $0.42');
+    await expect(field(page).getByTestId('rule-latest-run-turns')).toHaveText('턴 6');
+  });
+
   test('늦게 온 옛 응답은 먼저 온 새 응답을 덮지 않는다', async ({ page }) => {
     // 처음 읽기(옛 값)는 늦게, 실행 알림 뒤 읽기(새 값)는 바로 온다
     const bive = await openLatest(page, LATEST_RUN, {
