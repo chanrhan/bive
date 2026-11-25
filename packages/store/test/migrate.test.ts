@@ -2348,3 +2348,311 @@ describe('0023 structure_judge_runner: 판정 실행기 dependency-cruiser (M3-0
     });
   });
 });
+
+describe('0024 contracts: 계약 · 계약 검사 규칙 제약 · 확인 상태의 계약 (M3-04 #49, NRM-03 · ADR-019 · ADR-100 D2, ADR-129)', () => {
+  const T = (second: number) => `2026-11-25T01:00:${String(second).padStart(2, '0')}.000Z`;
+  const human = '{"kind":"human"}';
+  const agent = '{"kind":"agent","role":"rule-writer"}';
+  const HASH = 'a'.repeat(64);
+  const COMMIT = 'b'.repeat(40);
+  /** 0024가 새로 만드는 객체 (종류 · 이름 순). */
+  const NEW_OBJECTS = [
+    ['table', 'contracts'],
+    ['trigger', 'contracts_no_delete'],
+    ['trigger', 'contracts_no_replace'],
+    ['trigger', 'contracts_no_update'],
+    ['trigger', 'contracts_parent_live'],
+    ['trigger', 'rules_contract_rule'],
+  ];
+  /**
+   * 0024가 지우고 다시 만드는 객체: 확인 표와 그 트리거 다섯(0012의 넷 · 0019의 하나), 다른 표의 트리거 하나(0019). 글자가 바뀌는
+   * 것은 확인 표와 대상이 있어야 하는 트리거 둘뿐이다(계약을 더했다)
+   */
+  const REBUILT = [
+    'confirmations',
+    'confirmations_no_delete',
+    'confirmations_no_replace',
+    'confirmations_release_recorded',
+    'confirmations_target_exists',
+    'confirmations_target_immutable',
+    'norm_changes_unconfirmed',
+  ];
+  const CHANGED = ['confirmations', 'confirmations_target_exists'];
+
+  const seed = (db: SqliteDatabase) => {
+    const req = newId();
+    db.prepare(
+      `INSERT INTO requirements (id, display_id, text, author, norm_state, unrulable_reason, created_at,
+       updated_at, updated_by, deleted_at) VALUES (?, 'REQ-001', '본문', ?, 'approved', NULL, ?, ?, ?, NULL)`,
+    ).run(req, human, T(0), T(0), human);
+    const rule = (seq: number) => {
+      const id = newId();
+      db.prepare(
+        `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
+         parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
+         updated_at, deleted_at) VALUES (?, ?, '제목', '진술', 'business', '["test"]', ?, NULL, 0, '[]',
+         NULL, NULL, ?, 'approved', ?, ?, NULL)`,
+      ).run(id, `RULE-00${String(seq)}`, req, agent, T(seq), T(seq));
+      return id;
+    };
+    return { req, a: rule(1), b: rule(2), c: rule(3) };
+  };
+  const insertContract = (
+    db: SqliteDatabase,
+    row: { id?: string; display?: string; file?: string; parent?: string | null } = {},
+  ) => {
+    const id = row.id ?? newId();
+    db.prepare(
+      `INSERT INTO contracts (id, display_id, kind, source_file, content_hash, source_commit,
+       parent_requirement_id, author, created_at) VALUES (?, ?, 'openapi', ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      row.display ?? 'CON-001',
+      row.file ?? 'openapi.yaml',
+      HASH,
+      COMMIT,
+      row.parent ?? null,
+      human,
+      T(5),
+    );
+    return id;
+  };
+  const insertRule = (
+    db: SqliteDatabase,
+    row: {
+      contract: string | null;
+      builtin?: number;
+      parent?: string | null;
+      checks?: string;
+      display?: string;
+    },
+  ) =>
+    db
+      .prepare(
+        `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
+         parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
+         updated_at, deleted_at) VALUES (?, ?, '계약 규칙', '진술', 'tech-constraint', ?, ?, NULL, ?, '[]',
+         NULL, ?, ?, 'approved', ?, ?, NULL)`,
+      )
+      .run(
+        newId(),
+        row.display ?? 'RULE-009',
+        row.checks ?? '["contract"]',
+        row.parent ?? null,
+        row.builtin ?? 1,
+        row.contract,
+        human,
+        T(6),
+        T(6),
+      );
+  const confirm = (db: SqliteDatabase, entity: string, id: string, basis: string) =>
+    db
+      .prepare(
+        `INSERT INTO confirmations (entity, target_id, state, confirmed_at, confirmed_by, basis)
+         VALUES (?, ?, 'confirmed', ?, ?, ?)`,
+      )
+      .run(entity, id, T(4), human, basis);
+
+  it('0023까지의 DB(확인 행 · 풀린 행 · 두 해시 체인 있음)에 0024만 올리면 모든 표의 행은 값 · 순서 그대로, 다시 만든 객체는 이름 그대로이고 글자가 바뀐 것은 확인 표와 대상 트리거뿐이며, 새 객체는 표 하나와 트리거 다섯뿐이고 두 체인 검증 결과가 그대로다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 23), { now: fixedNow });
+      const { req, a, b, c } = seed(db);
+      const log = new ApprovalLogRepository(db).append({
+        at: T(2),
+        action: 'confirm',
+        actor: { kind: 'human' },
+        targetRef: { entity: 'Rule', id: a },
+        clientId: 'pipe-1',
+        detail: {},
+      });
+      confirm(db, 'Requirement', req, `{"kind":"requirement_record","at":"${T(0)}"}`);
+      confirm(db, 'Rule', a, `{"kind":"approval_log","seq":${String(log.seq)}}`);
+      confirm(db, 'Rule', b, '{"kind":"approval_log","seq":1}');
+      const changes = new NormChangeRepository(db);
+      const retired = changes.append({
+        at: T(7),
+        kind: 'retired',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        targetRef: { entity: 'Rule', id: b },
+        sessionId: newId(),
+        runId: null,
+        reason: '근거',
+        detail: { before: { title: '제목' }, retirement: { supersededBy: null } },
+      });
+      changes.append({
+        at: T(8),
+        kind: 'unconfirmed',
+        actor: { kind: 'orchestrator' },
+        targetRef: { entity: 'Rule', id: b },
+        sessionId: null,
+        runId: null,
+        reason: '풀림',
+        detail: {
+          unconfirm: {
+            causeSeq: retired.seq,
+            previous: {
+              state: 'confirmed',
+              at: T(4),
+              by: { kind: 'human' },
+              basis: { kind: 'approval_log', seq: 1 },
+            },
+          },
+        },
+      });
+      db.prepare(
+        `UPDATE confirmations SET state = 'unconfirmed', confirmed_at = NULL, confirmed_by = NULL,
+         basis = NULL WHERE target_id = ?`,
+      ).run(b);
+      // 0023까지는 계약 엔터티 · 계약 근거를 DB CHECK가 막는다
+      expect(() => confirm(db, 'Contract', c, '{"kind":"approval_log","seq":1}')).toThrow(/CHECK/);
+      expect(() => confirm(db, 'Rule', c, `{"kind":"contract_record","at":"${T(0)}"}`)).toThrow(
+        /CHECK/,
+      );
+      const tables = (
+        db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations'",
+          )
+          .all() as { name: string }[]
+      ).map((row) => row.name);
+      const rowsOf = () =>
+        Object.fromEntries(
+          tables.map((table) => [
+            table,
+            db.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all(),
+          ]),
+        );
+      const before = rowsOf();
+      expect(before.confirmations).toHaveLength(3);
+      const schemaBefore = schemaOf(db) as { type: string; name: string; sql: string }[];
+      const logBefore = new ApprovalLogRepository(db).verify();
+      const changesBefore = new NormChangeRepository(db).verify();
+      expect(logBefore).toMatchObject({ valid: true });
+      expect(changesBefore).toMatchObject({ valid: true });
+
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 24), { now: fixedNow }).applied).toEqual([24]);
+      expect(rowsOf()).toEqual(before);
+      const after = schemaOf(db) as { type: string; name: string; sql: string }[];
+      const added = new Set(NEW_OBJECTS.map(([, name]) => name));
+      expect(
+        after.filter((item) => added.has(item.name)).map((item) => [item.type, item.name]),
+      ).toEqual(NEW_OBJECTS);
+      const kept = after.filter((item) => !added.has(item.name));
+      expect(kept.map((item) => [item.type, item.name])).toEqual(
+        schemaBefore.map((item) => [item.type, item.name]),
+      );
+      for (const name of REBUILT)
+        expect(
+          kept.some((item) => item.name === name),
+          name,
+        ).toBe(true);
+      const sqlBefore = new Map(schemaBefore.map((item) => [item.name, item.sql]));
+      expect(
+        kept
+          .filter((item) => item.sql !== sqlBefore.get(item.name))
+          .map((item) => item.name)
+          .sort(),
+      ).toEqual(CHANGED);
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%_v24%'").all()).toEqual(
+        [],
+      );
+      expect(new ApprovalLogRepository(db).verify()).toEqual(logBefore);
+      expect(new NormChangeRepository(db).verify()).toEqual(changesBefore);
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+      // 다시 실행해도 스키마가 같다
+      const schema = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 24), { now: fixedNow }).applied).toEqual([]);
+      expect(schemaOf(db)).toEqual(schema);
+    });
+  });
+
+  it('확인 상태: 있는 계약만 받고, 계약의 작성 기록 근거는 계약에만 받으며, 다시 만든 덮어쓰기 · 대상 변경 · 삭제 · 풀림 기록 트리거와 사람 주체 CHECK가 그대로 동작한다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      const { req, a } = seed(db);
+      expect(() =>
+        confirm(db, 'Contract', newId(), `{"kind":"contract_record","at":"${T(5)}"}`),
+      ).toThrow(/없는 요구사항 · 규칙 · 계약/);
+      const contract = insertContract(db);
+      confirm(db, 'Contract', contract, `{"kind":"contract_record","at":"${T(5)}"}`);
+      // 계약의 작성 기록 근거는 계약에만
+      expect(() => confirm(db, 'Rule', a, `{"kind":"contract_record","at":"${T(5)}"}`)).toThrow(
+        /CHECK/,
+      );
+      expect(() =>
+        confirm(db, 'Requirement', req, `{"kind":"contract_record","at":"${T(5)}"}`),
+      ).toThrow(/CHECK/);
+      confirm(db, 'Rule', a, '{"kind":"approval_log","seq":1}');
+      // 사람 주체만 · 모르는 근거 종류 · 모르는 엔터티 거부
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO confirmations (entity, target_id, state, confirmed_at, confirmed_by, basis)
+             VALUES ('Requirement', ?, 'confirmed', ?, ?, '{"kind":"approval_log","seq":1}')`,
+          )
+          .run(req, T(4), agent),
+      ).toThrow(/CHECK/);
+      expect(() => confirm(db, 'Requirement', req, '{"kind":"other"}')).toThrow(/CHECK/);
+      expect(() => confirm(db, 'Block', newId(), '{"kind":"approval_log","seq":1}')).toThrow(
+        /CHECK/,
+      );
+      // 덮어쓰기 · 대상 변경 · 삭제 · 풀림 기록 없는 풀기
+      expect(() =>
+        confirm(db, 'Contract', contract, `{"kind":"contract_record","at":"${T(5)}"}`),
+      ).toThrow(/덮어쓰기 금지/);
+      expect(() =>
+        db.prepare(`UPDATE confirmations SET target_id = ? WHERE target_id = ?`).run(a, contract),
+      ).toThrow(/대상은 바꿀 수 없습니다/);
+      expect(() => db.prepare('DELETE FROM confirmations').run()).toThrow(/지울 수 없습니다/);
+      expect(() =>
+        db
+          .prepare(
+            `UPDATE confirmations SET state = 'unconfirmed', confirmed_at = NULL, confirmed_by = NULL,
+             basis = NULL WHERE target_id = ?`,
+          )
+          .run(contract),
+      ).toThrow(/확인 풀림 기록 없이/);
+    });
+  });
+
+  it('계약 표: 같은 파일 · 같은 ID는 한 번, 삭제된 · 없는 부모 요구사항 거부, 수정 · 삭제 거부. 계약 검사 규칙은 있는 계약마다 하나 · 내장 · 부모 없음 · 검사 종류 계약뿐이다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      const { req } = seed(db);
+      const contract = insertContract(db, { parent: req });
+      expect(() => insertContract(db, { display: 'CON-002' })).toThrow(/덮어쓰기 금지/);
+      expect(() =>
+        insertContract(db, { id: contract, display: 'CON-002', file: 'b.yaml' }),
+      ).toThrow(/덮어쓰기 금지/);
+      expect(() =>
+        insertContract(db, { display: 'CON-002', file: 'b.yaml', parent: newId() }),
+      ).toThrow(/부모 요구사항이 없거나 삭제됐습니다/);
+      db.prepare('UPDATE requirements SET deleted_at = ? WHERE id = ?').run(T(9), req);
+      expect(() => insertContract(db, { display: 'CON-002', file: 'b.yaml', parent: req })).toThrow(
+        /부모 요구사항이 없거나 삭제됐습니다/,
+      );
+      expect(() => db.prepare('UPDATE contracts SET content_hash = ?').run('c'.repeat(64))).toThrow(
+        /바꿀 수 없습니다/,
+      );
+      expect(() => db.prepare('DELETE FROM contracts').run()).toThrow(/지울 수 없습니다/);
+      // 계약 검사 규칙
+      const cases: [string, Parameters<typeof insertRule>[1]][] = [
+        ['없는 계약', { contract: newId() }],
+        ['내장 아님', { contract, builtin: 0, parent: req }],
+        ['부모 있음', { contract, parent: req }],
+        ['검사 종류', { contract, checks: '["test"]' }],
+        ['검사 종류 여럿', { contract, checks: '["contract","test"]' }],
+      ];
+      for (const [label, row] of cases) {
+        expect(() => insertRule(db, row), label).toThrow(/계약 검사 규칙은/);
+      }
+      insertRule(db, { contract });
+      expect(() => insertRule(db, { contract, display: 'RULE-010' })).toThrow(/계약 검사 규칙은/);
+      // 계약 칸이 없는 규칙은 그대로 받는다 (트리거는 계약 칸이 있을 때만)
+      insertRule(db, { contract: null, checks: '["structure"]', display: 'RULE-011' });
+      expect(
+        db.prepare('SELECT count(*) AS n FROM rules WHERE contract_id IS NOT NULL').get(),
+      ).toEqual({ n: 1 });
+    });
+  });
+});
