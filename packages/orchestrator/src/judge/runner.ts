@@ -90,7 +90,26 @@ export interface JudgeRunInput {
    * 대조한다(설치 중 변경 차단). 주지 않으면 시작 때 값을 기준으로 삼는다
    */
   acceptanceHashes?: Readonly<Record<string, string>>;
+  /**
+   * 판정 서버 앞에 끼우는 프록시 (선택, M3-47 #292 · ADR-132). 주면 서버가 뜬 뒤 `start`를 부르고 vitest에는 서버 대신 프록시의 기준
+   * URL을 넘긴다. 판정이 끝나면(실패 · 중단 · 시간 초과 포함) 서버보다 먼저 `stop`을 부른다. 주지 않으면 판정 동작이 그대로다
+   */
+  serverProxy?: JudgeServerProxy;
 }
+
+/** 판정 서버 앞에 끼우는 프록시 (계약 검사의 기록 프록시 등). */
+export interface JudgeServerProxy {
+  /** 판정 서버(`upstreamBaseUrl`, 127.0.0.1)가 뜬 뒤 부른다. 돌려준 기준 URL은 127.0.0.1의 http여야 한다 */
+  start(input: { readonly upstreamBaseUrl: string }): Promise<StartedJudgeServerProxy>;
+}
+
+export interface StartedJudgeServerProxy {
+  readonly baseUrl: string;
+  stop(): Promise<void>;
+}
+
+/** 프록시 기준 URL 형식 (판정 서버와 같다: 127.0.0.1의 임의 포트). */
+const PROXY_BASE_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}$/u;
 
 /** 판정 입력 변조 (검토 1회차, ADR-069): 판정 중 인수 테스트 · 테스트 실행기 · 판정 설정이 바뀌었다. */
 export interface JudgeTampering {
@@ -309,13 +328,21 @@ export class JudgeRunner {
     );
 
     const timings: Partial<Record<JudgeTimingStep, number>> = {};
+    /** 판정 서버 앞 프록시를 멈춘다 (한 번만, 띄우지 않았으면 아무것도 하지 않는다) */
+    const stopProxy = async (): Promise<void> => {
+      const started = proxy;
+      proxy = undefined;
+      if (started !== undefined) await started.stop();
+    };
     let server: StartedServer | undefined;
+    let proxy: StartedJudgeServerProxy | undefined;
     let exitCode: number | null = null;
     let tampered: JudgeTampering | null = null;
 
     const finish = async (
       partial: Pick<JudgeRunResult, 'status' | 'cases' | 'summary' | 'problems'>,
     ): Promise<JudgeRunResult> => {
+      await stopProxy();
       if (server !== undefined) await server.stop();
       await restrictFiles(dir);
       const endedMs = Date.now();
@@ -471,9 +498,25 @@ export class JudgeRunner {
       const beforeVitest = changedSinceBaseline();
       if (beforeVitest.length > 0) return await tamper('before_vitest', beforeVitest);
 
+      // 판정 서버 앞 프록시 (선택): vitest에는 프록시의 기준 URL을 넘긴다
+      let baseUrl = server.baseUrl;
+      if (input.serverProxy !== undefined) {
+        try {
+          proxy = await input.serverProxy.start({ upstreamBaseUrl: server.baseUrl });
+        } catch (err) {
+          return await runnerError(
+            `판정 서버 앞 프록시를 띄우지 못했습니다: ${describeError(err)}`,
+          );
+        }
+        if (!PROXY_BASE_URL.test(proxy.baseUrl)) {
+          return await runnerError('판정 서버 앞 프록시의 기준 URL이 127.0.0.1의 http가 아닙니다');
+        }
+        baseUrl = proxy.baseUrl;
+      }
+
       const exit = await runCommand(...vitestCommand(paths.config), {
         cwd: worktreeDir,
-        env: { ...vitestEnv, [BASE_URL_ENV]: server.baseUrl },
+        env: { ...vitestEnv, [BASE_URL_ENV]: baseUrl },
         stdoutFile: paths.stdout,
         stderrFile: paths.stderr,
         timeoutMs: deadline.remaining(),
@@ -481,7 +524,8 @@ export class JudgeRunner {
       });
       timings.vitest = exit.durationMs;
       exitCode = exit.code;
-      // vitest가 끝나면 서버(프로젝트 코드)를 먼저 멈춘 뒤 대조하고 결과를 읽는다 (대조 뒤 서버가 바꾸지 못하게)
+      // vitest가 끝나면 서버(프로젝트 코드)를 먼저 멈춘 뒤 대조하고 결과를 읽는다 (대조 뒤 서버가 바꾸지 못하게). 프록시가 있으면 그 앞에서 멈춘다
+      await stopProxy();
       await server.stop();
       // vitest가 끝난 직후 (실행 중 서버 코드가 바꿨는지)
       const afterVitest = changedSinceBaseline();
@@ -529,6 +573,7 @@ export class JudgeRunner {
       ) {
         return await runnerError(err.message);
       }
+      await stopProxy();
       if (server !== undefined) await server.stop();
       throw new Error(`판정 러너 내부 오류: ${describeError(err)}`, { cause: err });
     }

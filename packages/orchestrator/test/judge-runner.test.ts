@@ -47,7 +47,9 @@ import {
   judgeInputFingerprint,
   resolveRunnerEntry,
 } from '../src/judge/fingerprint.js';
+import { ExchangeRecorder } from '../src/contract-check/recorder.js';
 import { JudgeRunner, type JudgeRunResult } from '../src/judge/index.js';
+import type { JudgeServerProxy } from '../src/judge/runner.js';
 
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const RESET_FIXTURE = path.join(REPO_ROOT, 'scripts', 'reset-fixture.sh');
@@ -2591,4 +2593,95 @@ describe('판정 설치 로그를 끄는 프로젝트 설정 (#162 검토 2회�
   ])('%s %j는 설치 전에 거부한다', (file, body, message) => {
     expect(() => check({ [file]: body })).toThrow(message);
   });
+});
+
+describe('판정 서버 앞 프록시 자리 (선택 옵션, M3-47 #292 · ADR-132)', () => {
+  const PROXY_ACC = `import { expect, inject, it } from 'vitest';
+
+it('기준 URL', async () => {
+  console.log(\`BASE_URL=\${inject('baseUrl')}\`);
+  const res = await fetch(new URL('/api/health', inject('baseUrl')));
+  expect(res.status).toBe(200);
+});
+`;
+  const run = (serverProxy?: JudgeServerProxy) =>
+    runner.run({
+      projectId,
+      runId,
+      worktreeDir: fixtureDir,
+      profile: 'next-prisma-sqlite',
+      ruleIds: ['RULE-020'],
+      timeoutMs: JUDGE_TIMEOUT_MS,
+      ...(serverProxy === undefined ? {} : { serverProxy }),
+    });
+
+  it(
+    '옵션이 없으면 vitest는 판정 서버 기준 URL을 받고(판정 동작 그대로), 옵션이 있으면 서버가 뜬 뒤 프록시를 띄워 그 URL을 넘기고 서버보다 먼저 멈춘다',
+    async () => {
+      write('bive-acceptance/RULE-020/proxy.acc.ts', PROXY_ACC);
+      try {
+        const dbDirsBefore = tempDbDirs();
+        const plain = await run();
+        expect(plain.status).toBe('completed');
+        expect(plain.cases.map((c) => c.status)).toEqual(['passed']);
+        expect(readFileSync(plain.paths.stdout, 'utf8')).toContain(
+          `BASE_URL=${plain.server!.baseUrl}`,
+        );
+        await expectNoLeftovers(plain, dbDirsBefore);
+
+        const events: string[] = [];
+        const recorder = new ExchangeRecorder();
+        let upstream = '';
+        let proxyUrl = '';
+        const proxied = await run({
+          start: async (input) => {
+            upstream = input.upstreamBaseUrl;
+            events.push('start');
+            const started = await recorder.start(input);
+            proxyUrl = started.baseUrl;
+            return {
+              baseUrl: started.baseUrl,
+              stop: async () => {
+                // 서버보다 먼저 멈춘다: 이때 판정 서버는 아직 응답한다
+                const alive = await fetch(new URL('/api/health', upstream)).then(
+                  () => true,
+                  () => false,
+                );
+                events.push(`stop (서버 ${alive ? '살아 있음' : '멈춤'})`);
+                await started.stop();
+              },
+            };
+          },
+        });
+        expect(proxied.status).toBe('completed');
+        expect(proxied.cases.map((c) => c.status)).toEqual(['passed']);
+        expect(upstream).toBe(proxied.server!.baseUrl);
+        expect(proxyUrl).not.toBe(upstream);
+        const stdout = readFileSync(proxied.paths.stdout, 'utf8');
+        expect(stdout).toContain(`BASE_URL=${proxyUrl}`);
+        expect(stdout).not.toContain(`BASE_URL=${upstream}`);
+        expect(events).toEqual(['start', 'stop (서버 살아 있음)']);
+        expect(recorder.exchanges().map((e) => [e.method, e.target, e.status])).toEqual([
+          ['GET', '/api/health', 200],
+        ]);
+        await expect(fetch(proxyUrl)).rejects.toThrow();
+        await expectNoLeftovers(proxied, dbDirsBefore);
+
+        // 프록시를 띄우지 못하면 runner_error이고 서버 · 임시 DB를 정리한다
+        const failed = await run({
+          start: () => Promise.reject(new Error('프록시 실패')),
+        });
+        expect(failed.status).toBe('runner_error');
+        expect(failed.message).toBe('판정 서버 앞 프록시를 띄우지 못했습니다: 프록시 실패');
+        expect(failed.cases).toEqual([]);
+        await expectNoLeftovers(failed, dbDirsBefore);
+      } finally {
+        rmSync(path.join(fixtureDir, 'bive-acceptance', 'RULE-020'), {
+          recursive: true,
+          force: true,
+        });
+      }
+    },
+    3 * BUILD_TEST_TIMEOUT_MS,
+  );
 });

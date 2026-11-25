@@ -415,10 +415,11 @@ export const RuleWriterState = z.enum(['queued', 'running', 'ended', 'skipped'])
 export type RuleWriterState = z.infer<typeof RuleWriterState>;
 
 /**
- * 판정 실행기 (JDG-01). 인수 테스트는 vitest, 내장 구조 규칙(구조 검사, JDG-05)은 dependency-cruiser(파서, M3-03 #48 · ADR-127).
+ * 판정 실행기 (JDG-01). 인수 테스트는 vitest, 내장 구조 규칙(구조 검사, JDG-05)은 dependency-cruiser(파서, M3-03 #48 · ADR-127),
+ * OpenAPI 계약 검사 규칙은 redocly-prism(`@redocly/cli lint` + `@stoplight/prism-cli proxy --errors`, M3-47 #292 · ADR-132).
  * 넓히기만 한다(옛 판정 기록 행이 있다).
  */
-export const JudgeRunner = z.enum(['vitest', 'dependency-cruiser']);
+export const JudgeRunner = z.enum(['vitest', 'dependency-cruiser', 'redocly-prism']);
 export type JudgeRunner = z.infer<typeof JudgeRunner>;
 
 /** 판정 결과의 테스트 케이스 상태 (vitest JSON 리포터의 assertion status). */

@@ -27,14 +27,29 @@
 // - 병합 재검사의 구조 검사 (M3-03 #48, ADR-127): 블록 선언이 있으면 검사 단계와 같은 구조 검사를 병합 커밋의 깨끗한 체크아웃에서 설치
 //   전에 하고 내장 구조 규칙의 판정 기록을 남긴다(선언은 단계를 열 때 읽은 판). 내장 규칙이 실패하거나 구조 검사가 판정하지 못하면
 //   재검사 실패(병합 없음)다
+// - 병합 재검사의 계약 검사 (M3-47 #292, ADR-132): 계약 검사 규칙이 있으면 검사 단계와 같은 계약 검사를 병합 커밋의 판정에서 하고 판정
+//   기록을 남긴다. 계약과 다른 응답 · 도구를 끝까지 못 돌림은 재검사 실패(병합 없음)다. 등록된 문서의 형식 오류 · 판정 없음은 막지 않는다
 import type { JudgmentResult, Rule } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import type { MergeCheck } from '../git/worktree-manager.js';
 import { DEFAULT_INSTALL_TIMEOUT_MS } from '../judge/checkout.js';
-import { retiredTargetDisplayIds, TARGET_RULE_RETIRED } from '../norms/effective.js';
+import {
+  effectiveContracts,
+  retiredTargetDisplayIds,
+  TARGET_RULE_RETIRED,
+} from '../norms/effective.js';
 import { approvedRules } from './check.js';
+import {
+  CONTRACT_STAGE,
+  contractJudgmentsFrom,
+  contractRuleIds,
+  contractSummary,
+  missingContractVerdicts,
+  nonBlockingContractRuleIds,
+  contractPlanOf,
+} from './contract-check.js';
 import { contradictionHalt, judgeExistingRuleFailures } from './existing-rule.js';
 import {
   createNormGuard,
@@ -275,7 +290,15 @@ export const createMergeExecutor =
     if (planned.kind === 'halt') return planned.outcome;
     const plan = planned.kind === 'plan' ? planned.plan : null;
     const structureIds = structureRuleIds(plan);
-    const testedRules = rules.filter((rule) => !structureIds.includes(rule.id));
+    // 계약 검사 계획 (검사 단계와 같다)
+    const contractPlanned = contractPlanOf(
+      rules,
+      context.read((store) => effectiveContracts(store)),
+    );
+    if (contractPlanned.kind === 'halt') return contractPlanned.outcome;
+    const contractPlan = contractPlanned.kind === 'plan' ? contractPlanned.plan : null;
+    const builtinIds = [...structureIds, ...contractRuleIds(contractPlan)];
+    const testedRules = rules.filter((rule) => !builtinIds.includes(rule.id));
     let retiredDuringCheck: string[] = [];
     /** 재검사 판정이 끝났고 통과하지 못한 규칙이 있을 때의 판정 기록 · 인수 테스트 내용 (기존 규칙 판단용) */
     let failedRecheck: {
@@ -302,6 +325,7 @@ export const createMergeExecutor =
           signal: merge.signal,
           readAcceptanceTexts: true,
           ...(plan === null ? {} : { structure: plan }),
+          ...(contractPlan === null ? {} : { contracts: contractPlan }),
         },
         options,
       );
@@ -332,14 +356,21 @@ export const createMergeExecutor =
             structure: judged.structure.summary,
           };
           return { passed: false, detail: `${STRUCTURE_STAGE}: ${judged.structure.reason}` };
+        case 'contract_halt':
+          // 계약 검사 도구를 끝까지 못 돌렸다: 통과가 아니다
+          recheck = {
+            stage: CONTRACT_STAGE,
+            reason: judged.contract.reason,
+            message: judged.contract.message,
+            code: judged.contract.code,
+            ruleId: judged.contract.ruleId,
+          };
+          return { passed: false, detail: `${CONTRACT_STAGE}: ${judged.contract.code}` };
         case 'judged':
           break;
       }
       const testJudged = testedRules.filter((rule) => judged.ruleIds.includes(rule.displayId));
-      const judgedRules = [
-        ...testJudged,
-        ...rules.filter((rule) => structureIds.includes(rule.id)),
-      ];
+      const judgedRules = [...testJudged, ...rules.filter((rule) => builtinIds.includes(rule.id))];
       const meta = { runId: context.run.id, stepId: context.step.id, commit: merge.mergeCommit };
       const structureJudgments = structureJudgmentsFrom(judged.structure, {
         ...meta,
@@ -355,24 +386,41 @@ export const createMergeExecutor =
         };
         return { passed: false, detail: `${STRUCTURE_STAGE}: uncovered` };
       }
+      // 계약 검사 규칙마다 판정 · 판정 없음이 하나씩 있어야 한다 (판정 러너가 케이스 결과를 낸 경우. 아니면 계약 판정도 없다)
+      const missingContracts =
+        judged.result.status === 'completed'
+          ? missingContractVerdicts(contractPlan, judged.contracts)
+          : [];
+      if (missingContracts.length > 0) {
+        recheck = {
+          stage: CONTRACT_STAGE,
+          message: '계약 검사 판정이 계약 검사 규칙을 모두 덮지 않습니다',
+          missingRuleIds: missingContracts,
+        };
+        return { passed: false, detail: `${CONTRACT_STAGE}: uncovered` };
+      }
       const recorded = recordJudgments(context, [
         ...judgmentsFrom(judged.result, testJudged, meta),
         // 인수 테스트 판정이 케이스 결과를 냈을 때만 남긴다 (검사 단계와 같다: 판정 1회 = 기록 1묶음)
         ...(judged.result.status === 'completed' ? structureJudgments : []),
+        ...contractJudgmentsFrom(judged.contracts, { ...meta, judgedAt: judged.result.endedAt }),
       ]);
+      // 통과를 막는 판정: 등록된 계약 문서의 형식 오류(구현이 고칠 수 없다)는 기록만 한다
+      const nonBlocking = nonBlockingContractRuleIds(judged.contracts);
+      const blocking = recorded.filter((item) => !nonBlocking.has(item.ruleId));
       // 재검사가 도는 동안 대상 규칙이 폐기됐으면 통과여도 병합하지 않는다 (병합 직전, ADR-112)
       retiredDuringCheck = retiredTargets();
       const passed =
         retiredDuringCheck.length === 0 &&
         judged.result.status === 'completed' &&
-        recorded.every((item) => item.status === 'pass');
+        blocking.every((item) => item.status === 'pass');
       if (
         retiredDuringCheck.length === 0 &&
         judged.result.status === 'completed' &&
-        recorded.some((item) => item.status !== 'pass')
+        blocking.some((item) => item.status !== 'pass')
       ) {
         failedRecheck = {
-          judgments: recorded,
+          judgments: blocking,
           rules: judgedRules,
           acceptanceTexts: judged.acceptanceTexts ?? {},
         };
@@ -383,6 +431,9 @@ export const createMergeExecutor =
         ...judgeSummary(judged.result),
         judgments: judgmentDigest(recorded, judgedRules),
         ...(judged.structure === undefined ? {} : { structure: judged.structure.summary }),
+        ...(judged.contracts === undefined
+          ? {}
+          : { contracts: contractSummary(judged.contracts.verdicts) }),
       };
       return {
         passed,
@@ -393,7 +444,7 @@ export const createMergeExecutor =
                 retiredDuringCheck.length > 0
                   ? `대상 규칙 폐기: ${retiredDuringCheck.join(', ')}`
                   : judged.result.status === 'completed'
-                    ? `실패한 규칙: ${recorded
+                    ? `실패한 규칙: ${blocking
                         .filter((item) => item.status !== 'pass')
                         .map(
                           (item) => judgedRules.find((rule) => rule.id === item.ruleId)?.displayId,

@@ -2659,3 +2659,106 @@ describe('0024 contracts: 계약 · 계약 검사 규칙 제약 · 확인 상태
     });
   });
 });
+
+describe('0025 contract_judge_runner: 판정 실행기 redocly-prism (M3-47 #292, NRM-03 · JDG-01, ADR-132)', () => {
+  const T = (second: number) => `2026-11-25T02:00:${String(second).padStart(2, '0')}.000Z`;
+  const human = '{"kind":"human"}';
+  const seedRule = (db: SqliteDatabase): string => {
+    const req = newId();
+    const rule = newId();
+    db.prepare(
+      `INSERT INTO requirements (id, display_id, text, author, norm_state, unrulable_reason, created_at,
+       updated_at, updated_by, deleted_at) VALUES (?, 'REQ-001', '본문', ?, 'approved', NULL, ?, ?, ?, NULL)`,
+    ).run(req, human, T(0), T(0), human);
+    db.prepare(
+      `INSERT INTO rules (id, display_id, title, statement, kind, check_kinds, parent_requirement_id,
+       parent_detached_at, builtin, target_block_ids, risk, contract_id, author, norm_state, created_at,
+       updated_at, deleted_at) VALUES (?, 'RULE-001', '제목', '진술', 'business', '["test"]', ?, NULL, 0, '[]',
+       NULL, NULL, '{"kind":"agent","role":"rule-writer"}', 'approved', ?, ?, NULL)`,
+    ).run(rule, req, T(0), T(0));
+    return rule;
+  };
+  const insertJudgment = (db: SqliteDatabase, rule: string, runner: string, id = newId()) =>
+    db
+      .prepare(
+        `INSERT INTO judgments (id, rule_id, run_id, step_id, commit_sha, judged_at, status, runner, exit_code,
+         reporter_path, cases, quarantine_reason) VALUES (?, ?, NULL, NULL, ?, ?, 'fail', ?, 1, '/r.json', '[]', NULL)`,
+      )
+      .run(id, rule, 'a'.repeat(40), T(1), runner);
+  const tablesOf = (db: SqliteDatabase): string[] =>
+    (
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations' ORDER BY name",
+        )
+        .all() as { name: string }[]
+    ).map((row) => row.name);
+  const rowsOf = (db: SqliteDatabase) =>
+    Object.fromEntries(
+      tablesOf(db).map((table) => [
+        table,
+        db.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all(),
+      ]),
+    );
+
+  it('0024까지의 판정 기록(옛 실행기 값 둘)은 값 · 순서 그대로 옮기고, 모든 표의 행 · 다른 객체는 그대로이며, 글자가 바뀐 것은 판정 기록 표뿐이고, 새 실행기 값만 더 받는다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 24), { now: fixedNow });
+      const rule = seedRule(db);
+      insertJudgment(db, rule, 'vitest');
+      insertJudgment(db, rule, 'dependency-cruiser');
+      insertJudgment(db, rule, 'vitest');
+      // 0024까지는 새 실행기 값을 DB CHECK가 막는다
+      expect(() => insertJudgment(db, rule, 'redocly-prism')).toThrow(/CHECK/);
+      const before = rowsOf(db);
+      expect(before.judgments).toHaveLength(3);
+      const schemaBefore = schemaOf(db) as { type: string; name: string; sql: string }[];
+
+      expect(migrate(db, PROJECT_MIGRATIONS.slice(0, 25), { now: fixedNow }).applied).toEqual([25]);
+      expect(rowsOf(db)).toEqual(before);
+      const after = schemaOf(db) as { type: string; name: string; sql: string }[];
+      // 객체 이름 · 종류는 그대로 (새 객체 없음, 임시 표 없음)
+      expect(after.map((item) => [item.type, item.name])).toEqual(
+        schemaBefore.map((item) => [item.type, item.name]),
+      );
+      const sqlBefore = new Map(schemaBefore.map((item) => [item.name, item.sql]));
+      expect(
+        after.filter((item) => item.sql !== sqlBefore.get(item.name)).map((item) => item.name),
+      ).toEqual(['judgments']);
+      // 표의 글자는 실행기 값 하나만 다르다
+      expect(after.find((item) => item.name === 'judgments')?.sql).toBe(
+        sqlBefore
+          .get('judgments')
+          ?.replace(
+            "'vitest', 'dependency-cruiser')",
+            "'vitest', 'dependency-cruiser', 'redocly-prism')",
+          ),
+      );
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%_v25%'").all()).toEqual(
+        [],
+      );
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+
+      insertJudgment(db, rule, 'redocly-prism');
+      // 다른 값 · 트리거 · 외래 키는 그대로다
+      expect(() => insertJudgment(db, rule, 'prism')).toThrow(/CHECK/);
+      const id = newId();
+      insertJudgment(db, rule, 'vitest', id);
+      expect(() => insertJudgment(db, rule, 'vitest', id)).toThrow(/덮어쓰기 금지/);
+      expect(() => db.prepare(`UPDATE judgments SET status = 'pass'`).run()).toThrow(
+        /바꿀 수 없습니다/,
+      );
+      expect(() => db.prepare('DELETE FROM judgments').run()).toThrow(/지울 수 없습니다/);
+      expect(() => insertJudgment(db, newId(), 'vitest')).toThrow(/FOREIGN KEY/);
+    });
+  });
+
+  it('다시 실행해도 스키마가 같다', () => {
+    withDb((db) => {
+      migrate(db, PROJECT_MIGRATIONS, { now: fixedNow });
+      const schema = schemaOf(db);
+      expect(migrate(db, PROJECT_MIGRATIONS, { now: fixedNow }).applied).toEqual([]);
+      expect(schemaOf(db)).toEqual(schema);
+    });
+  });
+});
