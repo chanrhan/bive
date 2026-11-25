@@ -7,7 +7,9 @@
 //   케이스"이고, 나머지는 수로만 싣는다("알 수 없는 케이스 N건"). 인수 테스트 파일은 Red 확인 뒤 해시로 잠겨 구현이 바꿀 수 없다
 // - 대조할 파일 글: 검사 실패 판단은 판정한 체크아웃에서 읽은 글(`steps/judging.ts`), 그 밖의 세션(규칙 작성 · 요구사항 재판단 ·
 //   이의 판단 · 테스트 작성 · 구현)은 규칙마다 최근 판정을 한 커밋의 글을 git 객체에서 읽는다({@link judgedCaseFilter}). 판정 기록은
-//   인수 테스트 해시가 Red 확인 기록과 같은 커밋에서만 남으므로 그 커밋의 규칙 폴더 글은 테스트 작성 역할(또는 사람)이 쓴 글이다
+//   인수 테스트 해시가 Red 확인 기록과 같은 커밋에서만 남으므로 그 커밋의 규칙 폴더 글은 테스트 작성 역할(또는 사람)이 쓴 글이다.
+//   테스트 작성 세션의 앞 시도 사유(Red 확인 결과)는 그 Red 확인이 판정한 테스트 작성 커밋의 대상 규칙 폴더 글을 같은 방법으로
+//   읽는다({@link writtenAcceptanceOf}, M3-40 #281 · ADR-128)
 // - 해석이 애매하면 모르는 이름으로 본다(덜 싣는 쪽): 문법 오류가 있는 파일 · 읽지 못한 커밋 · 기호 링크 · 1 MiB 뒤의 글은 대조에
 //   쓰지 않는다
 import type { ProjectStore } from '@bive/store';
@@ -218,6 +220,52 @@ export const judgedCaseFilter = async (
   git?: GitRunner,
 ): Promise<CaseNameFilter> =>
   knownCaseMatcher(await readJudgedAcceptanceTexts(repoPath, sources, git));
+
+/**
+ * Red 확인을 돈 테스트 작성 커밋의 대상 규칙 폴더 (테스트 작성 세션의 앞 시도 사유를 거르는 기준, M3-40 #281 · ADR-128).
+ * 케이스 이름은 {@link knownCaseMatcher}로, 위치(파일 경로)는 그 커밋의 대상 규칙 폴더에 있는 일반 파일인지로 대조한다.
+ */
+export interface WrittenAcceptance {
+  /** 그 커밋의 대상 규칙 폴더 파일에 케이스 이름 리터럴로 적힌 이름인지 */
+  readonly isKnownCase: CaseNameFilter;
+  /** 그 커밋의 대상 규칙 폴더 일반 파일 (저장소 상대 경로 `bive-acceptance/<표시 ID>/…`) */
+  readonly files: ReadonlySet<string>;
+  /** 대상 규칙 표시 ID (규칙 폴더 자체 `bive-acceptance/<표시 ID>`를 위치로 받는 기준) */
+  readonly ruleDisplayIds: ReadonlySet<string>;
+}
+
+/** 아무 이름 · 위치도 모른다 (커밋을 읽지 못했거나 Red 확인 결과가 아닐 때: 덜 싣는 쪽). */
+export const NO_WRITTEN_ACCEPTANCE: WrittenAcceptance = {
+  isKnownCase: NO_KNOWN_CASES,
+  files: new Set(),
+  ruleDisplayIds: new Set(),
+};
+
+/**
+ * Red 확인 단계 결과에 남은 커밋(`exitDetail.commit`, Red 확인이 판정한 테스트 작성 커밋)의 대상 규칙 폴더 파일을 git 객체에서
+ * 읽어 대조 기준을 만든다({@link readJudgedAcceptanceTexts}와 같은 읽기: 작업 트리를 읽지 않고, 대체 객체를 따르지 않고, 커밋
+ * 형식 · 일반 파일만). 커밋이 문자열이 아니거나 읽지 못하면 아무 이름 · 위치도 모른다(닫힌 쪽).
+ */
+export const writtenAcceptanceOf = async (
+  repoPath: string,
+  commit: unknown,
+  ruleDisplayIds: readonly string[],
+  git?: GitRunner,
+): Promise<WrittenAcceptance> => {
+  if (typeof commit !== 'string') return NO_WRITTEN_ACCEPTANCE;
+  const texts = await readJudgedAcceptanceTexts(
+    repoPath,
+    ruleDisplayIds.map((ruleDisplayId) => ({ ruleDisplayId, commit })),
+    git,
+  );
+  const files = Object.keys(texts);
+  if (files.length === 0) return NO_WRITTEN_ACCEPTANCE;
+  return {
+    isKnownCase: knownCaseMatcher(texts),
+    files: new Set(files),
+    ruleDisplayIds: new Set(ruleDisplayIds),
+  };
+};
 
 /**
  * 세션 입력을 모으기 직전에 부른다: 저장소에서 규칙마다 최근 판정 커밋을 읽고, 그 커밋의 인수 테스트 파일과 대조하는 함수를 만든다.

@@ -45,6 +45,9 @@ export interface RedCheckOptions {
   installTimeoutMs?: number;
 }
 
+/** 대상 규칙에 케이스가 하나도 없을 때의 문제 글 (BIVE 고정 문구). */
+export const NO_CASES_MESSAGE = '케이스 0개';
+
 const newId = createUlidGenerator();
 const MAX_LISTED = 50;
 
@@ -96,7 +99,7 @@ export const evaluateRed = (
         reason: 'collect_error',
         problems: withoutCases.map((id) => ({
           file: `bive-acceptance/${id}`,
-          message: '케이스 0개',
+          message: NO_CASES_MESSAGE,
         })),
       },
     };

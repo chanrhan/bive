@@ -89,6 +89,9 @@ const parseCase = (raw: unknown, file: string, index: number): JudgmentCase => {
   };
 };
 
+/** 테스트가 하나도 모이지 않은 파일 · 실행의 문제 글 (BIVE 고정 문구). */
+export const NO_TESTS_COLLECTED_MESSAGE = '수집된 테스트 0개';
+
 /** 메시지 없이 실패한 파일(스위트 훅 실패 등)의 원인 안내 앞부분. */
 export const SUITE_FAILURE_MESSAGE = '스위트 훅 실패 등 파일 수준 오류 (stderr.log 참고)';
 
@@ -172,7 +175,7 @@ export const parseVitestReport = (
     // 파일 수준 오류(import 실패 · 문법 오류 · 최상위 예외 · 스위트 훅 실패)는 케이스 실패와 섞지 않는다
     if (fileMessage.length > 0) collectProblems.push({ file, message: fileMessage });
     else if (assertions.length === 0) {
-      collectProblems.push({ file, message: '수집된 테스트 0개' });
+      collectProblems.push({ file, message: NO_TESTS_COLLECTED_MESSAGE });
     } else if (rawFile.status === 'failed' && !fileCases.some((c) => c.status === 'failed')) {
       // describe 안 beforeAll · afterAll 실패는 JSON에 메시지 없이 파일 실패로만 남고 케이스는 건너뜀이 된다
       const detail = options.output === undefined ? null : firstErrorLineFor(options.output, file);
@@ -198,7 +201,7 @@ export const parseVitestReport = (
   }
 
   if (cases.length === 0 && collectProblems.length === 0) {
-    collectProblems.push({ file: null, message: '수집된 테스트 0개' });
+    collectProblems.push({ file: null, message: NO_TESTS_COLLECTED_MESSAGE });
   }
 
   const count = (status: TestCaseStatus): number => cases.filter((c) => c.status === status).length;
