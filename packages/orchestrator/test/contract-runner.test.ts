@@ -1245,7 +1245,8 @@ describe('검증하지 못한 요청은 닫힌 쪽이다: 실패(구현 회귀)�
   }, 60_000);
 
   it('검사 단계: 구현이 그런 응답을 돌려주면 계약 판정은 fail로 기록되고 구현 회귀 뒤 상한으로 끝나 병합되지 않는다', async () => {
-    for (const [label, respond] of EVASIONS) {
+    // 사례마다 따로 된 파이프라인(프로젝트 · 저장소 · BIVE_HOME)이라 함께 돌린다 (CI 시간)
+    const check = async ([label, respond]: (typeof EVASIONS)[number]) => {
       const { h, rules } = await contractPipeline(
         [{ file: 'openapi.yaml', kind: 'openapi' }],
         (calls) =>
@@ -1274,7 +1275,8 @@ describe('검증하지 못한 요청은 닫힌 쪽이다: 실패(구현 회귀)�
         reason: 'check_failed',
         contracts: [{ outcome: 'fail', blocking: true }],
       });
-    }
+    };
+    await Promise.all(EVASIONS.map(check));
   }, 900_000);
 });
 
