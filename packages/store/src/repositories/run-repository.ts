@@ -340,6 +340,7 @@ export class RunRepository {
   readonly #selectRuns;
   readonly #selectRunsByStatus;
   readonly #selectTargets;
+  readonly #selectLatestTargeting;
   readonly #selectSteps;
   readonly #ruleState;
   readonly #selectPendingTestChangeChecks;
@@ -393,6 +394,12 @@ export class RunRepository {
     );
     this.#selectTargets = db.prepare<[string], { rule_id: string }>(
       'SELECT rule_id FROM run_target_rules WHERE run_id = ? ORDER BY position',
+    );
+    // 그 규칙을 대상으로 한 실행 중 표시 ID가 가장 큰 것 1건 (색인 run_target_rules_rule로 대상 행만 읽는다)
+    this.#selectLatestTargeting = db.prepare<[string], RunRow>(
+      `SELECT ${RUN_COLUMNS} FROM runs
+       WHERE id IN (SELECT run_id FROM run_target_rules WHERE rule_id = ?)
+       ORDER BY length(display_id) DESC, display_id DESC LIMIT 1`,
     );
     this.#selectSteps = db.prepare<[string], StepRow>(
       `SELECT ${STEP_COLUMNS} FROM steps WHERE run_id = ?`,
@@ -502,6 +509,16 @@ export class RunRepository {
     if (run === null) return null;
     const roles = Object.keys(run.budgetSnapshot.roles) as AgentRole[];
     return summarizeRunUsage(roles, this.steps(run.id), this.#sessions.listByRun(run.id));
+  }
+
+  /**
+   * 그 규칙을 대상으로 한 실행(`targetRuleIds`에 든 실행) 중 가장 나중에 만든 것 (표시 ID 순 = 생성 순의 마지막, COST-02 ·
+   * ADR-134). 대상 행만 읽고 실행 1건만 돌려준다. 없으면 `null`. 그 행이 저장 형식에 맞지 않으면 `get`처럼 던진다
+   * (더 이전 실행을 "최신"으로 내세우지 않는다).
+   */
+  latestTargeting(ruleId: string): Run | null {
+    const row = this.#selectLatestTargeting.get(ruleId);
+    return row === undefined ? null : this.#toRun(row);
   }
 
   /**

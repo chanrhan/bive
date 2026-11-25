@@ -323,8 +323,28 @@ export type RuleListResult = z.infer<typeof RuleListResult>;
 /** `rule.get`: ID로 1건. 제안 ID는 규칙이 아니므로 -32004. */
 export const RuleGetParams = z.strictObject({ projectId: Ulid, id: Ulid });
 export type RuleGetParams = z.infer<typeof RuleGetParams>;
-export const RuleGetResult = RuleWithJudgment;
-export type RuleGetResult = RuleWithJudgment;
+/**
+ * 규칙의 최신 실행 링크 (COST-02 · SCR-03 "최신 실행 링크", M3-16 #61, ADR-134). 그 규칙을 대상으로 한 실행 중 가장 나중에
+ * 만든 실행(표시 ID 순 마지막)의 ID · 표시 ID와 실행 합계 비용 · 턴이다. 합계는 저장된 세션 기록의 실행 합계(`runs.usage`의
+ * `run`)이고, 값을 모르는 세션이 하나라도 있으면(진행 중 · 결과 없이 끝남) 그 값은 `null`이다(하한을 확정 값처럼 보이지
+ * 않는다). 세션이 없어도 `null`. 0은 기록이 실제로 0일 때만이다
+ */
+export const RuleLatestRun = z.strictObject({
+  id: Ulid,
+  displayId: displayIdSchema('EXE'),
+  costUsd: UsdOrNull,
+  turns: z.int().nonnegative().nullable(),
+});
+export type RuleLatestRun = z.infer<typeof RuleLatestRun>;
+
+/**
+ * `rule.get` 결과: 규칙 1건 + 최신 판정(목록 항목과 같은 칸) + 최신 실행 링크(`latestRun`, 대상으로 한 실행이 없으면 `null`).
+ * `latestRun`은 넓힌 칸이라 선택 칸이다(옛 오케스트레이터의 응답에는 없다). 오케스트레이터는 늘 싣는다
+ */
+export const RuleGetResult = RuleWithJudgment.extend({
+  latestRun: RuleLatestRun.nullable().optional(),
+});
+export type RuleGetResult = z.infer<typeof RuleGetResult>;
 
 // ── 규칙 직접 편집 (NRM-04 · NRM-07, ADR-100 B② · A2 · A8 · C2, M7-03 #215, ADR-109) ─────
 // - `rule.update`: 사람이 규칙의 제목 · 진술을 고친다. 사람 주체만 받는다(에이전트 -32020, 저장소를 열기 전에 본다)

@@ -5,6 +5,8 @@
 //   폐기된 규칙의 항목에는 `retirement`(폐기 시각 · 대체한 규칙 · 사유가 든 규범 변경 기록 순번)가 실린다. 폐기 기록은 효력
 //   모듈에서 읽는다
 // - 규칙마다 최신 판정을 붙인다. 판정 기록이 없으면 미판정 (judgments/latest-judgment.ts)
+// - `rule.get`만 최신 실행 링크(`latestRun`: 그 규칙을 대상으로 한 최신 실행 1건과 실행 합계 비용 · 턴)를 더 싣는다
+//   (COST-02, M3-16 · ADR-134). `rule.list`에는 싣지 않는다(목록에서 규칙마다 실행 · 세션을 읽지 않게)
 // - `judgment.list`: 규칙 상세의 실행 이력. 판정 기록 테이블(`judgments`)의 기록을 최신부터, 실행 표시 ID와 함께 (ADR-073)
 // - `rule.update`: 사람의 규칙 직접 편집(제목 · 진술, ADR-100 B② · A8). 사람 주체만 받고(에이전트 -32020) 편집 · 확인됨 ·
 //   승인 기록 `rule_edit`(before · after diff)을 트랜잭션 1개로 남긴다(C2: 사람 행동은 승인 기록). 이 처리기가 저장소의
@@ -21,7 +23,9 @@ import {
   type Rule,
   type RuleEditAutoStart,
   type RuleEditConflictReason,
+  type RuleGetResult,
   type RuleJudgmentEntry,
+  type RuleLatestRun,
   type RuleUpdateParams,
   type RuleWithJudgment,
 } from '@bive/shared';
@@ -89,6 +93,23 @@ const ruleOrThrow = (store: ProjectStore, id: string): Rule => {
     throw new RpcError(ErrorCode.NotFound, `규칙을 찾을 수 없습니다: ${id}`);
   }
   return rule;
+};
+
+/**
+ * 규칙의 최신 실행 링크 (COST-02 · SCR-03, ADR-134): 그 규칙을 대상으로 한 실행 중 가장 나중에 만든 것 1건과 그 실행의 합계
+ * 비용 · 턴. 합계는 실행 사용량 집계(`runs.usage`의 `run`, ADR-067)를 그대로 쓰고, 값을 모르는 세션이 하나라도 있으면 그
+ * 값은 `null`이다(아는 세션만 더한 하한을 확정 값처럼 내보내지 않는다, NFR-03). 대상으로 한 실행이 없으면 `null`.
+ */
+const latestRunLink = (store: ProjectStore, ruleId: string): RuleLatestRun | null => {
+  const run = store.runs.latestTargeting(ruleId);
+  if (run === null) return null;
+  const total = store.runs.usage(run.id)?.run ?? null;
+  return {
+    id: run.id,
+    displayId: run.displayId,
+    costUsd: total === null || total.costUnknownCount > 0 ? null : total.costUsd,
+    turns: total === null || total.turnsUnknownCount > 0 ? null : total.turns,
+  };
 };
 
 /** 판정 기록 → 실행 이력 항목. 같은 실행의 표시 ID는 한 번만 읽는다. */
@@ -243,9 +264,12 @@ export const createRuleHandlers = ({
       };
     }),
   'rule.get': ({ projectId, id }) =>
-    withProjectStore(biveHome, projectId, (store) => {
+    withProjectStore(biveHome, projectId, (store): RuleGetResult => {
       const rule = ruleOrThrow(store, id);
-      return listedItem(store, rule, latestJudgments(store), retiredRuleSet(store));
+      return {
+        ...listedItem(store, rule, latestJudgments(store), retiredRuleSet(store)),
+        latestRun: latestRunLink(store, rule.id),
+      };
     }),
   'rule.update': ({ projectId, id, author, title, statement, expectedUpdatedAt }, context) => {
     // 저장소를 열기 전에 주체를 본다: 에이전트 주체는 프로젝트 · 규칙 유무와 상관없이 -32020
