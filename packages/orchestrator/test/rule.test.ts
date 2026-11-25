@@ -14,6 +14,8 @@ import {
   type Requirement,
   type Rule,
   type RuleNewPayload,
+  type Run,
+  type Step,
 } from '@bive/shared';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -171,6 +173,7 @@ describe('rule.get: 규칙 1건 + 최신 판정', () => {
     expect(await h.client.call('rule.get', { projectId: h.project.id, id: rule.id })).toEqual({
       rule,
       judgment: UNJUDGED,
+      latestRun: null,
     });
   });
 
@@ -304,6 +307,7 @@ describe('최신 판정 결합 지점', () => {
     expect(await client.call('rule.get', { projectId: h.project.id, id: judged.id })).toEqual({
       rule: judged,
       judgment: { status: 'needs_recheck', latest },
+      latestRun: null,
     });
   });
 });
@@ -415,6 +419,283 @@ describe('judgment.list: 규칙 상세의 실행 이력 (M1-28, ADR-073)', () =>
         code: ErrorCode.NotFound,
       });
     }
+  });
+});
+
+describe('rule.get: 최신 실행 링크의 비용 · 턴 (M3-16 #61, COST-02 · ADR-134)', () => {
+  /**
+   * 실행 1건을 저장소에 바로 만든다. 단계 시도는 유형 A 계획에 `extra`(회귀로 생기는 다음 시도)를 더한다.
+   * 표시 ID는 만든 순서대로 붙는다(EXE-001, EXE-002, ...).
+   */
+  const createRun = (
+    targetRuleIds: string[],
+    extra: { kind: 'test_writing' | 'implementation'; attempt: number }[] = [],
+    createdAt = iso(T0),
+  ): { run: Run; steps: Step[] } =>
+    h.read((store) =>
+      store.runs.create({
+        id: newId(),
+        type: 'A',
+        targetRuleIds,
+        currentStep: 'approval',
+        baseBranch: 'main',
+        budgetSnapshot: { run: { maxBudgetUsd: 5, maxTurns: 200 }, roles: {} },
+        modelSnapshot: {},
+        startedBy: human,
+        createdAt,
+        steps: [...RUN_STEP_PLANS.A.map((kind) => ({ kind, attempt: 1 })), ...extra].map(
+          ({ kind, attempt }) => ({
+            id: newId(),
+            kind,
+            attempt,
+            status: 'pending' as const,
+            role: STEP_ROLES[kind],
+            startedAt: null,
+          }),
+        ),
+      }),
+    );
+
+  const stepOf = (steps: Step[], kind: Step['kind'], attempt = 1): Step => {
+    const step = steps.find((item) => item.kind === kind && item.attempt === attempt);
+    if (step === undefined) throw new Error(`단계 없음: ${kind} ${String(attempt)}`);
+    return step;
+  };
+
+  /**
+   * 단계 시도에 세션 1개를 기록한다. `end`가 `null`이면 끝나지 않은 세션(진행 중), 값이 `null`이면 결과에 그 값이 없던
+   * 세션(비정상 종료 등)이다.
+   */
+  const addSession = (
+    run: Run,
+    step: Step,
+    end: { costUsd: number | null; turns: number | null; reason?: 'success' | 'aborted' } | null,
+  ): void => {
+    h.read((store) => {
+      const id = newId();
+      store.sessions.start({
+        id,
+        runId: run.id,
+        stepId: step.id,
+        role: step.role ?? 'implementer',
+        model: 'test-model',
+        workDir: '/w',
+        budget: { maxBudgetUsd: 1, maxTurns: 20 },
+        startedAt: iso(T0 + 1_000),
+      });
+      if (end !== null) {
+        store.sessions.end(id, {
+          endReason: end.reason ?? 'success',
+          totalCostUsd: end.costUsd,
+          numTurns: end.turns,
+          endedAt: iso(T0 + 2_000),
+        });
+      }
+    });
+  };
+
+  const latestRunOf = async (ruleId: string) =>
+    (await h.client.call('rule.get', { projectId: h.project.id, id: ruleId })).latestRun;
+
+  it('그 규칙을 대상으로 한 실행이 없으면 최신 실행 자체가 null', async () => {
+    const req = await createRequirement();
+    const rule = await approveRule(req.id, '중복 이메일 가입 거부');
+    expect(await latestRunOf(rule.id)).toBeNull();
+  });
+
+  it('세션이 없는 실행은 실행 ID · 표시 ID와 비용 · 턴 null (0이 아니다)', async () => {
+    const req = await createRequirement();
+    const rule = await approveRule(req.id, '중복 이메일 가입 거부');
+    const { run } = createRun([rule.id]);
+    expect(await latestRunOf(rule.id)).toEqual({
+      id: run.id,
+      displayId: 'EXE-001',
+      costUsd: null,
+      turns: null,
+    });
+  });
+
+  it('값이 모두 있는 실행: 모든 단계 · 회귀로 생긴 다음 시도의 모든 세션을 더한다 (실행 사용량 집계와 같은 값)', async () => {
+    const req = await createRequirement();
+    const rule = await approveRule(req.id, '중복 이메일 가입 거부');
+    const { run, steps } = createRun(
+      [rule.id],
+      [
+        { kind: 'implementation', attempt: 2 },
+        { kind: 'implementation', attempt: 3 },
+      ],
+    );
+    addSession(run, stepOf(steps, 'test_writing'), { costUsd: 0.1, turns: 3 });
+    addSession(run, stepOf(steps, 'implementation', 1), { costUsd: 0.2, turns: 5 });
+    addSession(run, stepOf(steps, 'implementation', 2), { costUsd: 0.05, turns: 2 });
+    addSession(run, stepOf(steps, 'implementation', 3), { costUsd: 0.004, turns: 1 });
+    const latest = await latestRunOf(rule.id);
+    // 0.1 + 0.2 + 0.05 + 0.004 (나노 달러 정수 합산이라 부동소수 오차가 없다)
+    expect(latest).toEqual({ id: run.id, displayId: 'EXE-001', costUsd: 0.354, turns: 11 });
+    // 같은 값을 두 가지로 계산하지 않는다: 실행 사용량 집계(run.get의 usage)와 같다
+    const usage = h.read((store) => store.runs.usage(run.id));
+    expect(usage?.run.costUsd).toBe(latest?.costUsd);
+    expect(usage?.run.turns).toBe(latest?.turns);
+  });
+
+  it('비용 · 턴을 모르는 세션이 하나라도 섞이면 그 값은 null (아는 것만 더한 하한 · 0으로 더한 값을 보이지 않는다)', async () => {
+    const req = await createRequirement();
+    const both = await approveRule(req.id, '비용 · 턴 모두 모름');
+    const costOnly = await approveRule(req.id, '비용만 모름');
+    const turnsOnly = await approveRule(req.id, '턴만 모름');
+    const running = await approveRule(req.id, '진행 중 세션');
+
+    // 결과 없이 끝난 세션(비정상 종료): 비용 · 턴 모두 모름
+    const a = createRun([both.id]);
+    addSession(a.run, stepOf(a.steps, 'test_writing'), { costUsd: 0.1, turns: 3 });
+    addSession(a.run, stepOf(a.steps, 'implementation'), {
+      costUsd: null,
+      turns: null,
+      reason: 'aborted',
+    });
+    expect(await latestRunOf(both.id)).toEqual({
+      id: a.run.id,
+      displayId: a.run.displayId,
+      costUsd: null,
+      turns: null,
+    });
+
+    // 비용만 모름: 턴은 모든 세션의 합
+    const b = createRun([costOnly.id]);
+    addSession(b.run, stepOf(b.steps, 'test_writing'), { costUsd: 0.1, turns: 3 });
+    addSession(b.run, stepOf(b.steps, 'implementation'), { costUsd: null, turns: 4 });
+    expect(await latestRunOf(costOnly.id)).toEqual({
+      id: b.run.id,
+      displayId: b.run.displayId,
+      costUsd: null,
+      turns: 7,
+    });
+
+    // 턴만 모름: 비용은 모든 세션의 합
+    const c = createRun([turnsOnly.id]);
+    addSession(c.run, stepOf(c.steps, 'test_writing'), { costUsd: 0.1, turns: 3 });
+    addSession(c.run, stepOf(c.steps, 'implementation'), { costUsd: 0.25, turns: null });
+    expect(await latestRunOf(turnsOnly.id)).toEqual({
+      id: c.run.id,
+      displayId: c.run.displayId,
+      costUsd: 0.35,
+      turns: null,
+    });
+
+    // 아직 끝나지 않은 세션: 지금까지의 합은 하한이라 둘 다 null
+    const d = createRun([running.id]);
+    addSession(d.run, stepOf(d.steps, 'test_writing'), { costUsd: 0.1, turns: 3 });
+    addSession(d.run, stepOf(d.steps, 'implementation'), null);
+    expect(await latestRunOf(running.id)).toEqual({
+      id: d.run.id,
+      displayId: d.run.displayId,
+      costUsd: null,
+      turns: null,
+    });
+  });
+
+  it('기록이 실제로 0이면 0 (null과 구분한다)', async () => {
+    const req = await createRequirement();
+    const rule = await approveRule(req.id, '첫 요청 실패');
+    const { run, steps } = createRun([rule.id]);
+    addSession(run, stepOf(steps, 'test_writing'), { costUsd: 0, turns: 0 });
+    expect(await latestRunOf(rule.id)).toEqual({
+      id: run.id,
+      displayId: 'EXE-001',
+      costUsd: 0,
+      turns: 0,
+    });
+  });
+
+  it('여러 실행 중 가장 나중에 만든 실행(표시 ID 순 마지막)을 고르고 그 실행의 세션만 더한다', async () => {
+    const req = await createRequirement();
+    const rule = await approveRule(req.id, '중복 이메일 가입 거부');
+    // 생성 시각이 뒤섞여 있어도 표시 ID(= 생성 순)로 고른다
+    const first = createRun([rule.id], [], iso(T0 + 3_000));
+    addSession(first.run, stepOf(first.steps, 'test_writing'), { costUsd: 1, turns: 10 });
+    const second = createRun([rule.id], [], iso(T0 + 1_000));
+    addSession(second.run, stepOf(second.steps, 'test_writing'), { costUsd: 0.5, turns: 6 });
+    const third = createRun([rule.id], [], iso(T0 + 2_000));
+    addSession(third.run, stepOf(third.steps, 'test_writing'), { costUsd: 0.2, turns: 2 });
+    expect([first, second, third].map(({ run }) => run.displayId)).toEqual([
+      'EXE-001',
+      'EXE-002',
+      'EXE-003',
+    ]);
+    expect(await latestRunOf(rule.id)).toEqual({
+      id: third.run.id,
+      displayId: 'EXE-003',
+      costUsd: 0.2,
+      turns: 2,
+    });
+  });
+
+  it('표시 ID 자리수가 넘어가도 순번으로 고른다 (EXE-999보다 EXE-1000이 최신, 사전식 순서가 아니다)', async () => {
+    const req = await createRequirement();
+    const rule = await approveRule(req.id, '중복 이메일 가입 거부');
+    // 실행 순번을 998로 올려 둔다 (다음 실행이 EXE-999 · EXE-1000)
+    h.read((store) =>
+      store.db
+        .prepare(
+          `INSERT INTO display_id_sequences (prefix, last_seq) VALUES ('EXE', 998)
+           ON CONFLICT (prefix) DO UPDATE SET last_seq = 998`,
+        )
+        .run(),
+    );
+    const older = createRun([rule.id]);
+    addSession(older.run, stepOf(older.steps, 'test_writing'), { costUsd: 0.7, turns: 8 });
+    const newer = createRun([rule.id]);
+    addSession(newer.run, stepOf(newer.steps, 'test_writing'), { costUsd: 0.2, turns: 2 });
+    expect([older.run.displayId, newer.run.displayId]).toEqual(['EXE-999', 'EXE-1000']);
+    const latest = await latestRunOf(rule.id);
+    expect(latest?.displayId).toBe('EXE-1000');
+    expect(latest).toEqual({ id: newer.run.id, displayId: 'EXE-1000', costUsd: 0.2, turns: 2 });
+  });
+
+  it('다른 규칙만 대상인 실행은 섞이지 않는다 (더 나중에 만들어졌어도)', async () => {
+    const req = await createRequirement();
+    const mine = await approveRule(req.id, '이 규칙');
+    const other = await approveRule(req.id, '다른 규칙');
+    const own = createRun([mine.id]);
+    addSession(own.run, stepOf(own.steps, 'test_writing'), { costUsd: 0.3, turns: 4 });
+    const foreign = createRun([other.id]);
+    addSession(foreign.run, stepOf(foreign.steps, 'test_writing'), { costUsd: 2, turns: 30 });
+    expect(await latestRunOf(mine.id)).toEqual({
+      id: own.run.id,
+      displayId: 'EXE-001',
+      costUsd: 0.3,
+      turns: 4,
+    });
+    expect(await latestRunOf(other.id)).toEqual({
+      id: foreign.run.id,
+      displayId: 'EXE-002',
+      costUsd: 2,
+      turns: 30,
+    });
+  });
+
+  it('여러 규칙을 대상으로 한 실행은 대상 규칙마다 같은 실행 합계로 최신 실행이 된다 (대상 순서와 무관)', async () => {
+    const req = await createRequirement();
+    const firstTarget = await approveRule(req.id, '첫 대상');
+    const secondTarget = await approveRule(req.id, '둘째 대상');
+    const onlyFirst = createRun([firstTarget.id]);
+    addSession(onlyFirst.run, stepOf(onlyFirst.steps, 'test_writing'), { costUsd: 9, turns: 90 });
+    const both = createRun([firstTarget.id, secondTarget.id]);
+    addSession(both.run, stepOf(both.steps, 'test_writing'), { costUsd: 0.4, turns: 5 });
+    addSession(both.run, stepOf(both.steps, 'implementation'), { costUsd: 0.6, turns: 7 });
+    const expected = { id: both.run.id, displayId: 'EXE-002', costUsd: 1, turns: 12 };
+    expect(await latestRunOf(firstTarget.id)).toEqual(expected);
+    expect(await latestRunOf(secondTarget.id)).toEqual(expected);
+  });
+
+  it('rule.list 항목에는 최신 실행을 싣지 않는다 (목록에서 규칙마다 실행 · 세션을 읽지 않는다)', async () => {
+    const req = await createRequirement();
+    const rule = await approveRule(req.id, '중복 이메일 가입 거부');
+    const { run, steps } = createRun([rule.id]);
+    addSession(run, stepOf(steps, 'test_writing'), { costUsd: 0.1, turns: 1 });
+    const [item] = await listRules();
+    expect(item).toEqual({ rule, judgment: UNJUDGED });
+    expect(item).not.toHaveProperty('latestRun');
   });
 });
 

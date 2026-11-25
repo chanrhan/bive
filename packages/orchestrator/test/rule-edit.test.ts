@@ -170,7 +170,11 @@ describe('rule.update: 편집 · 확인됨 · 승인 기록 (수용 기준 1, AD
     // 조회 · 저장소가 같은 값을 돌려준다 (규칙의 생성 주체 · 생성 시각 · 부모는 그대로)
     await expect(
       h.client.call('rule.get', { projectId: h.project.id, id: rule.id }),
-    ).resolves.toEqual({ rule: edited, judgment: { status: 'unjudged', latest: null } });
+    ).resolves.toEqual({
+      rule: edited,
+      judgment: { status: 'unjudged', latest: null },
+      latestRun: null,
+    });
     const listed = await h.client.call('rule.list', { projectId: h.project.id });
     expect(listed.rules.map((item) => item.rule)).toEqual([edited]);
     expect(ruleOf(rule.id)).toEqual(edited);

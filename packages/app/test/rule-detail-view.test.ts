@@ -9,6 +9,7 @@ import {
   checkKindsText,
   failureCases,
   latestRunDisplayId,
+  latestRunParts,
   outputOpenByDefault,
   ruleAuthorName,
   shortCommit,
@@ -91,5 +92,44 @@ describe('규칙 상세 표시', () => {
     expect(ruleAuthorName({ kind: 'human' })).toBe('사람');
     expect(checkKindsText(['test', 'static'])).toBe('인수 테스트 · 정적 분석');
     expect(shortCommit('abcdef1234')).toBe('abcdef1');
+  });
+});
+
+describe('최신 실행 링크 (M3-16 #61, COST-02 · ADR-134)', () => {
+  const run = (costUsd: number | null, turns: number | null) => ({
+    id: '01JE0000000000000000000003',
+    displayId: 'EXE-003',
+    costUsd,
+    turns,
+  });
+
+  it('표시 ID · 비용(검증 화면 실행 링크와 같은 표기) · 턴', () => {
+    expect(latestRunParts(run(0.354, 11))).toEqual({
+      id: 'EXE-003',
+      cost: '비용 $0.35',
+      turns: '턴 11',
+    });
+    // 1센트 미만도 0으로 보이지 않는다 (formatUsd)
+    expect(latestRunParts(run(0.004, 1)).cost).toBe('비용 $0.004');
+  });
+
+  it('값이 없으면 각각 "없음"이고 0으로 보이지 않는다', () => {
+    expect(latestRunParts(run(null, 7))).toEqual({
+      id: 'EXE-003',
+      cost: '비용 없음',
+      turns: '턴 7',
+    });
+    expect(latestRunParts(run(0.1, null))).toEqual({
+      id: 'EXE-003',
+      cost: '비용 $0.10',
+      turns: '턴 없음',
+    });
+    const unknown = latestRunParts(run(null, null));
+    expect(unknown).toEqual({ id: 'EXE-003', cost: '비용 없음', turns: '턴 없음' });
+    expect(`${unknown.cost}${unknown.turns}`).not.toMatch(/0/);
+  });
+
+  it('기록이 실제로 0이면 0', () => {
+    expect(latestRunParts(run(0, 0))).toEqual({ id: 'EXE-003', cost: '비용 $0', turns: '턴 0' });
   });
 });
