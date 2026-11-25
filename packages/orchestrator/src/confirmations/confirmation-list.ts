@@ -103,6 +103,10 @@ export const hasPendingNotice = (store: ProjectStore, target: ConfirmationTarget
   target.entity === 'Rule' &&
   pendingNotices(store, store.normChanges.list({ entity: 'Rule', id: target.id })).length > 0;
 
+/** 규칙의 위험도 칸 (M3-01 #46, 선택 칸): 값이 있으면 `{risk}`, 없으면(옛 규칙) 칸을 두지 않는다. */
+const riskOf = (rule: Rule): { risk?: NonNullable<Rule['risk']> } =>
+  rule.risk === null ? {} : { risk: rule.risk };
+
 const byNewest = (a: { seq: number; at: string }, b: { seq: number; at: string }): number =>
   Date.parse(b.at) - Date.parse(a.at) || b.seq - a.seq;
 
@@ -132,6 +136,7 @@ const retirementItem = (
     rationale:
       created === undefined || created.reason === null ? null : shown(created.reason, truncated),
     released: release === undefined ? null : { seq: release.seq, at: release.at },
+    ...riskOf(rule),
     textTruncated: truncated.value,
   };
 };
@@ -155,6 +160,7 @@ const testChangeItem = (
     sessionId: entry.sessionId,
     files: change.files.map((file) => ({ path: shown(file.path, truncated), change: file.change })),
     fileCount: change.fileCount,
+    ...riskOf(rule),
     textTruncated: truncated.value,
   };
 };
@@ -192,6 +198,7 @@ const unconfirmedNorms = (store: ProjectStore): ConfirmationNormItem[] => {
       displayId: rule.displayId,
       text: shown(rule.title, truncated),
       author: rule.author,
+      ...riskOf(rule),
       textTruncated: truncated.value,
     });
   }

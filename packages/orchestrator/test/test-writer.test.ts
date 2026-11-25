@@ -112,6 +112,8 @@ interface SessionSnapshot {
   prompt: string;
   /** 작업 디렉터리 기준 상대 경로 (폴더는 끝에 `/`) */
   entries: string[];
+  /** 세션 시작 때 작업 디렉터리의 블록 선언 사본 (`blocks.json`, 없으면 `null`) */
+  blocks: string | null;
 }
 
 const listTree = (root: string): string[] => {
@@ -320,6 +322,9 @@ const setup = (options: SetupOptions = {}): Harness => {
         workDir: spec.workDir,
         prompt: spec.prompt,
         entries: listTree(spec.workDir),
+        blocks: fs.existsSync(path.join(spec.workDir, 'blocks.json'))
+          ? fs.readFileSync(path.join(spec.workDir, 'blocks.json'), 'utf8')
+          : null,
       });
       return scripted0.startSession(spec);
     },
@@ -490,6 +495,72 @@ describe('세션 작업 디렉터리 · 쓰기 범위 (수용 기준 1, ADR-024)
     }
   }, 60_000);
 
+  it('블록 선언이 있으면 세션 디렉터리에 읽기 전용 사본(blocks.json)이 놓이고, 쓰기 시도는 경로 가드가 거부하며 원본 · 커밋은 그대로다 (M3-01 #46 수용 기준 3, ADR-005 · ADR-122)', async () => {
+    const declaration = {
+      blocks: [
+        {
+          name: 'health',
+          kind: 'domain',
+          include: ['src/app/api/health/**'],
+          public: [],
+          dependsOn: ['lib'],
+          risk: 'medium',
+        },
+        {
+          name: 'lib',
+          kind: 'shared',
+          include: ['src/lib/**'],
+          public: ['src/lib/db.ts'],
+          dependsOn: [],
+          risk: 'low',
+        },
+      ],
+    } as const;
+    const h = setup({
+      scenario: 'test-writer-blocks',
+      scenariosDir: TEST_SCENARIOS_DIR,
+      seedNorms: (store) => {
+        store.blockDeclarations.set(declaration, { by: human, at: new Date(T0).toISOString() });
+      },
+    });
+    const done = await runToEnd(h);
+    expect(attempts(done, 'test_writing', 'red_check')).toEqual([
+      'test_writing#1:passed',
+      'red_check#1:passed',
+    ]);
+    const session = h.sessions.find((s) => s.role === 'test-writer');
+    expect(session?.entries).toContain('blocks.json');
+    // 사본 = 지금 판의 선언 그대로 (보이는 ASCII만이라 표시 값 변환이 바꾸지 않는다)
+    expect(JSON.parse(session?.blocks ?? 'null')).toEqual(declaration);
+    // 작업 지시의 규범 자료에도 같은 블록이 실린다
+    expect(session?.prompt).toContain('블록 선언 (판 1, 블록 2개');
+    expect(session?.prompt).toContain('  포함 경로: src/app/api/health/**');
+    const calls = toolCallsOf(h)
+      .filter((call) => call.name === 'write_file' || call.name === 'read_file')
+      .map(
+        (call) =>
+          `${call.name} ${call.argsSummary} ${call.status}${call.reason === null ? '' : `:${call.reason}`}`,
+      );
+    expect(calls).toEqual([
+      'read_file blocks.json ok',
+      'write_file blocks.json denied:path_denied',
+      'write_file ./blocks.json denied:path_denied',
+      'write_file bive-acceptance/RULE-001/health-time.acc.ts ok',
+    ]);
+    // 원본(프로젝트 폴더 밖 저장소)은 그대로 한 판, 사본은 워크트리로 옮겨지지 않는다
+    expect(
+      withProject(h.biveHome, h.project.id, (store) =>
+        store.blockDeclarations.list().map((record) => record.declaration),
+      ),
+    ).toEqual([declaration]);
+    const writing = done.steps.find((s) => s.kind === 'test_writing');
+    expect(changedIn(h.repo, String(writing?.commit))).toEqual([
+      'bive-acceptance/RULE-001/health-time.acc.ts',
+      ACCEPTANCE_ENV_DECLARATION,
+      ACCEPTANCE_HTTP_DECLARATION,
+    ]);
+  }, 60_000);
+
   it('라우트 목록은 App Router 위치에서 경로 · 메서드만 만든다', () => {
     const repo = copyFixture(temps);
     const extra = path.join(repo, 'src', 'app', '(group)', 'api', 'items', '[id]');
@@ -505,6 +576,7 @@ describe('세션 작업 디렉터리 · 쓰기 범위 (수용 기준 1, ADR-024)
     );
     expect(listAppRoutes(repo).map((r) => `${r.kind} ${r.methods.join(',')} ${r.path}`)).toEqual([
       'page  /',
+      'route GET /api/auth/session',
       'route GET /api/health',
       'route GET,POST,DELETE /api/items/[id]',
     ]);

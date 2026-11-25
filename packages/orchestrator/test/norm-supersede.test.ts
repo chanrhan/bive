@@ -128,6 +128,8 @@ const NEW_RULE = {
     'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON에 time 필드를 담지 않는다',
   kind: 'business',
   checkKinds: ['test'],
+  targetBlocks: ['health'],
+  risk: 'medium',
 } as const;
 
 let clockAt = T0 + 100;
@@ -246,6 +248,8 @@ describe('대체 · 폐기는 트랜잭션 1개 (수용 기준 1, ADR-100 D6)', 
         kind: 'business',
         checkKinds: ['test'],
         parentRequirementId: s.first.id,
+        targetBlockIds: [],
+        risk: null,
       },
       retirement: {
         supersededBy: { id: result.rule.id, displayId: 'RULE-004' },

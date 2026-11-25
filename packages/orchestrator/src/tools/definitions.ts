@@ -4,7 +4,7 @@
 // 규범을 쓰는 도구는 규칙 작성 역할의 규칙 생성 · 폐기 · 대체 도구(`propose_rule` · `retire_rule` · `supersede_rule`)와 이의 판단의
 // 유지 도구(`uphold_rule`)뿐이다(M7-02 · M7-09 · M7-11, ADR-100 D1 · D4 · D5 · D6, ADR-103 · ADR-112 · ADR-115). 구현 역할의 이의
 // 제기 도구(`raise_objection`)는 이의 기록만 남기고 규범을 바꾸지 않는다(M7-11, ADR-100 D4 · I2, ADR-115).
-import { type AgentRole, CheckKind, RuleKind } from '@bive/shared';
+import { type AgentRole, CheckKind, Risk, RuleKind, RuleTargetBlocks } from '@bive/shared';
 import { z } from 'zod';
 
 import { CONTROL_CHARACTERS, EARS_FORMAT, earsStatementProblem } from './ears.js';
@@ -160,7 +160,8 @@ export type RuleContradictionInput = z.infer<typeof RuleContradictionInput>;
 
 /**
  * 규칙 생성 입력 (NRM-02, ADR-062, M7-02). 제목(한 줄) · EARS 진술 · 종류 · 검사 종류(1개 이상, 중복 없음) ·
- * 부모 요구사항 · 근거 · 모순 판단(M7-07, 필수). 부모 요구사항이 세션의 요구사항인지 · 살아 있는지는 등록 콜백이 확인한다.
+ * 부모 요구사항 · 대상 블록(1개 이상)과 위험도(NRM-09, M3-01 #46 · ADR-122, 필수) · 근거 · 모순 판단(M7-07, 필수). 부모 요구사항이
+ * 세션의 요구사항인지 · 살아 있는지, 대상 블록이 블록 선언에 있는지(선언이 있을 때)는 반영 모듈이 확인한다.
  */
 export const ProposeRuleInput = z.strictObject({
   parentRequirementId: z
@@ -186,6 +187,10 @@ export const ProposeRuleInput = z.strictObject({
     .min(1)
     .refine((kinds) => new Set(kinds).size === kinds.length, '검사 종류가 중복됨')
     .describe('검사 종류 1개 이상 (중복 없이)'),
+  targetBlocks: RuleTargetBlocks.describe(
+    '대상 블록 이름 1개 이상 (중복 없이). 작업 지시에 블록 선언이 있으면 거기 있는 이름만 쓴다',
+  ),
+  risk: Risk.describe('위험도: low · medium · high'),
   rationale: NonBlank(z.string().min(1).max(4000)).describe('요구사항의 어느 부분을 옮겼는지'),
   contradiction: RuleContradictionInput,
 });
@@ -327,7 +332,7 @@ const DEFINITIONS: Record<FixedToolName, ToolDefinition> = {
   },
   propose_rule: {
     name: 'propose_rule',
-    description: `요구사항에서 도출한 규칙을 만든다. 만든 규칙은 바로 효력을 갖고 근거와 함께 규범 변경 기록에 남으며, 사람은 나중에 확인한다. 진술은 ${EARS_FORMAT} 형식 한 줄. 효력 있는 기존 규칙과의 모순 판단(contradiction)이 필수이고 그 판단도 규범 변경 기록에 남는다. 모순이어도 규칙은 만들어지고 기존 규칙은 그대로 효력을 갖는다.`,
+    description: `요구사항에서 도출한 규칙을 만든다. 만든 규칙은 바로 효력을 갖고 근거와 함께 규범 변경 기록에 남으며, 사람은 나중에 확인한다. 진술은 ${EARS_FORMAT} 형식 한 줄. 대상 블록(targetBlocks, 1개 이상, 작업 지시에 블록 선언이 있으면 그 이름만)과 위험도(risk)가 필수다. 효력 있는 기존 규칙과의 모순 판단(contradiction)이 필수이고 그 판단도 규범 변경 기록에 남는다. 모순이어도 규칙은 만들어지고 기존 규칙은 그대로 효력을 갖는다.`,
     inputSchema: ProposeRuleInput,
   },
   retire_rule: {

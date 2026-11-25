@@ -12,8 +12,11 @@
 // - 규칙 작성 · 테스트 작성 · 구현 역할이 같은 틀 · 상한 · 줄이기를 쓴다(M7-08). 세션 기록에는 {@link normInputRecord}를 남긴다
 // - 수가 상한을 넘으면 A15대로 줄인다: 초점(대상 규칙, 대상 · 그 부모 요구사항)과 같은 부모 요구사항의 규칙을 먼저 넣고,
 //   나머지를 최근 변경 순으로 상한까지 넣는다. 잘린 사실과 빠진 수는 자료 머리말과 요약(`summary`)에 남는다
+// - 블록 선언이 있으면 자료 끝에 지금 판의 선언(이름 · 종류 · 위험도 · 포함 경로 · 공개 API · 허용 의존)을 싣는다(M3-01 #46,
+//   ADR-122): 규칙 작성 역할이 대상 블록을 고르고, 테스트 작성 · 구현 역할이 블록 경계를 안다. 값은 저장소가 읽을 때 스키마로 본
+//   선언이라(깨진 행은 읽지 못하고 던진다) 보이는 ASCII만이다. 그래서 표시 값 변환을 거치지 않는다. 선언이 없으면 아무것도 싣지 않는다(지금까지의 작업 지시 그대로)
 // - 저장소를 읽기만 한다. 계약(M3-04)과 대상 블록으로 고르기(M3-29)는 뒤 이슈가 더한다
-import type { SessionNormInput } from '@bive/shared';
+import type { BlockDeclarationRecord, SessionNormInput } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
 import { displayText } from '../text-limit.js';
@@ -163,6 +166,8 @@ export interface NormInput {
   readonly requirements: readonly NormInputRequirement[];
   readonly rules: readonly NormInputRule[];
   readonly summary: NormInputSummary;
+  /** 지금 블록 선언 (M3-01 #46). 선언이 없으면 칸이 없다 */
+  readonly blocks?: BlockDeclarationRecord;
 }
 
 // 효력 판정은 `norms/effective.ts` 한 곳에 있다 (폐기된 규칙은 효력이 없다, M7-09 #221 · ADR-112)
@@ -297,7 +302,9 @@ export const collectNormInput = (
     });
   const requirementCount = count(requirements.length, shownRequirements.length);
   const ruleCount = count(rules.length, shownRules.length);
+  const blocks = store.blockDeclarations.current();
   return {
+    ...(blocks === null ? {} : { blocks }),
     requirements: shownRequirements,
     rules: shownRules,
     summary: {
@@ -358,8 +365,29 @@ export const renderNormInput = (input: NormInput, focusLabel: string): string =>
       );
     }
   }
+  if (input.blocks !== undefined) lines.push(...blockLines(input.blocks));
   lines.push(NORM_INPUT_END);
   return lines.join('\n');
+};
+
+/**
+ * 블록 선언 자료 줄. 값은 항목 머리말 뒤에만 온다. 표시 값 변환을 하지 않는다: 저장소가 스키마(보이는 ASCII 글자 집합 · 상한)로 본
+ * 선언만 돌려주므로 바꿀 글자가 없고, 그 스키마가 이 자료의 방어다(ADR-122 ⑩).
+ */
+const blockLines = (record: BlockDeclarationRecord): string[] => {
+  const shownList = (values: readonly string[]): string =>
+    values.length === 0 ? '없음' : values.join(', ');
+  const lines = [
+    `블록 선언 (판 ${String(record.version)}, 블록 ${String(record.declaration.blocks.length)}개, 사람이 정함. 규칙의 대상 블록은 이 이름만 쓴다)`,
+  ];
+  for (const block of record.declaration.blocks) {
+    lines.push(`- ${block.name}`);
+    lines.push(`  종류: ${block.kind}, 위험도: ${block.risk}`);
+    lines.push(`  포함 경로: ${shownList(block.include)}`);
+    lines.push(`  공개 API: ${shownList(block.public)}`);
+    lines.push(`  허용 의존: ${shownList(block.dependsOn)}`);
+  }
+  return lines;
 };
 
 /** 세션 기록 · 로그용 한 줄 요약. */
