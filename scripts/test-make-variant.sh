@@ -5,6 +5,8 @@
 #      거부는 종료 코드 1(인자 수는 2)이고 커밋 · 파일이 늘지 않는다
 #   2. 예제 블록 선언으로 원본 위반 0건, undeclared-import · cycle 변형은 커밋 하나에 위반 정확히 1건(종류 · 파일까지),
 #      git revert --no-edit HEAD 뒤 다시 0건
+#   3. contract-mismatch 변형(M3-47 #292)은 커밋 하나에 헬스 체크 라우트 파일 하나만 바꾸고(ok가 글) 구조 위반은 0건, 되돌리면
+#      원본과 같다 (계약 판정은 orchestrator/test/contract-runner.test.ts)
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -149,5 +151,32 @@ expect_violations '원본 위반 0건' 'total 0'
 check_variant undeclared-import \
   'structure.declared-direction src/app/api/health/session-probe.ts src/app/api/auth/session/route.ts'
 check_variant cycle 'structure.no-cycle src/lib/cycle-a.ts src/lib/cycle-b.ts'
+
+route=src/app/api/health/route.ts
+before_route="$(md5sum < "$fx/$route")"
+before="$(commits "$fx")"
+if ! "$mv" "$fx" contract-mismatch > /dev/null; then
+  echo "실패: contract-mismatch 변형이 0이 아닌 코드로 종료"
+  fail=1
+else
+  changed="$(g -C "$fx" diff --name-only HEAD~1 HEAD)"
+  if [[ "$(commits "$fx")" != "$((before + 1))" || "$(g -C "$fx" log -1 --format=%s)" != 'variant: contract-mismatch' || "$changed" != "$route" ]]; then
+    echo "실패: contract-mismatch 변형 커밋이 하나가 아니거나 바뀐 파일이 $route 하나가 아님 ($changed)"
+    fail=1
+  elif ! grep -q "Response.json({ ok: 'true' })" "$fx/$route"; then
+    echo "실패: contract-mismatch 변형이 ok를 글로 바꾸지 않음"
+    fail=1
+  else
+    echo "통과: contract-mismatch 변형 커밋 하나 · 라우트 파일 하나"
+  fi
+  expect_violations 'contract-mismatch 구조 위반 0건' 'total 0'
+  g -C "$fx" revert --no-edit HEAD > /dev/null
+  if [[ "$(md5sum < "$fx/$route")" == "$before_route" ]]; then
+    echo "통과: contract-mismatch 되돌린 뒤 원본과 같음"
+  else
+    echo "실패: contract-mismatch 되돌린 뒤 원본과 다름"
+    fail=1
+  fi
+fi
 
 exit "$fail"
