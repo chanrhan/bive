@@ -181,10 +181,7 @@ export const createCheckExecutor =
       return { status: 'unmet', exitDetail: { ...detail, reason: 'collect_error' } };
     }
     const testJudged = testedRules.filter((rule) => ruleIds.includes(rule.displayId));
-    const judgedRules = [
-      ...testJudged,
-      ...rules.filter((rule) => structureIds.includes(rule.id)),
-    ];
+    const judgedRules = [...testJudged, ...rules.filter((rule) => structureIds.includes(rule.id))];
     // 인수 테스트 판정과 구조 검사 판정을 한 트랜잭션에 남긴다 (판정 1회)
     const meta = { runId: context.run.id, stepId: context.step.id, commit };
     const recorded = recordJudgments(context, [

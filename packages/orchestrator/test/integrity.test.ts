@@ -1075,7 +1075,9 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
     expect(builtin.match(/\.normChanges\.append\(/g)).toHaveLength(1);
     expect(builtin.match(/builtin: (true|false)/g)).toEqual(['builtin: true']);
     expect(builtin).toMatch(/parentRequirementId: null,\s+builtin: true/);
-    expect(builtin.match(/kind: '[a-z_]+',\s+actor:/g)).toEqual(["kind: 'created',\n        actor:"]);
+    expect(builtin.match(/kind: '[a-z_]+',\s+actor:/g)).toEqual([
+      "kind: 'created',\n        actor:",
+    ]);
     expect(builtin).toMatch(/actor: \{ kind: 'orchestrator' \}/);
     expect(using(/\bensureBuiltinStructureRules\(/)).toEqual(['ipc/block-handlers.ts']);
     expect(using(/from '[./]+\/?(?:norms\/)?builtin-rules\.js'/)).toEqual([

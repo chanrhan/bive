@@ -227,7 +227,11 @@ const assertNoBuiltinTarget = (store: ProjectStore, ruleIds: readonly Ulid[]): v
   for (const id of ruleIds) {
     const rule = store.rules.get(id);
     if (rule?.builtin === true) {
-      throw new ConflictError('규칙', rule.displayId, '내장 구조 규칙은 실행 대상으로 받지 않습니다');
+      throw new ConflictError(
+        '규칙',
+        rule.displayId,
+        '내장 구조 규칙은 실행 대상으로 받지 않습니다',
+      );
     }
   }
 };

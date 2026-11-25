@@ -359,9 +359,7 @@ export const runStructureCheck = async (
     const failed = own.length > 0 || incomplete || truncated;
     const notes = [
       ...(own.length > 0 ? [`위반 ${String(own.length)}건`] : []),
-      ...(own.length > MAX_STRUCTURE_CASES
-        ? [`앞 ${String(MAX_STRUCTURE_CASES)}건만 실음`]
-        : []),
+      ...(own.length > MAX_STRUCTURE_CASES ? [`앞 ${String(MAX_STRUCTURE_CASES)}건만 실음`] : []),
       ...(truncated ? ['위반 목록이 잘려 종류를 다 알 수 없음'] : []),
       ...(unanalyzed === null
         ? []
@@ -370,15 +368,13 @@ export const runStructureCheck = async (
     const extra =
       unanalyzed === null
         ? []
-        : unanalyzed.items.slice(0, MAX_STRUCTURE_CASES).map(
-            (edge): JudgmentCase => ({
-              name: '분석하지 않은 대상으로 가는 가져오기',
-              file: shown(edge.from),
-              line: null,
-              status: 'failed',
-              message: `가져온 대상: ${shown(edge.to)}`,
-            }),
-          );
+        : unanalyzed.items.slice(0, MAX_STRUCTURE_CASES).map((edge): JudgmentCase => ({
+            name: '분석하지 않은 대상으로 가는 가져오기',
+            file: shown(edge.from),
+            line: null,
+            status: 'failed',
+            message: `가져온 대상: ${shown(edge.to)}`,
+          }));
     return {
       key,
       rule: plan.rules[key],

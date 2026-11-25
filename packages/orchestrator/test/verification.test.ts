@@ -1304,9 +1304,16 @@ describe('내장 구조 규칙의 준수 · 추적성 결함 (M3-03 #48 수용 �
 
   it('블록 선언 저장 직후(판정 기록 없음) 내장 규칙은 다른 규칙의 판정 없음과 같이 판정 가능 항목에 들고, 판정 기준 실행의 구조 검사 판정이 있으면 통과 · 실패로 센다. 추적성 결함(부모 없는 규칙)에서는 빠진다', async () => {
     const plain = h.read((store) => insertRule(store, '일반 규칙', 'approved'));
-    await h.client.call('blocks.set', { projectId: h.project.id, author: human, declaration: SAMPLE });
+    await h.client.call('blocks.set', {
+      projectId: h.project.id,
+      author: human,
+      declaration: SAMPLE,
+    });
     const builtin = h.read((store) => store.rules.list().filter((rule) => rule.builtin));
-    expect(builtin.map((rule) => rule.title)).toEqual(['공개 API로만 접근', '선언한 방향으로만 의존']);
+    expect(builtin.map((rule) => rule.title)).toEqual([
+      '공개 API로만 접근',
+      '선언한 방향으로만 의존',
+    ]);
     const [publicApi, direction] = builtin as [Rule, Rule];
 
     // 판정 기록 없음: 일반 규칙과 같은 '판정 없음'으로 분모에 든다
@@ -1337,9 +1344,7 @@ describe('내장 구조 규칙의 준수 · 추적성 결함 (M3-03 #48 수용 �
     const judged = await summary();
     expect(judged.compliance).toEqual({ passed: 2, judgeable: 3 });
     expect(judged.denominator).toEqual([plain.id, publicApi.id, direction.id]);
-    expect(
-      judged.rules.map((row) => [row.rule.displayId, row.judgment.status]),
-    ).toEqual([
+    expect(judged.rules.map((row) => [row.rule.displayId, row.judgment.status])).toEqual([
       [plain.displayId, 'pass'],
       [publicApi.displayId, 'pass'],
       [direction.displayId, 'fail'],

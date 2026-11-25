@@ -111,8 +111,12 @@ const builtinOf = (rules: readonly Rule[], key: BuiltinStructureRuleKey): Rule =
 describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기고 rule.list에 나온다 (수용 기준 1)', () => {
   it('blocks.set이 같은 트랜잭션에서 내장 규칙 두 개(부모 없음 · 구조 검사 · 대상 블록 없음 · 위험도 없음 · 효력 · 미확인)와 오케스트레이터의 신규 기록을 남기고, rule.list에 고정 순서로 나온다', async () => {
     const h = await startProjectHarness({ servers, clients });
-    expect((await ruleList(h))).toEqual([]);
-    await h.client.call('blocks.set', { projectId: h.project.id, author: human, declaration: SAMPLE });
+    expect(await ruleList(h)).toEqual([]);
+    await h.client.call('blocks.set', {
+      projectId: h.project.id,
+      author: human,
+      declaration: SAMPLE,
+    });
     const listed = (await h.client.call('rule.list', { projectId: h.project.id })).rules;
     const rules = listed.map((item) => item.rule);
     expect(
@@ -150,7 +154,10 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
         judgment: 'unjudged',
       })),
     );
-    expect(rules.map((rule) => rule.title)).toEqual(['공개 API로만 접근', '선언한 방향으로만 의존']);
+    expect(rules.map((rule) => rule.title)).toEqual([
+      '공개 API로만 접근',
+      '선언한 방향으로만 의존',
+    ]);
     // 규범 변경 기록: 규칙마다 신규 1건 (주체 오케스트레이터 · 세션 · 실행 없음 · 고정 사유 · 계기가 된 선언의 판)
     h.read((store) => {
       const changes = store.normChanges.list();
@@ -204,9 +211,13 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
     const h = await startProjectHarness({ servers, clients });
     // 이 변경 전처럼 선언만 저장소에 있다 (내장 규칙 없음)
     h.read((store) => store.blockDeclarations.set(SAMPLE, { at: iso(T0), by: human }));
-    expect((await ruleList(h))).toEqual([]);
-    await h.client.call('blocks.set', { projectId: h.project.id, author: human, declaration: SAMPLE });
-    const first = (await ruleList(h));
+    expect(await ruleList(h)).toEqual([]);
+    await h.client.call('blocks.set', {
+      projectId: h.project.id,
+      author: human,
+      declaration: SAMPLE,
+    });
+    const first = await ruleList(h);
     expect(first.map((rule) => rule.displayId)).toEqual(['RULE-001', 'RULE-002']);
     const changes = h.read((store) => store.normChanges.list());
     expect(changes.map((entry) => entry.detail.after)).toMatchObject([
@@ -220,13 +231,11 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
       declaration: { blocks: SAMPLE.blocks.map((item) => ({ ...item, risk: 'high' })) },
     });
     expect(third.current.version).toBe(3);
-    expect((await ruleList(h))).toEqual(first);
+    expect(await ruleList(h)).toEqual(first);
     expect(h.read((store) => store.normChanges.list())).toEqual(changes);
     // 다른 프로젝트(선언 없음)에는 내장 규칙이 없다
     const other = await startProjectHarness({ servers, clients });
-    expect((await ruleList(other))).toEqual(
-      [],
-    );
+    expect(await ruleList(other)).toEqual([]);
   });
 
   it('내장 규칙을 만들지 못하면 선언도 저장되지 않는다 (한 트랜잭션), 거부된 선언 · 에이전트 주체는 규칙을 만들지 않는다', async () => {
@@ -262,13 +271,21 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
     );
     expect(h.read((store) => store.rules.list())).toEqual([]);
     // 대조군: 트리거를 지우면 만들어진다
-    await h.client.call('blocks.set', { projectId: h.project.id, author: human, declaration: SAMPLE });
+    await h.client.call('blocks.set', {
+      projectId: h.project.id,
+      author: human,
+      declaration: SAMPLE,
+    });
     expect(h.read((store) => store.rules.list()).map((rule) => rule.builtin)).toEqual([true, true]);
   });
 
   it('사람의 [실행]은 내장 규칙을 대상으로 받지 않고(-32009 성격의 충돌, 아무것도 남지 않음), 사람 편집도 받지 않는다 (builtin_rule)', async () => {
     const h = await startProjectHarness({ servers, clients });
-    await h.client.call('blocks.set', { projectId: h.project.id, author: human, declaration: SAMPLE });
+    await h.client.call('blocks.set', {
+      projectId: h.project.id,
+      author: human,
+      declaration: SAMPLE,
+    });
     const rules = await ruleList(h);
     h.read((store) => {
       store.settings.update(
@@ -307,7 +324,7 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
       }),
     );
     expect(edited.data).toMatchObject({ reason: 'builtin_rule' });
-    expect((await ruleList(h))).toEqual(rules);
+    expect(await ruleList(h)).toEqual(rules);
   });
 });
 
@@ -376,8 +393,12 @@ describe('규칙 작성 역할의 폐기 · 대체 도구와 구현 역할의 �
     );
     if (service === null) throw new Error('서비스 없음');
     const svc: RuleWriterService = service;
-    await h.client.call('blocks.set', { projectId: h.project.id, author: human, declaration: SAMPLE });
-    const before = (await ruleList(h));
+    await h.client.call('blocks.set', {
+      projectId: h.project.id,
+      author: human,
+      declaration: SAMPLE,
+    });
+    const before = await ruleList(h);
     await h.client.call('settings.update', {
       projectId: h.project.id,
       patch: {
@@ -401,7 +422,7 @@ describe('규칙 작성 역할의 폐기 · 대체 도구와 구현 역할의 �
       ['supersede_rule', 'denied', 'builtin_rule'],
     ]);
     // 규칙은 효력 상태로 남는다: 목록 · 폐기 기록 · 규범 변경 기록 그대로
-    expect((await ruleList(h))).toEqual(before);
+    expect(await ruleList(h)).toEqual(before);
     h.read((store) => {
       for (const rule of before) expect(store.ruleRetirements.get(rule.id)).toBeNull();
       expect(store.ruleRetirements.list()).toEqual([]);
@@ -649,13 +670,19 @@ describe('검사 단계의 구조 검사: undeclared-import 변형에서 방향 
       failureReason: 'regression_limit',
       targetRuleIds: [h.rule.id, direction.id],
     });
-    expect(attempts(detail, 'check')).toEqual(['check#1:failed', 'check#2:failed', 'check#3:failed']);
+    expect(attempts(detail, 'check')).toEqual([
+      'check#1:failed',
+      'check#2:failed',
+      'check#3:failed',
+    ]);
     expect(exitOf(detail, 'check', 3)).toMatchObject({
       reason: 'regression_limit',
     });
-    expect(
-      structureJudgments(h, direction.id, runId).map((judgment) => judgment.status),
-    ).toEqual(['fail', 'fail', 'fail']);
+    expect(structureJudgments(h, direction.id, runId).map((judgment) => judgment.status)).toEqual([
+      'fail',
+      'fail',
+      'fail',
+    ]);
     expect(h.sessions.some((spec) => spec.role === 'rule-writer')).toBe(false);
   }, 120_000);
 
@@ -683,7 +710,9 @@ describe('검사 단계의 구조 검사: undeclared-import 변형에서 방향 
 
 describe('구조 검사가 돌지 않았는데 통과로 저장되는 길이 없다 (닫힌 쪽)', () => {
   const analyzer =
-    (fn: (input: Parameters<StructureAnalyzer>[0]) => Promise<ProjectAnalysis>): StructureAnalyzer =>
+    (
+      fn: (input: Parameters<StructureAnalyzer>[0]) => Promise<ProjectAnalysis>,
+    ): StructureAnalyzer =>
     (input) =>
       fn(input);
 
@@ -903,7 +932,10 @@ describe('병합 재검사의 구조 검사 (검사 단계와 같다)', () => {
 describe('구조 검사 결과 → 내장 규칙 판정 (단위, 파서 출력 모양)', () => {
   const rule = (title: string): Rule => ({
     id: newId(),
-    displayId: title === BUILTIN_STRUCTURE_RULE_TEXTS['structure.public-api-only'].title ? 'RULE-001' : 'RULE-002',
+    displayId:
+      title === BUILTIN_STRUCTURE_RULE_TEXTS['structure.public-api-only'].title
+        ? 'RULE-001'
+        : 'RULE-002',
     title,
     statement: 'WHILE 블록 선언이 있으면 THE SYSTEM SHALL 가져온다',
     kind: 'architecture',
@@ -925,14 +957,18 @@ describe('구조 검사 결과 → 내장 규칙 판정 (단위, 파서 출력 �
     version: 4,
     declaration: SAMPLE as unknown as StructurePlan['declaration'],
     rules: {
-      'structure.public-api-only': rule(BUILTIN_STRUCTURE_RULE_TEXTS['structure.public-api-only'].title),
+      'structure.public-api-only': rule(
+        BUILTIN_STRUCTURE_RULE_TEXTS['structure.public-api-only'].title,
+      ),
       'structure.declared-direction': rule(
         BUILTIN_STRUCTURE_RULE_TEXTS['structure.declared-direction'].title,
       ),
     },
   };
   const capped = <T>(items: T[], total = items.length) => ({ items, total });
-  const analysis = (outcome: NonNullable<ProjectAnalysis['structure']>['outcome']): ProjectAnalysis => ({
+  const analysis = (
+    outcome: NonNullable<ProjectAnalysis['structure']>['outcome'],
+  ): ProjectAnalysis => ({
     graph: {
       modules: [],
       edges: capped([]),
@@ -957,7 +993,11 @@ describe('구조 검사 결과 → 내장 규칙 판정 (단위, 파서 출력 �
     to: { file: to, block: 'lib' },
     cycle: kind === 'structure.no-cycle' ? capped([from, to]) : null,
   });
-  const run = (result: ProjectAnalysis | Error, dir = tempDir(), signal = new AbortController().signal) =>
+  const run = (
+    result: ProjectAnalysis | Error,
+    dir = tempDir(),
+    signal = new AbortController().signal,
+  ) =>
     runStructureCheck(dir, plan, {
       signal,
       analyze: () => (result instanceof Error ? Promise.reject(result) : Promise.resolve(result)),
@@ -1014,7 +1054,9 @@ describe('구조 검사 결과 → 내장 규칙 판정 (단위, 파서 출력 �
       analysis({
         status: 'incomplete',
         violations: capped([]),
-        unanalyzed: capped([{ from: 'src/app/api/health/route.ts', to: 'src/app/api/health/q.graphql' }]),
+        unanalyzed: capped([
+          { from: 'src/app/api/health/route.ts', to: 'src/app/api/health/q.graphql' },
+        ]),
       }),
     );
     expect(statuses(incomplete)).toEqual([
@@ -1054,7 +1096,11 @@ describe('구조 검사 결과 → 내장 규칙 판정 (단위, 파서 출력 �
 
   it('위반 경로는 표시 값으로 바꾸고 자르며, 케이스는 상한까지 싣고 위반 수는 요약에 센다', async () => {
     const many = Array.from({ length: MAX_STRUCTURE_CASES + 5 }, (_, i) =>
-      violation('structure.declared-direction', `src/app/api/health/f${String(i)}.ts`, 'src/lib/x.ts'),
+      violation(
+        'structure.declared-direction',
+        `src/app/api/health/f${String(i)}.ts`,
+        'src/lib/x.ts',
+      ),
     );
     many[0] = violation(
       'structure.declared-direction',
@@ -1065,7 +1111,9 @@ describe('구조 검사 결과 → 내장 규칙 판정 (단위, 파서 출력 �
     if (outcome.kind !== 'judged') throw new Error('판정 없음');
     const cases = outcome.verdicts[1]?.cases ?? [];
     expect(cases).toHaveLength(1 + MAX_STRUCTURE_CASES);
-    expect(cases[0]?.message).toBe(`위반 ${String(MAX_STRUCTURE_CASES + 5)}건 · 앞 ${String(MAX_STRUCTURE_CASES)}건만 실음`);
+    expect(cases[0]?.message).toBe(
+      `위반 ${String(MAX_STRUCTURE_CASES + 5)}건 · 앞 ${String(MAX_STRUCTURE_CASES)}건만 실음`,
+    );
     expect(cases[1]?.file).toBe('src/app/api/health/\\u202eevil\\n.ts');
     expect(cases[1]?.message?.length).toBeLessThanOrEqual('가져온 파일: '.length + 300);
     expect(cases[1]?.message).toContain('…');
@@ -1105,12 +1153,17 @@ describe('구조 검사 결과 → 내장 규칙 판정 (단위, 파서 출력 �
     expect(
       statuses(
         await run(
-          analysis({ status: 'overlap', overlaps: capped([{ file: 'src/a.ts', blocks: ['a', 'b'] }]) }),
+          analysis({
+            status: 'overlap',
+            overlaps: capped([{ file: 'src/a.ts', blocks: ['a', 'b'] }]),
+          }),
         ),
       ),
     ).toBe('block_declaration_overlap');
     expect(
-      statuses(await run({ ...analysis({ status: 'checked', violations: capped([]) }), structure: null })),
+      statuses(
+        await run({ ...analysis({ status: 'checked', violations: capped([]) }), structure: null }),
+      ),
     ).toBe('judge_runner_error');
     const controller = new AbortController();
     const reason = new Error('중단');
