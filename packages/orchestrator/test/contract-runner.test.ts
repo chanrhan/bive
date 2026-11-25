@@ -13,7 +13,7 @@ import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createUlidGenerator, type JudgmentResult, type Rule } from '@bive/shared';
+import { type Contract, createUlidGenerator, type JudgmentResult, type Rule } from '@bive/shared';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -40,6 +40,11 @@ import type { JudgingOptions } from '../src/steps/judging.js';
 import { JudgeRunner } from '../src/judge/runner.js';
 import { readContractSource, registerHumanContract } from '../src/norms/contract.js';
 import { createCheckExecutor } from '../src/steps/check.js';
+import {
+  disposeContracts,
+  finishContracts,
+  prepareContracts,
+} from '../src/steps/contract-check.js';
 import { verificationSummary } from '../src/verification/summary.js';
 import { human, userGit, withProject } from './helpers/engine-harness.js';
 import {
@@ -386,24 +391,41 @@ describe('두 도구는 대상 프로젝트의 설정 · 플러그인 코드를 
   it('실행기(등록 커밋의 git 객체 → 빈 도구 폴더의 사본 · BIVE 설정)로 lint와 prism 검증을 해도 아무것도 실행되지 않는다', async () => {
     const { root, markers, commit } = plantedProject();
     const source = await readContractSource(root, 'main', 'openapi.yaml');
-    expect(source).toMatchObject({ ok: true, commit });
-    const prepared = await prepareOpenApiContract(FIXTURE_OPENAPI, {
-      sourceFile: 'openapi.yaml',
-      signal: never,
-    });
+    if (!source.ok) throw new Error(source.code);
+    expect(source.commit).toBe(commit);
+    // 검사 단계와 같은 입구: 등록 커밋의 git 객체에서 읽고(저장소 = 심은 프로젝트) 도구를 부른다
+    const item = {
+      rule: { id: newId(), displayId: 'RULE-002' } as Rule,
+      contract: {
+        id: newId(),
+        displayId: 'CON-001',
+        kind: 'openapi',
+        sourceFile: 'openapi.yaml',
+        contentHash: source.contentHash,
+        sourceCommit: commit,
+      } as Contract,
+      runner: 'openapi' as const,
+    };
+    const prepared = await prepareContracts(root, commit, { items: [item] }, { signal: never });
+    if (prepared.kind !== 'prepared') throw new Error(prepared.code);
     try {
-      expect(prepared.kind).toBe('ready');
-      if (prepared.kind !== 'ready') return;
+      // lint 뒤: 심은 설정 · 플러그인이 실행되지 않았다
+      expect(markersIn(markers)).toEqual([]);
+      const [entry] = prepared.prepared.items;
+      expect(entry).toMatchObject({ kind: 'openapi', sourceAtCommit: 'same' });
+      const doc = entry?.kind === 'openapi' ? entry.prepared : null;
+      if (doc?.kind !== 'ready') throw new Error('준비되지 않음');
       // 도구 폴더는 프로젝트 밖의 빈 폴더이고 사본 · BIVE 설정만 있다
-      expect(prepared.toolDir.startsWith(root)).toBe(false);
-      expect(fs.readdirSync(prepared.toolDir).sort()).toEqual([
-        'bive-redocly.yaml',
-        'contract.yaml',
-      ]);
-      const result = await verifyOpenApiTraffic(prepared, [exchange()], { signal: never });
-      expect(result.exchanges.map((item) => item.outcome)).toEqual(['ok']);
+      expect(doc.toolDir.startsWith(root)).toBe(false);
+      expect(fs.readdirSync(doc.toolDir).sort()).toEqual(['bive-redocly.yaml', 'contract.yaml']);
+      const run = await finishContracts(
+        prepared.prepared,
+        { exchanges: [exchange()], overflow: 0 },
+        { signal: never },
+      );
+      expect(run).toMatchObject({ kind: 'judged', verdicts: [{ kind: 'judged', status: 'pass' }] });
     } finally {
-      disposePrepared(prepared);
+      disposeContracts(prepared.prepared);
     }
     expect(markersIn(markers)).toEqual([]);
   }, 60_000);
