@@ -279,7 +279,7 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
     expect(h.read((store) => store.rules.list()).map((rule) => rule.builtin)).toEqual([true, true]);
   });
 
-  it('사람의 [실행]은 내장 규칙을 대상으로 받지 않고(-32009 성격의 충돌, 아무것도 남지 않음), 사람 편집도 받지 않는다 (builtin_rule)', async () => {
+  it('사람의 [실행]은 내장 규칙을 대상으로 받지 않고(-32009, 아무것도 남지 않음), 사람 편집도 받지 않는다 (builtin_rule)', async () => {
     const h = await startProjectHarness({ servers, clients });
     await h.client.call('blocks.set', {
       projectId: h.project.id,
@@ -314,6 +314,12 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
     });
     const rule = rules[0];
     if (rule === undefined) throw new Error('규칙 없음');
+    // 파이프의 run.create도 같은 거부다 (-32009)
+    const rejected = await rpcError(
+      h.client.call('run.create', { projectId: h.project.id, ruleIds: [rule.id], author: human }),
+    );
+    expect(rejected.code).toBe(-32009);
+    expect(h.read((store) => store.runs.list())).toEqual([]);
     const edited = await rpcError(
       h.client.call('rule.update', {
         projectId: h.project.id,
