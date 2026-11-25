@@ -33,6 +33,7 @@ import {
   costPerRun,
   humanConfirmedCompliance,
   type MergeRecord,
+  parentlessRuleDefects,
   pipelineOf,
 } from '../src/verification/summary.js';
 import type { TestClient } from './helpers/client.js';
@@ -1273,5 +1274,96 @@ describe('사람 확인 기준 · 에이전트 폐기 수 계산 (순수 함수,
         entry('retired', 'R4', { kind: 'orchestrator' }),
       ]),
     ).toBe(2);
+  });
+});
+
+describe('내장 구조 규칙의 준수 · 추적성 결함 (M3-03 #48 수용 기준 3, JDG-03 · NRM-06 · NRM-02, ADR-127)', () => {
+  const SAMPLE = {
+    blocks: [
+      {
+        name: 'lib',
+        kind: 'shared',
+        include: ['src/lib/**'],
+        public: ['src/lib/db.ts'],
+        dependsOn: [],
+        risk: 'low',
+      },
+    ],
+  };
+  const structureJudgment = (
+    rule: Rule,
+    status: JudgmentResult['status'],
+    where: JudgedIn,
+    at: number,
+    commit: string,
+  ): JudgmentResult => ({
+    ...judgment(rule, status, where, at, commit),
+    runner: 'dependency-cruiser',
+    exitCode: null,
+  });
+
+  it('블록 선언 저장 직후(판정 기록 없음) 내장 규칙은 다른 규칙의 판정 없음과 같이 판정 가능 항목에 들고, 판정 기준 실행의 구조 검사 판정이 있으면 통과 · 실패로 센다. 추적성 결함(부모 없는 규칙)에서는 빠진다', async () => {
+    const plain = h.read((store) => insertRule(store, '일반 규칙', 'approved'));
+    await h.client.call('blocks.set', { projectId: h.project.id, author: human, declaration: SAMPLE });
+    const builtin = h.read((store) => store.rules.list().filter((rule) => rule.builtin));
+    expect(builtin.map((rule) => rule.title)).toEqual(['공개 API로만 접근', '선언한 방향으로만 의존']);
+    const [publicApi, direction] = builtin as [Rule, Rule];
+
+    // 판정 기록 없음: 일반 규칙과 같은 '판정 없음'으로 분모에 든다
+    const fresh = await summary();
+    expect(fresh.compliance).toEqual({ passed: 0, judgeable: 3 });
+    expect(fresh.denominator).toEqual([plain.id, publicApi.id, direction.id]);
+    for (const rule of [plain, ...builtin]) {
+      expect(fresh.rules.find((row) => row.rule.id === rule.id)).toMatchObject({
+        judgment: UNJUDGED,
+        run: null,
+      });
+    }
+
+    // 판정 기준 실행의 검사 단계: 일반 규칙 통과, 공개 API 규칙 통과, 방향 규칙 실패
+    h.read((store) => {
+      const run = mergedRun(store, {
+        ruleIds: [plain.id],
+        at: T0 + 10_000,
+        headCommit: SHA_C,
+        mergeCommit: SHA_A,
+      });
+      store.judgments.record([
+        judgment(plain, 'pass', judgedIn(store, run), T0 + 11_000, SHA_C),
+        structureJudgment(publicApi, 'pass', judgedIn(store, run), T0 + 11_000, SHA_C),
+        structureJudgment(direction, 'fail', judgedIn(store, run), T0 + 11_000, SHA_C),
+      ]);
+    });
+    const judged = await summary();
+    expect(judged.compliance).toEqual({ passed: 2, judgeable: 3 });
+    expect(judged.denominator).toEqual([plain.id, publicApi.id, direction.id]);
+    expect(
+      judged.rules.map((row) => [row.rule.displayId, row.judgment.status]),
+    ).toEqual([
+      [plain.displayId, 'pass'],
+      [publicApi.displayId, 'pass'],
+      [direction.displayId, 'fail'],
+    ]);
+    // 내장 규칙은 아직 미확인이라 사람 확인 기준에는 들지 않는다
+    expect(judged.confirmedCompliance).toBeNull();
+
+    // 추적성 결함(부모 없는 규칙): 부모가 해제된 일반 규칙만, 내장 구조 규칙은 빠진다
+    h.read((store) => {
+      store.rules.detachFromParent(String(plain.parentRequirementId), iso(T0 + 20_000));
+      const rules = store.rules.list();
+      expect(rules.filter((rule) => rule.parentRequirementId === null)).toHaveLength(3);
+      expect(parentlessRuleDefects(rules, new Set()).map((rule) => rule.id)).toEqual([plain.id]);
+      // 대조군: 내장 규칙을 내장이 아니라고 보면 결함에 든다 (빼는 조건이 builtin 하나다)
+      expect(
+        parentlessRuleDefects(
+          rules.map((rule) => ({ ...rule, builtin: false })),
+          new Set(),
+        ).map((rule) => rule.id),
+      ).toEqual([plain.id, publicApi.id, direction.id]);
+      // 폐기된 규칙도 결함에서 빠진다
+      expect(parentlessRuleDefects(rules, new Set([plain.id]))).toEqual([]);
+    });
+    // 부모가 해제돼도 일반 규칙은 효력이라 분모 그대로
+    expect((await summary()).denominator).toEqual([plain.id, publicApi.id, direction.id]);
   });
 });
