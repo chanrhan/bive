@@ -100,7 +100,7 @@ export class ProjectStore {
     this.normChanges = new NormChangeRepository(db);
     this.autoStartSkips = new AutoStartSkipRepository(db);
     this.ruleRetirements = new RuleRetirementRepository(db);
-    this.blockDeclarations = new BlockDeclarationRepository(db);
+    this.blockDeclarations = new BlockDeclarationRepository(db, projectId);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

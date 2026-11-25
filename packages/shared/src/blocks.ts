@@ -51,12 +51,15 @@ export const blockPatternProblem = (pattern: string): string | null => {
   }
   if (pattern.startsWith('/')) return '절대 경로는 받지 않습니다 (프로젝트 루트 기준 상대 경로)';
   const segments = pattern.split('/');
-  for (const segment of segments) {
+  for (const [index, segment] of segments.entries()) {
     if (segment === '') return '빈 경로 구간(// 또는 끝의 /)은 받지 않습니다';
     if (segment === '.' || segment === '..') {
       return '. · .. 구간은 받지 않습니다 (프로젝트 폴더 밖을 가리킬 수 없습니다)';
     }
     if (segment.includes('**') && segment !== '**') return '**는 구간 전체로만 씁니다';
+    if (segment === '**' && segments[index - 1] === '**') {
+      return '**를 잇달아 쓸 수 없습니다 (**/**는 ** 하나와 같습니다)';
+    }
   }
   return null;
 };
@@ -68,28 +71,68 @@ export const BlockPattern = z.string().superRefine((pattern, ctx) => {
 });
 export type BlockPattern = z.infer<typeof BlockPattern>;
 
-const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-
-/** 패턴 → 정규식 (경로 전체 일치). 패턴은 {@link blockPatternProblem}을 통과한 것이어야 한다. */
-export const blockPatternRegExp = (pattern: string): RegExp => {
-  const segments = pattern.split('/');
-  let source = '';
-  segments.forEach((segment, index) => {
-    const last = index === segments.length - 1;
-    if (segment === '**') {
-      // 0개 이상의 구간: 마지막이면 남은 경로 전부(1글자 이상), 아니면 "구간/"의 반복
-      source += last ? '.+' : '(?:[^/]+/)*';
-      return;
+/**
+ * 구간 하나의 글롭(`*`만 특수 글자)이 글자 그대로의 구간에 맞는지. 별을 만나면 그 자리를 기억해 두고 어긋날 때 별이 한 글자 더
+ * 먹게 하는 방식이라 되돌아감이 마지막 별 하나뿐이다(최악 패턴 길이 × 구간 길이).
+ */
+const segmentMatches = (glob: string, text: string): boolean => {
+  let g = 0;
+  let t = 0;
+  let star = -1;
+  let starText = 0;
+  while (t < text.length) {
+    if (g < glob.length && glob[g] === '*') {
+      star = g;
+      starText = t;
+      g += 1;
+    } else if (g < glob.length && glob[g] === text[t]) {
+      g += 1;
+      t += 1;
+    } else if (star >= 0) {
+      g = star + 1;
+      starText += 1;
+      t = starText;
+    } else {
+      return false;
     }
-    source += segment.split('*').map(escapeRegExp).join('[^/]*');
-    if (!last) source += '/';
-  });
-  return new RegExp(`^${source}$`, 'u');
+  }
+  while (g < glob.length && glob[g] === '*') g += 1;
+  return g === glob.length;
 };
 
-/** 프로젝트 루트 기준 상대 경로(`/` 구분)가 패턴에 맞는지. */
-export const matchesBlockPattern = (pattern: string, relPath: string): boolean =>
-  blockPatternRegExp(pattern).test(relPath);
+/**
+ * 프로젝트 루트 기준 상대 경로(`/` 구분)가 패턴에 맞는지. 정규식을 쓰지 않는 구간 단위 매처다(ADR-122 ②): 패턴 구간마다 경로의 닿을
+ * 수 있는 자리 집합을 한 번 넘겨 가며 계산한다(최악 패턴 구간 수 × 경로 구간 수 × 구간 비교). 뜻:
+ * 가운데 `**`는 빈 글이 아닌 구간 0개 이상, 끝의 `**`는 빈 글이 아닌 나머지 전부, 구간 안 `*`는 `/` 아닌 글자 0개 이상.
+ */
+export const matchesBlockPattern = (pattern: string, relPath: string): boolean => {
+  const globs = pattern.split('/');
+  const parts = relPath.split('/');
+  const n = parts.length;
+  let reach = new Array<boolean>(n + 1).fill(false);
+  reach[0] = true;
+  for (const [index, glob] of globs.entries()) {
+    const last = index === globs.length - 1;
+    if (glob === '**' && last) {
+      // 남은 경로(`/`로 이은 글)가 빈 글이 아니면 맞는다
+      return reach.some((ok, at) => ok && at < n && (at < n - 1 || (parts[at] ?? '') !== ''));
+    }
+    const next = new Array<boolean>(n + 1).fill(false);
+    if (glob === '**') {
+      for (let at = 0; at <= n; at += 1) {
+        next[at] =
+          (reach[at] ?? false) ||
+          (at > 0 && (next[at - 1] ?? false) && (parts[at - 1] ?? '') !== '');
+      }
+    } else {
+      for (let at = 0; at < n; at += 1) {
+        if ((reach[at] ?? false) && segmentMatches(glob, parts[at] ?? '')) next[at + 1] = true;
+      }
+    }
+    reach = next;
+  }
+  return reach[n] ?? false;
+};
 
 const uniqueList = <T extends z.ZodType<string>>(item: T, min: number, max: number, what: string) =>
   z
