@@ -285,7 +285,7 @@ test.describe('결함 · 미확인 예외와 [문제만] (수용 기준 2)', () 
     const first = CONTRACTS[0] as Entry;
     const odd: Entry = {
       ...first,
-      contract: { ...first.contract, sourceFile: 'api/‮open​.yaml' },
+      contract: { ...first.contract, sourceFile: 'api/\u202eopen\u200b.yaml' },
     };
     await openScreen(page, { 'contract.list': { result: { contracts: [odd] } } });
     await expect(page.getByTestId('card-title')).toHaveText('api/\\u202eopen\\u200b.yaml');
@@ -294,6 +294,76 @@ test.describe('결함 · 미확인 예외와 [문제만] (수용 기준 2)', () 
       'api/\\u202eopen\\u200b.yaml',
     );
     await expect(detailValue(page, 'source')).toHaveText('api/\\u202eopen\\u200b.yaml');
+  });
+
+  test('부모 요구사항을 읽지 못하면 그 줄만 숨고("없음"이 아님) 나머지 속성 줄은 그대로다', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page, { 'requirement.get': { pending: true } });
+    await card(page, 'CON-001').click();
+    const names = page
+      .getByTestId('contract-detail')
+      .locator('[data-testid^="contract-field-"] > dt');
+    const withoutParent = ['종류', '원본 파일', '연결 규칙', '판정', '생성 주체', '확인 상태'];
+    // 응답 전(로딩): 부모 줄이 없다. "없음"으로 보이지 않는다
+    await expect(names).toHaveText(withoutParent);
+    await expect(page.getByTestId('contract-field-parent')).toHaveCount(0);
+    // 조회 실패: 같은 계약을 다시 고르면 새로 읽고, 실패해도 부모 줄만 숨는다
+    await bive.setResponse('requirement.get', {
+      error: { code: -32004, message: '요구사항 없음' },
+    });
+    await card(page, 'CON-002').click();
+    await card(page, 'CON-001').click();
+    await expect(page.getByTestId('contract-detail-id')).toHaveText('CON-001');
+    // 처음 호출(대기)은 끝나지 않으므로 실패 응답이 건네진 것을 기다린다
+    await expect
+      .poll(async () => (await bive.settled()).filter((m) => m === 'requirement.get').length)
+      .toBeGreaterThan(0);
+    await nextFrame(page);
+    await expect(names).toHaveText(withoutParent);
+    await expect(page.getByTestId('contract-field-parent')).toHaveCount(0);
+    await expect(detailValue(page, 'rule')).toHaveText('RULE-011');
+    await expect(detailValue(page, 'judgment')).toHaveText('통과');
+  });
+
+  test('늦게 온 옛 계약 목록 응답은 먼저 온 새 응답을 덮지 않는다', async ({ page }) => {
+    // 처음 읽기(옛 값, 한 건)는 늦게, 규범 변경 알림 뒤 읽기(새 값, 네 건)는 바로 온다
+    const bive = await openScreen(page, {
+      'contract.list': { result: { contracts: CONTRACTS.slice(0, 1) }, delayMs: 1500 },
+    });
+    await bive.setResponse('contract.list', { result: { contracts: CONTRACTS } });
+    await bive.emit('event.normChange.appended', { projectId: PROJECT.id, lastSeq: 9 });
+    await expect(page.getByTestId('card')).toHaveCount(CONTRACTS.length);
+    // 옛 응답이 모두 도착한 뒤에도 새 값 그대로다
+    await allSettled(bive, 'contract.list');
+    await nextFrame(page);
+    await expect(page.getByTestId('card')).toHaveCount(CONTRACTS.length);
+    expect(await cardIds(page)).toEqual([...VISIBLE_ORDER]);
+  });
+
+  test('프로젝트를 바꾼 뒤 늦게 온 앞 프로젝트의 응답은 새 프로젝트 목록을 덮지 않는다', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    await expect(page.getByTestId('card')).toHaveCount(CONTRACTS.length);
+    // 앞 프로젝트의 다시 읽기(네 건)는 늦게 온다
+    const before = (await callsOf(bive, 'contract.list')).length;
+    await bive.setResponse('contract.list', { result: { contracts: CONTRACTS }, delayMs: 1500 });
+    await bive.emit('event.normChange.appended', { projectId: PROJECT.id, lastSeq: 9 });
+    await expect
+      .poll(async () => (await callsOf(bive, 'contract.list')).length)
+      .toBeGreaterThan(before);
+    // 새 프로젝트는 한 건, 바로 온다
+    await bive.setResponse('contract.list', { result: { contracts: CONTRACTS.slice(1, 2) } });
+    await bive.emit(PROJECT_OPENED_EVENT, { project: OTHER_PROJECT, created: false, empty: false });
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'requirements');
+    await page.getByRole('button', { name: '계약', exact: true }).click();
+    expect(await cardIds(page)).toEqual(['CON-002']);
+    const calls = await callsOf(bive, 'contract.list');
+    expect(calls.at(-1)?.params).toEqual({ projectId: OTHER_PROJECT.id });
+    await allSettled(bive, 'contract.list');
+    await nextFrame(page);
+    expect(await cardIds(page)).toEqual(['CON-002']);
   });
 
   test('규범 변경 알림을 받으면 다시 읽어 새 판정의 결함을 보인다', async ({ page }) => {

@@ -50,9 +50,12 @@ const contract = (patch: Partial<Contract> = {}): Contract => ({
 
 const RULE_REF = { id: '01JC0000000000000000000009', displayId: 'RULE-009' } as const;
 
-const ruleItem = (status: JudgmentStatus): RuleWithJudgment =>
+const ruleItem = (
+  status: JudgmentStatus,
+  ref: { id: string; displayId: string } = RULE_REF,
+): RuleWithJudgment =>
   ({
-    rule: { id: RULE_REF.id, displayId: RULE_REF.displayId } as Rule,
+    rule: { id: ref.id, displayId: ref.displayId } as Rule,
     judgment: { status, latest: null },
   }) as RuleWithJudgment;
 
@@ -98,7 +101,13 @@ describe('계약 항목 합치기', () => {
           source: { status: 'missing' },
         },
       ],
-      [ruleItem('fail')],
+      // 규칙 목록의 순서 · 개수는 계약과 어긋난다: 계약과 무관한 규칙이 앞에 있고, 둘째 계약 자리에 판정이 있다
+      [
+        ruleItem('pass', { id: '01JC0000000000000000000001', displayId: 'RULE-001' }),
+        ruleItem('quarantined', { id: '01JC0000000000000000000002', displayId: 'RULE-002' }),
+        ruleItem('fail'),
+        ruleItem('needs_recheck', { id: '01JC0000000000000000000004', displayId: 'RULE-004' }),
+      ],
     );
     expect(items.map((it) => [it.contract.displayId, it.judgment])).toEqual([
       ['CON-001', 'fail'],
@@ -126,7 +135,7 @@ describe('결함 · 카드 예외', () => {
     const card = contractCard(
       item({
         contract: contract({
-          sourceFile: 'api/‮open.yaml',
+          sourceFile: 'api/\u202eopen.yaml',
           author: { kind: 'agent', role: 'rule-writer' },
           confirmation: { state: 'unconfirmed' },
         }),
