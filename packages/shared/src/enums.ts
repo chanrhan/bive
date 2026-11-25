@@ -339,6 +339,7 @@ export const RunFailureReason = z.enum([
   'target_rule_retired',
   'target_rule_unavailable',
   'judge_runner_error',
+  'block_declaration_overlap',
   'dependency_install_failed',
   'acceptance_ignored',
   'project_daily_budget_unset',
@@ -385,6 +386,7 @@ export const RUN_FAILURE_REASON_LABELS = {
   target_rule_retired: '대상 규칙 폐기',
   target_rule_unavailable: '대상 규칙 효력 없음',
   judge_runner_error: '판정 실행기 오류',
+  block_declaration_overlap: '블록 선언 겹침',
   dependency_install_failed: '의존성 설치 실패',
   acceptance_ignored: '인수 테스트 무시 규칙 걸림',
   project_daily_budget_unset: '프로젝트 하루 한도 없음',
@@ -412,8 +414,11 @@ export const RUN_FAILURE_REASON_LABELS = {
 export const RuleWriterState = z.enum(['queued', 'running', 'ended', 'skipped']);
 export type RuleWriterState = z.infer<typeof RuleWriterState>;
 
-/** 판정 실행기 (JDG-01). M1은 vitest만. */
-export const JudgeRunner = z.enum(['vitest']);
+/**
+ * 판정 실행기 (JDG-01). 인수 테스트는 vitest, 내장 구조 규칙(구조 검사, JDG-05)은 dependency-cruiser(파서, M3-03 #48 · ADR-127).
+ * 넓히기만 한다(옛 판정 기록 행이 있다).
+ */
+export const JudgeRunner = z.enum(['vitest', 'dependency-cruiser']);
 export type JudgeRunner = z.infer<typeof JudgeRunner>;
 
 /** 판정 결과의 테스트 케이스 상태 (vitest JSON 리포터의 assertion status). */

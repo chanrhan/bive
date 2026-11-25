@@ -113,6 +113,19 @@ export const isJudgeable = (
   retired: ReadonlySet<string>,
 ): boolean => isEffectiveRule(rule, retired) && judgment.status !== 'quarantined';
 
+/**
+ * 추적성 결함 가운데 부모 없는 규칙 (NRM-06, 기획서 4.1): 효력 있는 규칙 가운데 부모 요구사항이 없는 것(부모가 지워져 해제된 규칙).
+ * 내장 구조 규칙은 부모가 없는 것이 정상이라 결함에서 뺀다(NRM-02 · NRM-06, M3-03 #48 · ADR-127). 폐기된 규칙도 뺀다(ADR-100 NRM-06).
+ * 화면 · 응답에 결함 수와 목록을 싣는 일은 M3-11이 하고 이 함수를 기준으로 쓴다. 내장 구조 규칙은 준수 분모(`isJudgeable`)에는 든다.
+ */
+export const parentlessRuleDefects = (
+  rules: readonly Rule[],
+  retired: ReadonlySet<string>,
+): Rule[] =>
+  rules.filter(
+    (rule) => isEffectiveRule(rule, retired) && !rule.builtin && rule.parentRequirementId === null,
+  );
+
 /** 시각 → 정렬 값. 없거나 읽을 수 없으면 가장 앞. */
 const timeOf = (iso: string | null): number => {
   const ms = iso === null ? NaN : Date.parse(iso);

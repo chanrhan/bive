@@ -36,6 +36,7 @@ import {
   RELEASE_REASON,
   REQUIREMENT_CHANGE_UNDECIDED_REASON,
 } from '../src/norms/agent-rule.js';
+import { BUILTIN_RULE_CREATED_REASON } from '../src/norms/builtin-rules.js';
 import { CHECK_UNDECIDED_REASON } from '../src/norms/check-contradiction.js';
 import { NORM_INPUT_BEGIN } from '../src/norms/norm-input.js';
 import { recordObjection, UNDECIDED_REASON } from '../src/norms/objection.js';
@@ -976,12 +977,18 @@ describe('블록 선언을 쓰는 경로는 사람의 blocks.set 처리기뿐 (M
     expect(using(/'blocks\.set'/)).toEqual(['ipc/block-handlers.ts']);
     // 처리기를 가져오는 곳 = 처리기 묶음뿐
     expect(using(/from '[./]+\/?(?:ipc\/)?block-handlers\.js'/)).toEqual(['ipc/handlers.ts']);
-    // 읽기: 조회 처리기 · 규칙 반영의 이름 대조 · 세션 입력(규범 자료 · 테스트 작성 사본)뿐 (판만 읽는다)
+    // 읽기: 조회 처리기 · 규칙 반영의 이름 대조 · 세션 입력(규범 자료 · 테스트 작성 사본) · 검사 단계와 병합 재검사의 구조 검사
+    // (M3-03 #48, 단계를 열 때 지금 판을 한 번 읽는다)뿐 (판만 읽는다)
     expect(using(/\.blockDeclarations\./)).toEqual([
       'ipc/block-handlers.ts',
       'norms/agent-rule.ts',
       'norms/norm-input.ts',
+      'steps/structure-check.ts',
       'steps/test-writing.ts',
+    ]);
+    const structure = files.find((f) => f.rel === 'steps/structure-check.ts')?.text ?? '';
+    expect(structure.match(/\.blockDeclarations\.[A-Za-z]+/g)).toEqual([
+      '.blockDeclarations.current',
     ]);
     for (const { rel, text } of files) {
       if (rel === 'ipc/block-handlers.ts') continue;
@@ -1020,8 +1027,10 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
         .map((f) => f.rel)
         .sort();
     // 저장소의 규칙 생성
+    // 내장 구조 규칙 모듈(M3-03 #48, ADR-127)은 사람의 블록 선언 저장과 같은 트랜잭션에서 내장 규칙(부모 없음)만 만든다 (아래 시험)
     expect(using(/\.rules\.create\(/)).toEqual([
       'norms/agent-rule.ts',
+      'norms/builtin-rules.ts',
       'proposals/proposal-service.ts',
     ]);
     // 규범 변경 기록 쓰기 = 바로 반영 모듈(신규)과 실행 자동 시작 모듈(자동 시작, M7-05). 읽기는 조회 처리기 · 규칙 작성 상태 ·
@@ -1030,8 +1039,10 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
     // 테스트 변경 알림 모듈(M7-13, ADR-113)도 그 종류를 쓰고, 확인할 것 목록(M7-13)은 읽는다
     // 이의 기록 모듈(M7-11, ADR-115)은 구현 역할의 이의와 판단 없는 유지를 쓴다 (규칙 · 폐기 · 판정은 쓰지 않는다, 아래 시험)
     // 검사 실패 판단 모듈(M7-12, ADR-118)은 판단 없는 검사 실패 판단(모순 없음)만 쓴다 (규칙 · 폐기 · 판정은 쓰지 않는다, 아래 시험)
+    // 내장 구조 규칙 모듈(M3-03 #48)은 그 규칙의 신규 기록(주체 오케스트레이터)만 쓴다
     expect(using(/\.normChanges\.append\(/)).toEqual([
       'norms/agent-rule.ts',
+      'norms/builtin-rules.ts',
       'norms/check-contradiction.ts',
       'norms/objection.ts',
       'norms/test-change.ts',
@@ -1049,12 +1060,29 @@ describe('규범 쓰기 · 규범 변경 기록 · 제안 등록의 코드 경�
       'ipc/project-store-access.ts',
       'ipc/rule-writer-handlers.ts',
       'norms/agent-rule.ts',
+      'norms/builtin-rules.ts',
       'norms/check-contradiction.ts',
       'norms/objection.ts',
       'norms/test-change.ts',
       'runs/auto-start.ts',
       'runs/rule-edit-start.ts',
       'verification/summary.ts',
+    ]);
+    // 내장 구조 규칙 모듈: 규칙 생성은 내장 규칙(builtin: true · 부모 없음)뿐이고 기록은 신규 · 주체 오케스트레이터뿐이며, 만드는 함수를
+    // 부르는 곳은 사람의 블록 선언 저장 처리기뿐이다. 엔진 · 단계 · 에이전트 코드는 판별 함수만 가져온다
+    const builtin = files.find((f) => f.rel === 'norms/builtin-rules.ts')?.text ?? '';
+    expect(builtin.match(/\.rules\.create\(/g)).toHaveLength(1);
+    expect(builtin.match(/\.normChanges\.append\(/g)).toHaveLength(1);
+    expect(builtin.match(/builtin: (true|false)/g)).toEqual(['builtin: true']);
+    expect(builtin).toMatch(/parentRequirementId: null,\s+builtin: true/);
+    expect(builtin.match(/kind: '[a-z_]+',\s+actor:/g)).toEqual([
+      "kind: 'created',\n        actor:",
+    ]);
+    expect(builtin).toMatch(/actor: \{ kind: 'orchestrator' \}/);
+    expect(using(/\bensureBuiltinStructureRules\(/)).toEqual(['ipc/block-handlers.ts']);
+    expect(using(/from '[./]+\/?(?:norms\/)?builtin-rules\.js'/)).toEqual([
+      'ipc/block-handlers.ts',
+      'steps/structure-check.ts',
     ]);
     // 저장소 접근 모듈의 규범 변경 기록 접근은 마지막 순번 읽기뿐이다 (알림 계기, 쓰기 · 목록 읽기 없음, ADR-119)
     const access = files.find((f) => f.rel === 'ipc/project-store-access.ts')?.text ?? '';
@@ -1084,6 +1112,7 @@ const NORM_CHANGE_FIXED_REASONS: Readonly<Record<string, string>> = {
   AUTO_START_REASON,
   CONTRADICTION_RESTART_REASON,
   RULE_EDIT_START_REASON,
+  BUILTIN_RULE_CREATED_REASON,
 };
 
 /** 문서 기호 꼴: ADR · SCR · NFR 번호, PRD, PRD 요구사항 ID(`RUN-08` 등 대문자 2~5자 + 숫자 2자리) */
