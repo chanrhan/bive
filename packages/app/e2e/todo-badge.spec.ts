@@ -177,7 +177,8 @@ test.describe('규범 변경 알림 → 화면 다시 읽기', () => {
     await page.waitForTimeout(300);
     const children = await countCalls(bive, 'rule.list');
     await bive.emit('event.normChange.appended', appended(5));
-    await expect.poll(() => countCalls(bive, 'rule.list')).toBe(children + 1);
+    // 목록의 블록 칩(구현 위치, ADR-126)과 상세의 자식 규칙이 각각 한 번씩 다시 읽는다
+    await expect.poll(() => countCalls(bive, 'rule.list')).toBe(children + 2);
 
     // 요구사항 화면을 떠나면 자식 규칙의 구독이 끊기고 배지의 구독만 남는다
     await page.getByTestId('todo-button').click();

@@ -1,6 +1,6 @@
 // 요구사항 화면 (screens.md SCR-02): 중앙 목록 + 상세 2단.
 // - 목록: requirement.list 결과만 그린다(NFR-03). 카드 · 필터 규칙은 requirementsView.ts. 블록 칩의 값(구현 위치)은 rule.list
-//   1회(규칙 화면과 같은 읽기 · 다시 읽기, useRules)에서 만든다. 규칙 목록을 읽는 동안은 목록 자리가 로딩이고(칩 값이 늦게 생겨
+//   1회(규칙 화면과 같은 읽기, useRules. 다시 읽기는 규범 변경 알림 · 재접속 때만)에서 만든다. 규칙 목록을 읽는 동안은 목록 자리가 로딩이고(칩 값이 늦게 생겨
 //   다른 화면이 정한 필터가 지워지지 않게), 읽지 못하면 블록 칩만 0건 비활성이다 (ADR-126)
 // - [+ 새 요구사항]: 목록 맨 위 입력 줄 → requirement.create 1회 → 목록 다시 불러오기
 //   (저장 뒤 규칙 제안은 오케스트레이터 쪽 이슈 #21이 붙인다. 화면은 호출만 한다)
@@ -19,6 +19,7 @@ import { ListView } from '../../components/ListView/ListView.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { clearPendingSelection, peekPendingSelection } from '../../navigation/pendingSelection.js';
 import { useProject } from '../../project/ProjectContext.js';
+import { NORM_CHANGE_EVENT_NAMES } from '../../runs/refreshCoalescer.js';
 import { RequirementDetail } from '../norm-detail/RequirementDetail.js';
 import { implementationBlocksByRequirement } from '../rules/blockView.js';
 import { useRules } from '../rules/useRules.js';
@@ -52,7 +53,8 @@ export const RequirementsScreen = (): React.JSX.Element => {
 
 const RequirementsPanes = ({ projectId }: { projectId: string }): React.JSX.Element => {
   const { load: requirementsLoad, create, update, remove } = useRequirements(projectId);
-  const { load: rulesLoad } = useRules(projectId);
+  // 블록 칩 값은 규칙의 대상 블록 · 폐기에서만 바뀐다: 규범 변경 알림 · 재접속 때만 다시 읽는다(실행 알림은 받지 않음)
+  const { load: rulesLoad } = useRules(projectId, NORM_CHANGE_EVENT_NAMES);
   // 규칙 목록을 읽는 동안은 목록 전체를 로딩으로 둔다(블록 칩 값이 아직 없어 지정된 선택이 지워지지 않게)
   const load =
     requirementsLoad.state === 'ready' && rulesLoad.state === 'loading'

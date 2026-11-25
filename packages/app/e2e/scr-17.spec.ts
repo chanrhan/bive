@@ -1,5 +1,6 @@
 // SCR-17 자리 확인할 것: 목록 · 상세 · [확인] · 판단 카드 · 필터 · 배치 (이슈 #226 수용 기준 1 · 2 · 4, screens.md 6장 할 일 · SCR-17,
 // TODO-01 · NRM-04, ADR-100 명세 변경 SCR-17 · D2 · D3 · B⑦ · D8, ADR-113 · ADR-119).
+// 이슈 #64(M3-19) 수용 기준 3: 위험도 칩이 항목의 대상 규칙 위험도로 값 개수와 함께 활성, 대상 링크가 블록 · 위험도 칩 선택도 비움 (ADR-126).
 // 옛 승인 대기의 승인 · 수정 · 거절 시험은 기능이 대체되어(ADR-063 · ADR-082 → ADR-119) 이 시험으로 바뀌었다.
 // 데이터는 가짜 브리지 응답(e2e/checklists/scr-17.ts, shared 스키마 대조는 test/todo-confirmation.test.ts)으로만 만든다:
 //   ① 대체 RULE-001(확인 풀림) · 폐기 RULE-002(미확인) ② 테스트 변경 RULE-004 2건(실행 2개) ③ 미확인 RULE-003 · RULE-005 · REQ-002
@@ -653,6 +654,40 @@ test.describe('대상 링크 (M3-35 #263: 카드를 고른 상태로 열림)', (
     await expect(page.getByTestId('rule-detail-retired')).toHaveText('폐기');
   });
 
+  test('대상 링크는 규칙 · 요구사항 목록의 블록 · 위험도 칩 선택도 비운다 (#64, ADR-114 · ADR-126)', async ({
+    page,
+  }) => {
+    await setup(page, FIXTURE_LIST, links);
+    // 규칙 화면에서 블록 · 위험도를, 요구사항 화면에서 블록을 골라 둔다
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await choose(page, 'block', 'lib');
+    await choose(page, 'risk', 'medium');
+    await expect(page.getByTestId('filter-chip-block')).toHaveAttribute('data-selected', 'true');
+    await expect(page.getByTestId('filter-chip-risk')).toHaveAttribute('data-selected', 'true');
+    await page.getByRole('button', { name: '요구사항', exact: true }).click();
+    await choose(page, 'block', 'auth');
+    await expect(page.getByTestId('filter-chip-block')).toHaveAttribute('data-selected', 'true');
+
+    // 대체 규칙 링크 → 규칙 화면: 검색어만 남고 블록 · 위험도 선택은 없다
+    await page.getByTestId('todo-button').click();
+    await cardAt(page, 0).click();
+    await page.getByTestId('detail-link').nth(1).click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(page.getByTestId('list-search')).toHaveValue('RULE-003');
+    await expect(page.getByTestId('filter-chip-block')).toHaveAttribute('data-selected', 'false');
+    await expect(page.getByTestId('filter-chip-risk')).toHaveAttribute('data-selected', 'false');
+    await expect(selectedCard(page)).toHaveAttribute('data-id', 'RULE-003');
+
+    // 요구사항 링크 → 요구사항 화면: 블록 선택이 없다
+    await page.getByTestId('todo-button').click();
+    await cardAt(page, 6).click();
+    await page.getByTestId('detail-link').click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'requirements');
+    await expect(page.getByTestId('list-search')).toHaveValue('REQ-002');
+    await expect(page.getByTestId('filter-chip-block')).toHaveAttribute('data-selected', 'false');
+    await expect(selectedCard(page)).toHaveAttribute('data-id', 'REQ-002');
+  });
+
   test('대체 규칙 링크: 폐기 포함 없이 그 카드가 골라진다', async ({ page }) => {
     await setup(page, FIXTURE_LIST, links);
     await cardAt(page, 0).click();
@@ -880,10 +915,11 @@ test.describe('필터 칩 (수용 기준 4)', () => {
       await chips.evaluateAll((els) => els.map((el) => el.getAttribute('data-testid') ?? '')),
     ).toEqual(CONFIRMATION_FILTERS.map(({ id }) => `filter-chip-${id}`));
     await expect(chips).toHaveText(CONFIRMATION_FILTERS.map(({ label }) => label));
-    // 위험도: 항목에 근거가 없어 값이 없다 (0건 비활성)
+    // 위험도: 항목의 대상 규칙 위험도(선택 칸)에서 센다. 칸이 없는 RULE-005 · 요구사항은 세지 않는다 (#64, ADR-126)
     await expect(
       page.getByTestId('filter-chip-risk').getByTestId('filter-chip-button'),
-    ).toBeDisabled();
+    ).toBeEnabled();
+    expect(await optionCounts(page, 'risk')).toEqual({ low: '2', medium: '1', high: '2' });
     expect(await optionCounts(page, 'confirm')).toEqual({
       unconfirmed: '4',
       released: '1',
@@ -913,6 +949,21 @@ test.describe('필터 칩 (수용 기준 4)', () => {
 
     await choose(page, 'kind', 'test_changed');
     await expect(cards(page).getByTestId('card-id')).toHaveText(['RULE-004', 'RULE-004']);
+    await page.getByTestId('list-reset').click();
+
+    // 위험도 높음: 대체(RULE-001) · 미확인 규칙 RULE-003. 낮음을 더하면 테스트 변경 2건도 (기준 안 OR)
+    await choose(page, 'risk', 'high');
+    await expect(cards(page).getByTestId('card-id')).toHaveText(['RULE-001', 'RULE-003']);
+    await expect(page.getByTestId('filter-chip-risk').getByTestId('filter-chip-button')).toHaveText(
+      '위험도: 높음',
+    );
+    await choose(page, 'risk', 'low');
+    await expect(cards(page).getByTestId('card-id')).toHaveText([
+      'RULE-001',
+      'RULE-004',
+      'RULE-004',
+      'RULE-003',
+    ]);
     await page.getByTestId('list-reset').click();
 
     await choose(page, 'author', 'chat');

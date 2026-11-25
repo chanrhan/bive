@@ -2,6 +2,7 @@
 // 1) checklists/scr-06.ts의 요구사항 기본 상태(본문, 생성 주체 이름, 자식 규칙 목록)를 통과하고 변경 이력 영역이 미노출
 // 2) 자식 규칙을 누르면 그 자리에서 진술, 속성, 테스트 출력이 펼쳐짐 (규칙 상세 RuleDetail 재사용)
 // 3) 직접 편집 저장이 requirement.update를 1회 부르고, 삭제는 첫 클릭에서 호출 0회 · 두 번째 클릭에서 requirement.delete 1회
+// 4) 이슈 #64(M3-19) 수용 기준 2: 구현 위치 = 효력 있는 자식 규칙의 대상 블록만, 중복 없이 선언 순서 (ADR-126)
 // 요구사항 화면(SCR-02)에서 카드를 눌러 들어온다. 데이터는 가짜 브리지의 requirement.list · rule.list · judgment.list 응답뿐이다.
 import { expect, type Page, test } from '@playwright/test';
 
@@ -9,17 +10,26 @@ import type { Requirement, RuleWithJudgment } from '@bive/shared';
 
 import { REQUIREMENTS } from './checklists/scr-02.js';
 import {
+  BLOCKS,
   FAILED_CASE,
   FAILING_HISTORY,
   FAILING_RULE,
   HISTORY,
+  NO_BLOCKS,
   PARENT,
   PASSING_RULE,
   PROJECT,
   requirementDetailChecklist,
   RULES,
 } from './checklists/scr-06.js';
-import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
+import {
+  allSettled,
+  type BiveMock,
+  type MockCall,
+  mockBive,
+  type MockResponses,
+  nextFrame,
+} from './support/bive-mock.js';
 import {
   collectVisibleText,
   expectScreen,
@@ -67,7 +77,15 @@ const DELETED: Requirement = {
   deletedAt: '2026-10-17T00:00:00.000Z',
 };
 
-const openRequirement = async (page: Page, responses: MockResponses = {}): Promise<BiveMock> => {
+/**
+ * 요구사항 화면을 열고 PARENT 카드를 고른다. `beforeSelect`는 목록이 그려진 뒤 · 카드를 고르기 전에 바꿀 응답이다(목록의 블록 칩이
+ * rule.list를 먼저 한 번 읽으므로, 상세의 자식 규칙만 대기 · 실패로 두려면 그 뒤에 바꾼다, ADR-126).
+ */
+const openRequirement = async (
+  page: Page,
+  responses: MockResponses = {},
+  beforeSelect: MockResponses = {},
+): Promise<BiveMock> => {
   const bive = await mockBive(page, {
     responses: {
       'system.status': { result: STATUS },
@@ -77,12 +95,18 @@ const openRequirement = async (page: Page, responses: MockResponses = {}): Promi
       'judgment.list': { result: { judgments: FAILING_HISTORY } },
       'requirement.update': { result: { requirement: EDITED } },
       'requirement.delete': { result: { requirement: DELETED } },
+      'blocks.get': { result: BLOCKS },
       ...responses,
     },
   });
   await page.goto('/');
   await page.getByRole('button', { name: '요구사항', exact: true }).click();
-  await page.getByTestId('card').filter({ hasText: PARENT.displayId }).click();
+  const card = page.getByTestId('card').filter({ hasText: PARENT.displayId });
+  await expect(card).toBeVisible();
+  for (const [method, response] of Object.entries(beforeSelect)) {
+    await bive.setResponse(method as keyof MockResponses, response as never);
+  }
+  await card.click();
   await expect(page.getByTestId('requirement-detail')).toHaveAttribute(
     'data-selected-id',
     PARENT.id,
@@ -114,7 +138,7 @@ const expectRequirementDetail = async (
 };
 
 test.describe('체크리스트 (수용 기준 1)', () => {
-  test('기본: 본문 · 생성 주체 이름 · 자식 규칙 목록, 변경 이력 · 구현 위치 미노출', async ({
+  test('기본: 본문 · 생성 주체 이름 · 자식 규칙 목록 · 구현 위치, 변경 이력 미노출', async ({
     page,
   }) => {
     await openRequirement(page);
@@ -155,7 +179,7 @@ test.describe('체크리스트 (수용 기준 1)', () => {
   });
 
   test('로딩: 자식 규칙 자리만 비우고 나머지 상세는 보인다', async ({ page }) => {
-    await openRequirement(page, { 'rule.list': { pending: true } });
+    await openRequirement(page, {}, { 'rule.list': { pending: true } });
     await expectRequirementDetail(page, '로딩');
     await expect(page.getByTestId('requirement-rules-loading')).toHaveText('');
   });
@@ -163,9 +187,11 @@ test.describe('체크리스트 (수용 기준 1)', () => {
   test('에러: 자식 규칙 자리에 "자식 규칙 불러오기 실패", 나머지 상세는 보인다', async ({
     page,
   }) => {
-    await openRequirement(page, {
-      'rule.list': { error: { code: -32603, message: '내부 오류' } },
-    });
+    await openRequirement(
+      page,
+      {},
+      { 'rule.list': { error: { code: -32603, message: '내부 오류' } } },
+    );
     await expectRequirementDetail(page, '에러');
   });
 
@@ -175,8 +201,14 @@ test.describe('체크리스트 (수용 기준 1)', () => {
     const bive = await openRequirement(page);
     await expect(page.getByTestId('child-rule')).toHaveCount(RULES.length);
     const lists = await callsOf(bive, 'rule.list');
-    expect(lists.length).toBeGreaterThan(0);
-    for (const call of lists) expect(call.params).toEqual({ projectId: PROJECT.id });
+    // 목록의 블록 칩(폐기 포함, ADR-126)과 상세의 자식 규칙(폐기 제외), 둘 다 이 프로젝트
+    const params = new Set(lists.map((call) => JSON.stringify(call.params)));
+    expect([...params].sort()).toEqual(
+      [
+        JSON.stringify({ projectId: PROJECT.id, includeRetired: true }),
+        JSON.stringify({ projectId: PROJECT.id }),
+      ].sort(),
+    );
     await childRule(page, FAILING_RULE.displayId).getByTestId('child-rule-toggle').click();
     await expect(page.getByTestId('child-rule-detail')).toHaveCount(1);
     // 펼친 규칙의 부모는 이미 가진 요구사항이므로 다시 조회하지 않는다
@@ -708,5 +740,93 @@ test.describe('펼친 자식 규칙의 직접 편집 (#215 수용 기준 3, ADR-
     await expect(row.getByTestId('child-rule-toggle')).toHaveAttribute('aria-expanded', 'true');
     await expect(childRule(page, PASSING_RULE.displayId)).toContainText(PASSING_RULE.title);
     expect(await callsOf(bive, 'rule.list')).toHaveLength(listCalls);
+  });
+});
+
+test.describe('구현 위치 (#64 수용 기준 2, SCR-02 상세, ADR-126)', () => {
+  const implementation = (page: Page) => page.getByTestId('requirement-implementation');
+  const names = (page: Page) => implementation(page).getByTestId('block-name');
+  /** 폐기된 자식 규칙 · 잠정 자식 규칙 (효력 없음, 테스트 전용 데이터): 그 블록은 구현 위치에 들지 않는다 */
+  const RETIRED_CHILD: RuleWithJudgment = {
+    rule: {
+      ...FAILING_RULE,
+      id: '01JC0000000000000000000010',
+      displayId: 'RULE-010',
+      title: '폐기된 자식 규칙',
+      targetBlockIds: ['retired-only', 'auth'],
+    },
+    judgment: { status: 'unjudged', latest: null },
+    retirement: { retiredAt: '2026-10-16T00:00:00.000Z', supersededBy: null, normChangeSeq: 2 },
+  };
+  const PROVISIONAL_CHILD: RuleWithJudgment = {
+    rule: {
+      ...FAILING_RULE,
+      id: '01JC0000000000000000000011',
+      displayId: 'RULE-011',
+      title: '잠정 자식 규칙',
+      normState: 'provisional',
+      targetBlockIds: ['provisional-only'],
+    },
+    judgment: { status: 'unjudged', latest: null },
+  };
+  const WITH_INEFFECTIVE = [...RULES, RETIRED_CHILD, PROVISIONAL_CHILD, OTHER_RULE];
+
+  test('효력 있는 자식 규칙의 대상 블록만, 중복 없이 지금 선언 순서(선언에 없는 이름은 뒤, "선언 외"). 다른 요구사항 · 폐기 · 잠정 규칙의 블록은 없다', async ({
+    page,
+  }) => {
+    const bive = await openRequirement(page, {
+      'rule.list': { result: { rules: WITH_INEFFECTIVE } },
+    });
+    // 자식 규칙: RULE-001 auth, RULE-002 lib · auth · legacy-mail, RULE-003 없음. 선언 순서 health · auth · lib
+    await expect(names(page)).toHaveText(['auth', 'lib', 'legacy-mail']);
+    await expect(implementation(page).getByTestId('block-item')).toHaveText([
+      'auth',
+      'lib',
+      'legacy-mail선언 외',
+    ]);
+    await expect(implementation(page).getByTestId('block-note')).toHaveCount(0);
+    // 구역 순서: 자식 규칙 다음
+    const sections = await page
+      .getByTestId('requirement-detail')
+      .locator('section')
+      .evaluateAll((els) => els.map((el) => el.getAttribute('data-testid')));
+    expect(sections.slice(0, 2)).toEqual(['requirement-rules', 'requirement-implementation']);
+    // 펼친 자식 규칙 상세는 읽은 선언을 받아 blocks.get을 다시 부르지 않는다
+    await allSettled(bive, 'blocks.get');
+    const before = await callsOf(bive, 'blocks.get');
+    expect(before.length).toBeGreaterThan(0);
+    for (const call of before) expect(call.params).toEqual({ projectId: PROJECT.id });
+    await childRule(page, FAILING_RULE.displayId).getByTestId('child-rule-toggle').click();
+    await expect(
+      page
+        .getByTestId('child-rule-detail')
+        .getByTestId('rule-field-blocks')
+        .getByTestId('block-undeclared'),
+    ).toHaveText('선언 외');
+    await nextFrame(page);
+    expect(await callsOf(bive, 'blocks.get')).toHaveLength(before.length);
+  });
+
+  test('선언이 없으면 이름 순이고 "블록 선언 없음" 한 번', async ({ page }) => {
+    await openRequirement(page, { 'blocks.get': { result: NO_BLOCKS } });
+    await expect(names(page)).toHaveText(['auth', 'legacy-mail', 'lib']);
+    await expect(implementation(page).getByTestId('block-note')).toHaveText('블록 선언 없음');
+    await expect(implementation(page).getByTestId('block-undeclared')).toHaveCount(0);
+  });
+
+  test('자식 규칙이 없거나 블록이 하나도 없으면 "없음"', async ({ page }) => {
+    await openRequirement(page);
+    // REQ-003: 자식 규칙 없음
+    await page.getByTestId('card').filter({ hasText: 'REQ-003' }).click();
+    await expect(page.getByTestId('requirement-blocks-none')).toHaveText('없음');
+    await expect(names(page)).toHaveCount(0);
+  });
+
+  test('효력 있는 자식 규칙에 블록이 없으면(옛 규칙 · 폐기 규칙만 블록을 가짐) "없음"', async ({
+    page,
+  }) => {
+    const old = RULES.map((item) => ({ ...item, rule: { ...item.rule, targetBlockIds: [] } }));
+    await openRequirement(page, { 'rule.list': { result: { rules: [...old, RETIRED_CHILD] } } });
+    await expect(page.getByTestId('requirement-blocks-none')).toHaveText('없음');
   });
 });

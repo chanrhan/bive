@@ -9,17 +9,21 @@
 // 6) 이슈 #227(M7-15) 수용 기준 3: 확인 상태와 [확인](confirmation.set 1회 · 사람 주체, 성공하면 상세 · 목록 카드가 확인됨),
 //    폐기된 규칙의 "폐기"와 대체 규칙 링크(옛 규칙 → 새 규칙, 새 규칙의 판단 기록 → 옛 규칙), 규범 변경 기록의 사유와 근거.
 //    제목 · 진술의 숨은 글자(U+202E 등)는 보이는 표기로, 편집 입력에는 원문. 820 · 1280px 창의 머리줄 · 속성 줄 배치
+// 7) 이슈 #64(M3-19) 수용 기준 1: 속성 줄의 대상 블록(저장 순서, 지금 선언에 없는 이름은 "선언 외", 선언이 없으면 "블록 선언
+//    없음" 한 번) · 위험도(표시명), 값이 없으면 "없음". 블록 10개가 820 · 1100 · 1280 · 1440px 창에서 넘치거나 겹치지 않음 (ADR-126)
 // 규칙 화면(SCR-03)에서 카드를 눌러 들어온다. 데이터는 가짜 브리지의 rule.list · judgment.list · requirement.get ·
 // rule.update · normChange.list · confirmation.set 응답뿐이다.
 import { expect, type Page, test } from '@playwright/test';
 
 import {
+  BLOCKS,
   CREATE_REASON,
   FAILED_CASE,
   FAILING_CHANGES,
   FAILING_HISTORY,
   FAILING_RULE,
   HISTORY,
+  NO_BLOCKS,
   NO_CHANGES,
   PARENT,
   PASSING_HISTORY,
@@ -86,6 +90,7 @@ const openRules = async (
       'judgment.list': { result: { judgments: FAILING_HISTORY } },
       'requirement.get': { result: { requirement: PARENT } },
       'normChange.list': { result: NO_CHANGES },
+      'blocks.get': { result: BLOCKS },
       ...responses,
     },
   });
@@ -1721,6 +1726,179 @@ test.describe('실행 이력: 실행 하나가 한 줄 · 실행 종료 사유 (
       expect(await rowOverlaps(pane)).toEqual([]);
       await page.screenshot({
         path: `${SCREENSHOT_DIR}SCR-06/실행-이력-${String(width)}.png`,
+        fullPage: true,
+      });
+    });
+  }
+});
+
+test.describe('대상 블록 · 위험도 (#64 수용 기준 1, NRM-09, ADR-126)', () => {
+  const blocks = (page: Page) => page.getByTestId('rule-field-blocks');
+  const names = (page: Page) => blocks(page).getByTestId('block-name');
+  const fieldIds = (page: Page) =>
+    page
+      .getByTestId('rule-detail-body')
+      .locator('.rule-fields')
+      .first()
+      .evaluate((el) => [...el.children].map((child) => child.getAttribute('data-testid') ?? ''));
+
+  test('부모 요구사항 다음 줄에 대상 블록(저장 순서) · 위험도(표시명). 선언에 없는 이름만 "선언 외"이고 blocks.get은 이 프로젝트로', async ({
+    page,
+  }) => {
+    const bive = await openRules(page);
+    await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+    await expect(names(page)).toHaveText(['lib', 'auth', 'legacy-mail']);
+    // 선언(health · auth · lib)에 없는 legacy-mail만 글자 표시 (색에만 기대지 않음)
+    await expect(blocks(page).getByTestId('block-item')).toHaveText([
+      'lib',
+      'auth',
+      'legacy-mail선언 외',
+    ]);
+    await expect(blocks(page).locator('[data-undeclared="true"]')).toHaveCount(1);
+    await expect(blocks(page).getByTestId('block-note')).toHaveCount(0);
+    await expect(page.getByTestId('rule-risk')).toHaveText('보통');
+    await expect(page.getByTestId('rule-field-risk').locator('dt')).toHaveText('위험도');
+    await expect(blocks(page).locator('dt')).toHaveText('대상 블록');
+    expect(await fieldIds(page)).toEqual([
+      'rule-field-statement',
+      'rule-field-kind',
+      'rule-field-checks',
+      'rule-field-parent',
+      'rule-field-blocks',
+      'rule-field-risk',
+      'rule-field-author',
+      'rule-field-confirmation',
+    ]);
+    await allSettled(bive, 'blocks.get');
+    const declarationCalls = await callsOf(bive, 'blocks.get');
+    expect(declarationCalls.length).toBeGreaterThan(0);
+    for (const call of declarationCalls) expect(call.params).toEqual({ projectId: PROJECT.id });
+    // 영어 위험도 값은 화면에 없다
+    const texts = await collectVisibleText(page);
+    expect(texts.filter(({ text }) => /\b(low|medium|high)\b/.test(text))).toEqual([]);
+
+    // 다른 규칙: 저장된 값 그대로 (높음, auth 하나)
+    await selectRule(page, bive, 'RULE-001', PASSING_RULE.id);
+    await expect(names(page)).toHaveText(['auth']);
+    await expect(page.getByTestId('rule-risk')).toHaveText('높음');
+  });
+
+  test('값이 없는 옛 규칙(빈 목록 · null)은 대상 블록 · 위험도 모두 "없음"', async ({ page }) => {
+    const bive = await openRules(page);
+    await selectRule(page, bive, 'RULE-003', UNJUDGED_RULE.id);
+    await expect(page.getByTestId('rule-blocks-none')).toHaveText('없음');
+    await expect(blocks(page).getByTestId('block-item')).toHaveCount(0);
+    await expect(blocks(page)).toHaveText('대상 블록없음');
+    await expect(page.getByTestId('rule-field-risk')).toHaveText('위험도없음');
+  });
+
+  test('블록 선언이 없는 프로젝트: 이름마다 "선언 외"를 붙이지 않고 "블록 선언 없음"을 한 번', async ({
+    page,
+  }) => {
+    const bive = await openRules(page, { 'blocks.get': { result: NO_BLOCKS } });
+    await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+    await expect(names(page)).toHaveText(['lib', 'auth', 'legacy-mail']);
+    await expect(blocks(page).getByTestId('block-note')).toHaveText('블록 선언 없음');
+    await expect(blocks(page).getByTestId('block-undeclared')).toHaveCount(0);
+  });
+
+  test('선언을 못 읽으면 이름만 보이고 "블록 선언 불러오기 실패"를 한 번, 선언 외 판단은 하지 않는다', async ({
+    page,
+  }) => {
+    const bive = await openRules(page, {
+      'blocks.get': { error: { code: -32603, message: '내부 오류' } },
+    });
+    await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+    await expect(names(page)).toHaveText(['lib', 'auth', 'legacy-mail']);
+    await expect(blocks(page).getByTestId('block-note')).toHaveText('블록 선언 불러오기 실패');
+    await expect(blocks(page).getByTestId('block-undeclared')).toHaveCount(0);
+  });
+
+  /** 블록 10개(이름 40자 포함, 테스트 전용 데이터) */
+  const TEN = [
+    'auth',
+    'billing-and-subscription-management-core',
+    'lib',
+    'notification-delivery-and-retry-pipeline',
+    'health',
+    'search',
+    'catalog-pricing',
+    'legacy-mail',
+    'admin-console-audit-log-export-reporting',
+    'checkout',
+  ];
+  const MANY_BLOCKS: RuleWithJudgment[] = RULES.map((item) =>
+    item.rule.id === FAILING_RULE.id
+      ? { ...item, rule: { ...item.rule, targetBlockIds: TEN } }
+      : item,
+  );
+
+  for (const width of [820, 1100, 1280, 1440]) {
+    test(`${String(width)}×800: 블록 10개가 상세 안에서 줄을 바꾸고 가로 스크롤 · 넘침 · 겹침이 없다`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      const bive = await openRules(page, { 'rule.list': { result: { rules: MANY_BLOCKS } } });
+      await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+      await expect(names(page)).toHaveText(TEN);
+      const pane = page.getByTestId('rule-detail');
+      expect(await horizontalOverflow(pane, '[data-testid="block-item"]')).toEqual([]);
+      // 이름 상자끼리 겹치지 않고 모두 값 칸 안에 있다
+      const problems = await blocks(page).evaluate((field) => {
+        const out: string[] = [];
+        const dd = field.querySelector('dd');
+        if (dd === null) return ['값 칸 없음'];
+        const area = dd.getBoundingClientRect();
+        const boxes = [...field.querySelectorAll('[data-testid="block-item"]')].map((el) =>
+          el.getBoundingClientRect(),
+        );
+        boxes.forEach((a, i) => {
+          if (a.left < area.left - 0.5 || a.right > area.right + 0.5) {
+            out.push(`${String(i + 1)}: 값 칸 밖`);
+          }
+          boxes.slice(i + 1).forEach((b, k) => {
+            const overlap =
+              a.left < b.right - 0.5 &&
+              b.left < a.right - 0.5 &&
+              a.top < b.bottom - 0.5 &&
+              b.top < a.bottom - 0.5;
+            if (overlap) out.push(`${String(i + 1)} · ${String(i + k + 2)}: 겹침`);
+          });
+        });
+        return out;
+      });
+      expect(problems).toEqual([]);
+      // 이름 상자는 눌려 좁아지지 않고 줄을 바꿔 감싼다: 짧은 이름(6자 이하)은 한 줄이고, 상자는 두 줄 이상에 놓인다.
+      // 줄 수 · 자리는 글꼴 폭에 따라 다르므로 고정 값으로 보지 않는다
+      const layout = await blocks(page).evaluate((field) => {
+        const items = [...field.querySelectorAll<HTMLElement>('[data-testid="block-item"]')];
+        const rows = new Set(items.map((el) => Math.round(el.getBoundingClientRect().top)));
+        const broken = items
+          .map((el) => el.querySelector<HTMLElement>('[data-testid="block-name"]'))
+          .filter((el): el is HTMLElement => el !== null && (el.textContent ?? '').length <= 6)
+          .filter((el) => {
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            const tops = new Set(
+              [...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top)),
+            );
+            return tops.size !== 1;
+          })
+          .map((el) => el.textContent ?? '');
+        return { rows: rows.size, broken };
+      });
+      expect(layout.broken).toEqual([]);
+      expect(layout.rows).toBeGreaterThan(1);
+      // 위험도 줄은 대상 블록 줄 아래에 있고 겹치지 않는다
+      const blocksBox = await blocks(page).boundingBox();
+      const riskBox = await page.getByTestId('rule-field-risk').boundingBox();
+      expect(blocksBox).not.toBeNull();
+      expect(riskBox).not.toBeNull();
+      if (blocksBox !== null && riskBox !== null) {
+        expect(riskBox.y).toBeGreaterThanOrEqual(blocksBox.y + blocksBox.height - 0.5);
+      }
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}SCR-06/대상-블록-${String(width)}.png`,
         fullPage: true,
       });
     });

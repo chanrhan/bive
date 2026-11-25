@@ -1,6 +1,7 @@
 // SCR-03 규칙 (이슈 #24 수용 기준 2 · 3, screens.md SCR-03 · 1.4, ADR-029 · ADR-035 · ADR-060).
 // 2) checklists/scr-03.ts의 기본(카드 1줄 제목, 2줄 ID · WHEN 조건 · 예외) · 빈("규칙 없음") 상태
-// 3) 필터 칩 7종(판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류), 변이 · 블록 · 위험도는 값이 없어 0건 비활성
+// 3) 필터 칩 7종(판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류), 변이는 값이 없어 0건 비활성
+// 이슈 #64(M3-19) 수용 기준 3: 블록 · 위험도 칩이 값 개수와 함께 활성(블록마다 셈 · 여러 블록 OR · 프로젝트 전환 때 비움, ADR-126)
 // 이슈 #227(M7-15) 수용 기준 1 · 4: 미확인 규칙 카드 2줄째에 예외 "미확인"(판정 예외 다음), 확인됨은 예외 없음, 필터 칩 "확인"
 // (미확인 · 확인됨)이 값 개수와 함께 활성, 준수 집계 칩에 "사람 확인". 폐기된 규칙은 기본 목록에서 빠지고 [폐기 포함]에서만
 // 보이며 그 카드의 예외는 "폐기" (ADR-100 I3 · D7 · 명세 변경 목록 SCR-03, ADR-114)
@@ -260,7 +261,9 @@ test.describe('목록', () => {
 });
 
 test.describe('필터 칩 (수용 기준 3)', () => {
-  test('칩 7종이 있고 변이 · 블록 · 위험도는 값이 없어 0건 비활성', async ({ page }) => {
+  test('칩 7종이 있고 변이만 값이 없어 0건 비활성, 블록 · 위험도는 활성 (#64)', async ({
+    page,
+  }) => {
     await openScreen(page);
     const chips = page.getByTestId('list-view').getByTestId('filter-chip-button');
     await expect(chips).toHaveText(CHIPS.map((chip) => chip.label));
@@ -268,16 +271,79 @@ test.describe('필터 칩 (수용 기준 3)', () => {
       if (chip.enabled) await expect(chipButton(page, chip.id)).toBeEnabled();
       else await expect(chipButton(page, chip.id)).toBeDisabled();
     }
-    expect(CHIPS.filter((chip) => !chip.enabled).map((chip) => chip.label)).toEqual([
-      '변이',
-      '블록',
-      '위험도',
-    ]);
+    expect(CHIPS.filter((chip) => !chip.enabled).map((chip) => chip.label)).toEqual(['변이']);
     // 비활성 칩은 눌러도 메뉴가 열리지 않는다
-    for (const id of ['mutation', 'block', 'risk']) {
-      await chipButton(page, id).click({ force: true });
-      await expect(page.getByTestId('filter-menu')).toHaveCount(0);
+    await chipButton(page, 'mutation').click({ force: true });
+    await expect(page.getByTestId('filter-menu')).toHaveCount(0);
+  });
+
+  test('블록 · 위험도: 값별 개수와 함께 활성, 블록은 규칙마다가 아니라 블록마다 센다. 선언에 없는 이름도 값이다 (#64, ADR-126)', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    // 보이는 규칙(폐기 제외): RULE-001 auth, RULE-002 auth · lib, RULE-003 없음, RULE-005 lib, RULE-006 auth · legacy-mail
+    await chipButton(page, 'block').click();
+    expect(await menuOptions(page)).toEqual([
+      ['auth', '3', false],
+      ['legacy-mail', '1', false],
+      ['lib', '2', false],
+    ]);
+    await page.keyboard.press('Escape');
+    await chipButton(page, 'risk').click();
+    expect(await menuOptions(page)).toEqual([
+      ['낮음', '1', false],
+      ['보통', '1', false],
+      ['높음', '2', false],
+    ]);
+    await page.keyboard.press('Escape');
+    // [폐기 포함]: 폐기된 RULE-007(auth · 보통)이 더해진다
+    await page.getByTestId('hidden-toggle').click();
+    await chipButton(page, 'block').click();
+    expect(await menuOptions(page)).toEqual([
+      ['auth', '4', false],
+      ['legacy-mail', '1', false],
+      ['lib', '2', false],
+    ]);
+    await page.keyboard.press('Escape');
+    await chipButton(page, 'risk').click();
+    expect((await menuOptions(page)).find(([label]) => label === '보통')).toEqual([
+      '보통',
+      '2',
+      false,
+    ]);
+  });
+
+  test('블록 여러 개를 고르면 하나라도 가진 규칙이 남고(OR), 위험도와는 AND, ×로 풀린다 (#64)', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    await chipButton(page, 'block').click();
+    await page.getByTestId('filter-option').filter({ hasText: 'lib' }).click();
+    await page.keyboard.press('Escape');
+    expect(await cardIds(page)).toEqual(['RULE-002', 'RULE-005']);
+    await expect(page.getByTestId('list-result')).toHaveText('5개 중 2개 · 초기화');
+    await chipButton(page, 'block').click();
+    await page.getByTestId('filter-option').filter({ hasText: 'legacy-mail' }).click();
+    await page.keyboard.press('Escape');
+    await expect(chipButton(page, 'block')).toHaveText('블록: legacy-mail, lib');
+    expect(await cardIds(page)).toEqual(['RULE-002', 'RULE-005', 'RULE-006']);
+    // 위험도 높음과 AND: legacy-mail · lib 가운데 높음은 RULE-006
+    await chipButton(page, 'risk').click();
+    await page.getByTestId('filter-option').filter({ hasText: '높음' }).click();
+    await page.keyboard.press('Escape');
+    expect(await cardIds(page)).toEqual(['RULE-006']);
+    // 블록이 없는 옛 규칙(RULE-003)은 어떤 블록 값에도 남지 않는다
+    await page.getByTestId('filter-chip-block').getByTestId('filter-chip-clear').click();
+    await page.getByTestId('filter-chip-risk').getByTestId('filter-chip-clear').click();
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    await chipButton(page, 'block').click();
+    for (const name of ['auth', 'legacy-mail', 'lib']) {
+      const option = page.getByTestId('filter-option').filter({ hasText: name });
+      await option.click();
     }
+    await page.keyboard.press('Escape');
+    expect(await cardIds(page)).not.toContain('RULE-003');
+    expect(await cardIds(page)).toHaveLength(LIVE.length - 1);
   });
 
   test('값별 개수는 최신 판정 · 규칙 필드에서 나오고 근거 데이터가 없는 값은 0건 비활성', async ({
@@ -403,6 +469,14 @@ test.describe('프로젝트 전환 (ADR-034 · ADR-060)', () => {
   }) => {
     const bive = await openScreen(page);
     await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    // 블록 · 위험도 칩을 골라 둔다 (프로젝트 전환 때 함께 지워져야 한다, #64)
+    await chipButton(page, 'block').click();
+    await page.getByTestId('filter-option').filter({ hasText: 'lib' }).click();
+    await page.keyboard.press('Escape');
+    await chipButton(page, 'risk').click();
+    await page.getByTestId('filter-option').filter({ hasText: '낮음' }).click();
+    await page.keyboard.press('Escape');
+    expect(await cardIds(page)).toEqual(['RULE-005']);
     await bive.setResponse('rule.list', { result: { rules: [] }, delayMs: 1500 });
     await bive.emit(PROJECT_OPENED_EVENT, { project: OTHER_PROJECT, created: false, empty: false });
     // 프로젝트가 열리면 요구사항 화면으로 이동하므로(ADR-055) 다시 규칙으로 간다
@@ -412,6 +486,14 @@ test.describe('프로젝트 전환 (ADR-034 · ADR-060)', () => {
     await expect(page.getByTestId('list-view').getByTestId('empty-state')).toHaveText('규칙 없음');
     const listCalls = await callsOf(bive, 'rule.list');
     expect(listCalls.at(-1)?.params).toEqual({ projectId: OTHER_PROJECT.id, includeRetired: true });
+    // 새 프로젝트의 규칙 목록에서 블록 · 위험도 선택이 남아 있지 않다
+    await bive.setResponse('rule.list', { result: { rules: RULES } });
+    await bive.emit(PROJECT_OPENED_EVENT, { project: PROJECT, created: false, empty: false });
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    await expect(chipButton(page, 'block')).toHaveText('블록');
+    await expect(chipButton(page, 'risk')).toHaveText('위험도');
+    await expect(page.getByTestId('list-result')).toHaveCount(0);
   });
 });
 
