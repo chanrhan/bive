@@ -26,6 +26,9 @@ const plantedProject = () => {
     '.dependency-cruiser.js': cjs(m('depcruise-js')),
     '.dependency-cruiser.cjs': cjs(m('depcruise-cjs')),
     '.dependency-cruiser.mjs': esm(m('depcruise-mjs')),
+    '.dependency-cruiser.ts': esm(m('depcruise-ts')),
+    '.dependency-cruiser.mts': esm(m('depcruise-mts')),
+    '.dependency-cruiser.cts': cjs(m('depcruise-cts')),
     // webpack · babel 설정
     'webpack.config.js': cjs(m('webpack-js')),
     'webpack.config.mjs': esm(m('webpack-mjs')),
