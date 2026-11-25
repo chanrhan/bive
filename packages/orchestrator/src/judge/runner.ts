@@ -172,6 +172,9 @@ export interface JudgeRunnerOptions {
   tempDir?: string;
 }
 
+/** 대상 규칙 폴더에 인수 테스트 파일이 하나도 없을 때의 문제 글 (BIVE 고정 문구). */
+export const NO_ACCEPTANCE_FILES_MESSAGE = '인수 테스트 파일 없음';
+
 const PROFILES: Record<JudgeProfileName, StackProfile> = {
   'next-prisma-sqlite': nextPrismaSqliteProfile,
 };
@@ -401,7 +404,7 @@ export class JudgeRunner {
         for (const id of ruleIds) {
           const files = await listAcceptanceFiles(worktreeDir, path.join(acceptanceRoot, id));
           if (files.length === 0) {
-            missing.push({ file: `${ACCEPTANCE_DIR}/${id}`, message: '인수 테스트 파일 없음' });
+            missing.push({ file: `${ACCEPTANCE_DIR}/${id}`, message: NO_ACCEPTANCE_FILES_MESSAGE });
           }
         }
         if (missing.length > 0) return await collectError(missing);

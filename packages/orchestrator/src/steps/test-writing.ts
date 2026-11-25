@@ -17,8 +17,21 @@ import { createUlidGenerator, type Step } from '@bive/shared';
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
 import { lintAcceptanceSource } from '../judge/acceptance-lint.js';
-import { latestJudgedCaseFilter } from '../norms/case-names.js';
+import { NO_ACCEPTANCE_FILES_MESSAGE } from '../judge/runner.js';
+import { ACCEPTANCE_DIR } from '../judge/config.js';
+import {
+  NO_TESTS_COLLECTED_MESSAGE,
+  ruleIdOfAcceptanceFile,
+  SUITE_FAILURE_MESSAGE,
+} from '../judge/report.js';
+import {
+  latestJudgedCaseFilter,
+  NO_WRITTEN_ACCEPTANCE,
+  type WrittenAcceptance,
+  writtenAcceptanceOf,
+} from '../norms/case-names.js';
 import { collectNormInput, normInputRecord } from '../norms/norm-input.js';
+import { NO_CASES_MESSAGE } from './red-check.js';
 import {
   applyTestWriterOutputs,
   collectTestWriterOutputs,
@@ -70,8 +83,99 @@ const listed = (items: readonly string[]): string =>
   items.slice(0, MAX_LISTED).join('\n') +
   (items.length > MAX_LISTED ? `\n… 외 ${String(items.length - MAX_LISTED)}건` : '');
 
-/** 앞 시도의 미충족 결과를 다음 세션에 줄 문장으로 바꾼다. 모르는 모양이면 `null`. */
-export const describeUnmet = (exitDetail: unknown): string | null => {
+/** Red 확인 수집 오류 가운데 글 그대로 싣는 BIVE 고정 문구 (판정 러너 · Red 확인이 만드는 글). */
+const FIXED_PROBLEM_MESSAGES: ReadonlySet<string> = new Set([
+  NO_CASES_MESSAGE,
+  NO_ACCEPTANCE_FILES_MESSAGE,
+  NO_TESTS_COLLECTED_MESSAGE,
+]);
+
+/** Red 확인 수집 오류의 메시지 원문 대신 싣는 글. */
+export const RED_PROBLEM_WITHHELD = '불러오기 · 수집 오류 (메시지 원문은 싣지 않음)';
+
+/** 위치를 뺀 수집 오류에 붙이는 글 (판정한 커밋의 대상 규칙 폴더 파일 · 폴더가 아닌 위치). */
+export const RED_PROBLEM_OUTSIDE = '(대상 규칙 폴더의 파일로 확인되지 않은 위치는 싣지 않음)';
+
+/**
+ * 수집 오류 메시지 대신 싣는 글: BIVE 고정 문구와 같으면 그 문구, 스위트 훅 실패 안내로 시작하면 안내 앞부분만, 나머지는 원문 대신
+ * {@link RED_PROBLEM_WITHHELD}. 판정 중 프로젝트 코드가 던진 오류의 메시지는 vitest의 파일 메시지에 그대로 실려 러너 오류와
+ * 글로 가려낼 수 없다(ADR-128).
+ */
+const problemMessage = (message: unknown): string => {
+  if (typeof message !== 'string') return RED_PROBLEM_WITHHELD;
+  if (FIXED_PROBLEM_MESSAGES.has(message)) return message;
+  if (message === SUITE_FAILURE_MESSAGE || message.startsWith(`${SUITE_FAILURE_MESSAGE}:`)) {
+    return SUITE_FAILURE_MESSAGE;
+  }
+  return RED_PROBLEM_WITHHELD;
+};
+
+/** 위치가 판정한 커밋의 대상 규칙 폴더 파일이거나 대상 규칙 폴더 자체면 그 경로, 아니면 `null`. */
+const writtenLocation = (file: unknown, written: WrittenAcceptance): string | null => {
+  if (typeof file !== 'string') return null;
+  if (written.files.has(file)) return file;
+  return [...written.ruleDisplayIds].some((id) => file === `${ACCEPTANCE_DIR}/${id}`) ? file : null;
+};
+
+/**
+ * Red 확인의 실패하지 않은 케이스 줄: 위치가 판정한 커밋의 대상 규칙 폴더 파일이고 이름이 그 규칙 폴더 파일의 케이스 이름
+ * 리터럴과 맞을 때만 위치 · 이름을 싣고, 나머지는 "알 수 없는 케이스 N건"으로 센다 (M3-40 #281, ADR-121 · ADR-128).
+ */
+const redCaseLines = (cases: unknown, written: WrittenAcceptance): string[] => {
+  if (!Array.isArray(cases)) return [];
+  const lines: string[] = [];
+  let unknown = 0;
+  for (const item of cases) {
+    const file = isRecord(item) && typeof item.file === 'string' ? item.file : null;
+    const name = isRecord(item) && typeof item.name === 'string' ? item.name : null;
+    const ruleId = file === null ? null : ruleIdOfAcceptanceFile(file);
+    if (
+      file === null ||
+      name === null ||
+      ruleId === null ||
+      !written.files.has(file) ||
+      !written.isKnownCase(ruleId, name)
+    ) {
+      unknown += 1;
+      continue;
+    }
+    const line =
+      isRecord(item) &&
+      typeof item.line === 'number' &&
+      Number.isInteger(item.line) &&
+      item.line > 0
+        ? `:${String(item.line)}`
+        : '';
+    lines.push(`- ${file}${line} ${name}`);
+  }
+  if (unknown > 0) {
+    lines.push(
+      `- (알 수 없는 케이스 ${String(unknown)}건: 인수 테스트 파일에서 이름을 찾지 못해 싣지 않음)`,
+    );
+  }
+  return lines;
+};
+
+/**
+ * Red 확인의 수집 오류 줄: 위치는 판정한 커밋의 대상 규칙 폴더 안의 것만, 메시지는 {@link problemMessage}로 바꾼 글만 싣는다
+ * (M3-40 #281, ADR-128).
+ */
+const redProblemLines = (problems: unknown, written: WrittenAcceptance): string[] => {
+  if (!Array.isArray(problems)) return [];
+  return problems.map((item) => {
+    const record = isRecord(item) ? item : {};
+    const where = writtenLocation(record.file, written);
+    const outside = record.file !== undefined && record.file !== null && where === null;
+    const parts = [where, problemMessage(record.message), outside ? RED_PROBLEM_OUTSIDE : null];
+    return `- ${parts.filter((part) => part !== null).join(' ')}`;
+  });
+};
+
+/**
+ * 앞 시도의 미충족 결과를 다음 세션에 줄 문장으로 바꾼다. 모르는 모양이면 `null`. Red 확인 결과(실패하지 않은 케이스 · 수집 오류)는
+ * `written`(그 Red 확인이 판정한 커밋의 대상 규칙 폴더)과 대조한 것만 싣는다.
+ */
+export const describeUnmet = (exitDetail: unknown, written: WrittenAcceptance): string | null => {
   if (!isRecord(exitDetail)) return null;
   const items = (key: string): string[] =>
     Array.isArray(exitDetail[key])
@@ -87,9 +191,9 @@ export const describeUnmet = (exitDetail: unknown): string | null => {
       : [];
   switch (exitDetail.reason) {
     case 'not_red':
-      return `Red 확인: 구현 전에 실패하지 않은 케이스가 있다 (모든 케이스가 실패해야 한다)\n${listed(items('notFailedCases'))}`;
+      return `Red 확인: 구현 전에 실패하지 않은 케이스가 있다 (모든 케이스가 실패해야 한다)\n${listed(redCaseLines(exitDetail.notFailedCases, written))}`;
     case 'collect_error':
-      return `Red 확인: 테스트 파일을 불러오거나 수집하지 못했다\n${listed(items('problems'))}`;
+      return `Red 확인: 테스트 파일을 불러오거나 수집하지 못했다\n${listed(redProblemLines(exitDetail.problems, written))}`;
     case 'lint':
       return `허용되지 않은 import · 모듈 로드\n${listed(items('problems'))}`;
     case 'missing_tests':
@@ -101,19 +205,35 @@ export const describeUnmet = (exitDetail: unknown): string | null => {
   }
 };
 
-/** 이번 시도 앞의 마지막 미충족 시도(테스트 작성 · Red 확인, 재기동 중단 제외)의 사유 문장. */
-export const previousFeedback = (steps: readonly Step[], current: Step): string | null => {
-  const earlier = steps.filter(
-    (step) =>
-      step.id !== current.id &&
-      (step.kind === 'test_writing' || step.kind === 'red_check') &&
-      step.status === 'failed' &&
-      step.endedAt !== null &&
-      !(isRecord(step.exitDetail) && step.exitDetail.interrupted === true),
-  );
-  const last = earlier.sort((a, b) => String(a.endedAt).localeCompare(String(b.endedAt))).at(-1);
+/** 이번 시도 앞의 마지막 미충족 시도(테스트 작성 · Red 확인, 재기동 중단 제외). */
+export const lastUnmetAttempt = (steps: readonly Step[], current: Step): Step | undefined =>
+  steps
+    .filter(
+      (step) =>
+        step.id !== current.id &&
+        (step.kind === 'test_writing' || step.kind === 'red_check') &&
+        step.status === 'failed' &&
+        step.endedAt !== null &&
+        !(isRecord(step.exitDetail) && step.exitDetail.interrupted === true),
+    )
+    .sort((a, b) => String(a.endedAt).localeCompare(String(b.endedAt)))
+    .at(-1);
+
+/**
+ * 앞 시도(`lastUnmetAttempt`)의 사유 문장. 앞 시도가 Red 확인이면 그 결과에 남은 커밋(Red 확인이 판정한 테스트 작성 커밋)의
+ * 대상 규칙 폴더 글을 git 객체에서 읽어 대조 기준으로 쓴다. 다른 시도는 Red 확인 결과가 없으므로 아무것도 모르는 기준이다.
+ */
+export const previousFeedback = async (
+  last: Step | undefined,
+  repoPath: string,
+  ruleDisplayIds: readonly string[],
+): Promise<string | null> => {
   if (last === undefined) return null;
-  const text = describeUnmet(last.exitDetail);
+  const written =
+    last.kind === 'red_check' && isRecord(last.exitDetail)
+      ? await writtenAcceptanceOf(repoPath, last.exitDetail.commit, ruleDisplayIds)
+      : NO_WRITTEN_ACCEPTANCE;
+  const text = describeUnmet(last.exitDetail, written);
   if (text === null) return null;
   return text.length <= MAX_FEEDBACK_CHARS ? text : `${text.slice(0, MAX_FEEDBACK_CHARS)}…`;
 };
@@ -220,7 +340,12 @@ export const createTestWritingExecutor =
           runDisplayId: context.run.displayId,
           rules,
           norms,
-          feedback: previousFeedback(context.steps, context.step),
+          // 앞 시도의 사유: Red 확인 결과의 케이스 이름 · 위치는 판정한 커밋의 대상 규칙 폴더 글과 대조한다 (M3-40, ADR-128)
+          feedback: await previousFeedback(
+            lastUnmetAttempt(context.steps, context.step),
+            context.git.repoPath,
+            ruleIds,
+          ),
         }),
         normInput: normInputRecord(norms),
         vars: {
