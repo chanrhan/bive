@@ -6,9 +6,11 @@
 // - 효력 있는 요구사항 = 삭제되지 않고 규범 상태가 효력(`approved`)인 것
 // - 효력 있는 규칙 = 삭제되지 않고 규범 상태가 효력이며 폐기되지 않은 것(폐기 기록 `rule_retirements`가 없음). 부모가 해제된
 //   규칙 · 내장 규칙도 넣는다. 잠정(`provisional`) · 삭제 · 폐기된 규칙은 효력이 없다
+// - 효력 있는 계약 = 등록된 계약 전부(계약은 아직 고치거나 지우거나 폐기하지 않는다, M3-04 #49 · ADR-129). 변경 반영(M3-10)이
+//   계약의 효력을 바꾸면 이 함수를 고친다
 // - 규칙 화면의 폐기 표시(`rule.list`의 폐기 포함 · 항목의 `retirement`, M7-15 #227 · ADR-114)도 폐기 기록을 여기서 읽는다
 // - 저장소를 읽기만 한다
-import type { Requirement, Rule, RuleRetirementView } from '@bive/shared';
+import type { Contract, Requirement, Rule, RuleRetirementView } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
 /** 폐기된 규칙 ID (폐기 기록을 읽는 곳은 이 모듈과 폐기 · 대체 모듈뿐이다). */
@@ -32,6 +34,9 @@ export const effectiveRules = (store: ProjectStore): Rule[] => {
   const retired = retiredRuleSet(store);
   return store.rules.list().filter((rule) => isEffectiveRule(rule, retired));
 };
+
+/** 효력 있는 계약 (표시 ID 순). */
+export const effectiveContracts = (store: ProjectStore): Contract[] => store.contracts.list();
 
 /** 삭제되지 않았고 폐기되지 않은 규칙 (표시 ID 순, 잠정 포함). 규칙 목록 조회의 기본 결과다. */
 export const unretiredRules = (store: ProjectStore): Rule[] => {

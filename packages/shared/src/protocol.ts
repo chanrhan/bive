@@ -14,6 +14,7 @@ import {
   CommitSha,
   Confirmation,
   ConfirmationTarget,
+  Contract,
   DailyBudgetUsd,
   EntityRef,
   IdeSetting,
@@ -47,6 +48,7 @@ import {
   AutoStartSkipReason,
   ConfirmationItemKind,
   CodeOpenReason,
+  ContractKind,
   JudgmentStatus,
   NormChangeKind,
   ProposalKind,
@@ -1273,6 +1275,90 @@ export type BlocksSetParams = z.infer<typeof BlocksSetParams>;
 export const BlocksSetResult = z.strictObject({ current: BlockDeclarationRecord });
 export type BlocksSetResult = z.infer<typeof BlocksSetResult>;
 
+// ── 계약 (NRM-03, ADR-019 · ADR-033 · ADR-100 C2 · K1 · A14, M3-04 #49, ADR-129) ─────
+// - `contract.register`: 사람(`human`)만. 에이전트 · 오케스트레이터 주체는 -32020(저장소를 열기 전). `file`은 프로젝트 루트 기준 상대
+//   경로(`/` 구분)이고 내용은 기준 브랜치 커밋의 그 파일에서 읽는다(작업 트리가 아니다). 승인 대기 제안 없이 트랜잭션 1개로 계약(확인됨,
+//   근거 = 계약의 작성 기록) · `contract` 검사 규칙(내장, 미확인) · 승인 기록 `contract_edit`(이전 없는 diff) · 규범 변경 기록
+//   `created`(규칙, 주체 오케스트레이터)를 남긴다. 실행을 자동으로 만들지 않는다
+// - 형식 · 파일 문제는 -32001(`data.reason = CONTRACT_INVALID`, `data.code`), 같은 파일이 이미 등록됨 -32009, 부모 요구사항 없음
+//   -32004 · 삭제됨 · 효력 없음 -32009
+// - `contract.list`: 계약(표시 ID 순)과 그 검사 규칙, 지금 기준 브랜치의 그 파일이 등록 때 내용과 같은지(`source`)
+
+/** 계약 등록 형식 · 파일 문제(-32001)의 `error.data.reason`. */
+export const CONTRACT_INVALID_REASON = 'CONTRACT_INVALID';
+
+/**
+ * 계약 등록을 받지 않은 까닭.
+ * - `kind_not_supported`: 지금 등록을 받지 않는 종류(OpenAPI · DB 스키마 · AsyncAPI만 받는다)
+ * - `path_invalid`: 절대 경로 · `..` · 빈 구간 · `.git` · 허용 밖 글자 · 길이 초과
+ * - `extension_mismatch`: 종류와 맞지 않는 확장자
+ * - `base_unreadable`: 기준 브랜치 커밋을 읽지 못함(git 저장소가 아님 · 브랜치 없음)
+ * - `file_missing`: 기준 브랜치 커밋에 그 파일이 없음
+ * - `not_regular_file`: 디렉터리 · 기호 링크 · 하위 모듈
+ * - `too_large`: 크기 상한 초과
+ * - `not_text`: UTF-8 글이 아님(또는 대체 문자 U+FFFD가 있음)
+ */
+export const ContractInvalidCode = z.enum([
+  'kind_not_supported',
+  'path_invalid',
+  'extension_mismatch',
+  'base_unreadable',
+  'file_missing',
+  'not_regular_file',
+  'too_large',
+  'not_text',
+]);
+export type ContractInvalidCode = z.infer<typeof ContractInvalidCode>;
+
+export const ContractInvalidData = z.strictObject({
+  reason: z.literal(CONTRACT_INVALID_REASON),
+  code: ContractInvalidCode,
+});
+export type ContractInvalidData = z.infer<typeof ContractInvalidData>;
+
+/** `contract.register`: 파일 · 경로 형식은 처리기가 검사한다(까닭을 -32001로 돌려주려고 여기서는 문자열만 묻는다). */
+export const ContractRegisterParams = z.strictObject({
+  projectId: Ulid,
+  file: z.string(),
+  kind: ContractKind,
+  author: Author,
+  /** 부모 요구사항 (연결 단위 = 파일, ADR-019). 없으면 부모 없는 계약 */
+  requirementId: Ulid.optional(),
+});
+export type ContractRegisterParams = z.infer<typeof ContractRegisterParams>;
+export const ContractRegisterResult = z.strictObject({
+  contract: Contract,
+  rule: Rule,
+  approvalLog: ApprovalLogEntry,
+});
+export type ContractRegisterResult = z.infer<typeof ContractRegisterResult>;
+
+/**
+ * 지금 기준 브랜치의 계약 파일이 등록 때 내용과 같은지. `same` · `changed`(내용 해시가 다름, `contentHash` = 지금 해시) ·
+ * `missing`(파일이 없거나 일반 파일이 아님) · `unreadable`(기준 브랜치 · 파일을 읽지 못함 · 상한 초과 · 글이 아님).
+ */
+export const ContractSourceState = z.discriminatedUnion('status', [
+  z.strictObject({ status: z.literal('same') }),
+  z.strictObject({ status: z.literal('changed'), contentHash: Sha256Hex }),
+  z.strictObject({ status: z.literal('missing') }),
+  z.strictObject({ status: z.literal('unreadable') }),
+]);
+export type ContractSourceState = z.infer<typeof ContractSourceState>;
+
+export const ContractListParams = z.strictObject({ projectId: Ulid });
+export type ContractListParams = z.infer<typeof ContractListParams>;
+export const ContractListResult = z.strictObject({
+  contracts: z.array(
+    z.strictObject({
+      contract: Contract,
+      /** 그 계약의 `contract` 검사 규칙 (없으면 `null`) */
+      rule: z.strictObject({ id: Ulid, displayId: displayIdSchema('RULE') }).nullable(),
+      source: ContractSourceState,
+    }),
+  ),
+});
+export type ContractListResult = z.infer<typeof ContractListResult>;
+
 /**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
@@ -1306,6 +1392,8 @@ export const METHODS = {
   'project.list': { params: ProjectListParams, result: ProjectListResult },
   'blocks.get': { params: BlocksGetParams, result: BlocksResult },
   'blocks.set': { params: BlocksSetParams, result: BlocksSetResult },
+  'contract.register': { params: ContractRegisterParams, result: ContractRegisterResult },
+  'contract.list': { params: ContractListParams, result: ContractListResult },
   'settings.get': { params: SettingsGetParams, result: SettingsResult },
   'settings.update': { params: SettingsUpdateParams, result: SettingsResult },
   'settings.validateForRun': { params: SettingsValidateParams, result: SettingsValidateResult },
