@@ -203,6 +203,7 @@ describe('대상 프로젝트의 코드를 실행하지 않는다', () => {
       baseDir: root,
       exclude: { path: 'x' },
       tsPreCompilationDeps: true,
+      skipAnalysisNotInRules: true,
     });
     writeFiles(root, { 'tsconfig.json': '{}' });
     expect(cruiseInput({ root, exclude: 'x', ruleSet: null }).options).toMatchObject({

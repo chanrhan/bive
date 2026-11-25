@@ -84,6 +84,8 @@ export const cruiseInput = (request: CruiseRequest): { args: string[]; options: 
       exclude: { path: request.exclude },
       // 타입 전용 · 동적 import도 TypeScript 구문 그대로 읽어 간선으로 둔다
       tsPreCompilationDeps: true,
+      // 규칙에 없는 분석(규칙이 없을 때의 순환 경로 계산 등)을 하지 않는다
+      skipAnalysisNotInRules: true,
       ...(existsSync(tsConfig) ? { tsConfig: { fileName: tsConfig } } : {}),
       ...(request.ruleSet === null ? {} : { ruleSet: request.ruleSet, validate: true }),
     },
