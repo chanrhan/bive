@@ -63,6 +63,11 @@ jobs:
       - name: 초기화 스크립트 검사
         run: scripts/test-reset-fixture.sh
 
+      # 변형 스크립트의 거부 · 변형별 커밋 하나 · 예제 선언의 위반 수 검사 (M3-02). 앞 단계의 파서 빌드를 쓰고,
+      # 픽스처 사본은 임시 폴더에 설치 없이 만든다
+      - name: 변형 스크립트 검사
+        run: scripts/test-make-variant.sh
+
       # 로드맵 발행 스크립트의 재발행 시험 (M2-05, 가짜 gh 응답으로 돌고 GitHub를 부르지 않는다)과
       # 파이프라인 e2e 묶음 대조 스크립트의 시험 (M3-24)
       - name: 파이썬 스크립트 검사
