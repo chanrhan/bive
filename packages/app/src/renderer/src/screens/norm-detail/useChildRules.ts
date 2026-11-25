@@ -45,7 +45,7 @@ export const useChildRules = (
   const [loaded, setLoaded] = useState<{ requirementId: string; load: ChildRulesLoad } | null>(
     null,
   );
-  // 바꾼 횟수. 요청을 보낸 뒤 바뀌었으면 그 응답은 편집 전 · 알림 전 값일 수 있어 버린다
+  // 바꾼 횟수. 요청을 보낸 뒤 바뀌었으면 그 응답은 편집 전 값일 수 있어 버린다
   const replaced = useRef(0);
   // 응답을 기다리는 요청이 있는지, 다시 읽기 계기
   const inFlight = useRef(false);
@@ -67,8 +67,7 @@ export const useChildRules = (
       },
       () => {
         if (live) inFlight.current = false;
-        if (live && replaced.current === mine)
-          setLoaded({ requirementId, load: { state: 'error' } });
+        if (live) setLoaded({ requirementId, load: { state: 'error' } });
       },
     );
     return () => {
@@ -83,7 +82,8 @@ export const useChildRules = (
     if (seenListed.current === listed) return;
     seenListed.current = listed;
     if (listed.state === 'loading') return;
-    replaced.current += 1;
+    // 기다리던 요청(열 때 · 편집 뒤)이 있으면 다시 읽는다: 위 효과가 다시 돌며 그 요청의 응답을 버린다(이 목록보다 옛 값일 수
+    // 있다). 다시 읽은 값이 마지막에 남는다
     const dropped = inFlight.current;
     setLoaded({
       requirementId,
