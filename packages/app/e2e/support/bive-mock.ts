@@ -244,7 +244,11 @@ export const mockBive = async (page: Page, options: MockBiveOptions = {}): Promi
   };
 };
 
-/** 그 메서드의 지금까지 호출이 모두 응답을 받을 때까지 기다린다 (지연 응답의 도착을 시간이 아니라 기록으로 본다). */
+/**
+ * 그 메서드의 지금까지 호출이 모두 응답을 받을 때까지 기다린다 (지연 응답의 도착을 시간이 아니라 기록으로 본다).
+ * '부른 수 = 응답한 수'만 보므로 아직 나가지 않은 호출은 잡지 못한다: 그려진 것을 먼저 확인하고 `nextFrame` 뒤에 쓴다.
+ * 응답을 주지 않는 메서드(`pending`)에는 쓰지 않는다(끝나지 않는다).
+ */
 export const allSettled = async (bive: BiveMock, method: string): Promise<void> => {
   await expect
     .poll(async () => {
