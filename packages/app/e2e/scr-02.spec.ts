@@ -19,7 +19,14 @@ import {
   REQUIREMENTS,
   VISIBLE_ORDER,
 } from './checklists/scr-02.js';
-import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
+import {
+  allSettled,
+  type BiveMock,
+  type MockCall,
+  mockBive,
+  type MockResponses,
+  nextFrame,
+} from './support/bive-mock.js';
 import { collectVisibleText, expectScreen, findForbiddenText } from './support/expectScreen.js';
 
 // 카드 시각(로컬 `YYYY-MM-DD HH:mm`)을 고정하려고 시간대를 정한다
@@ -389,6 +396,37 @@ test.describe('필터 칩 (수용 기준 3)', () => {
     for (const call of lists) {
       expect(call.params).toEqual({ projectId: PROJECT.id, includeRetired: true });
     }
+  });
+
+  test('블록: 규칙 목록은 실행 알림으로는 다시 읽지 않고 규범 변경 알림 하나에 정확히 한 번 다시 읽는다 (ADR-126)', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    await expect(page.getByTestId('requirement-detail')).toHaveAttribute('data-selected-id', '');
+    await nextFrame(page);
+    await allSettled(bive, 'rule.list');
+    const before = (await callsOf(bive, 'rule.list')).length;
+
+    // 실행 알림(이 프로젝트): 블록 · 폐기는 실행으로 바뀌지 않으므로 다시 읽지 않는다
+    await bive.emit('event.run.updated', {
+      projectId: PROJECT.id,
+      runId: '01JE0000000000000000000001',
+    });
+    await bive.emit('event.step.updated', {
+      projectId: PROJECT.id,
+      runId: '01JE0000000000000000000001',
+    });
+    await nextFrame(page);
+    await allSettled(bive, 'rule.list');
+    expect((await callsOf(bive, 'rule.list')).length).toBe(before);
+
+    // 규범 변경 알림 하나: 정확히 한 번
+    await bive.emit('event.normChange.appended', { projectId: PROJECT.id, lastSeq: 7 });
+    await expect.poll(async () => (await callsOf(bive, 'rule.list')).length).toBe(before + 1);
+    await nextFrame(page);
+    await allSettled(bive, 'rule.list');
+    expect((await callsOf(bive, 'rule.list')).length).toBe(before + 1);
   });
 
   test('블록: 규칙 목록을 읽는 동안은 목록 자리가 로딩이다', async ({ page }) => {
