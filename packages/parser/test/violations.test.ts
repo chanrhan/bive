@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { analyzeProject, type StructureViolation } from '../src/index.js';
+import { structureOutcome } from '../src/analyze.js';
 import { mapFilesToBlocks } from '../src/blocks.js';
 import { CruiseOutput } from '../src/cruise.js';
 import { escapeRegExpLiteral, exactPathsRegExp } from '../src/regex.js';
@@ -435,6 +436,54 @@ describe('분석하지 않은 파일로 가는 import는 드러나고, 블록 �
     expect(result.structure?.outcome).toEqual({
       status: 'checked',
       violations: { items: [], total: 0 },
+    });
+  });
+
+  it('incomplete의 분석하지 않은 대상 목록도 상한을 넘으면 앞쪽만 담고 전체 개수를 남긴다', () => {
+    const mapping = mapFilesToBlocks(ab(), ['src/a/x.ts', 'src/page.ts']);
+    const relays = Array.from({ length: PARSER_LIMITS.unanalyzed + 1 }, (_, i) => ({
+      from: 'src/a/x.ts',
+      to: `src/a/r${String(i).padStart(5, '0')}.es6`,
+    }));
+    const outcome = structureOutcome(
+      mapping,
+      true,
+      [{ from: 'src/page.ts', to: '.next/x.js' }, ...relays],
+      () => ({ items: [], total: 0 }),
+    );
+    if (outcome.status !== 'incomplete') throw new Error(outcome.status);
+    expect(outcome.unanalyzed.items).toHaveLength(PARSER_LIMITS.unanalyzed);
+    expect(outcome.unanalyzed.total).toBe(PARSER_LIMITS.unanalyzed + 1);
+    expect(outcome.unanalyzed.items[0]).toEqual(relays[0]);
+  });
+
+  it('겹침과 분석하지 않은 대상이 함께면 overlap이다 (판별하지 않았으므로)', async () => {
+    const result = await analyzeProject({
+      projectDir: makeProject({ ...relayFiles, 'src/a/x.ts': "import './relay.es6';\n" }),
+      declaration: declaration([
+        { name: 'a', include: ['src/a/**'] },
+        { name: 'all', include: ['src/**'] },
+      ]),
+    });
+    expect(result.graph.unanalyzed.total).toBe(1);
+    expect(result.structure?.outcome.status).toBe('overlap');
+  });
+
+  it('inManifest는 dependency-cruiser가 가장 가까운 package.json으로 본 값 그대로다 (루트 manifest 기준이 아니다)', async () => {
+    const result = await analyzeAb({
+      'package.json': JSON.stringify({ name: 'p', devDependencies: { 'dev-only': '1.0.0' } }),
+      'src/a/package.json': JSON.stringify({ name: 'a', dependencies: { 'relay-pkg': '1.0.0' } }),
+      'node_modules/dev-only/package.json': JSON.stringify({ name: 'dev-only', main: 'index.js' }),
+      'node_modules/dev-only/index.js': '',
+      'src/a/x.ts': "import 'relay-pkg';\nimport 'dev-only';\n",
+    });
+    // relay-pkg는 루트 manifest에 없지만 src/a/package.json에 있어 true, dev-only는 루트에만 있어 false
+    expect(result.graph.packages).toEqual({
+      items: [
+        { name: 'dev-only', inManifest: false },
+        { name: 'relay-pkg', inManifest: true },
+      ],
+      total: 2,
     });
   });
 

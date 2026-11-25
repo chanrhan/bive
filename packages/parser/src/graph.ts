@@ -18,7 +18,11 @@ export interface UnresolvedImport {
 export interface PackageImport {
   /** 패키지 이름 (모듈 이름의 첫 구간, `@범위/이름`이면 두 구간) */
   name: string;
-  /** 프로젝트 package.json의 의존성에 있는지 (dependency-cruiser의 의존 종류 그대로) */
+  /**
+   * dependency-cruiser가 그 import를 "manifest에 있음"으로 본 것(의존 종류가 `npm-no-pkg` · `npm-unknown`이 아님) 그대로다. 기준은
+   * 가져오는 파일의 폴더에서 가장 가까운 package.json이다(프로젝트 루트가 아닐 수 있다). 여러 파일이 가져오면 하나라도 아니면
+   * `false`. 안전 신호가 아니다(ADR-125 ⑨)
+   */
   inManifest: boolean;
 }
 

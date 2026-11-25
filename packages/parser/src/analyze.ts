@@ -7,7 +7,12 @@
 // - 분석을 끝까지 못 했으면 `ParserError`를 던진다
 import { BlockDeclaration } from '@bive/shared';
 
-import { mapFilesToBlocks, type FileOverlap, type PublicOutsideInclude } from './blocks.js';
+import {
+  type BlockMapping,
+  mapFilesToBlocks,
+  type FileOverlap,
+  type PublicOutsideInclude,
+} from './blocks.js';
 import { type ProcessOptions, runCruise } from './cruise.js';
 import { ParserError } from './errors.js';
 import { listSourceFiles } from './files.js';
@@ -66,6 +71,30 @@ const doNotFollowRegExp = (skipped: readonly string[]): string =>
     .map((part) => `(?:${part})`)
     .join('|');
 
+/**
+ * 판정 상태. 겹침이 있으면(규칙을 만들지 않았으면) 다른 사정과 상관없이 `overlap`, 그다음 블록 파일에서 나간 분석하지 않은 대상이
+ * 있으면 `incomplete`, 아니면 `checked`.
+ */
+export const structureOutcome = (
+  mapping: BlockMapping,
+  judged: boolean,
+  unanalyzed: readonly ImportEdge[],
+  violations: () => Capped<StructureViolation>,
+): StructureOutcome => {
+  if (!judged) {
+    return { status: 'overlap', overlaps: capped(mapping.overlaps, PARSER_LIMITS.overlaps) };
+  }
+  const fromBlocks = unanalyzed.filter((edge) => mapping.blockOf.has(edge.from));
+  if (fromBlocks.length > 0) {
+    return {
+      status: 'incomplete',
+      violations: violations(),
+      unanalyzed: capped(fromBlocks, PARSER_LIMITS.unanalyzed),
+    };
+  }
+  return { status: 'checked', violations: violations() };
+};
+
 export const analyzeProject = async (options: AnalyzeOptions): Promise<ProjectAnalysis> => {
   let declaration: BlockDeclaration | null = null;
   if (options.declaration !== null) {
@@ -88,19 +117,9 @@ export const analyzeProject = async (options: AnalyzeOptions): Promise<ProjectAn
   const full = collectGraph(output, files);
   const graph = cappedGraph(full, files);
   if (mapping === null) return { graph, structure: null };
-  const fromBlocks = full.unanalyzed.filter((edge) => mapping.blockOf.has(edge.from));
-  let outcome: StructureOutcome;
-  if (ruleSet === null) {
-    outcome = { status: 'overlap', overlaps: capped(mapping.overlaps, PARSER_LIMITS.overlaps) };
-  } else if (fromBlocks.length > 0) {
-    outcome = {
-      status: 'incomplete',
-      violations: violationsFromCruise(output, mapping),
-      unanalyzed: capped(fromBlocks, PARSER_LIMITS.unanalyzed),
-    };
-  } else {
-    outcome = { status: 'checked', violations: violationsFromCruise(output, mapping) };
-  }
+  const outcome = structureOutcome(mapping, ruleSet !== null, full.unanalyzed, () =>
+    violationsFromCruise(output, mapping),
+  );
   return {
     graph,
     structure: {

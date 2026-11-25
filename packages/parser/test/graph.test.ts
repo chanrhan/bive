@@ -391,6 +391,35 @@ describe('상한 (ADR-125 ⑤)', () => {
     expect(graph.edges.total).toBe(PARSER_LIMITS.edges + 1);
   });
 
+  it('분석하지 않은 대상 · 패키지 목록도 상한을 넘으면 앞쪽만 담고 전체 개수를 남긴다', () => {
+    const relays = Array.from(
+      { length: PARSER_LIMITS.unanalyzed + 1 },
+      (_, i) => `src/r${String(i).padStart(5, '0')}.es6`,
+    );
+    const names = Array.from(
+      { length: PARSER_LIMITS.packages + 1 },
+      (_, i) => `pkg-${String(i).padStart(5, '0')}`,
+    );
+    const output = cruiseOutput([
+      {
+        source: 'src/a.ts',
+        dependencies: [
+          ...relays.map((relay) => dep(relay, relay)),
+          ...names.map((name) =>
+            dep(name, `node_modules/${name}/index.js`, { dependencyTypes: ['npm'] }),
+          ),
+        ],
+      },
+    ]);
+    const graph = graphFromCruise(output, ['src/a.ts']);
+    expect(graph.unanalyzed.items).toHaveLength(PARSER_LIMITS.unanalyzed);
+    expect(graph.unanalyzed.total).toBe(PARSER_LIMITS.unanalyzed + 1);
+    expect(graph.unanalyzed.items[0]).toEqual({ from: 'src/a.ts', to: relays[0] });
+    expect(graph.packages.items).toHaveLength(PARSER_LIMITS.packages);
+    expect(graph.packages.total).toBe(PARSER_LIMITS.packages + 1);
+    expect(graph.packages.items[0]).toEqual({ name: names[0], inManifest: true });
+  });
+
   it('프로젝트 폴더가 없으면 오류다', async () => {
     await expect(graphOf(path.join(tempDir(), 'none'))).rejects.toMatchObject({
       code: 'project_not_found',
