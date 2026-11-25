@@ -4,6 +4,7 @@
 // 규범 변경 알림(M7-14) · 재접속(M1-36)도 같은 합치기를 쓴다: 이름 대조 · 재접속 전이 판단은 여기, 화면 쪽은
 // e2e/todo-badge.spec.ts · e2e/reconnect.spec.ts.
 import {
+  BLOCK_EVENT_NAMES as SHARED_BLOCK_EVENT_NAMES,
   NORM_CHANGE_EVENT_NAMES as SHARED_NORM_CHANGE_EVENT_NAMES,
   RULE_WRITER_EVENT_NAMES as SHARED_RULE_WRITER_EVENT_NAMES,
   RUN_EVENT_NAMES as SHARED_RUN_EVENT_NAMES,
@@ -12,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createReconnectDetector } from '../src/renderer/src/connection/reconnect.js';
 import {
+  BLOCK_EVENT_NAMES,
   createRefreshCoalescer,
   isProjectEvent,
   NORM_CHANGE_EVENT_NAMES,
@@ -171,6 +173,7 @@ describe('실행 알림 이름 · 프로젝트 거르기', () => {
       ...SHARED_NORM_CHANGE_EVENT_NAMES,
     ]);
     expect(RULE_WRITER_EVENT_NAMES).toEqual(SHARED_RULE_WRITER_EVENT_NAMES);
+    expect(BLOCK_EVENT_NAMES).toEqual(SHARED_BLOCK_EVENT_NAMES);
   });
 
   it('이 프로젝트의 알림만 받는다', () => {

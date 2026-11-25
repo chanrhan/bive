@@ -3,6 +3,8 @@
 // 2) 자식 규칙을 누르면 그 자리에서 진술, 속성, 테스트 출력이 펼쳐짐 (규칙 상세 RuleDetail 재사용)
 // 3) 직접 편집 저장이 requirement.update를 1회 부르고, 삭제는 첫 클릭에서 호출 0회 · 두 번째 클릭에서 requirement.delete 1회
 // 4) 이슈 #64(M3-19) 수용 기준 2: 구현 위치 = 효력 있는 자식 규칙의 대상 블록만, 중복 없이 선언 순서 (ADR-126)
+// 5) 이슈 #283(M3-42): 규범 변경 알림 하나에 rule.list 한 번(화면 목록과 자식 규칙이 한 응답을 함께 씀), 블록 선언 알림 · 재접속
+//    뒤 구현 위치 · 펼친 자식 규칙이 새 선언으로 "선언 외"를 판단 (ADR-135)
 // 요구사항 화면(SCR-02)에서 카드를 눌러 들어온다. 데이터는 가짜 브리지의 requirement.list · rule.list · judgment.list 응답뿐이다.
 import { expect, type Page, test } from '@playwright/test';
 
@@ -828,5 +830,246 @@ test.describe('구현 위치 (#64 수용 기준 2, SCR-02 상세, ADR-126)', () 
     const old = RULES.map((item) => ({ ...item, rule: { ...item.rule, targetBlockIds: [] } }));
     await openRequirement(page, { 'rule.list': { result: { rules: [...old, RETIRED_CHILD] } } });
     await expect(page.getByTestId('requirement-blocks-none')).toHaveText('없음');
+  });
+});
+
+test.describe('다시 읽기 다듬기 (#283 M3-42, SCR-02 상세 · NRM-09, ADR-135)', () => {
+  const appended = (lastSeq: number) => ({ projectId: PROJECT.id, lastSeq });
+  const OTHER_PROJECT_ID = '01JA00000000000000000000FF';
+  const names = (page: Page) => page.getByTestId('child-rule').getByTestId('child-rule-toggle');
+  const implementation = (page: Page) =>
+    page.getByTestId('requirement-implementation').getByTestId('block-item');
+  /** 알림 뒤 새로 생긴 자식 규칙(대상 블록 health) · 폐기된 자식 규칙 (테스트 전용 데이터) */
+  const ADDED_CHILD: RuleWithJudgment = {
+    rule: {
+      ...PASSING_RULE,
+      id: '01JC0000000000000000000012',
+      displayId: 'RULE-012',
+      title: '알림 뒤 생긴 자식 규칙',
+      targetBlockIds: ['health'],
+    },
+    judgment: { status: 'unjudged', latest: null },
+  };
+  const RETIRED_CHILD: RuleWithJudgment = {
+    rule: {
+      ...FAILING_RULE,
+      id: '01JC0000000000000000000013',
+      displayId: 'RULE-013',
+      title: '폐기된 자식 규칙',
+      targetBlockIds: ['retired-only'],
+    },
+    judgment: { status: 'unjudged', latest: null },
+    retirement: { retiredAt: '2026-10-16T00:00:00.000Z', supersededBy: null, normChangeSeq: 2 },
+  };
+  const AFTER = [...RULES, ADDED_CHILD, RETIRED_CHILD, OTHER_RULE];
+
+  /** 요구사항 화면만 연다(상세 닫힘). */
+  const openScreen = async (page: Page, responses: MockResponses = {}): Promise<BiveMock> => {
+    const bive = await mockBive(page, {
+      responses: {
+        'system.status': { result: STATUS },
+        'project.current': { result: { project: PROJECT } },
+        'requirement.list': { result: { requirements: REQUIREMENTS } },
+        'rule.list': { result: { rules: [...RULES, OTHER_RULE] } },
+        'judgment.list': { result: { judgments: FAILING_HISTORY } },
+        'blocks.get': { result: BLOCKS },
+        ...responses,
+      },
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: '요구사항', exact: true }).click();
+    await expect(page.getByTestId('card').filter({ hasText: PARENT.displayId })).toBeVisible();
+    return bive;
+  };
+  const selectParent = async (page: Page): Promise<void> => {
+    await page.getByTestId('card').filter({ hasText: PARENT.displayId }).click();
+    await expect(names(page)).toHaveCount(RULES.length);
+  };
+  const settledCount = async (page: Page, bive: BiveMock, method: string): Promise<number> => {
+    await allSettled(bive, method);
+    await nextFrame(page);
+    return (await callsOf(bive, method)).length;
+  };
+
+  test('규범 변경 알림 하나에 rule.list는 정확히 한 번(폐기 포함 한 조회)이고, 그 응답으로 목록 칩 · 자식 규칙 · 구현 위치가 바뀐다. 상세가 닫혀 있어도 한 번이다', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    // 상세가 닫힌 화면: 알림 하나에 한 번
+    const closed = await settledCount(page, bive, 'rule.list');
+    await bive.emit('event.normChange.appended', appended(2));
+    await expect.poll(async () => (await callsOf(bive, 'rule.list')).length).toBe(closed + 1);
+    expect(await settledCount(page, bive, 'rule.list')).toBe(closed + 1);
+
+    // 상세가 열린 화면: 그래도 한 번이고, 그 응답 하나를 두 자리가 함께 쓴다
+    await selectParent(page);
+    await expect(implementation(page)).toHaveText(['auth', 'lib', 'legacy-mail선언 외']);
+    const opened = await settledCount(page, bive, 'rule.list');
+    await bive.setResponse('rule.list', { result: { rules: AFTER } });
+    await bive.emit('event.normChange.appended', appended(3));
+    // 자식 규칙: 새 규칙이 받은 순서(표시 ID 순)로 더해지고, 폐기된 자식 규칙 · 다른 요구사항의 규칙은 없다
+    await expect(names(page)).toHaveCount(RULES.length + 1);
+    await expect(page.getByTestId('child-rule').last()).toHaveAttribute(
+      'data-rule-id',
+      ADDED_CHILD.rule.id,
+    );
+    await expect(page.getByTestId('requirement-rules')).toContainText(ADDED_CHILD.rule.title);
+    await expect(page.getByTestId('requirement-rules')).not.toContainText(RETIRED_CHILD.rule.title);
+    // 구현 위치: 새 규칙의 health가 선언 순서 맨 앞, 폐기 규칙의 블록은 없다
+    await expect(implementation(page)).toHaveText(['health', 'auth', 'lib', 'legacy-mail선언 외']);
+    // 목록의 블록 칩도 같은 응답에서 health를 센다
+    await page.getByTestId('filter-chip-block').getByTestId('filter-chip-button').click();
+    await expect(page.getByTestId('filter-option').filter({ hasText: 'health' })).toHaveCount(1);
+    await page.keyboard.press('Escape');
+    expect(await settledCount(page, bive, 'rule.list')).toBe(opened + 1);
+    expect((await callsOf(bive, 'rule.list')).at(-1)?.params).toEqual({
+      projectId: PROJECT.id,
+      includeRetired: true,
+    });
+  });
+
+  test('다시 붙으면(끊김 → 연결됨) 화면의 rule.list 한 번으로 열린 상세의 자식 규칙도 바뀐다', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    await selectParent(page);
+    const before = await settledCount(page, bive, 'rule.list');
+    await bive.setResponse('rule.list', { result: { rules: AFTER } });
+    const connection = page.getByTestId('connection-status');
+    await bive.emit('system.connection', { state: 'disconnected' });
+    await expect(connection).toHaveAttribute('data-state', 'disconnected');
+    await bive.emit('system.connection', { state: 'connected', status: STATUS });
+    await expect(connection).toHaveAttribute('data-state', 'connected');
+    await expect(names(page)).toHaveCount(RULES.length + 1);
+    await expect(page.getByTestId('requirement-rules')).toContainText(ADDED_CHILD.rule.title);
+    expect(await settledCount(page, bive, 'rule.list')).toBe(before + 1);
+  });
+
+  test('상세를 열 때의 늦은 자식 규칙 응답은 알림 뒤 먼저 온 새 목록을 덮지 않는다', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    // 상세를 열 때 읽기(옛 목록)는 늦게 온다
+    await bive.setResponse('rule.list', {
+      result: { rules: [...RULES, OTHER_RULE] },
+      delayMs: 1500,
+    });
+    await page.getByTestId('card').filter({ hasText: PARENT.displayId }).click();
+    await expect(page.getByTestId('requirement-detail')).toHaveAttribute(
+      'data-selected-id',
+      PARENT.id,
+    );
+    // 그동안 알림 → 새 목록이 바로 온다. 기다리던 상세 요청을 버리고 한 번 더 읽는 요청도 이 응답을 받는다(가짜 브리지는 인자로
+    // 폐기를 거르지 않으므로 이 시험의 새 목록에는 폐기된 규칙을 넣지 않는다)
+    await bive.setResponse('rule.list', { result: { rules: [...RULES, ADDED_CHILD, OTHER_RULE] } });
+    await bive.emit('event.normChange.appended', appended(2));
+    await expect(names(page)).toHaveCount(RULES.length + 1);
+    // 옛 응답이 도착해 그린 뒤에도 새 목록 그대로다
+    await allSettled(bive, 'rule.list');
+    await nextFrame(page);
+    await expect(names(page)).toHaveCount(RULES.length + 1);
+    await expect(page.getByTestId('requirement-rules')).toContainText(ADDED_CHILD.rule.title);
+  });
+
+  test.describe('블록 선언이 바뀐 뒤 다시 읽기', () => {
+    /** 선언 이름만 바꾼 `blocks.get` 응답 (테스트 전용 데이터) */
+    const declared = (version: number, blockNames: readonly string[]): typeof BLOCKS => ({
+      current: {
+        ...(BLOCKS.current as NonNullable<typeof BLOCKS.current>),
+        version,
+        declaration: {
+          blocks: blockNames.map((name) => ({
+            name,
+            kind: 'domain' as const,
+            include: [`src/${name}/**`],
+            public: [],
+            dependsOn: [],
+            risk: 'low' as const,
+          })),
+        },
+      },
+    });
+    const changed = (version: number, projectId: string = PROJECT.id) => ({ projectId, version });
+    /** 펼친 자식 규칙(RULE-002) 상세의 대상 블록 */
+    const childBlocks = (page: Page) =>
+      page
+        .getByTestId('child-rule-detail')
+        .getByTestId('rule-field-blocks')
+        .getByTestId('block-item');
+
+    test('알림 뒤 화면을 다시 열지 않고 구현 위치와 펼친 자식 규칙이 새 선언으로 "선언 외"를 판단한다. 알림 하나에 blocks.get 한 번(펼친 규칙은 다시 읽지 않음)', async ({
+      page,
+    }) => {
+      const bive = await openScreen(page);
+      await selectParent(page);
+      await childRule(page, FAILING_RULE.displayId).getByTestId('child-rule-toggle').click();
+      await expect(implementation(page)).toHaveText(['auth', 'lib', 'legacy-mail선언 외']);
+      await expect(childBlocks(page)).toHaveText(['lib', 'auth', 'legacy-mail선언 외']);
+      const before = await settledCount(page, bive, 'blocks.get');
+
+      // legacy-mail이 선언에 생김: 선언 순서(맨 뒤)로 들어가고 "선언 외"가 사라진다
+      await bive.setResponse('blocks.get', {
+        result: declared(2, ['health', 'auth', 'lib', 'legacy-mail']),
+      });
+      await bive.emit('event.blocks.changed', changed(2));
+      await expect(implementation(page)).toHaveText(['auth', 'lib', 'legacy-mail']);
+      await expect(childBlocks(page)).toHaveText(['lib', 'auth', 'legacy-mail']);
+
+      // auth가 선언에서 빠짐: 선언에 없는 이름은 뒤에 이름 순, "선언 외"
+      await bive.setResponse('blocks.get', {
+        result: declared(3, ['health', 'lib', 'legacy-mail']),
+      });
+      await bive.emit('event.blocks.changed', changed(3));
+      await expect(implementation(page)).toHaveText(['lib', 'legacy-mail', 'auth선언 외']);
+      await expect(childBlocks(page)).toHaveText(['lib', 'auth선언 외', 'legacy-mail']);
+      await expect(page.getByTestId('requirement-detail')).toHaveAttribute(
+        'data-selected-id',
+        PARENT.id,
+      );
+      expect(await settledCount(page, bive, 'blocks.get')).toBe(before + 2);
+    });
+
+    test('다른 프로젝트의 블록 선언 알림으로는 다시 읽지 않는다', async ({ page }) => {
+      const bive = await openScreen(page);
+      await selectParent(page);
+      await expect(implementation(page)).toHaveText(['auth', 'lib', 'legacy-mail선언 외']);
+      const before = await settledCount(page, bive, 'blocks.get');
+      await bive.setResponse('blocks.get', {
+        result: declared(2, ['health', 'auth', 'lib', 'legacy-mail']),
+      });
+      await bive.emit('event.blocks.changed', changed(2, OTHER_PROJECT_ID));
+      // 다른 프로젝트 알림 뒤 이 프로젝트 알림의 결과가 그려지면 센다: 앞 알림이 읽었다면 하나 더 많다
+      await bive.emit('event.blocks.changed', changed(2));
+      await expect(implementation(page)).toHaveText(['auth', 'lib', 'legacy-mail']);
+      expect(await settledCount(page, bive, 'blocks.get')).toBe(before + 1);
+    });
+
+    test('늦게 온 옛 선언 응답은 알림 뒤 먼저 온 새 선언을 덮지 않는다', async ({ page }) => {
+      const bive = await openScreen(page, { 'blocks.get': { result: BLOCKS, delayMs: 1500 } });
+      await page.getByTestId('card').filter({ hasText: PARENT.displayId }).click();
+      await bive.setResponse('blocks.get', {
+        result: declared(2, ['health', 'auth', 'lib', 'legacy-mail']),
+      });
+      await bive.emit('event.blocks.changed', changed(2));
+      await expect(implementation(page)).toHaveText(['auth', 'lib', 'legacy-mail']);
+      await allSettled(bive, 'blocks.get');
+      await nextFrame(page);
+      await expect(implementation(page)).toHaveText(['auth', 'lib', 'legacy-mail']);
+    });
+
+    test('다시 붙으면(끊김 → 연결됨) 선언을 다시 읽는다', async ({ page }) => {
+      const bive = await openScreen(page);
+      await selectParent(page);
+      await expect(implementation(page)).toHaveText(['auth', 'lib', 'legacy-mail선언 외']);
+      await bive.setResponse('blocks.get', {
+        result: declared(2, ['health', 'auth', 'lib', 'legacy-mail']),
+      });
+      const connection = page.getByTestId('connection-status');
+      await bive.emit('system.connection', { state: 'disconnected' });
+      await expect(connection).toHaveAttribute('data-state', 'disconnected');
+      await bive.emit('system.connection', { state: 'connected', status: STATUS });
+      await expect(connection).toHaveAttribute('data-state', 'connected');
+      await expect(implementation(page)).toHaveText(['auth', 'lib', 'legacy-mail']);
+    });
   });
 });

@@ -8,7 +8,8 @@
 // - 변이 상태는 해당 이슈 전 미노출 (ADR-035)
 // - 대상 블록 · 위험도 (NRM-09, M3-19 #64 · ADR-126): 부모 요구사항 다음 줄. 대상 블록은 저장된 순서 그대로의 이름 목록이고
 //   지금 블록 선언(blocks.get)에 없는 이름은 "선언 외", 선언이 없는 프로젝트면 "블록 선언 없음" 한 번(BlockList). 빈 목록 ·
-//   위험도 null(옛 규칙 · 내장 규칙)은 "없음". 놓는 화면이 선언(`blocks`)을 주면 다시 읽지 않는다
+//   위험도 null(옛 규칙 · 내장 규칙)은 "없음". 놓는 화면이 선언(`blocks`)을 주면 다시 읽지 않는다. 선언은 블록 선언 알림 ·
+//   재접속 때 다시 읽는다(M3-42 #283 · ADR-135)
 // - 머리 오른쪽 동작(`actions`)은 놓는 화면이 정한다: 규칙 화면은 [실행] (M1-19, ADR-076)
 // - 직접 편집 (ADR-100 B②, M7-03 · ADR-109): 놓는 화면이 `onEdited`를 주면 머리에 [편집](효력 있고 내장 구조 규칙이 아닌
 //   규칙만). [편집] → 제목 · 진술 입력 → [저장](⌘↵ · Ctrl+Enter) 1회 = rule.update(바뀐 칸만), [취소](Esc)는 호출 없음.
@@ -80,15 +81,15 @@ import {
 } from './ruleEditView.js';
 import { type RunHistoryRow, runHistoryRows } from './runHistoryView.js';
 import {
-  type ProjectRunsLoad,
   type RuleHistoryLoad,
   type RuleLatestRunLoad,
   type RuleNormChangesLoad,
-  useProjectRuns,
+  type RuleRunsLoad,
   useRuleHistory,
   useRuleLatestRun,
   useRuleNormChanges,
   useRuleParent,
+  useRuleRuns,
 } from './useRuleDetailData.js';
 import { useBlockDeclaration } from './useBlockDeclaration.js';
 
@@ -236,7 +237,7 @@ export const RuleDetail = ({
   );
   const latest = judgment.latest;
   const history = useRuleHistory(projectId, rule.id, latest?.id ?? null);
-  const runs = useProjectRuns(projectId);
+  const runs = useRuleRuns(projectId, rule.id);
   const latestRun = useRuleLatestRun(projectId, rule.id);
   const knownMatches = knownParent !== undefined && knownParent.id === rule.parentRequirementId;
   const fetchedParent = useRuleParent(projectId, knownMatches ? null : rule.parentRequirementId);
@@ -758,7 +759,7 @@ const History = ({
 }: {
   ruleId: string;
   load: RuleHistoryLoad;
-  runs: ProjectRunsLoad;
+  runs: RuleRunsLoad;
 }): React.JSX.Element => {
   if (load.state === 'loading' || runs.state === 'loading') {
     return (

@@ -287,12 +287,15 @@
   list-style: none;
 }
 
-/* 칸: 시각 · 판정 · 실행 · 커밋 · 실행 상태와 종료 사유(남는 폭, ADR-123) */
+/* 칸: 시각 · 판정 · 실행 · 커밋(고정 폭, 이 순서의 자식) · 실행 상태와 종료 사유(남는 폭, ADR-123).
+   실행 상태와 종료 사유는 줄을 바꾸지 않는 한 칸이다: 남는 폭에 들어가지 않으면 칸째 다음 줄 왼쪽 끝으로 넘어가 그 줄을 다
+   쓴다(글자 폭에 기대는 접힘 기준을 따로 두지 않는다, M3-42 #283 · ADR-135) */
 .rule-history-row {
-  display: grid;
-  grid-template-columns: 140px 72px 72px 64px minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-3);
+  column-gap: var(--space-3);
+  row-gap: 0;
   font-size: var(--font-size-2);
 }
 
@@ -301,19 +304,34 @@
   overflow-wrap: anywhere;
 }
 
+.rule-history-row > :nth-child(1) {
+  flex: 0 0 140px;
+}
+
+.rule-history-row > :nth-child(2),
+.rule-history-row > :nth-child(3) {
+  flex: 0 0 72px;
+}
+
+.rule-history-row > :nth-child(4) {
+  flex: 0 0 64px;
+}
+
 .rule-history-row > .status-badge,
 .rule-history-judgment {
   justify-self: start;
 }
 
 .rule-history-status {
+  flex: 1 0 auto;
   color: var(--color-text-muted);
-  word-break: keep-all;
+  white-space: nowrap;
 }
 
 /* 좁은 상세(칸이 한 줄에 들어가지 않는 폭)에서는 2칸: 시각 · 판정 / 실행 · 커밋 / 실행 상태. 값은 줄이지 않는다 (#165) */
 @container rule-detail (max-width: 400px) {
   .rule-history-row {
+    display: grid;
     grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
     row-gap: 0;
     padding-bottom: var(--space-1);
@@ -322,6 +340,8 @@
   /* 실행 상태와 종료 사유는 줄 전체 폭을 쓴다. 그래도 긴 사유는 낱말 단위로 다음 줄에 접힌다 (ADR-123) */
   .rule-history-status {
     grid-column: 1 / -1;
+    white-space: normal;
+    word-break: keep-all;
   }
 }
 

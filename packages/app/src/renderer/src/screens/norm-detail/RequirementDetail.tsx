@@ -10,7 +10,10 @@
 // - 변경 이력(P1) · 자식 계약(P1)은 해당 이슈 전 미노출 (ADR-035)
 // - 구현 위치 (SCR-02 상세 "자식 규칙의 대상 블록만", M3-19 #64 · ADR-126): 자식 규칙(rule.list 1회, 위와 같은 결과) 가운데 효력
 //   있는 것의 대상 블록을 중복 없이, 지금 블록 선언(blocks.get) 순서로(선언에 없는 이름은 뒤에 이름 순, "선언 외"). 없으면 "없음".
-//   자식 규칙 · 선언을 읽는 동안은 비움, 자식 규칙을 못 읽으면 "구현 위치 불러오기 실패". 읽은 선언은 펼친 자식 규칙에 넘긴다
+//   자식 규칙 · 선언을 읽는 동안은 비움, 자식 규칙을 못 읽으면 "구현 위치 불러오기 실패". 읽은 선언은 펼친 자식 규칙에 넘긴다.
+//   선언은 블록 선언 알림 · 재접속 때 다시 읽는다(M3-42 #283 · ADR-135)
+// - 자식 규칙은 열 때 · 편집 뒤 rule.list로 읽고, 규범 변경 알림 · 재접속 뒤에는 화면의 규칙 목록(`rules`)이 다시 읽은 결과에서
+//   고른다(알림 하나에 rule.list 한 번, useChildRules.ts · ADR-135)
 // - 자식 규칙 위에 가장 최근 규칙 작성 시도의 상태(대기 · 진행 중 · 생략 · 실패)를 한 줄 보인다. 정상 종료면 없음.
 //   값은 ruleWriter.status에서만, 알림 event.ruleWriter.changed · 재접속 · 직접 편집 저장 때 다시 읽는다 (M3-26, ADR-099)
 // - 값은 requirement.list 항목 · rule.list · ruleWriter.status · blocks.get 결과에서만 (NFR-03)
@@ -29,6 +32,7 @@ import {
   blockListView,
   implementationBlocks,
 } from '../rules/blockView.js';
+import type { RulesLoad } from '../rules/useRules.js';
 import { BlockList } from './BlockList.js';
 import { canSaveEdit, REQUIREMENT_DETAIL_TEXT as TEXT } from './requirementDetailView.js';
 import { RuleDetail } from './RuleDetail.js';
@@ -41,6 +45,8 @@ import { useRuleWriterStatus } from './useRuleWriterStatus.js';
 export interface RequirementDetailProps {
   projectId: string;
   requirement: Requirement;
+  /** 요구사항 화면의 규칙 목록(폐기 포함). 알림 · 재접속 뒤 다시 읽힌 값에서 자식 규칙을 고른다 */
+  rules: RulesLoad;
   /** 직접 편집 저장 (requirement.update). 거부되면 실패 표시 */
   onUpdate: (text: string) => Promise<void>;
   /** 삭제 (requirement.delete). 거부되면 실패 표시 */
@@ -55,10 +61,11 @@ const isMac = (): boolean => /Mac|iPhone|iPad/.test(navigator.userAgent);
 export const RequirementDetail = ({
   projectId,
   requirement,
+  rules,
   onUpdate,
   onDelete,
 }: RequirementDetailProps): React.JSX.Element => {
-  const children = useChildRules(projectId, requirement.id, requirement.updatedAt);
+  const children = useChildRules(projectId, requirement.id, requirement.updatedAt, rules);
   const writer = useRuleWriterStatus(projectId, requirement.id, requirement.updatedAt);
   const declaration = useBlockDeclaration(projectId);
   const [editing, setEditing] = useState(false);

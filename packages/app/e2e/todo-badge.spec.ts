@@ -4,7 +4,8 @@
 //    다른 프로젝트 알림 · 실행 알림으로는 배지를 다시 세지 않는다
 // 2) 연달아 온 알림은 합친다(동시 조회 1개 · 뒤따르는 조회 최대 1개)고 마지막 상태가 남는다
 // 3) 할 일 화면이 열려 있으면 같은 알림으로 목록 카드가 바뀐다(배지와 같은 조회 하나)
-// 4) 규칙 화면(rule.list) · 요구사항 상세의 자식 규칙(rule.list) · 검증 화면(verification.summary)도 같은 알림으로 다시 읽는다
+// 4) 규칙 화면(rule.list) · 요구사항 상세의 자식 규칙(화면의 rule.list 한 번을 함께 씀) · 검증 화면(verification.summary)도 같은
+//    알림으로 다시 읽는다
 // 오케스트레이터가 규범 변경 기록이 늘 때 알림을 보내는 것은 orchestrator/test/events.test.ts가 단언한다.
 // 옛 제안 알림(event.proposal.changed) → proposal.count 시험은 배지가 확인할 것으로 바뀌어(ADR-119) 이 시험으로 바뀌었다.
 import type { NormChangeAppendedEvent } from '@bive/shared';
@@ -21,7 +22,13 @@ import {
   listOf,
   PROJECT,
 } from './checklists/scr-17.js';
-import { type BiveMock, mockBive, type MockResponses } from './support/bive-mock.js';
+import {
+  allSettled,
+  type BiveMock,
+  mockBive,
+  type MockResponses,
+  nextFrame,
+} from './support/bive-mock.js';
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 const OTHER_PROJECT_ID = '01JCCCCCCCCCCCCCCCCCCCCCCC';
@@ -177,8 +184,12 @@ test.describe('규범 변경 알림 → 화면 다시 읽기', () => {
     await page.waitForTimeout(300);
     const children = await countCalls(bive, 'rule.list');
     await bive.emit('event.normChange.appended', appended(5));
-    // 목록의 블록 칩(구현 위치, ADR-126)과 상세의 자식 규칙이 각각 한 번씩 다시 읽는다
-    await expect.poll(() => countCalls(bive, 'rule.list')).toBe(children + 2);
+    // 목록의 블록 칩(구현 위치, ADR-126)이 한 번 다시 읽고 상세의 자식 규칙은 그 결과를 함께 쓴다(알림 하나에 한 번, M3-42 #283 ·
+    // ADR-135. 이전에는 두 번)
+    await expect.poll(() => countCalls(bive, 'rule.list')).toBe(children + 1);
+    await allSettled(bive, 'rule.list');
+    await nextFrame(page);
+    expect(await countCalls(bive, 'rule.list')).toBe(children + 1);
 
     // 요구사항 화면을 떠나면 자식 규칙의 구독이 끊기고 배지의 구독만 남는다
     await page.getByTestId('todo-button').click();

@@ -1,7 +1,8 @@
 // 요구사항 화면 (screens.md SCR-02): 중앙 목록 + 상세 2단.
 // - 목록: requirement.list 결과만 그린다(NFR-03). 카드 · 필터 규칙은 requirementsView.ts. 블록 칩의 값(구현 위치)은 rule.list
 //   1회(규칙 화면과 같은 읽기, useRules. 다시 읽기는 규범 변경 알림 · 재접속 때만)에서 만든다. 규칙 목록을 읽는 동안은 목록 자리가 로딩이고(칩 값이 늦게 생겨
-//   다른 화면이 정한 필터가 지워지지 않게), 읽지 못하면 블록 칩만 0건 비활성이다 (ADR-126)
+//   다른 화면이 정한 필터가 지워지지 않게), 읽지 못하면 블록 칩만 0건 비활성이다 (ADR-126). 알림 · 재접속 뒤 다시 읽은 이 목록을
+//   열린 상세의 자식 규칙도 쓴다(알림 하나에 rule.list 한 번, M3-42 #283 · ADR-135)
 // - [+ 새 요구사항]: 목록 맨 위 입력 줄 → requirement.create 1회 → 목록 다시 불러오기
 //   (저장 뒤 규칙 제안은 오케스트레이터 쪽 이슈 #21이 붙인다. 화면은 호출만 한다)
 // - 상세(SCR-06 규범 상세, norm-detail/RequirementDetail): 본문 · 생성 주체 · 자식 규칙(그 자리에서 펼침) · 직접 편집 ·
@@ -164,6 +165,7 @@ const RequirementsPanes = ({ projectId }: { projectId: string }): React.JSX.Elem
             key={selected.id}
             projectId={projectId}
             requirement={selected}
+            rules={rulesLoad}
             onUpdate={(text) => update(selected.id, text)}
             onDelete={() => remove(selected.id)}
           />
