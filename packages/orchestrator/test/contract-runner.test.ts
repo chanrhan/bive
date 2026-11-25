@@ -21,7 +21,7 @@ import {
   prepareOpenApiContract,
   verifyOpenApiTraffic,
 } from '../src/contract-check/openapi.js';
-import { readOpenApiDocument } from '../src/contract-check/openapi-document.js';
+import { isPlainSchemaName, readOpenApiDocument } from '../src/contract-check/openapi-document.js';
 import {
   classifyExchange,
   EXCHANGE_HEADER,
@@ -1606,6 +1606,240 @@ setInterval(() => {}, 1000);`,
       expect(alive(pid), entry).toBe(false);
     }
     expect(await waitGone(toolDir)).toEqual([]);
+  }, 60_000);
+});
+
+// ── 검토 2회차: 동시 요청의 교환 번호 · 스키마 이름 모양 ─────────────────────────
+
+/** 헬스 체크 계약에 맞는 본문 · 어긋난 본문. */
+const OK_BODY = '{"ok":true}';
+const BAD_BODY = '{"ok":"yes"}';
+
+/**
+ * 요청을 `count`건 받을 때까지 응답을 쥐고 있다가, `order`의 도착 순번 차례로 하나씩 응답을 끝내는 판정 서버(시간 맞추기 없이 순서를
+ * 고정한다). `respond(도착 순번, 경로)`가 상태 · 본문을 정한다.
+ */
+const heldApi = async (
+  count: number,
+  order: readonly number[],
+  respond: (arrival: number, url: string) => { status: number; body: string },
+) => {
+  const held: { url: string; res: http.ServerResponse }[] = [];
+  const api = await listen((req, res) => {
+    req.resume();
+    held.push({ url: req.url ?? '', res });
+    if (held.length !== count) return;
+    void (async () => {
+      for (const arrival of order) {
+        const item = held[arrival]!;
+        const { status, body } = respond(arrival, item.url);
+        await new Promise<void>((resolve) => {
+          item.res.on('finish', () => resolve());
+          item.res.writeHead(status, { 'content-type': 'application/json' });
+          item.res.end(body);
+        });
+      }
+    })();
+  });
+  return api;
+};
+
+/** 기록 프록시 앞에서 `paths`를 한꺼번에 보내고 교환을 prism · 판정까지 돌린다. */
+const concurrentVerdict = async (
+  paths: readonly string[],
+  order: readonly number[],
+  respond: (arrival: number, url: string) => { status: number; body: string },
+  recorder = new ExchangeRecorder(),
+) => {
+  const api = await heldApi(paths.length, order, respond);
+  const proxy = await recorder.start({ upstreamBaseUrl: api.url });
+  await Promise.all(paths.map((p) => fetch(`${proxy.baseUrl}${p}`).then((res) => res.text())));
+  await proxy.stop();
+  const toolDir = tempDir();
+  fs.writeFileSync(path.join(toolDir, 'contract.yaml'), FIXTURE_OPENAPI);
+  const result = await validateWithPrism({
+    toolDir,
+    documentFile: 'contract.yaml',
+    signal: never,
+    exchanges: recorder.exchanges(),
+  });
+  return {
+    recorder,
+    result,
+    verdict: trafficVerdict(planItem(), result, 'same', {
+      overflow: recorder.overflow(),
+      warnings: 0,
+    }),
+  };
+};
+
+describe('동시 요청도 교환마다 다른 번호로 기록 · 재생한다 (검토 2회차 N-B1)', () => {
+  it('(가) 같은 작업에 동시 요청 두 건: 위반 응답이 먼저 끝나든 나중에 끝나든 fail이고 두 교환의 번호가 다르다', async () => {
+    for (const order of [
+      [0, 1],
+      [1, 0],
+    ]) {
+      // 먼저 도착한 요청이 위반 본문, 다음 요청이 맞는 본문 (끝나는 순서는 order)
+      const { recorder, result, verdict } = await concurrentVerdict(
+        ['/api/health', '/api/health'],
+        order,
+        (arrival) => ({ status: 200, body: arrival === 0 ? BAD_BODY : OK_BODY }),
+      );
+      expect(
+        recorder.exchanges().map((item) => item.index),
+        String(order),
+      ).toEqual([0, 1]);
+      expect(
+        recorder.exchanges().map((item) => item.responseBody.toString()),
+        String(order),
+      ).toEqual([BAD_BODY, OK_BODY]);
+      expect(
+        result.exchanges.map((item) => item.outcome),
+        String(order),
+      ).toEqual(['violation', 'ok']);
+      expect(verdict, String(order)).toMatchObject({
+        kind: 'judged',
+        status: 'fail',
+        reason: 'response_mismatch',
+      });
+    }
+  }, 60_000);
+
+  it('(나) 정상 구현에 서로 다른 작업 두 개를 동시에 요청해도 각자 제 응답으로 재생되어 pass다', async () => {
+    const { result, verdict } = await concurrentVerdict(
+      ['/api/health', '/api/auth/session'],
+      [1, 0],
+      (_arrival, url) =>
+        url === '/api/health'
+          ? { status: 200, body: OK_BODY }
+          : { status: 401, body: '{"authenticated":false}' },
+    );
+    expect(result.exchanges.map((item) => item.outcome)).toEqual(['ok', 'ok']);
+    expect(verdict).toMatchObject({ kind: 'judged', status: 'pass' });
+  }, 60_000);
+
+  it('(다) 같은 작업 여섯 건을 동시에 보내 한 건만 위반이어도(그 건이 먼저 끝남) fail이다', async () => {
+    const { recorder, result, verdict } = await concurrentVerdict(
+      Array.from({ length: 6 }, () => '/api/health'),
+      [3, 0, 1, 2, 4, 5],
+      (arrival) => ({ status: 200, body: arrival === 3 ? BAD_BODY : OK_BODY }),
+    );
+    expect(recorder.exchanges().map((item) => item.index)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(result.exchanges.filter((item) => item.outcome === 'violation')).toHaveLength(1);
+    expect(verdict).toMatchObject({ kind: 'judged', status: 'fail' });
+  }, 60_000);
+
+  it('(라) 동시 요청이 건수 상한을 넘으면 상한까지만 기록하고 나머지는 넘친 수로 세며, 판정은 fail이다', async () => {
+    const recorder = new ExchangeRecorder({ maxExchanges: 2 });
+    const { verdict } = await concurrentVerdict(
+      Array.from({ length: 5 }, () => '/api/health'),
+      [4, 3, 2, 1, 0],
+      () => ({ status: 200, body: OK_BODY }),
+      recorder,
+    );
+    expect(recorder.exchanges().map((item) => item.index)).toEqual([0, 1]);
+    expect(recorder.overflow()).toBe(3);
+    expect(verdict).toMatchObject({
+      kind: 'judged',
+      status: 'fail',
+      reason: 'response_unverified',
+    });
+  }, 60_000);
+
+  it('닫을 때 끝나지 않은 교환은 번호를 가진 기록 불완전으로 남는다', async () => {
+    const api = await listen(() => undefined);
+    const recorder = new ExchangeRecorder();
+    const proxy = await recorder.start({ upstreamBaseUrl: api.url });
+    const pending = fetch(`${proxy.baseUrl}/api/health`).catch(() => undefined);
+    // 판정 서버에 닿을 때까지 (요청이 들어온 순간 번호가 정해진다)
+    while (api.hits.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    await proxy.stop();
+    await pending;
+    expect(recorder.exchanges().map((item) => [item.index, item.complete])).toEqual([[0, false]]);
+  });
+});
+
+describe('주소 · 파일 모양의 스키마 이름은 판별자 대응 값으로 받지 않는다 (검토 2회차 N-B2, 대조군)', () => {
+  /** 스키마 이름이 `name`이고 판별자가 그 이름을 가리키는 문서. */
+  const NAMED = (
+    name: string,
+    discriminator: 'mapping' | 'defaultMapping',
+  ) => `openapi: ${discriminator === 'defaultMapping' ? '3.2.0' : '3.1.0'}
+info:
+  title: t
+  version: '1'
+paths:
+  /pets:
+    get:
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Pet:
+      type: object
+      properties:
+        kind:
+          type: string
+      discriminator:
+        propertyName: kind
+${discriminator === 'mapping' ? `        mapping:\n          dog: '${name}'` : `        defaultMapping: '${name}'`}
+    '${name}':
+      type: object
+`;
+
+  it('사전 검사: 컴포넌트 이름 글자만이고 .yaml · .yml · .json으로 끝나지 않는 스키마 이름만 받는다', () => {
+    for (const name of ['Dog', 'pet-v2', 'a.b', 'A_1']) {
+      expect(isPlainSchemaName(name), name).toBe(true);
+      expect(readOpenApiDocument(NAMED(name, 'mapping')), name).toMatchObject({ kind: 'ok' });
+    }
+    for (const name of [
+      'http://127.0.0.1:9/named.yaml',
+      'https://x/y',
+      'file:///etc/x',
+      'data:text/plain,x',
+      './dog',
+      'a/b',
+      'dog.yaml',
+      'dog.YML',
+      'Dog.Json',
+    ]) {
+      expect(isPlainSchemaName(name), name).toBe(false);
+      for (const key of ['mapping', 'defaultMapping'] as const) {
+        expect(readOpenApiDocument(NAMED(name, key)), `${key} ${name}`).toMatchObject({
+          kind: 'external',
+          references: [{ key }],
+        });
+      }
+    }
+  });
+
+  it('대조군: 주소 모양 스키마 이름을 mapping 값 · defaultMapping으로 쓰면 방어 없는 lint는 시험 서버에 요청한다. 실행기는 바깥 참조로 끝내고 요청 0건이다', async () => {
+    const remote = await listen((_req, res) => {
+      res.setHeader('content-type', 'application/yaml');
+      res.end('type: object\n');
+    });
+    const docs = [
+      NAMED(`${remote.url}/named.yaml`, 'mapping'),
+      NAMED(`${remote.url}/default.yaml`, 'defaultMapping'),
+    ];
+    for (const doc of docs) {
+      const toolDir = tempDir();
+      fs.writeFileSync(path.join(toolDir, 'contract.yaml'), doc);
+      fs.writeFileSync(path.join(toolDir, 'c.yaml'), REDOCLY_CONFIG);
+      await runDirect(REDOCLY_ENTRY, lintArgs('contract.yaml', path.join(toolDir, 'c.yaml')), {
+        cwd: toolDir,
+        env: toolEnv(toolDir),
+      });
+    }
+    expect([...new Set(remote.hits)].sort()).toEqual(['/default.yaml', '/named.yaml']);
+    remote.hits.length = 0;
+    for (const doc of docs) {
+      expect(
+        await prepareOpenApiContract(doc, { sourceFile: 'openapi.yaml', signal: never }),
+      ).toMatchObject({ kind: 'external' });
+    }
+    expect(remote.hits).toEqual([]);
   }, 60_000);
 });
 

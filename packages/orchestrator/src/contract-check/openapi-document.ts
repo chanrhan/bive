@@ -7,7 +7,9 @@
 //   않는다(닫힌 쪽).
 // - 바깥을 가리키는 값: 키 `$ref` · `$dynamicRef` · `$recursiveRef` · `operationRef`의 값이 `#`로 시작하는 글이 아님(원격 주소 · 다른
 //   파일 · 글이 아닌 값), `externalValue` 키가 있음, 키 `discriminator` 아래 `mapping`의 값 · `defaultMapping`이 문서 안 참조(`#`로
-//   시작)도 스키마 이름(`components.schemas` · `definitions`의 키)도 아님. 키 이름만 보고 자리는 가리지 않는다(넓게 막는다)
+//   시작)도 받는 스키마 이름도 아님. 받는 스키마 이름 = `components.schemas` · `definitions`의 키이면서 컴포넌트 이름 글자
+//   (`A-Za-z0-9._-`)만으로 되고 대소문자 가리지 않고 `.yaml` · `.yml` · `.json`으로 끝나지 않는 값({@link isPlainSchemaName}: redocly가
+//   참조로 읽는 값보다 좁다). 키 이름만 보고 자리는 가리지 않는다(넓게 막는다)
 // - 문서를 읽지 못함(YAML · JSON 문법, 별칭 · 태그 · 중복 키, 여러 문서, 최상위가 객체가 아님)은 문서 형식 오류다
 // 이 모듈은 문서를 해석해 판정하지 않는다: 형식 · 일치 판정은 도구가 한다(ADR-033).
 import { parseAllDocuments } from 'yaml';
@@ -42,6 +44,15 @@ const escapePointer = (key: string): string => key.replaceAll('~', '~0').replace
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+/**
+ * 판별자 대응 값으로 받는 스키마 이름의 모양 (허용 목록): 컴포넌트 이름 글자(`A-Za-z0-9._-`)만, 대소문자 가리지 않고 `.yaml` · `.yml` ·
+ * `.json`으로 끝나지 않음. redocly 2.77.0은 `#`로 시작 · `http://` · `https://` · `file://` · `data:`로 시작 · `./` · `../`로 시작 · `/`
+ * 포함 · `.ya?ml` · `.json`으로 끝남(대소문자 무시)을 참조로 읽어 푼다. 이 허용 목록은 `#` · `:` · `/`를 받지 않고 그 끝말을 받지 않아
+ * 그 가운데 어느 것에도 걸리지 않는다(스키마 이름과 같아도 이 모양이 아니면 바깥 참조로 막는다).
+ */
+export const isPlainSchemaName = (value: string): boolean =>
+  /^[A-Za-z0-9._-]+$/u.test(value) && !/\.(?:ya?ml|json)$/iu.test(value);
+
 /** 문서의 스키마 이름 (`components.schemas` · `definitions`의 키). */
 const schemaNames = (root: unknown): Set<string> => {
   const names = new Set<string>();
@@ -60,9 +71,10 @@ export const externalReferences = (
   const items: ExternalReference[] = [];
   let total = 0;
   const names = schemaNames(root);
-  /** 판별자 대응 값이 문서 안인지: 문서 안 참조 또는 스키마 이름 */
+  /** 판별자 대응 값이 문서 안인지: 문서 안 참조 또는 받는 스키마 이름 */
   const inside = (value: unknown): boolean =>
-    typeof value === 'string' && (value.startsWith('#') || names.has(value));
+    typeof value === 'string' &&
+    (value.startsWith('#') || (isPlainSchemaName(value) && names.has(value)));
   const push = (pointer: string, key: string): void => {
     total += 1;
     if (items.length < MAX_EXTERNAL_REFERENCES) items.push({ pointer, key });

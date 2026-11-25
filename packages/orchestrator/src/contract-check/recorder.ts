@@ -5,7 +5,11 @@
 // 404 · 405를 돌려주며, `--errors`면 계약과 다른 응답을 500으로 바꾼다. 바로 두면 계약 밖 경로를 쓰는 다른 규칙의 인수 테스트 결과가
 // 바뀐다. 기록 프록시는 요청 · 응답 바이트를 바꾸지 않는다(판정 서버가 보는 요청 · 테스트가 받는 응답이 그대로다).
 // - 127.0.0.1의 임의 빈 포트, 판정이 끝나면 닫는다(열린 연결도 끊는다)
-// - 기록 상한: 교환 수 · 본문 크기. 넘은 교환은 그대로 넘기되 "기록 불완전"으로 남는다(그 교환은 검증하지 못한 것이다)
+// - 교환 번호: 요청이 들어온 순간 하나씩 늘리는 카운터로 정한다(동시 요청끼리도 겹치지 않는다). 기록은 응답이 끝날 때 하므로 끝난 순서가
+//   번호 순서와 다를 수 있어 `exchanges()`는 번호 순으로 돌려준다. 번호는 배열 위치와 같다는 전제가 없다(넘친 교환은 번호만 쓰고 기록에
+//   없다). 재생(`prism.ts`)은 이 번호를 BIVE가 붙이는 머리로만 가린다
+// - 기록 상한: 교환 수(번호가 상한 밖이면 기록하지 않고 넘친 수로 센다) · 본문 크기. 넘은 교환은 그대로 넘기되 "기록 불완전" 또는
+//   넘침으로 남는다(그 교환은 검증하지 못한 것이다). 닫을 때 끝나지 않은 교환도 "기록 불완전"으로 남긴다
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -48,8 +52,12 @@ export class ExchangeRecorder {
   readonly #exchanges: RecordedExchange[] = [];
   readonly #maxExchanges: number;
   readonly #maxBodyBytes: number;
+  /** 다음 교환 번호 (요청이 들어온 순간 늘린다) */
+  #next = 0;
   #overflow = 0;
   #started = false;
+  /** 아직 기록하지 않은 교환의 마무리 (닫을 때 불완전으로 남긴다) */
+  readonly #pending = new Map<number, () => void>();
 
   /** 상한은 시험용 주입 (기본 {@link MAX_RECORDED_EXCHANGES} · {@link MAX_RECORDED_BODY_BYTES}). */
   constructor(limits: { readonly maxExchanges?: number; readonly maxBodyBytes?: number } = {}) {
@@ -57,9 +65,9 @@ export class ExchangeRecorder {
     this.#maxBodyBytes = limits.maxBodyBytes ?? MAX_RECORDED_BODY_BYTES;
   }
 
-  /** 기록된 교환 (도착 순). */
+  /** 기록된 교환 (교환 번호 순, 번호는 요청이 들어온 순서). */
   exchanges(): readonly RecordedExchange[] {
-    return this.#exchanges;
+    return [...this.#exchanges].sort((a, b) => a.index - b.index);
   }
 
   /** 교환 수 상한을 넘어 기록하지 못한 교환 수. */
@@ -76,8 +84,9 @@ export class ExchangeRecorder {
       throw new Error('판정 서버 주소가 127.0.0.1의 http가 아닙니다');
     }
     const server = http.createServer((req, res) => {
-      const index = this.#exchanges.length + this.#overflow;
-      const record = this.#exchanges.length < this.#maxExchanges;
+      const index = this.#next;
+      this.#next += 1;
+      const record = index < this.#maxExchanges;
       if (!record) this.#overflow += 1;
       const requestChunks: Buffer[] = [];
       const responseChunks: Buffer[] = [];
@@ -91,6 +100,7 @@ export class ExchangeRecorder {
       const save = (): void => {
         if (!record || saved) return;
         saved = true;
+        this.#pending.delete(index);
         this.#exchanges.push({
           index,
           method: req.method ?? 'GET',
@@ -103,6 +113,12 @@ export class ExchangeRecorder {
           complete,
         });
       };
+      if (record) {
+        this.#pending.set(index, () => {
+          complete = false;
+          save();
+        });
+      }
       const forward = http.request({
         host: upstream.hostname,
         port: upstream.port,
@@ -167,11 +183,14 @@ export class ExchangeRecorder {
     const { port } = server.address() as AddressInfo;
     return {
       baseUrl: `http://127.0.0.1:${String(port)}`,
-      stop: () =>
-        new Promise<void>((resolve) => {
+      stop: async () => {
+        await new Promise<void>((resolve) => {
           server.close(() => resolve());
           server.closeAllConnections();
-        }),
+        });
+        // 끝나지 않은 교환은 기록 불완전으로 남긴다 (번호가 빠지지 않게)
+        for (const finish of [...this.#pending.values()]) finish();
+      },
     };
   }
 }
