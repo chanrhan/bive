@@ -220,6 +220,52 @@ export const judgedCaseFilter = async (
   knownCaseMatcher(await readJudgedAcceptanceTexts(repoPath, sources, git));
 
 /**
+ * Red 확인을 돈 테스트 작성 커밋의 대상 규칙 폴더 (테스트 작성 세션의 앞 시도 사유를 거르는 기준, M3-40 #281 · ADR-128).
+ * 케이스 이름은 {@link knownCaseMatcher}로, 위치(파일 경로)는 그 커밋의 대상 규칙 폴더에 있는 일반 파일인지로 대조한다.
+ */
+export interface WrittenAcceptance {
+  /** 그 커밋의 대상 규칙 폴더 파일에 케이스 이름 리터럴로 적힌 이름인지 */
+  readonly isKnownCase: CaseNameFilter;
+  /** 그 커밋의 대상 규칙 폴더 일반 파일 (저장소 상대 경로 `bive-acceptance/<표시 ID>/…`) */
+  readonly files: ReadonlySet<string>;
+  /** 대상 규칙 표시 ID (규칙 폴더 자체 `bive-acceptance/<표시 ID>`를 위치로 받는 기준) */
+  readonly ruleDisplayIds: ReadonlySet<string>;
+}
+
+/** 아무 이름 · 위치도 모른다 (커밋을 읽지 못했거나 Red 확인 결과가 아닐 때: 덜 싣는 쪽). */
+export const NO_WRITTEN_ACCEPTANCE: WrittenAcceptance = {
+  isKnownCase: NO_KNOWN_CASES,
+  files: new Set(),
+  ruleDisplayIds: new Set(),
+};
+
+/**
+ * Red 확인 단계 결과에 남은 커밋(`exitDetail.commit`, Red 확인이 판정한 테스트 작성 커밋)의 대상 규칙 폴더 파일을 git 객체에서
+ * 읽어 대조 기준을 만든다({@link readJudgedAcceptanceTexts}와 같은 읽기: 작업 트리를 읽지 않고, 대체 객체를 따르지 않고, 커밋
+ * 형식 · 일반 파일만). 커밋이 문자열이 아니거나 읽지 못하면 아무 이름 · 위치도 모른다(닫힌 쪽).
+ */
+export const writtenAcceptanceOf = async (
+  repoPath: string,
+  commit: unknown,
+  ruleDisplayIds: readonly string[],
+  git?: GitRunner,
+): Promise<WrittenAcceptance> => {
+  if (typeof commit !== 'string') return NO_WRITTEN_ACCEPTANCE;
+  const texts = await readJudgedAcceptanceTexts(
+    repoPath,
+    ruleDisplayIds.map((ruleDisplayId) => ({ ruleDisplayId, commit })),
+    git,
+  );
+  const files = Object.keys(texts);
+  if (files.length === 0) return NO_WRITTEN_ACCEPTANCE;
+  return {
+    isKnownCase: knownCaseMatcher(texts),
+    files: new Set(files),
+    ruleDisplayIds: new Set(ruleDisplayIds),
+  };
+};
+
+/**
  * 세션 입력을 모으기 직전에 부른다: 저장소에서 규칙마다 최근 판정 커밋을 읽고, 그 커밋의 인수 테스트 파일과 대조하는 함수를 만든다.
  * 규범 자료(`collectNormInput`)와 인용 출처(`norms/agent-rule.ts`)가 같은 함수를 받는다.
  */

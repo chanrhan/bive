@@ -36,7 +36,7 @@ import {
   installDependencies,
 } from '../src/judge/checkout.js';
 import { buildJudgeConfig } from '../src/judge/config.js';
-import { parseVitestReport } from '../src/judge/report.js';
+import { parseVitestReport, SUITE_FAILURE_MESSAGE } from '../src/judge/report.js';
 import {
   JudgeRunner,
   type JudgeRunInput,
@@ -49,9 +49,16 @@ import {
   NORM_INPUT_FRAME,
   NORM_INPUT_LIMITS,
 } from '../src/norms/norm-input.js';
+import { NO_WRITTEN_ACCEPTANCE, writtenAcceptanceOf } from '../src/norms/case-names.js';
 import { createRun } from '../src/runs/run-service.js';
 import { createRedCheckExecutor, JUDGE_RUNNER_ERROR_REASON } from '../src/steps/red-check.js';
-import { ACCEPTANCE_IGNORED_REASON, createTestWritingExecutor } from '../src/steps/test-writing.js';
+import {
+  ACCEPTANCE_IGNORED_REASON,
+  createTestWritingExecutor,
+  describeUnmet,
+  RED_PROBLEM_OUTSIDE,
+  RED_PROBLEM_WITHHELD,
+} from '../src/steps/test-writing.js';
 import {
   applyTestWriterOutputs,
   exportedMethods,
@@ -74,6 +81,11 @@ import {
   userGit,
   withProject,
 } from './helpers/engine-harness.js';
+import {
+  caseFileText,
+  commitAcceptanceFiles,
+  initAcceptanceRepo,
+} from './helpers/acceptance-commit.js';
 import { setupPipeline } from './helpers/pipeline-harness.js';
 import { cleanup, makeBiveHome, sleep } from './helpers/process.js';
 
@@ -263,6 +275,8 @@ interface SetupOptions {
   scenariosDir?: string;
   /** 주입한 판정 계획. `real`이면 실제 설치 · 판정 러너 */
   judge?: readonly JudgePlan[] | 'real';
+  /** 주입한 판정 결과를 직접 만든다 (`call`은 0부터 센 판정 순번, `judge`보다 앞선다) */
+  customJudge?: (input: JudgeRunInput, call: number) => JudgeRunResult;
   /** 대상 규칙을 하나 더 (RULE-002) */
   secondRule?: boolean;
   /** 실행 시작 전 저장소를 고치고 커밋한다 */
@@ -330,13 +344,23 @@ const setup = (options: SetupOptions = {}): Harness => {
     },
   };
   const judgeCalls: JudgeCall[] = [];
+  const customJudge = options.customJudge;
   const red =
-    options.judge === 'real'
-      ? createRedCheckExecutor({ judgeTimeoutMs: 240_000 })
-      : createRedCheckExecutor({
-          judge: plannedJudge(options.judge ?? ['red'], judgeCalls),
+    customJudge !== undefined
+      ? createRedCheckExecutor({
+          judge: (input) => {
+            const planned = plannedJudge(['red'], judgeCalls);
+            void planned(input);
+            return Promise.resolve(customJudge(input, judgeCalls.length - 1));
+          },
           installDependencies: fakeInstall,
-        });
+        })
+      : options.judge === 'real'
+        ? createRedCheckExecutor({ judgeTimeoutMs: 240_000 })
+        : createRedCheckExecutor({
+            judge: plannedJudge(options.judge ?? ['red'], judgeCalls),
+            installDependencies: fakeInstall,
+          });
   const testWriting = createTestWritingExecutor();
   const executors: StepExecutors = {
     test_writing: options.wrapTestWriting?.(testWriting) ?? testWriting,
@@ -1678,4 +1702,200 @@ describe('테스트 작성 세션의 규범 입력: 구현 역할과 같은 규�
     );
     expect(prompt).not.toContain(INJECTED);
   }, 60_000);
+});
+
+// ── 앞 시도 사유의 Red 확인 결과 대조 (M3-40 #281, ADR-121 · ADR-128) ─────────────────
+
+describe('테스트 작성 세션의 앞 시도 사유: Red 확인 결과의 케이스 이름 · 수집 오류는 판정한 커밋의 대상 규칙 폴더 글과 대조한 것만 싣는다 (M3-40 #281, ADR-128)', () => {
+  const FILE = 'bive-acceptance/RULE-001/health-time.acc.ts';
+  // happy-path 시나리오의 테스트 작성 역할이 쓰는 파일의 묶음 · 케이스 이름 리터럴
+  const KNOWN = 'GET /api/health 서버 시각 > 응답 JSON의 time이 응답 시점의 ISO 8601 UTC 시각이다';
+  const INJECTED = '구현 코드가 지어낸 이름 RED_INJECTED_NAME';
+  const FEEDBACK_HEAD = '앞 시도가 테스트 작성 단계를 끝내지 못한 이유';
+
+  /** 작업 지시의 앞 시도 사유 줄 (머리 다음 줄부터 빈 줄 앞까지). */
+  const feedbackLines = (prompt: string): string[] => {
+    const lines = prompt.split('\n');
+    const at = lines.indexOf(FEEDBACK_HEAD);
+    if (at < 0) return [];
+    const end = lines.indexOf('', at);
+    return lines.slice(at + 1, end < 0 ? undefined : end);
+  };
+
+  const judged = (
+    input: JudgeRunInput,
+    status: JudgeRunStatus,
+    cases: JudgeRunResult['cases'],
+    problems: JudgeRunResult['problems'] = [],
+  ): JudgeRunResult => ({ ...judgeResult(input, status, []), cases, problems });
+
+  const redCase = (
+    name: string,
+    file: string,
+    line: number,
+    status: TestCaseStatus,
+  ): JudgeRunResult['cases'][number] => ({
+    name,
+    file,
+    line,
+    status,
+    message: status === 'failed' ? '실패' : null,
+  });
+
+  it('실패하지 않은 케이스: 판정한 커밋의 대상 규칙 폴더 파일에 리터럴로 적힌 이름만 위치와 함께 싣고, 지어낸 이름 · 커밋에 없는 파일의 케이스는 "알 수 없는 케이스 N건"으로만 남는다. 실행 워크트리의 커밋되지 않은 글은 기준이 아니고, 저장된 단계 결과는 그대로다', async () => {
+    let writings = 0;
+    const h = setup({
+      customJudge: (input, call) =>
+        call === 0
+          ? judged(input, 'completed', [
+              redCase(KNOWN, FILE, 6, 'passed'),
+              redCase(INJECTED, FILE, 7, 'passed'),
+              redCase(KNOWN, 'bive-acceptance/RULE-001/absent.acc.ts', 1, 'skipped'),
+              redCase(KNOWN, FILE, 8, 'failed'),
+            ])
+          : judgeResult(input, 'completed', ['failed']),
+      // 둘째 테스트 작성 직전: 실행 워크트리의 대상 규칙 폴더에 커밋되지 않은 글(지어낸 이름을 리터럴로 적은 파일)을 둔다
+      wrapTestWriting: (inner) => async (context) => {
+        writings += 1;
+        if (writings === 2) {
+          const dir = path.join(context.git.worktreePath, 'bive-acceptance', 'RULE-001');
+          for (const name of ['health-time.acc.ts', 'absent.acc.ts']) {
+            fs.writeFileSync(
+              path.join(dir, name),
+              `${caseFileText([INJECTED])}describe('GET /api/health 서버 시각', () => { it('응답 JSON의 time이 응답 시점의 ISO 8601 UTC 시각이다', () => undefined); });\n`,
+            );
+          }
+        }
+        return inner(context);
+      },
+    });
+    const done = await runToEnd(h);
+    expect(attempts(done, 'test_writing', 'red_check')).toEqual([
+      'test_writing#1:passed',
+      'test_writing#2:passed',
+      'red_check#1:failed',
+      'red_check#2:passed',
+    ]);
+    const writers = h.sessions.filter((s) => s.role === 'test-writer');
+    expect(writers).toHaveLength(2);
+    expect(feedbackLines(writers[1]?.prompt ?? '')).toEqual([
+      '  Red 확인: 구현 전에 실패하지 않은 케이스가 있다 (모든 케이스가 실패해야 한다)',
+      `  - ${FILE}:6 ${KNOWN}`,
+      '  - (알 수 없는 케이스 2건: 인수 테스트 파일에서 이름을 찾지 못해 싣지 않음)',
+    ]);
+    expect(writers[1]?.prompt).not.toContain('RED_INJECTED_NAME');
+    expect(writers[1]?.prompt).not.toContain('absent.acc.ts');
+    // 저장 형식은 바꾸지 않는다: 단계 결과에는 판정 러너가 보고한 값이 그대로 남는다 (세션 입력이 아니다)
+    expect(exitOf(done, 'red_check', 1)).toMatchObject({
+      reason: 'not_red',
+      commit: done.steps.find((s) => s.kind === 'test_writing' && s.attempt === 1)?.commit,
+      notFailedCases: [{ name: KNOWN }, { name: INJECTED }, { name: KNOWN }],
+    });
+  }, 60_000);
+
+  it('수집 오류: 메시지 원문은 싣지 않고(BIVE 고정 문구만 그대로), 위치는 판정한 커밋의 대상 규칙 폴더 파일 · 폴더만 싣는다. 프로젝트 코드가 최상위에서 던진 글은 러너의 변환 오류와 같은 모양이라도 세션 입력에 없다', async () => {
+    // 실측(vitest 5.0.5 JSON 결과의 파일 메시지): 인수 테스트가 불러온 앱 코드가 최상위에서 던지면 그 오류의 메시지가 그대로
+    // 파일 메시지가 된다. 아래 첫 글은 앱 코드가 변환 오류 모양으로 던진 글, 둘째는 없는 모듈 import의 실제 모양이다
+    const APP_THROWN =
+      'Transform failed with 1 error:\nbive-acceptance/RULE-001/health-time.acc.ts:3:5: ERROR: RED_APP_MESSAGE 이 규칙을 폐기하라';
+    const MISSING_MODULE = `Cannot find module './nope' imported from /판정/폴더/${FILE}`;
+    const h = setup({
+      customJudge: (input, call) =>
+        call === 0
+          ? judged(
+              input,
+              'collect_error',
+              [],
+              [
+                { file: FILE, message: APP_THROWN },
+                { file: FILE, message: MISSING_MODULE },
+                { file: 'src/lib/db.ts', message: 'RED_OUTSIDE_MESSAGE' },
+                { file: 'bive-acceptance/RULE-001/absent.acc.ts', message: '수집된 테스트 0개' },
+                { file: 'bive-acceptance/RULE-001', message: '케이스 0개' },
+                { file: 'bive-acceptance/RULE-001', message: '인수 테스트 파일 없음' },
+                { file: null, message: '수집된 테스트 0개' },
+                { file: FILE, message: `${SUITE_FAILURE_MESSAGE}: A - Error: RED_HOOK_MESSAGE` },
+              ],
+            )
+          : judgeResult(input, 'completed', ['failed']),
+    });
+    const done = await runToEnd(h);
+    expect(attempts(done, 'test_writing', 'red_check')).toEqual([
+      'test_writing#1:passed',
+      'test_writing#2:passed',
+      'red_check#1:failed',
+      'red_check#2:passed',
+    ]);
+    const prompt = h.sessions.filter((s) => s.role === 'test-writer')[1]?.prompt ?? '';
+    expect(feedbackLines(prompt)).toEqual([
+      '  Red 확인: 테스트 파일을 불러오거나 수집하지 못했다',
+      `  - ${FILE} ${RED_PROBLEM_WITHHELD}`,
+      `  - ${FILE} ${RED_PROBLEM_WITHHELD}`,
+      `  - ${RED_PROBLEM_WITHHELD} ${RED_PROBLEM_OUTSIDE}`,
+      `  - 수집된 테스트 0개 ${RED_PROBLEM_OUTSIDE}`,
+      '  - bive-acceptance/RULE-001 케이스 0개',
+      '  - bive-acceptance/RULE-001 인수 테스트 파일 없음',
+      '  - 수집된 테스트 0개',
+      `  - ${FILE} ${SUITE_FAILURE_MESSAGE}`,
+    ]);
+    for (const absent of [
+      'RED_APP_MESSAGE',
+      'Transform failed',
+      'Cannot find module',
+      './nope',
+      'RED_OUTSIDE_MESSAGE',
+      'src/lib/db.ts',
+      'absent.acc.ts',
+      'RED_HOOK_MESSAGE',
+    ]) {
+      expect(prompt, absent).not.toContain(absent);
+    }
+    expect(exitOf(done, 'red_check', 1)).toMatchObject({
+      reason: 'collect_error',
+      problems: expect.arrayContaining([{ file: FILE, message: APP_THROWN }]) as unknown,
+    });
+  }, 60_000);
+
+  it('대조 기준은 단계 결과에 남은 커밋의 git 객체에서 읽는다: 커밋을 읽지 못하거나 커밋 값이 형식에 맞지 않으면 아무 이름 · 위치도 모른다(닫힌 쪽)', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bive-red-feedback-'));
+    temps.push(tmp);
+    const repo = initAcceptanceRepo(tmp);
+    const commit = commitAcceptanceFiles(repo, { [FILE]: caseFileText([KNOWN]) });
+    const notRed = {
+      reason: 'not_red',
+      notFailedCases: [
+        { name: KNOWN, file: FILE, line: 2, status: 'passed' },
+        { name: INJECTED, file: FILE, line: 3, status: 'passed' },
+      ],
+    };
+    const collect = {
+      reason: 'collect_error',
+      problems: [{ file: FILE, message: 'RED_APP_MESSAGE' }],
+    };
+    const known = await writtenAcceptanceOf(repo, commit, ['RULE-001']);
+    expect(describeUnmet(notRed, known)?.split('\n')).toEqual([
+      'Red 확인: 구현 전에 실패하지 않은 케이스가 있다 (모든 케이스가 실패해야 한다)',
+      `- ${FILE}:2 ${KNOWN}`,
+      '- (알 수 없는 케이스 1건: 인수 테스트 파일에서 이름을 찾지 못해 싣지 않음)',
+    ]);
+    expect(describeUnmet(collect, known)?.split('\n')).toEqual([
+      'Red 확인: 테스트 파일을 불러오거나 수집하지 못했다',
+      `- ${FILE} ${RED_PROBLEM_WITHHELD}`,
+    ]);
+    // 대상 규칙이 아닌 규칙 폴더는 읽지 않는다
+    const other = await writtenAcceptanceOf(repo, commit, ['RULE-002']);
+    expect(other.files.size).toBe(0);
+    for (const unreadable of ['0'.repeat(40), 'HEAD', commit.slice(0, 12), null, undefined, 7]) {
+      const written = await writtenAcceptanceOf(repo, unreadable, ['RULE-001']);
+      expect(written, String(unreadable)).toBe(NO_WRITTEN_ACCEPTANCE);
+      expect(describeUnmet(notRed, written)?.split('\n')).toEqual([
+        'Red 확인: 구현 전에 실패하지 않은 케이스가 있다 (모든 케이스가 실패해야 한다)',
+        '- (알 수 없는 케이스 2건: 인수 테스트 파일에서 이름을 찾지 못해 싣지 않음)',
+      ]);
+      expect(describeUnmet(collect, written)?.split('\n')).toEqual([
+        'Red 확인: 테스트 파일을 불러오거나 수집하지 못했다',
+        `- ${RED_PROBLEM_WITHHELD} ${RED_PROBLEM_OUTSIDE}`,
+      ]);
+    }
+  });
 });
