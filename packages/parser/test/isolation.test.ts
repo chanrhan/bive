@@ -2,13 +2,13 @@
 // 대상 프로젝트에 "실행되면 표시 파일을 남기는" 설정 파일 · 플러그인 · 스크립트를 심고 분석해도 표시 파일이 생기지 않음을 본다.
 // 심은 파일이 실제로 실행되면 표시 파일을 남긴다는 것은 대조군(node로 직접 실행)으로 확인한다.
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { analyzeProject } from '../src/index.js';
-import { cruiseInput, RUNNER_PATH, runCruiseProcess } from '../src/cruise.js';
+import { analyzeProject, ParserError } from '../src/index.js';
+import { childEnv, cruiseInput, RUNNER_PATH, runCruiseProcess } from '../src/cruise.js';
 import { declaration, tempDir, writeFiles } from './helpers.js';
 
 const cjs = (marker: string): string =>
@@ -41,6 +41,14 @@ const plantedProject = () => {
     'node_modules/evil-babel-plugin/index.js': cjs(m('babel-plugin')),
     'node_modules/typescript/index.js': cjs(m('project-typescript')),
     'node_modules/dependency-cruiser/index.js': cjs(m('project-depcruise')),
+    // 프로젝트 안의 가짜 변환기 (dependency-cruiser가 찾는 이름 · 지원 판 범위)와 그 변환기가 읽을 소스
+    'node_modules/@swc/core/index.js': cjs(m('project-swc')),
+    'node_modules/svelte/compiler.js': cjs(m('project-svelte')),
+    'node_modules/vue-template-compiler/index.js': cjs(m('project-vue')),
+    'node_modules/coffeescript/index.js': cjs(m('project-coffee')),
+    'src/c.vue': cjs(m('source-vue')),
+    'src/d.svelte': cjs(m('source-svelte')),
+    'src/e.coffee': cjs(m('source-coffee')),
     // pnpm 훅 · 프로젝트 소스의 최상위 부수 효과
     '.pnpmfile.cjs': cjs(m('pnpmfile')),
     'next.config.js': cjs(m('next-config')),
@@ -72,6 +80,31 @@ const plantedProject = () => {
       version: '5.9.0',
       main: 'index.js',
     }),
+    'node_modules/@swc/core/package.json': JSON.stringify({
+      name: '@swc/core',
+      version: '1.9.0',
+      main: 'index.js',
+    }),
+    'node_modules/svelte/package.json': JSON.stringify({
+      name: 'svelte',
+      version: '4.2.0',
+      main: 'compiler.js',
+      exports: {
+        '.': './compiler.js',
+        './compiler': './compiler.js',
+        './package.json': './package.json',
+      },
+    }),
+    'node_modules/vue-template-compiler/package.json': JSON.stringify({
+      name: 'vue-template-compiler',
+      version: '2.7.0',
+      main: 'index.js',
+    }),
+    'node_modules/coffeescript/package.json': JSON.stringify({
+      name: 'coffeescript',
+      version: '2.7.0',
+      main: 'index.js',
+    }),
     'node_modules/dependency-cruiser/package.json': JSON.stringify({
       name: 'dependency-cruiser',
       version: '18.7.2',
@@ -96,7 +129,8 @@ const plantedProject = () => {
       ],
       compilerOptions: { paths: { '@/*': ['./src/*'] }, plugins: [{ name: 'evil-ts-plugin' }] },
     }),
-    'src/a.ts': "import '@/side';\nimport './b';\n",
+    'src/a.ts':
+      "import '@/side';\nimport './b';\nimport './c.vue';\nimport './d.svelte';\nimport './e.coffee';\n",
     'src/b.ts': '',
   });
   writeFiles(path.join(root, '..'), {
@@ -128,10 +162,55 @@ describe('대상 프로젝트의 코드를 실행하지 않는다', () => {
       { from: 'src/a.ts', to: 'src/b.ts' },
       { from: 'src/a.ts', to: 'src/side.js' },
     ]);
+    // .vue · .svelte · .coffee는 소스로 치지 않아 분석하지 않은 대상으로 드러난다(변환기를 부르지 않음)
+    const unanalyzed = [
+      { from: 'src/a.ts', to: 'src/c.vue' },
+      { from: 'src/a.ts', to: 'src/d.svelte' },
+      { from: 'src/a.ts', to: 'src/e.coffee' },
+    ];
+    expect(result.graph.unanalyzed).toEqual({ items: unanalyzed, total: 3 });
     expect(result.structure?.outcome).toEqual({
-      status: 'checked',
+      status: 'incomplete',
       violations: { items: [], total: 0 },
+      unanalyzed: { items: unanalyzed, total: 3 },
     });
+  });
+
+  it('tsconfig extends가 JS 파일을 가리켜도 실행하지 않는다 (대조군: 실행하면 남김)', async () => {
+    const markers = tempDir('markers-');
+    const root = path.join(tempDir(), 'project');
+    writeFiles(root, {
+      'evil-extends.js': cjs(path.join(markers, 'extends-js')),
+      'node_modules/evil-ext/index.js': cjs(path.join(markers, 'extends-package-js')),
+      'node_modules/evil-ext/package.json': JSON.stringify({ name: 'evil-ext', main: 'index.js' }),
+      'tsconfig.json': JSON.stringify({
+        extends: ['./evil-extends.js', 'evil-ext'],
+        compilerOptions: { paths: { '@/*': ['./src/*'] } },
+      }),
+      'src/a.ts': "import '@/b';\n",
+      'src/b.ts': '',
+    });
+    execFileSync(process.execPath, [path.join(root, 'evil-extends.js')], { env: {} });
+    execFileSync(process.execPath, [path.join(root, 'node_modules/evil-ext/index.js')], {
+      env: {},
+    });
+    expect(markersIn(markers)).toEqual(['extends-js', 'extends-package-js']);
+    rmSync(path.join(markers, 'extends-js'));
+    rmSync(path.join(markers, 'extends-package-js'));
+    // 결과는 성공이든 닫힌 쪽 오류든 되지만 아무것도 실행되지 않아야 한다
+    await analyzeProject({ projectDir: root, declaration: null }).catch((error: unknown) => {
+      expect(error).toBeInstanceOf(ParserError);
+    });
+    expect(markersIn(markers)).toEqual([]);
+  });
+
+  it('프로젝트 루트가 기호 링크여도 실제 폴더를 분석하고 아무것도 실행하지 않는다', async () => {
+    const { root, markers } = plantedProject();
+    const link = path.join(tempDir(), 'link');
+    symlinkSync(root, link);
+    const result = await analyzeProject({ projectDir: link, declaration: null });
+    expect(markersIn(markers)).toEqual([]);
+    expect(result.graph.edges.items).toContainEqual({ from: 'src/a.ts', to: 'src/b.ts' });
   });
 
   describe('실행기 환경', () => {
@@ -193,6 +272,16 @@ describe('대상 프로젝트의 코드를 실행하지 않는다', () => {
       // 파서의 실제 의존성에는 TypeScript 파서가 있다
       const { getAvailableTranspilers } = await import('dependency-cruiser');
       expect(getAvailableTranspilers().find((t) => t.name === 'typescript')?.available).toBe(true);
+    });
+
+    it('자식 환경: Electron이 아니면 빈 객체, Electron 위면 ELECTRON_RUN_AS_NODE 하나뿐 (NODE_OPTIONS · NODE_PATH는 어떤 경우에도 없음)', () => {
+      process.env.NODE_OPTIONS = '--require x';
+      process.env.NODE_PATH = '/x';
+      const node: NodeJS.ProcessVersions = { ...process.versions };
+      delete node.electron;
+      expect(childEnv(node)).toEqual({});
+      expect(childEnv({ ...node, electron: '40.0.0' })).toEqual({ ELECTRON_RUN_AS_NODE: '1' });
+      expect(childEnv()).toEqual({});
     });
 
     it('실제 실행기의 자리는 파서 패키지 안이다', () => {

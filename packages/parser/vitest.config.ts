@@ -6,7 +6,7 @@ export default defineConfig({
   ssr: { resolve: { conditions: ['@bive/source', 'module', 'node', 'development|production'] } },
   test: {
     include: ['test/**/*.test.ts'],
-    // 시험마다 dependency-cruiser 실행기를 자식 프로세스로 여러 번 띄운다(한 번에 약 1초). CI의 병렬 부하에서 기본 5초를 넘었다
-    testTimeout: 60_000,
+    // 시험마다 dependency-cruiser 실행기를 자식 프로세스로 여러 번 띄운다(한 번에 약 1초). CI의 병렬 부하에서 기본 5초를 넘었다. 가장 느린 시험이 로컬 약 7초라 세 배 가까운 여유
+    testTimeout: 20_000,
   },
 });

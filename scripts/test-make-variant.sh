@@ -57,6 +57,11 @@ check_refused '모르는 이름' 1 '모르는 변형' "$fx" "$mv" "$fx" no-such-
 check_refused '없는 폴더' 1 '폴더 없음' "$fx" "$mv" "$work/none" cycle
 check_refused '원본 픽스처' 1 '저장소 안의 폴더' "$repo/fixtures/sample-next-app" "$mv" "$repo/fixtures/sample-next-app" cycle
 
+# 원본 픽스처를 가리키는 기호 링크(저장소 밖에 둔 링크)도 실제 경로로 보고 거부한다
+ln -s "$repo/fixtures/sample-next-app" "$work/link-to-original"
+check_refused '원본 픽스처 기호 링크' 1 '저장소 안의 폴더' "$repo/fixtures/sample-next-app" \
+  "$mv" "$work/link-to-original" cycle
+
 # 저장소 안의 폴더: 가짜 저장소 안에 픽스처 사본 모양의 git 저장소를 두어도 거부한다
 mkdir -p "$work/repo/scripts" "$work/repo/fixtures"
 cp "$mv" "$work/repo/scripts/"

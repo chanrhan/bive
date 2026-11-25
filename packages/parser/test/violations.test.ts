@@ -76,6 +76,22 @@ describe('종류별 판별', () => {
     ]);
   });
 
+  it('공유 블록을 가져오는 쪽도 dependsOn에 적어야 한다: 공개 파일이라도 선언 외 방향 한 건', async () => {
+    const result = await analyzeProject({
+      projectDir: makeProject({ ...base, 'src/solo/s.ts': "import '@/lib/db';\n" }),
+      declaration: declaration([...blocks().blocks, { name: 'solo', include: ['src/solo/**'] }]),
+    });
+    expect(result.structure?.outcome).toEqual({
+      status: 'checked',
+      violations: {
+        items: [
+          edge('structure.declared-direction', ['src/solo/s.ts', 'solo'], ['src/lib/db.ts', 'lib']),
+        ],
+        total: 1,
+      },
+    });
+  });
+
   it('같은 블록 안 import와 미분류 파일이 낀 import는 위반이 아니다', async () => {
     expect(
       await violationsOf({

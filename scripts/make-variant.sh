@@ -92,4 +92,4 @@ EOF
 (cd "$target" && "variant_${name//-/_}")
 git_fx add -A
 git_fx commit -q -m "variant: $name"
-echo "[make-variant] $name 커밋: $(git_fx rev-parse --short HEAD) (되돌리기: git -C $target revert --no-edit HEAD)"
+echo "[make-variant] $name 커밋: $(git_fx rev-parse --short HEAD) (되돌리기: git -C '$target' revert --no-edit HEAD)"
