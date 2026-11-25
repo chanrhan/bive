@@ -1413,6 +1413,51 @@ describe('케이스 이름을 세션 입력에 싣는 자리는 모두 같은 �
       'rule-writer/rule-writer-service.ts',
     ]);
   });
+
+  it('Red 확인 결과(실패하지 않은 케이스 이름 · 수집 오류)를 읽는 곳은 고정이고, 테스트 작성 세션의 앞 시도 사유는 판정한 커밋의 대상 규칙 폴더 기준을 지난 것만 싣는다 (M3-40 #281, ADR-128)', () => {
+    // Red 확인 단계 결과를 고르는 곳: 판정 단계(인수 테스트 해시만)와 테스트 작성 단계(앞 시도 사유)뿐
+    expect(using(/'red_check'/)).toEqual(['steps/judging.ts', 'steps/test-writing.ts']);
+    expect(read('steps/judging.ts')).not.toMatch(/notFailedCases|collect_error/);
+    // 실패하지 않은 케이스 목록을 쓰는 곳 · 읽는 곳: Red 확인(만듦)과 테스트 작성(대조 뒤 실음)뿐
+    expect(using(/\bnotFailedCases\b/)).toEqual(['steps/red-check.ts', 'steps/test-writing.ts']);
+    // 커밋 객체에서 대조 글을 읽는 곳은 케이스 이름 대조 모듈 하나, 그 기준을 만드는 함수를 부르는 곳은 테스트 작성 단계 하나
+    expect(using(/\breadJudgedAcceptanceTexts\(/)).toEqual(['norms/case-names.ts']);
+    expect(using(/\bwrittenAcceptanceOf\(/)).toEqual(['steps/test-writing.ts']);
+    const writing = read('steps/test-writing.ts');
+    // 기준은 Red 확인 단계 결과에 남은 커밋으로 만든다 (작업 트리 · 실행 워크트리가 아니다)
+    expect(callArgs(writing, 'writtenAcceptanceOf')).toEqual([
+      'repoPath, last.exitDetail.commit, ruleDisplayIds',
+    ]);
+    // 사유 문장의 기준은 필수 인자이고, Red 확인의 두 사유는 대조 함수를 지난다 (원문을 그대로 늘어놓는 도우미를 쓰지 않는다)
+    expect(writing).toMatch(
+      /export const describeUnmet = \(exitDetail: unknown, written: WrittenAcceptance\)/,
+    );
+    expect(writing).toMatch(
+      /case 'not_red':\s*return `[^`]*\$\{listed\(redCaseLines\(exitDetail\.notFailedCases, written\)\)\}`;/,
+    );
+    expect(writing).toMatch(
+      /case 'collect_error':\s*return `[^`]*\$\{listed\(redProblemLines\(exitDetail\.problems, written\)\)\}`;/,
+    );
+    expect(writing).not.toMatch(/items\('notFailedCases'\)/);
+    expect(callArgs(writing, 'describeUnmet')).toEqual(['last.exitDetail, written']);
+    const body = (name: string): string =>
+      new RegExp(`const ${name} = [^]*?\\n\\};\\n`).exec(writing)?.[0] ?? '';
+    // 케이스 줄: 위치는 커밋의 파일, 이름은 대조 함수
+    expect(body('redCaseLines')).toMatch(/!written\.files\.has\(file\)/);
+    expect(body('redCaseLines')).toMatch(/!written\.isKnownCase\(ruleId, name\)/);
+    // 수집 오류 줄: 메시지는 고정 문구로 바꾼 글만, 위치는 커밋의 대상 규칙 폴더 안만
+    expect(body('redProblemLines')).toMatch(/problemMessage\(record\.message\)/);
+    expect(body('redProblemLines')).toMatch(/writtenLocation\(record\.file, written\)/);
+    expect(body('redProblemLines')).not.toMatch(/record\.message(?!\))/);
+    const message = body('problemMessage');
+    expect(message.match(/return [^;]+;/g)).toEqual([
+      'return RED_PROBLEM_WITHHELD;',
+      'return message;',
+      'return SUITE_FAILURE_MESSAGE;',
+      'return RED_PROBLEM_WITHHELD;',
+    ]);
+    expect(message).toMatch(/if \(FIXED_PROBLEM_MESSAGES\.has\(message\)\) return message;/);
+  });
 });
 
 describe('이의 제기 도구는 이의 기록 추가만 한다 (M7-11 #223 수용 기준 3, ADR-100 D4 · I2, ADR-115)', () => {
