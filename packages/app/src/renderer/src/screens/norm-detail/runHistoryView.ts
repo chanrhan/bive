@@ -41,6 +41,7 @@ export const RUN_FAILURE_REASON_TEXT = {
   target_rule_retired: '대상 규칙 폐기',
   target_rule_unavailable: '대상 규칙 효력 없음',
   judge_runner_error: '판정 실행기 오류',
+  block_declaration_overlap: '블록 선언 겹침',
   dependency_install_failed: '의존성 설치 실패',
   acceptance_ignored: '인수 테스트 무시 규칙 걸림',
   project_daily_budget_unset: '프로젝트 하루 한도 없음',

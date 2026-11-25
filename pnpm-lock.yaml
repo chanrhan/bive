@@ -95,6 +95,9 @@ importers:
       '@anthropic-ai/sdk':
         specifier: 0.131.0
         version: 0.131.0(zod@4.6.7)
+      '@bive/parser':
+        specifier: workspace:*
+        version: link:../parser
       '@bive/shared':
         specifier: workspace:*
         version: link:../shared
