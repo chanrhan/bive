@@ -277,6 +277,10 @@ export const listPaneOverflow = (pane: Locator): Promise<string[]> =>
     );
     const frame = (): Promise<void> =>
       new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    // 보이는 영역 밖의 대상에는 툴팁이 열리지 않으므로(ADR-124) 줄을 보이게 스크롤해 보고, 끝나면 스크롤 위치를 되돌린다
+    const scrolled = [el, ...el.querySelectorAll<HTMLElement>('*')]
+      .filter((node) => node.scrollHeight > node.clientHeight)
+      .map((node) => [node, node.scrollTop] as const);
     for (const text of texts) {
       if (text.scrollWidth <= text.clientWidth + 0.5) continue;
       const id = text.className;
@@ -290,6 +294,8 @@ export const listPaneOverflow = (pane: Locator): Promise<string[]> =>
         if (tip.trim() === '') problems.push(`${id}: 넘치는데 툴팁 없음 (${content})`);
         continue;
       }
+      hover.scrollIntoView({ block: 'nearest' });
+      await frame();
       hover.dispatchEvent(
         new MouseEvent('mouseover', { bubbles: true, relatedTarget: document.body }),
       );
@@ -303,6 +309,8 @@ export const listPaneOverflow = (pane: Locator): Promise<string[]> =>
       );
       await frame();
     }
+    for (const [node, top] of scrolled) node.scrollTop = top;
+    await frame();
     return problems;
   });
 

@@ -462,6 +462,72 @@ test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
     });
   }
 
+  /** 긴 표시 ID (테스트 전용 데이터) */
+  const LONG_DISPLAY_ID = 'RULE-12345678';
+  const titleRatio = async (page: Page): Promise<number> => {
+    const title = await page.getByTestId('rule-detail-title').boundingBox();
+    const content = await page.getByTestId('rule-detail-body').evaluate((el) => {
+      const style = getComputedStyle(el);
+      return (
+        el.clientWidth -
+        Number.parseFloat(style.paddingLeft) -
+        Number.parseFloat(style.paddingRight)
+      );
+    });
+    if (title === null) throw new Error('제목 상자 없음');
+    return title.width / content;
+  };
+
+  for (const width of NARROW_WIDTHS) {
+    test(`${width}×800: 긴 표시 ID · 넓은 판정 배지(재검증 필요)에서도 긴 제목은 상세 내용 폭의 절반 이상이다 (#275 검토 N5)`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      const rules = RULES.map((item) =>
+        item.rule.id === FAILING_RULE.id
+          ? {
+              rule: { ...item.rule, title: HEAD_TITLES.long, displayId: LONG_DISPLAY_ID },
+              judgment: { ...item.judgment, status: 'needs_recheck' as const },
+            }
+          : item,
+      );
+      const bive = await openRules(page, { 'rule.list': { result: { rules } } });
+      await selectRule(page, bive, LONG_DISPLAY_ID, FAILING_RULE.id);
+      await expect(page.getByTestId('rule-detail-id')).toHaveText(LONG_DISPLAY_ID);
+      await expect(page.locator('.rule-detail-head [data-testid="status-badge"]')).toHaveText(
+        '재검증 필요',
+      );
+      expect(await titleRatio(page)).toBeGreaterThanOrEqual(0.5);
+      expect(
+        await textClipping(detailPane(page), ['rule-detail-id', 'rule-edit', 'run-start']),
+      ).toEqual([]);
+      expect(await horizontalOverflow(detailPane(page), '.rule-detail-head')).toEqual([]);
+    });
+
+    test(`${width}×800: 폐기 · 대체 규칙 링크가 함께 있는 머리(긴 표시 ID)에서도 긴 제목은 상세 내용 폭의 절반 이상이다 (#275 검토 N5)`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      const retired = {
+        ...RETIRED_ITEM,
+        rule: { ...RETIRED_ITEM.rule, title: HEAD_TITLES.long, displayId: LONG_DISPLAY_ID },
+      };
+      const bive = await openRules(page, {
+        'rule.list': { result: { rules: [...RULES, retired] } },
+        'normChange.list': { result: RETIRED_CHANGES },
+      });
+      await page.getByTestId('hidden-toggle').click();
+      await selectRule(page, bive, LONG_DISPLAY_ID, RETIRED_RULE.id);
+      await expect(page.getByTestId('rule-detail-retired')).toHaveText('폐기');
+      await expect(page.getByTestId('rule-detail-successor')).toBeVisible();
+      expect(await titleRatio(page)).toBeGreaterThanOrEqual(0.5);
+      expect(
+        await textClipping(detailPane(page), ['rule-detail-id', 'rule-detail-retired', 'rule-ref']),
+      ).toEqual([]);
+      expect(await horizontalOverflow(detailPane(page), '.rule-detail-head')).toEqual([]);
+    });
+  }
+
   for (const width of [1280, WIDE_WIDTH] as const) {
     test(`${width}px 창의 머리 배치는 이전과 같다: 보통 제목은 한 줄, 표시 ID는 제목 바로 뒤(8px) 또는 다음 줄 왼쪽 끝, 판정 배지는 표시 ID 바로 뒤, 버튼은 오른쪽 끝 (#201)`, async ({
       page,

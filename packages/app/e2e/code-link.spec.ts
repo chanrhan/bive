@@ -352,6 +352,18 @@ test.describe('IDE 미설정: 처음 열 때 IDE 선택을 먼저 요구 (#45 �
       'cursor://file/{path}:{line}',
     );
     await expect(modal.getByTestId('code-open-ide-confirm')).toHaveText('확인');
+    // 이 단계는 설정 IDE 섹션과 달리 묶음 이름 "IDE"가 화면에 보이고 자리 표시 안내가 없다 (#201 · #275 검토 B3)
+    const legend = modal.getByTestId('ide-choice-legend');
+    await expect(legend).toHaveText('IDE');
+    await expect(legend).toBeVisible();
+    expect(
+      await legend.evaluate((el) => {
+        const box = el.getBoundingClientRect();
+        return box.width > 1 && box.height > 1 && !el.classList.contains('visually-hidden');
+      }),
+    ).toBe(true);
+    await expect(modal.getByTestId('ide-path-hint')).toHaveCount(0);
+    await expect(modal.getByRole('textbox')).not.toHaveAttribute('aria-describedby');
     for (const [reason] of REASONS) {
       await expect(modal.getByTestId(`code-open-reason-${reason}`)).toHaveCount(0);
     }

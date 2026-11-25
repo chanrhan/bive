@@ -16,7 +16,7 @@ import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import { REQUIREMENTS } from './checklists/scr-02.js';
 import { PROJECT, RULES } from './checklists/scr-03.js';
-import { mockBive } from './support/bive-mock.js';
+import { mockBive, nextFrame } from './support/bive-mock.js';
 import { SCREENSHOT_DIR } from './support/expectScreen.js';
 import { listPaneOverflow, NARROW_WIDTHS, WIDE_WIDTH } from './support/overflow.js';
 
@@ -688,14 +688,26 @@ test.describe('카드의 잘린 제목 · 2줄째 툴팁 (#201, ADR-124, screens
         testId,
       ).toEqual([]);
     }
-    // 문서 리스너(Esc · 밖 누름)는 툴팁이 열린 동안만 더해지고 닫히면 빠진다
-    const documentListeners = async (): Promise<number> =>
-      (await listenersOf('document')).filter((type) => type === 'keydown' || type === 'pointerdown')
-        .length;
+    // 창 · 문서 리스너(Esc · 밖 누름 · 스크롤 · 창 크기)는 툴팁이 열린 동안만 하나씩 더해지고 닫히면 빠진다
+    // 툴팁이 다는 자리: 창의 keydown(캡처) · scroll(캡처) · resize, 문서의 pointerdown(캡처)
+    const ADDED = ['window:keydown', 'window:scroll', 'window:resize', 'document:pointerdown'];
+    const documentListeners = async (): Promise<Record<string, number>> => {
+      const win = await listenersOf('window');
+      const doc = await listenersOf('document');
+      return Object.fromEntries(
+        ADDED.map((key) => {
+          const [target, type] = key.split(':');
+          const list = target === 'window' ? win : doc;
+          return [key, list.filter((listener) => listener === type).length];
+        }),
+      );
+    };
     const closed = await documentListeners();
     await tabToCard(page, 'RULE-199');
     await expect(tooltip(page)).toHaveCount(1);
-    expect(await documentListeners()).toBe(closed + 2);
+    expect(await documentListeners()).toEqual(
+      Object.fromEntries(ADDED.map((key) => [key, (closed[key] ?? 0) + 1])),
+    );
     // 여러 카드를 오가도 툴팁은 하나
     for (const id of ['RULE-101', 'RULE-199', 'RULE-102']) {
       await cardOf(page, id).getByTestId('card-title').hover();
@@ -704,7 +716,66 @@ test.describe('카드의 잘린 제목 · 2줄째 툴팁 (#201, ADR-124, screens
     await page.keyboard.press('Escape');
     await page.mouse.move(0, 0);
     await expect(tooltip(page)).toHaveCount(0);
-    expect(await documentListeners()).toBe(closed);
+    expect(await documentListeners()).toEqual(closed);
+  });
+
+  test('대상이 보이는 영역 밖으로 스크롤되면 닫히고, 창 크기가 바뀌어도 닫힌다. 보이는 영역 밖의 대상에는 열지 않는다 (#275 검토 B2)', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 500 });
+    await openRules(page, [...RULES, ...EXTRA, LONG_RULE]);
+    const long = cardOf(page, 'RULE-199');
+    const items = page.getByTestId('list-items');
+    await tabToCard(page, 'RULE-199');
+    await expect(tooltip(page)).toHaveText(LONG_TITLE);
+    await expect(long).toHaveAttribute('aria-describedby', 'bive-tooltip');
+
+    // 목록 칸 안에서 스크롤해도 대상이 보이면 툴팁은 남고 대상을 따라간다
+    const before = await tooltip(page).boundingBox();
+    const delta = await items.evaluate((el) => {
+      const start = el.scrollTop;
+      el.scrollTop = start + 4;
+      if (el.scrollTop === start) el.scrollTop = start - 4;
+      return el.scrollTop - start;
+    });
+    expect(delta).not.toBe(0);
+    await expect
+      .poll(async () => (await tooltip(page).boundingBox())?.y)
+      .toBeCloseTo((before?.y ?? 0) - delta, 0);
+    await expect(long).toHaveAttribute('aria-describedby', 'bive-tooltip');
+
+    // 대상이 목록 칸 밖으로 나가게 스크롤하면 닫히고 연결도 지워진다
+    const away = await items.evaluate((el, id) => {
+      const card = el.querySelector(`[data-id="${id}"]`);
+      el.scrollTop =
+        card instanceof HTMLElement && card.offsetTop > el.clientHeight ? 0 : el.scrollHeight;
+      return el.scrollTop;
+    }, 'RULE-199');
+    expect(away).toBeGreaterThanOrEqual(0);
+    await expect(tooltip(page)).toHaveCount(0);
+    await expect(long).not.toHaveAttribute('aria-describedby');
+    expect(
+      await long.evaluate((card) => {
+        const box = card.getBoundingClientRect();
+        const list = card.closest('[data-testid="list-items"]')?.getBoundingClientRect();
+        return list !== undefined && (box.bottom <= list.top || box.top >= list.bottom);
+      }),
+    ).toBe(true);
+
+    // 보이는 영역 밖의 카드에 마우스 이벤트가 와도 열지 않는다
+    await long
+      .getByTestId('card-title')
+      .dispatchEvent('mouseover', { relatedTarget: null, bubbles: true });
+    await nextFrame(page);
+    await expect(tooltip(page)).toHaveCount(0);
+
+    // 다시 보이게 하고 열어 둔 뒤 창 크기를 바꾸면 닫힌다
+    await long.scrollIntoViewIfNeeded();
+    await long.getByTestId('card-title').hover();
+    await expect(tooltip(page)).toHaveText(LONG_TITLE);
+    await page.setViewportSize({ width: 1240, height: 500 });
+    await expect(tooltip(page)).toHaveCount(0);
+    await expect(long.getByTestId('card-title')).not.toHaveAttribute('aria-describedby');
   });
 
   test('툴팁 문구는 표시 값 도우미를 거친 글자 노드다: 숨은 글자는 보이는 표기, 꺾쇠 글은 글자 그대로 (요구사항 카드)', async ({
@@ -714,7 +785,7 @@ test.describe('카드의 잘린 제목 · 2줄째 툴팁 (#201, ADR-124, screens
     const sample = REQUIREMENTS[0];
     if (sample === undefined) throw new Error('요구사항 시험 데이터 없음');
     const text =
-      '로그인 실패가 다섯 번 이어지면 계정을 잠그고 ‮관리자에게 알린다 <b>굵게</b> <img src=x onerror="window.__xss=1"> 끝까지 긴 요구사항 본문';
+      '로그인 실패가 다섯 번 이어지면 계정을 잠그고 \u202E관리자에게 알린다 <b>굵게</b> <img src=x onerror="window.__xss=1"> 끝까지 긴 요구사항 본문';
     await mockBive(page, {
       responses: {
         'system.status': { result: STATUS },
@@ -730,10 +801,10 @@ test.describe('카드의 잘린 제목 · 2줄째 툴팁 (#201, ADR-124, screens
     await expect(title).toHaveCount(1);
     expect(await clippedOf(title)).toBe(true);
     await title.hover();
-    await expect(tooltip(page)).toHaveText(text.replace('‮', '\\u202e'));
+    await expect(tooltip(page)).toHaveText(text.replace('\u202E', '\\u202e'));
     const inner = await tooltip(page).evaluate((el) => ({
       elements: [...el.querySelectorAll('*')].map((child) => child.tagName.toLowerCase()),
-      hidden: /[‪-‮⁦-⁩]/.test(el.textContent ?? ''),
+      hidden: /[\u202a-\u202e\u2066-\u2069]/.test(el.textContent ?? ''),
     }));
     expect(inner).toEqual({ elements: ['span'], hidden: false });
     expect(await page.evaluate(() => (window as { __xss?: number }).__xss)).toBeUndefined();

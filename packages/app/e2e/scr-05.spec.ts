@@ -974,6 +974,71 @@ test.describe('공통 툴팁: 준수 카드의 기준 · 코드 열람 한계 �
     await expect(tooltip(page)).toHaveCount(0);
   });
 
+  test('Esc 한 번은 열린 툴팁만 닫는다: 겹쳐 연 채팅은 그대로이고, 두 번째 Esc가 채팅을 닫는다 (#275 검토 B1)', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1000, height: 800 });
+    await openScreen(page);
+    const chat = page.getByTestId('chat-panel');
+    await page.getByTestId('chat-strip').click();
+    await expect(chat).toHaveAttribute('data-mode', 'overlay');
+    await keyboardFocus(page, 'code-open-hint');
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['code-open-hint'].text);
+    await page.keyboard.press('Escape');
+    await expect(tooltip(page)).toHaveCount(0);
+    await expect(page.getByTestId('code-open-hint')).toBeFocused();
+    await expect(chat).toHaveAttribute('data-mode', 'overlay');
+    // 툴팁이 닫혀 있으면 Esc는 평소대로 채팅 겹침을 닫는다
+    await page.keyboard.press('Escape');
+    await expect(chat).toHaveAttribute('data-mode', 'strip');
+  });
+
+  test('툴팁이 닫혀 있으면 Esc 한 번에 모달(설정)이 닫힌다 (#275 검토 B1)', async ({ page }) => {
+    await openScreen(page);
+    // 툴팁을 한 번 열고 닫아 둔다(닫힌 뒤 Esc를 삼키는 리스너가 남지 않음을 본다)
+    await keyboardFocus(page, 'code-open-hint');
+    await page.keyboard.press('Escape');
+    await expect(tooltip(page)).toHaveCount(0);
+    await page.getByRole('button', { name: '설정', exact: true }).click();
+    await expect(page.getByTestId('settings-modal')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('settings-modal')).toHaveCount(0);
+  });
+
+  test('창 오른쪽 끝의 대상: 툴팁은 창 안으로 당겨지고 가로 스크롤을 만들지 않는다 (#275 검토 N4)', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 820, height: 600 });
+    await openScreen(page);
+    // 대상(코드 열람 한계 문구 버튼)을 창 오른쪽 끝(접힌 채팅 띠 44px 바로 왼쪽)에 붙인다 (시험 전용 배치)
+    await page.addStyleTag({
+      content:
+        '[data-testid="code-open-hint"] { position: fixed; right: 60px; top: 200px; z-index: 1; }',
+    });
+    await page.getByTestId('code-open-hint').click();
+    await expect(tooltip(page)).toHaveText(TOOLTIPS['code-open-hint'].text);
+    const place = await tooltip(page).evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      const anchor = document
+        .querySelector('[data-testid="code-open-hint"]')
+        ?.getBoundingClientRect();
+      const root = document.documentElement;
+      return {
+        left: box.left,
+        right: box.right,
+        width: box.width,
+        anchorLeft: anchor?.left ?? 0,
+        viewport: root.clientWidth,
+        scroll: root.scrollWidth - root.clientWidth,
+      };
+    });
+    // 대상 왼쪽 끝에 맞추면 창 밖으로 나가는 폭이다(당김이 실제로 일어남)
+    expect(place.anchorLeft + place.width).toBeGreaterThan(place.viewport - 8);
+    expect(place.right).toBeLessThanOrEqual(place.viewport - 8 + 0.5);
+    expect(place.left).toBeGreaterThanOrEqual(8 - 0.5);
+    expect(place.scroll).toBe(0);
+  });
+
   for (const width of [820, 1100, 1280, 1440] as const) {
     test(`${width}×800: 툴팁은 창 안에 있고 가로 스크롤을 만들지 않는다`, async ({ page }) => {
       await page.setViewportSize({ width, height: 800 });
