@@ -114,9 +114,7 @@ const problemMessage = (message: unknown): string => {
 const writtenLocation = (file: unknown, written: WrittenAcceptance): string | null => {
   if (typeof file !== 'string') return null;
   if (written.files.has(file)) return file;
-  return [...written.ruleDisplayIds].some((id) => file === `${ACCEPTANCE_DIR}/${id}`)
-    ? file
-    : null;
+  return [...written.ruleDisplayIds].some((id) => file === `${ACCEPTANCE_DIR}/${id}`) ? file : null;
 };
 
 /**
@@ -142,7 +140,10 @@ const redCaseLines = (cases: unknown, written: WrittenAcceptance): string[] => {
       continue;
     }
     const line =
-      isRecord(item) && typeof item.line === 'number' && Number.isInteger(item.line) && item.line > 0
+      isRecord(item) &&
+      typeof item.line === 'number' &&
+      Number.isInteger(item.line) &&
+      item.line > 0
         ? `:${String(item.line)}`
         : '';
     lines.push(`- ${file}${line} ${name}`);
