@@ -32,7 +32,11 @@ export const makeProject = (files: Record<string, string>): string => {
   const root = path.join(tempDir(), 'project');
   writeFiles(root, {
     'tsconfig.json': JSON.stringify({
-      compilerOptions: { module: 'esnext', moduleResolution: 'bundler', paths: { '@/*': ['./src/*'] } },
+      compilerOptions: {
+        module: 'esnext',
+        moduleResolution: 'bundler',
+        paths: { '@/*': ['./src/*'] },
+      },
     }),
     ...files,
   });

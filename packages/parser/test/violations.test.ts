@@ -52,7 +52,11 @@ const edge = (
 describe('종류별 판별', () => {
   it('선언 외 방향: dependsOn에 없는 블록으로의 import (공개 여부와 상관없이 한 건)', async () => {
     expect(await violationsOf({ 'src/health/h.ts': "import '@/auth/a';\n" })).toEqual([
-      edge('structure.declared-direction', ['src/health/h.ts', 'health'], ['src/auth/a.ts', 'auth']),
+      edge(
+        'structure.declared-direction',
+        ['src/health/h.ts', 'health'],
+        ['src/auth/a.ts', 'auth'],
+      ),
     ]);
   });
 
@@ -85,12 +89,21 @@ describe('종류별 판별', () => {
   it('타입 전용 · 동적 import도 판별한다', async () => {
     expect(
       await violationsOf({
-        'src/health/h.ts': "import type { X } from '@/lib/internal';\nexport const l = () => import('@/auth/a');\nexport type Y = X;\n",
+        'src/health/h.ts':
+          "import type { X } from '@/lib/internal';\nexport const l = () => import('@/auth/a');\nexport type Y = X;\n",
         'src/lib/internal.ts': 'export type X = 1;\n',
       }),
     ).toEqual([
-      edge('structure.declared-direction', ['src/health/h.ts', 'health'], ['src/auth/a.ts', 'auth']),
-      edge('structure.public-api-only', ['src/health/h.ts', 'health'], ['src/lib/internal.ts', 'lib']),
+      edge(
+        'structure.declared-direction',
+        ['src/health/h.ts', 'health'],
+        ['src/auth/a.ts', 'auth'],
+      ),
+      edge(
+        'structure.public-api-only',
+        ['src/health/h.ts', 'health'],
+        ['src/lib/internal.ts', 'lib'],
+      ),
     ]);
   });
 
@@ -196,13 +209,28 @@ describe('규칙은 매핑한 파일 경로를 글자 그대로 넣은 것이다
   });
 
   it('이스케이프한 정규식은 목록의 경로에만 정확히 맞는다', () => {
-    const paths = ['src/a.ts', 'src/[id]/b+c.ts', 'src/q?.ts', 'src/back\\slash.ts', 'src/한 글.ts'];
+    const paths = [
+      'src/a.ts',
+      'src/[id]/b+c.ts',
+      'src/q?.ts',
+      'src/back\\slash.ts',
+      'src/한 글.ts',
+    ];
     const re = new RegExp(exactPathsRegExp(paths));
     for (const p of paths) expect(re.test(p), p).toBe(true);
-    for (const near of ['src/aXts', 'src/a.ts/x', 'xsrc/a.ts', 'src/i/b+c.ts', 'src/q.ts', 'src/bbc.ts']) {
+    for (const near of [
+      'src/aXts',
+      'src/a.ts/x',
+      'xsrc/a.ts',
+      'src/i/b+c.ts',
+      'src/q.ts',
+      'src/bbc.ts',
+    ]) {
       expect(re.test(near), near).toBe(false);
     }
-    expect(escapeRegExpLiteral('.*+?^${}()|[]\\')).toBe('\\.\\*\\+\\?\\^\\$\\{\\}\\(\\)\\|\\[\\]\\\\');
+    expect(escapeRegExpLiteral('.*+?^${}()|[]\\')).toBe(
+      '\\.\\*\\+\\?\\^\\$\\{\\}\\(\\)\\|\\[\\]\\\\',
+    );
     expect(() => exactPathsRegExp([])).toThrow();
   });
 
@@ -236,8 +264,18 @@ describe('위반 출력 옮기기', () => {
   it('같은 순환이 여러 간선에서 나와도 하나로 모은다', () => {
     const result = violationsFromCruise(
       output([
-        { from: 'src/lib/b.ts', to: 'src/lib/db.ts', rule: rule('no-cycle'), cycle: [{ name: 'src/lib/db.ts' }, { name: 'src/lib/b.ts' }] },
-        { from: 'src/lib/db.ts', to: 'src/lib/b.ts', rule: rule('no-cycle'), cycle: [{ name: 'src/lib/b.ts' }, { name: 'src/lib/db.ts' }] },
+        {
+          from: 'src/lib/b.ts',
+          to: 'src/lib/db.ts',
+          rule: rule('no-cycle'),
+          cycle: [{ name: 'src/lib/db.ts' }, { name: 'src/lib/b.ts' }],
+        },
+        {
+          from: 'src/lib/db.ts',
+          to: 'src/lib/b.ts',
+          rule: rule('no-cycle'),
+          cycle: [{ name: 'src/lib/b.ts' }, { name: 'src/lib/db.ts' }],
+        },
       ]),
       mapping(),
     );
@@ -247,7 +285,10 @@ describe('위반 출력 옮기기', () => {
 
   it('모르는 규칙 · 블록 밖 파일 · 깨진 순환 경로는 오류다', () => {
     expect(() =>
-      violationsFromCruise(output([{ from: 'src/auth/a.ts', to: 'src/lib/b.ts', rule: rule('other') }]), mapping()),
+      violationsFromCruise(
+        output([{ from: 'src/auth/a.ts', to: 'src/lib/b.ts', rule: rule('other') }]),
+        mapping(),
+      ),
     ).toThrow(expect.objectContaining({ code: 'cruise_output_invalid' }));
     expect(() =>
       violationsFromCruise(
@@ -257,17 +298,33 @@ describe('위반 출력 옮기기', () => {
     ).toThrow(expect.objectContaining({ code: 'cruise_output_invalid' }));
     expect(() =>
       violationsFromCruise(
-        output([{ from: 'src/lib/b.ts', to: 'src/lib/db.ts', rule: rule('no-cycle'), cycle: [{ name: 'src/lib/db.ts' }] }]),
+        output([
+          {
+            from: 'src/lib/b.ts',
+            to: 'src/lib/db.ts',
+            rule: rule('no-cycle'),
+            cycle: [{ name: 'src/lib/db.ts' }],
+          },
+        ]),
         mapping(),
       ),
     ).toThrow(expect.objectContaining({ code: 'cruise_output_invalid' }));
   });
 
   it('위반 목록이 상한을 넘으면 앞쪽만 담고 전체 개수를 남긴다', () => {
-    const files = Array.from({ length: PARSER_LIMITS.violations + 1 }, (_, i) => `src/lib/f${String(i).padStart(5, '0')}.ts`);
+    const files = Array.from(
+      { length: PARSER_LIMITS.violations + 1 },
+      (_, i) => `src/lib/f${String(i).padStart(5, '0')}.ts`,
+    );
     const big = mapFilesToBlocks(blocks(), ['src/auth/a.ts', ...files]);
     const result = violationsFromCruise(
-      output(files.map((file) => ({ from: 'src/auth/a.ts', to: file, rule: rule('public-api-only--lib') }))),
+      output(
+        files.map((file) => ({
+          from: 'src/auth/a.ts',
+          to: file,
+          rule: rule('public-api-only--lib'),
+        })),
+      ),
       big,
     );
     expect(result.items).toHaveLength(PARSER_LIMITS.violations);

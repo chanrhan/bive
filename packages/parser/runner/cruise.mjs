@@ -44,7 +44,9 @@ if (typescript?.available !== true) fail('TypeScript 파서를 찾지 못함');
 
 try {
   const result = await cruise(args, { ...options, outputType: 'json', cache: false });
-  process.stdout.write(typeof result.output === 'string' ? result.output : JSON.stringify(result.output));
+  process.stdout.write(
+    typeof result.output === 'string' ? result.output : JSON.stringify(result.output),
+  );
 } catch (error) {
   fail(`분석 실패: ${error instanceof Error ? error.message.split('\n')[0] : '알 수 없는 오류'}`);
 }

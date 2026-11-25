@@ -9,9 +9,7 @@ import { exactPathsRegExp } from './regex.js';
 
 /** 위반 종류. 앞의 둘은 내장 구조 규칙 이름과 같다(기획서 3.4). */
 export type ViolationKind =
-  | 'structure.declared-direction'
-  | 'structure.public-api-only'
-  | 'structure.no-cycle';
+  'structure.declared-direction' | 'structure.public-api-only' | 'structure.no-cycle';
 
 /** dependency-cruiser 규칙 이름의 머리 (뒤에 `--<블록 이름>`) → 위반 종류 */
 export const RULE_PREFIX: Record<ViolationKind, string> = {

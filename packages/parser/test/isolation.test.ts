@@ -49,23 +49,48 @@ const plantedProject = () => {
       forbidden: [{ name: 'planted', severity: 'error', from: {}, to: {} }],
     }),
     '.babelrc': JSON.stringify({ plugins: ['evil-babel-plugin'] }),
-    'node_modules/evil-ts-plugin/package.json': JSON.stringify({ name: 'evil-ts-plugin', main: 'index.js' }),
-    'node_modules/evil-ts-config/package.json': JSON.stringify({ name: 'evil-ts-config', main: 'index.js' }),
-    'node_modules/evil-ts-config/tsconfig.json': JSON.stringify({ compilerOptions: { strict: true } }),
-    'node_modules/evil-babel-plugin/package.json': JSON.stringify({ name: 'evil-babel-plugin', main: 'index.js' }),
-    'node_modules/typescript/package.json': JSON.stringify({ name: 'typescript', version: '5.9.0', main: 'index.js' }),
-    'node_modules/dependency-cruiser/package.json': JSON.stringify({ name: 'dependency-cruiser', version: '18.7.2', main: 'index.js' }),
+    'node_modules/evil-ts-plugin/package.json': JSON.stringify({
+      name: 'evil-ts-plugin',
+      main: 'index.js',
+    }),
+    'node_modules/evil-ts-config/package.json': JSON.stringify({
+      name: 'evil-ts-config',
+      main: 'index.js',
+    }),
+    'node_modules/evil-ts-config/tsconfig.json': JSON.stringify({
+      compilerOptions: { strict: true },
+    }),
+    'node_modules/evil-babel-plugin/package.json': JSON.stringify({
+      name: 'evil-babel-plugin',
+      main: 'index.js',
+    }),
+    'node_modules/typescript/package.json': JSON.stringify({
+      name: 'typescript',
+      version: '5.9.0',
+      main: 'index.js',
+    }),
+    'node_modules/dependency-cruiser/package.json': JSON.stringify({
+      name: 'dependency-cruiser',
+      version: '18.7.2',
+      main: 'index.js',
+    }),
     'package.json': JSON.stringify({
       name: 'planted',
       scripts: Object.fromEntries(
-        ['preinstall', 'install', 'postinstall', 'prepare', 'pretest', 'test', 'depcruise'].map((hook) => [
-          hook,
-          `node -e "require('fs').writeFileSync('${m(`script-${hook}`)}', 'ran')"`,
-        ]),
+        ['preinstall', 'install', 'postinstall', 'prepare', 'pretest', 'test', 'depcruise'].map(
+          (hook) => [
+            hook,
+            `node -e "require('fs').writeFileSync('${m(`script-${hook}`)}', 'ran')"`,
+          ],
+        ),
       ),
     }),
     'tsconfig.json': JSON.stringify({
-      extends: ['evil-ts-config/tsconfig.json', './node_modules/evil-ts-config/tsconfig.json', '../outside/tsconfig.json'],
+      extends: [
+        'evil-ts-config/tsconfig.json',
+        './node_modules/evil-ts-config/tsconfig.json',
+        '../outside/tsconfig.json',
+      ],
       compilerOptions: { paths: { '@/*': ['./src/*'] }, plugins: [{ name: 'evil-ts-plugin' }] },
     }),
     'src/a.ts': "import '@/side';\nimport './b';\n",
@@ -132,7 +157,7 @@ describe('대상 프로젝트의 코드를 실행하지 않는다', () => {
       const probe = path.join(tempDir(), 'probe.mjs');
       writeFileSync(
         probe,
-        "process.stdout.write(JSON.stringify({ env: Object.keys(process.env), cwd: process.cwd(), exec: process.execPath, argv: process.argv.slice(2) }));\n",
+        'process.stdout.write(JSON.stringify({ env: Object.keys(process.env), cwd: process.cwd(), exec: process.execPath, argv: process.argv.slice(2) }));\n',
       );
       process.env.NODE_OPTIONS = '--no-warnings';
       const seen = JSON.parse(await runCruiseProcess({}, { runnerPath: probe })) as {
@@ -145,7 +170,9 @@ describe('대상 프로젝트의 코드를 실행하지 않는다', () => {
     });
 
     it('실제 실행기의 자리는 파서 패키지 안이다', () => {
-      expect(RUNNER_PATH.endsWith(path.join('packages', 'parser', 'runner', 'cruise.mjs'))).toBe(true);
+      expect(RUNNER_PATH.endsWith(path.join('packages', 'parser', 'runner', 'cruise.mjs'))).toBe(
+        true,
+      );
       expect(existsSync(RUNNER_PATH)).toBe(true);
     });
   });
@@ -203,7 +230,9 @@ describe('실행기 실패는 닫힌 쪽이다 ("위반 0건"으로 읽히지 �
     const runner = fake(
       `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`,
     );
-    await expect(analyze(runner, { timeoutMs: 500 })).rejects.toMatchObject({ code: 'cruise_timeout' });
+    await expect(analyze(runner, { timeoutMs: 500 })).rejects.toMatchObject({
+      code: 'cruise_timeout',
+    });
     const pid = Number(execFileSync('cat', [pidFile]).toString());
     expect(() => process.kill(pid, 0)).toThrow();
   });
@@ -217,23 +246,27 @@ describe('실행기 실패는 닫힌 쪽이다 ("위반 0건"으로 읽히지 �
 
   it('0이 아닌 종료는 오류다 (출력이 그럴듯해도)', async () => {
     const runner = fake(
-      "process.stdout.write(JSON.stringify({ modules: [], summary: { violations: [] } }));\nprocess.exit(3);\n",
+      'process.stdout.write(JSON.stringify({ modules: [], summary: { violations: [] } }));\nprocess.exit(3);\n',
     );
     await expect(analyze(runner)).rejects.toMatchObject({ code: 'cruise_failed' });
   });
 
   it('깨진 JSON · 다른 모양은 오류다', async () => {
-    await expect(analyze(fake("process.stdout.write('{\"modules\": [');\n"))).rejects.toMatchObject({
-      code: 'cruise_output_invalid',
-    });
-    await expect(analyze(fake("process.stdout.write('{\"modules\": []}');\n"))).rejects.toMatchObject({
+    await expect(analyze(fake('process.stdout.write(\'{"modules": [\');\n'))).rejects.toMatchObject(
+      {
+        code: 'cruise_output_invalid',
+      },
+    );
+    await expect(
+      analyze(fake('process.stdout.write(\'{"modules": []}\');\n')),
+    ).rejects.toMatchObject({
       code: 'cruise_output_invalid',
     });
   });
 
   it('빈 결과는 파일을 분석하지 않은 것이라 오류다', async () => {
     const runner = fake(
-      "process.stdout.write(JSON.stringify({ modules: [], summary: { violations: [] } }));\n",
+      'process.stdout.write(JSON.stringify({ modules: [], summary: { violations: [] } }));\n',
     );
     await expect(analyze(runner)).rejects.toMatchObject({ code: 'file_not_analyzed' });
   });

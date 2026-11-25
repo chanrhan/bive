@@ -31,7 +31,10 @@ const kindOf = (ruleName: string): ViolationKind | null => {
 };
 
 const unexpected = (what: string): ParserError =>
-  new ParserError('cruise_output_invalid', `dependency-cruiser 위반 출력이 예상과 다릅니다: ${what}`);
+  new ParserError(
+    'cruise_output_invalid',
+    `dependency-cruiser 위반 출력이 예상과 다릅니다: ${what}`,
+  );
 
 /** 순환 경로를 사전순 가장 앞 파일에서 시작하게 돌린다. */
 const rotate = (loop: string[]): string[] => {

@@ -45,7 +45,11 @@ export interface AnalyzeOptions extends ProcessOptions {
 
 /** 어느 깊이의 node_modules든, 그리고 파서가 건너뛴 자리 · 프로젝트 밖으로 풀린 경로를 dependency-cruiser에서도 제외한다. */
 const excludeRegExp = (skipped: readonly string[]): string =>
-  ['(^|/)node_modules(/|$)', '^\\.\\./', ...(skipped.length > 0 ? [pathsOrBelowRegExp(skipped)] : [])]
+  [
+    '(^|/)node_modules(/|$)',
+    '^\\.\\./',
+    ...(skipped.length > 0 ? [pathsOrBelowRegExp(skipped)] : []),
+  ]
     .map((part) => `(?:${part})`)
     .join('|');
 

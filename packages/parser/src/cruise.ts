@@ -165,4 +165,5 @@ export const runCruiseProcess = (input: unknown, options: ProcessOptions = {}): 
 export const runCruise = async (
   request: CruiseRequest,
   options: ProcessOptions = {},
-): Promise<CruiseOutput> => parseCruiseOutput(await runCruiseProcess(cruiseInput(request), options));
+): Promise<CruiseOutput> =>
+  parseCruiseOutput(await runCruiseProcess(cruiseInput(request), options));

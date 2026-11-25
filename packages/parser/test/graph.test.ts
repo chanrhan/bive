@@ -161,8 +161,13 @@ describe('변환만 한다 (출력 → 그래프)', () => {
         expect(text.includes(banned), `${name}: ${banned}`).toBe(false);
       }
     }
-    const runner = readFileSync(fileURLToPath(new URL('../runner/cruise.mjs', import.meta.url)), 'utf8');
-    expect([...runner.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1])).toEqual(['dependency-cruiser']);
+    const runner = readFileSync(
+      fileURLToPath(new URL('../runner/cruise.mjs', import.meta.url)),
+      'utf8',
+    );
+    expect([...runner.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1])).toEqual([
+      'dependency-cruiser',
+    ]);
   });
 });
 
@@ -233,7 +238,10 @@ describe('그래프에 넣는 파일 (ADR-125 ①)', () => {
     symlinkSync(root, path.join(root, 'src/loop'));
     mkdirSync(path.join(root, '..', 'outside'), { recursive: true });
     writeFileSync(path.join(root, '..', 'outside', 'z.ts'), "import './w';\n");
-    writeFileSync(path.join(root, 'src/c.ts'), "import './linked-file';\nimport './linked-dir/x';\n");
+    writeFileSync(
+      path.join(root, 'src/c.ts'),
+      "import './linked-file';\nimport './linked-dir/x';\n",
+    );
     const graph = await graphOf(root);
     expect(graph.modules).toEqual(['src/a.ts', 'src/b.ts', 'src/c.ts']);
     expect(graph.edges).toEqual({ items: [], total: 0 });
@@ -257,9 +265,9 @@ describe('그래프에 넣는 파일 (ADR-125 ①)', () => {
     });
     const graph = await graphOf(root);
     expect(graph.modules).toEqual([...names, 'src/main.ts', 'src/other.ts', 'src/q?.ts'].sort());
-    expect(graph.edges.items.filter((edge) => edge.from === 'src/main.ts').map((edge) => edge.to)).toEqual(
-      [...names].sort(),
-    );
+    expect(
+      graph.edges.items.filter((edge) => edge.from === 'src/main.ts').map((edge) => edge.to),
+    ).toEqual([...names].sort());
     expect(graph.edges.items.some((edge) => edge.from === 'src/other.ts')).toBe(false);
     expect(graph.unresolved.items).toContainEqual({ from: 'src/other.ts', module: './q?' });
   });
