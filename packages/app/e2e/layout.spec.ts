@@ -128,15 +128,15 @@ test.describe('기본 배치 (1440px)', () => {
     await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'start');
     await expect(page.getByTestId('project-start')).toBeVisible();
 
-    const contracts = page.getByRole('button', { name: '계약', exact: true });
-    await contracts.click();
-    await expect(contracts).toHaveAttribute('aria-current', 'page');
-    await expect(empty).toHaveText('계약 준비 중');
-    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'contracts');
+    const traceability = page.getByRole('button', { name: '추적성 맵', exact: true });
+    await traceability.click();
+    await expect(traceability).toHaveAttribute('aria-current', 'page');
+    await expect(empty).toHaveText('추적성 맵 준비 중');
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'traceability');
 
     await page.getByRole('button', { name: '실행 추적', exact: true }).click();
     await expect(empty).toHaveText('실행 추적 준비 중');
-    await expect(contracts).not.toHaveAttribute('aria-current', 'page');
+    await expect(traceability).not.toHaveAttribute('aria-current', 'page');
 
     // 할 일은 화면이 있다(#23). 프로젝트를 열기 전이라 목록 대신 "프로젝트 없음"
     await page.getByRole('button', { name: '할 일', exact: true }).click();

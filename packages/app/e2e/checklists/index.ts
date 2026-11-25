@@ -3,6 +3,7 @@ import { shellChecklist } from './scr-00-shell.js';
 import { projectStartChecklist } from './scr-01.js';
 import { requirementsChecklist } from './scr-02.js';
 import { rulesChecklist } from './scr-03.js';
+import { contractsChecklist } from './scr-04.js';
 import { verificationChecklist } from './scr-05.js';
 import { ruleDetailChecklist } from './scr-06.js';
 import { confirmationChecklist } from './scr-17.js';
@@ -14,6 +15,7 @@ export const CHECKLISTS: Partial<Record<ScreenId, ScreenChecklist>> = {
   'SCR-01': projectStartChecklist,
   'SCR-02': requirementsChecklist,
   'SCR-03': rulesChecklist,
+  'SCR-04': contractsChecklist,
   'SCR-05': verificationChecklist,
   'SCR-06': ruleDetailChecklist,
   'SCR-17': confirmationChecklist,

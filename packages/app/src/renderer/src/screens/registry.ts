@@ -4,6 +4,7 @@
 import type { ComponentType } from 'react';
 
 import type { RouteId } from '../navigation/routes.js';
+import { ContractsScreen } from './contracts/ContractsScreen.js';
 import { ProjectStartScreen } from './project-start/ProjectStartScreen.js';
 import { RequirementsScreen } from './requirements/RequirementsScreen.js';
 import { RulesScreen } from './rules/RulesScreen.js';
@@ -15,5 +16,6 @@ export const SCREENS: Partial<Record<RouteId, ComponentType>> = {
   verification: VerificationScreen,
   requirements: RequirementsScreen,
   rules: RulesScreen,
+  contracts: ContractsScreen,
   todo: TodoScreen,
 };
