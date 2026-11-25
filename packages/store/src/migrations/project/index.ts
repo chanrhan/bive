@@ -25,6 +25,7 @@ import { migration as m0020 } from './0020_session_objection_end.js';
 import { migration as m0021 } from './0021_integrity_gaps.js';
 import { migration as m0022 } from './0022_block_declarations.js';
 import { migration as m0023 } from './0023_structure_judge_runner.js';
+import { migration as m0024 } from './0024_contracts.js';
 
 export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0001,
@@ -50,4 +51,5 @@ export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0021,
   m0022,
   m0023,
+  m0024,
 ];

@@ -5,6 +5,7 @@ import type { RunEngineHooks } from './run-handlers.js';
 import { createBlockHandlers } from './block-handlers.js';
 import { createCodeOpenHandlers } from './code-open-handlers.js';
 import { createConfirmationHandlers } from './confirmation-handlers.js';
+import { createContractHandlers } from './contract-handlers.js';
 import { createNormChangeHandlers } from './norm-change-handlers.js';
 import { createProjectHandlers } from './project-handlers.js';
 import { createProposalHandlers } from './proposal-handlers.js';
@@ -83,6 +84,7 @@ export const createHandlers = ({
   ...createConfirmationHandlers({ biveHome, now }),
   ...createNormChangeHandlers({ biveHome }),
   ...createBlockHandlers({ biveHome, now }),
+  ...createContractHandlers({ biveHome, now }),
   ...createSettingsHandlers({ biveHome, now }),
   ...createRunHandlers({ biveHome, now, ...(engine === undefined ? {} : { engine }) }),
   ...createVerificationHandlers({ biveHome }),

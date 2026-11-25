@@ -12,6 +12,7 @@ import { AutoStartSkipRepository } from './repositories/auto-start-skip-reposito
 import { BlockDeclarationRepository } from './repositories/block-declaration-repository.js';
 import { CodeOpenRepository } from './repositories/code-open-repository.js';
 import { ConfirmationRepository } from './repositories/confirmation-repository.js';
+import { ContractRepository } from './repositories/contract-repository.js';
 import { DisplayIdSequences } from './repositories/display-id-sequences.js';
 import { JudgmentRepository } from './repositories/judgment-repository.js';
 import { NormChangeRepository } from './repositories/norm-change-repository.js';
@@ -77,6 +78,11 @@ export class ProjectStore {
    * 처리기만 쓴다). 지금 선언은 가장 큰 판이다.
    */
   readonly blockDeclarations: BlockDeclarationRepository;
+  /**
+   * 계약 (NRM-03, ADR-019, M3-04 #49, ADR-129). 등록 단위 = 파일, 추가 전용(고치기 · 지우기는 변경 반영 M3-10). 쓰기는 오케스트레이터의
+   * 계약 모듈만 한다(사람의 등록 RPC · 에이전트 반영).
+   */
+  readonly contracts: ContractRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -101,6 +107,7 @@ export class ProjectStore {
     this.autoStartSkips = new AutoStartSkipRepository(db);
     this.ruleRetirements = new RuleRetirementRepository(db);
     this.blockDeclarations = new BlockDeclarationRepository(db, projectId);
+    this.contracts = new ContractRepository(db, this.sequences);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */
