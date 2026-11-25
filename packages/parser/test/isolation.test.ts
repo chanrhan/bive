@@ -2,7 +2,7 @@
 // 대상 프로젝트에 "실행되면 표시 파일을 남기는" 설정 파일 · 플러그인 · 스크립트를 심고 분석해도 표시 파일이 생기지 않음을 본다.
 // 심은 파일이 실제로 실행되면 표시 파일을 남긴다는 것은 대조군(node로 직접 실행)으로 확인한다.
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -167,6 +167,29 @@ describe('대상 프로젝트의 코드를 실행하지 않는다', () => {
         argv: string[];
       };
       expect(seen).toEqual({ env: [], cwd: path.dirname(probe), exec: process.execPath, argv: [] });
+    });
+
+    it('TypeScript 파서가 없는 dependency-cruiser면 실행기가 거부한다 (.ts import를 못 읽은 "위반 0건"을 막음)', async () => {
+      const dir = tempDir('runner-');
+      copyFileSync(RUNNER_PATH, path.join(dir, 'cruise.mjs'));
+      writeFiles(dir, {
+        'node_modules/dependency-cruiser/package.json': JSON.stringify({
+          name: 'dependency-cruiser',
+          type: 'module',
+          exports: './index.js',
+        }),
+        'node_modules/dependency-cruiser/index.js':
+          "export const getAvailableTranspilers = () => [{ name: 'typescript', available: false }];\nexport const cruise = async () => ({ output: { modules: [], summary: { violations: [] } } });\n",
+      });
+      await expect(
+        runCruiseProcess(
+          { args: ['.'], options: {} },
+          { runnerPath: path.join(dir, 'cruise.mjs') },
+        ),
+      ).rejects.toMatchObject({ code: 'cruise_failed' });
+      // 파서의 실제 의존성에는 TypeScript 파서가 있다
+      const { getAvailableTranspilers } = await import('dependency-cruiser');
+      expect(getAvailableTranspilers().find((t) => t.name === 'typescript')?.available).toBe(true);
     });
 
     it('실제 실행기의 자리는 파서 패키지 안이다', () => {

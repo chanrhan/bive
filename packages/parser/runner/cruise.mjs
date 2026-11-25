@@ -54,7 +54,9 @@ try {
 if (typeof result !== 'object' || result === null) fail('분석 결과가 객체가 아님');
 
 const pick = (object, keys) =>
-  Object.fromEntries(keys.filter((key) => Object.hasOwn(object, key)).map((key) => [key, object[key]]));
+  Object.fromEntries(
+    keys.filter((key) => Object.hasOwn(object, key)).map((key) => [key, object[key]]),
+  );
 
 process.stdout.write(
   JSON.stringify({

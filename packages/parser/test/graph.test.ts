@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { analyzeProject, ParserError } from '../src/index.js';
-import { CruiseOutput } from '../src/cruise.js';
+import { CruiseOutput, cruiseInput, runCruiseProcess } from '../src/cruise.js';
 import { graphFromCruise } from '../src/graph.js';
 import { capped, PARSER_LIMITS } from '../src/limits.js';
 import { copyFixture, makeProject, tempDir, writeFiles } from './helpers.js';
@@ -83,6 +83,49 @@ describe('픽스처의 import 그래프', () => {
 });
 
 describe('변환만 한다 (출력 → 그래프)', () => {
+  it('실행기 출력은 dependency-cruiser json 보고서(--output-type json과 같은 보고서)에서 칸만 고른 것이다', async () => {
+    const root = makeProject({
+      'src/a.ts':
+        "import { b } from '@/b';\nimport 'left-pad';\nimport fs from 'node:fs';\nexport const a = [b, fs];\n",
+      'src/b.ts': "import { a } from './a';\nexport const b = () => a;\n",
+    });
+    const ruleSet = {
+      forbidden: [
+        {
+          name: 'no-cycle',
+          severity: 'error' as const,
+          from: { path: '^src/' },
+          to: { circular: true as const },
+        },
+      ],
+    };
+    const input = cruiseInput({ root, exclude: '(^|/)node_modules(/|$)', ruleSet });
+    const fromRunner = JSON.parse(await runCruiseProcess(input)) as unknown;
+    const { cruise } = await import('dependency-cruiser');
+    const report = await cruise(input.args, { ...input.options, outputType: 'json' });
+    const json = JSON.parse(report.output as string) as {
+      modules: { source: string; dependencies: Record<string, unknown>[] }[];
+      summary: { violations: Record<string, unknown>[] };
+    };
+    const pick = (object: Record<string, unknown>, keys: string[]) =>
+      Object.fromEntries(keys.filter((key) => key in object).map((key) => [key, object[key]]));
+    expect(fromRunner).toEqual({
+      modules: json.modules.map((module) => ({
+        source: module.source,
+        dependencies: module.dependencies.map((dependency) =>
+          pick(dependency, ['module', 'resolved', 'coreModule', 'couldNotResolve']),
+        ),
+      })),
+      summary: {
+        violations: json.summary.violations.map((violation) => ({
+          ...pick(violation, ['type', 'from', 'to', 'rule']),
+          cycle: (violation.cycle as Record<string, unknown>[]).map((step) => pick(step, ['name'])),
+        })),
+      },
+    });
+    expect(json.summary.violations).toHaveLength(1);
+  });
+
   it('간선의 끝은 출력의 resolved 그대로다 (모듈 이름에서 경로를 짐작하지 않는다)', () => {
     const output = cruiseOutput([
       {
