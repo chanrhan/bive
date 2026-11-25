@@ -1,0 +1,36 @@
+/* 계약 화면 (SCR-04, 규칙 화면과 같은 틀): 중앙 목록 + 상세 2단. 색 · 반경 · 글꼴 크기는 토큰만 (ADR-044). */
+
+.contracts-screen {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.contracts-screen[data-state='no-project'] {
+  flex-direction: column;
+}
+
+/* 목록은 최대 --list-pane-width에서 220px까지 줄고, 상세는 288px 아래로 줄지 않는다.
+   좁은 창(1100px ~ 1280px)에서는 목록이 먼저 준다 (ADR-090) */
+.contracts-list-pane {
+  display: flex;
+  flex: 0 1 var(--list-pane-width);
+  flex-direction: column;
+  min-width: 220px;
+  min-height: 0;
+  border-right: 1px solid var(--color-border);
+}
+
+.contracts-loading {
+  flex: 1;
+}
+
+.contracts-detail {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 288px;
+  min-height: 0;
+  overflow: auto;
+}
