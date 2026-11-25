@@ -89,9 +89,10 @@ export type ContractSourceRead =
   | ({ readonly ok: true } & ContractSource)
   | { readonly ok: false; readonly code: ContractInvalidCode };
 
-const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
+/** 디코드가 손실이면 생기는 대체 문자 U+FFFD (원문에 있어도 손실과 구별할 수 없어 거부한다). */
+const REPLACEMENT_CHARACTER = String.fromCodePoint(0xfffd);
 
-const COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
 
 /**
  * 기준 브랜치 커밋의 계약 원본을 git 객체에서 읽는다 (작업 트리 · 워크트리는 읽지 않는다). `file`은 {@link contractFileProblem}을
@@ -99,7 +100,8 @@ const COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
  * - 브랜치 · 커밋을 읽지 못함(git 저장소가 아님 등) → `base_unreadable`, 파일 없음 → `file_missing`
  * - 일반 파일(모드 100644 · 100755)이 아님(기호 링크 · 디렉터리 · 하위 모듈) → `not_regular_file`
  * - 상한 초과 → `too_large`(내용을 읽지 않는다), UTF-8 글이 아님(디코드에 대체 문자 U+FFFD가 생기거나 원래 있음) → `not_text`
- * 해시는 그 바이트의 SHA-256이다(글로 읽어 손실 없이 디코드됐음을 확인한 뒤 UTF-8로 다시 부호화하므로 같은 바이트다).
+ * 해시는 그 바이트의 SHA-256이다(UTF-8 디코드는 잘못된 바이트를 대체 문자로만 바꾸므로, 대체 문자가 없으면 디코드가 손실 없고 다시
+ * 부호화한 바이트가 원래 바이트와 같다).
  */
 export const readContractSource = async (
   repoPath: string,
@@ -124,7 +126,6 @@ export const readContractSource = async (
   } catch {
     return { ok: false, code: 'base_unreadable' };
   }
-  if (!COMMIT.test(commit)) return { ok: false, code: 'base_unreadable' };
   let listing: string;
   try {
     listing = (
@@ -148,9 +149,8 @@ export const readContractSource = async (
   if (type !== 'blob' || (mode !== '100644' && mode !== '100755') || object === undefined) {
     return { ok: false, code: 'not_regular_file' };
   }
-  const bytes = Number(size);
-  if (!Number.isSafeInteger(bytes) || bytes < 0) return { ok: false, code: 'base_unreadable' };
-  if (bytes > CONTRACT_SOURCE_MAX_BYTES) return { ok: false, code: 'too_large' };
+  // 크기를 읽지 못하면(숫자가 아님) 상한 초과로 본다 (닫힌 쪽)
+  if (!(Number(size) <= CONTRACT_SOURCE_MAX_BYTES)) return { ok: false, code: 'too_large' };
   let text: string;
   try {
     text = (await git(['--no-replace-objects', 'cat-file', 'blob', object], { cwd: repoPath }))
@@ -158,9 +158,7 @@ export const readContractSource = async (
   } catch {
     return { ok: false, code: 'base_unreadable' };
   }
-  if (text.includes('�') || Buffer.byteLength(text, 'utf8') !== bytes) {
-    return { ok: false, code: 'not_text' };
-  }
+  if (text.includes(REPLACEMENT_CHARACTER)) return { ok: false, code: 'not_text' };
   return { ok: true, commit, contentHash: sha256(text) };
 };
 

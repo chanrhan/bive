@@ -18,6 +18,7 @@ import {
 import { ConflictError, type ProjectStore } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { confirmHumanContractRegistration } from '../src/confirmations/confirmation-service.js';
 import type { PipeServer } from '../src/ipc/server.js';
 import { retireAgentRule } from '../src/norms/agent-rule.js';
 import {
@@ -612,6 +613,15 @@ describe('에이전트 반영: 미확인 · 규범 변경 기록에만 (수용 �
         /같은 파일/,
       );
       expect(footprint(store)).toMatchObject({ contracts: 1, rules: 1 });
+      // 확인 서비스는 에이전트가 반영한 계약을 등록으로 확인됨으로 두지 않는다 (-32020, 확인 상태 그대로)
+      const [contract] = store.contracts.list();
+      if (contract === undefined) throw new Error('계약 없음');
+      expect(() => confirmHumanContractRegistration(store, contract)).toThrow(
+        expect.objectContaining({ code: -32020 }),
+      );
+      expect(store.confirmations.get({ entity: 'Contract', id: contract.id })).toEqual({
+        state: 'unconfirmed',
+      });
     });
   });
 });

@@ -7,7 +7,7 @@
 import { Contract, UNCONFIRMED } from '@bive/shared';
 
 import { withTransaction, type SqliteDatabase } from '../database.js';
-import { ConflictError, NotFoundError, isUniqueViolation } from '../errors.js';
+import { ConflictError, NotFoundError } from '../errors.js';
 import {
   type ConfirmationColumns,
   confirmationJoin,
@@ -117,32 +117,29 @@ export class ContractRepository {
           );
         }
       }
+      // 같은 키 · 파일은 덮어쓰기 금지 트리거보다 먼저 저장소 오류로 거른다 (트리거 오류는 상태 충돌로 읽히지 않는다)
       if (this.#selectByFile.get(input.sourceFile) !== undefined) {
         throw new ConflictError(ENTITY, input.sourceFile, '같은 파일의 계약이 이미 있습니다');
+      }
+      if (this.#select.get(input.id) !== undefined) {
+        throw new ConflictError(ENTITY, input.id, '이미 있습니다');
       }
       const contract = Contract.parse({
         ...input,
         displayId: this.#sequences.nextDisplayId('CON'),
         confirmation: UNCONFIRMED,
       });
-      try {
-        this.#insert.run({
-          id: contract.id,
-          display_id: contract.displayId,
-          kind: contract.kind,
-          source_file: contract.sourceFile,
-          content_hash: contract.contentHash,
-          source_commit: contract.sourceCommit,
-          parent_requirement_id: contract.parentRequirementId,
-          author: JSON.stringify(contract.author),
-          created_at: contract.createdAt,
-        });
-      } catch (error) {
-        if (isUniqueViolation(error)) {
-          throw new ConflictError(ENTITY, input.id, '이미 있습니다', { cause: error });
-        }
-        throw error;
-      }
+      this.#insert.run({
+        id: contract.id,
+        display_id: contract.displayId,
+        kind: contract.kind,
+        source_file: contract.sourceFile,
+        content_hash: contract.contentHash,
+        source_commit: contract.sourceCommit,
+        parent_requirement_id: contract.parentRequirementId,
+        author: JSON.stringify(contract.author),
+        created_at: contract.createdAt,
+      });
       return contract;
     });
   }
