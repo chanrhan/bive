@@ -26,10 +26,10 @@ PATH="$work/bin:$PATH" "$here/reset-fixture.sh" "$fx" > /dev/null
 fail=0
 commits() { g -C "$1" rev-list --count HEAD 2> /dev/null || echo none; }
 
-# 거부: 기대 종료 코드, 안내 한 줄, 대상의 커밋 수 · 파일 목록이 그대로
+# 거부: 기대 종료 코드, 기대 글이 든 안내 한 줄, 대상의 커밋 수 · 파일 목록이 그대로
 check_refused() {
-  local label="$1" expected="$2" probe="$3" script="$4"
-  shift 4
+  local label="$1" expected="$2" want="$3" probe="$4" script="$5"
+  shift 5
   local before_commits before_files code=0 err
   before_commits="$(commits "$probe")"
   before_files="$(cd "$probe" && find . -path ./.git -prune -o -type f -print | sort | md5sum)"
@@ -39,7 +39,7 @@ check_refused() {
   if [[ "$code" -ne "$expected" ]]; then
     echo "실패: $label 종료 코드 $code (기대 $expected)"
     fail=1
-  elif [[ "$(printf '%s\n' "$err" | wc -l)" -ne 1 || -z "$err" ]]; then
+  elif [[ "$(printf '%s\n' "$err" | wc -l)" -ne 1 || "$err" != *"$want"* ]]; then
     echo "실패: $label 안내가 한 줄이 아님: $err"
     fail=1
   elif [[ "$(commits "$probe")" != "$before_commits" || "$after_files" != "$before_files" ]]; then
@@ -51,35 +51,39 @@ check_refused() {
 }
 
 mv="$here/make-variant.sh"
-check_refused '인자 없음' 2 "$fx" "$mv"
-check_refused '인자 셋' 2 "$fx" "$mv" "$fx" cycle extra
-check_refused '모르는 이름' 1 "$fx" "$mv" "$fx" no-such-variant
-check_refused '없는 폴더' 1 "$fx" "$mv" "$work/none" cycle
-check_refused '원본 픽스처' 1 "$repo/fixtures/sample-next-app" "$mv" "$repo/fixtures/sample-next-app" cycle
+check_refused '인자 없음' 2 '사용법' "$fx" "$mv"
+check_refused '인자 셋' 2 '사용법' "$fx" "$mv" "$fx" cycle extra
+check_refused '모르는 이름' 1 '모르는 변형' "$fx" "$mv" "$fx" no-such-variant
+check_refused '없는 폴더' 1 '폴더 없음' "$fx" "$mv" "$work/none" cycle
+check_refused '원본 픽스처' 1 '저장소 안의 폴더' "$repo/fixtures/sample-next-app" "$mv" "$repo/fixtures/sample-next-app" cycle
 
 # 저장소 안의 폴더: 가짜 저장소 안에 픽스처 사본 모양의 git 저장소를 두어도 거부한다
 mkdir -p "$work/repo/scripts" "$work/repo/fixtures"
 cp "$mv" "$work/repo/scripts/"
 cp -a "$fx" "$work/repo/fixtures/sample-next-app"
-check_refused '저장소 안 사본' 1 "$work/repo/fixtures/sample-next-app" \
+check_refused '저장소 안 사본' 1 '저장소 안의 폴더' "$work/repo/fixtures/sample-next-app" \
   "$work/repo/scripts/make-variant.sh" "$work/repo/fixtures/sample-next-app" cycle
 
 # 픽스처 사본이 아닌 폴더
 plain="$work/plain"
 mkdir -p "$plain"
 cp "$fx/package.json" "$plain/"
-check_refused 'git 저장소 아님' 1 "$plain" "$mv" "$plain" cycle
+check_refused 'git 저장소 아님' 1 '최상위가 아님' "$plain" "$mv" "$plain" cycle
 sub="$work/sub"
 cp -a "$fx" "$sub"
+# 하위 폴더에도 픽스처 package.json을 커밋해 두어 최상위 검사만 이것을 거부하게 한다
 mkdir -p "$sub/inner"
-check_refused '저장소 최상위 아님' 1 "$sub" "$mv" "$sub/inner" cycle
+cp "$fx/package.json" "$sub/inner/"
+g -C "$sub" add -A
+g -C "$sub" commit -q -m inner
+check_refused '저장소 최상위 아님' 1 '최상위가 아님' "$sub" "$mv" "$sub/inner" cycle
 other="$work/other"
 cp -a "$fx" "$other"
 rm -rf "$other/.git"
 g -C "$other" init -q -b main
 g -C "$other" add -A
 g -C "$other" commit -q -m 'something else'
-check_refused '첫 커밋이 다름' 1 "$other" "$mv" "$other" cycle
+check_refused '첫 커밋이 다름' 1 'fixture: initial' "$other" "$mv" "$other" cycle
 renamed="$work/renamed"
 cp -a "$fx" "$renamed"
 rm -rf "$renamed/.git"
@@ -87,16 +91,16 @@ sed -i 's/"name": "sample-next-app"/"name": "other-app"/' "$renamed/package.json
 g -C "$renamed" init -q -b main
 g -C "$renamed" add -A
 g -C "$renamed" commit -q -m 'fixture: initial'
-check_refused '다른 package.json' 1 "$renamed" "$mv" "$renamed" cycle
+check_refused '다른 package.json' 1 'package.json' "$renamed" "$mv" "$renamed" cycle
 
 # 더러운 작업 트리 (고친 파일 · 추적하지 않는 파일)
 dirty="$work/dirty"
 cp -a "$fx" "$dirty"
 echo '// dirty' >> "$dirty/src/lib/db.ts"
-check_refused '고친 파일' 1 "$dirty" "$mv" "$dirty" cycle
+check_refused '고친 파일' 1 '깨끗하지 않음' "$dirty" "$mv" "$dirty" cycle
 g -C "$dirty" checkout -q -- src/lib/db.ts
 echo 'x' > "$dirty/untracked.txt"
-check_refused '추적하지 않는 파일' 1 "$dirty" "$mv" "$dirty" cycle
+check_refused '추적하지 않는 파일' 1 '깨끗하지 않음' "$dirty" "$mv" "$dirty" cycle
 
 # 위반 수: 원본 0건, 변형마다 커밋 하나 · 정확히 1건, 되돌리면 0건
 violations() { node "$here/variant-violations.mjs" "$fx" "$blocks"; }
