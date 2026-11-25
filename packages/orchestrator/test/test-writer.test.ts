@@ -11,7 +11,7 @@ import path from 'node:path';
 
 import type { Rule, RunStatus, StepKind, TestCaseStatus } from '@bive/shared';
 import type { ProjectStore, RunDetail } from '@bive/store';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentAdapter, SessionSpec } from '../src/agent/adapter.js';
 import { loadScenario } from '../src/agent/scenario.js';
@@ -62,7 +62,14 @@ import {
 import {
   applyTestWriterOutputs,
   exportedMethods,
+  isSafeRouteSegment,
   listAppRoutes,
+  prepareTestWriterInputs,
+  PRISMA_SCHEMA_MAX_BYTES,
+  renderRoutes,
+  type RouteEntry,
+  ROUTES_LIMITS,
+  ROUTES_NOTICES,
 } from '../src/test-writer/inputs.js';
 import { testWriterTaskPrompt } from '../src/test-writer/prompts.js';
 import {
@@ -630,6 +637,392 @@ describe('세션 작업 디렉터리 · 쓰기 범위 (수용 기준 1, ADR-024)
     // 대상 폴더 밖 파일은 그대로 (링크를 따라가면 결과에 없는 기존 *.acc.ts로 보고 지웠다)
     expect(fs.readdirSync(path.join(outside, 'RULE-001'))).toEqual(['victim.acc.ts']);
     expect(fs.readFileSync(path.join(outside, 'RULE-001', 'victim.acc.ts'), 'utf8')).toBe('victim');
+  });
+});
+
+// ── M3-50 (#295): 구현 산출 입력의 방어 (라우트 목록 · 데이터 스키마 사본, ADR-131) ─────────
+
+/** 빈 워크트리 · 세션 디렉터리. */
+const inputDirs = (): { root: string; worktree: string; sessionDir: string } => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tw-in.'));
+  temps.push(root);
+  const worktree = path.join(root, 'worktree');
+  const sessionDir = path.join(root, 'session');
+  fs.mkdirSync(worktree);
+  fs.mkdirSync(sessionDir);
+  return { root, worktree, sessionDir };
+};
+
+/** 워크트리 기준 폴더에 `page.tsx`를 둔다. */
+const putPage = (worktree: string, ...folders: string[]): void => {
+  const dir = path.join(worktree, ...folders);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'page.tsx'), 'export default function Page() { return null; }\n');
+};
+
+/** 입력 사본을 만들고 `routes.md` · 스키마 사본(없으면 `null`) · 파일 목록을 돌려준다. */
+const prepared = (
+  worktree: string,
+  sessionDir: string,
+): { routes: string; schema: Buffer | null; files: string[] } => {
+  const result = prepareTestWriterInputs({ worktree, sessionDir, rules: [] });
+  const schemaPath = path.join(sessionDir, 'prisma', 'schema.prisma');
+  return {
+    routes: fs.readFileSync(path.join(sessionDir, 'routes.md'), 'utf8'),
+    schema: fs.existsSync(schemaPath) ? fs.readFileSync(schemaPath) : null,
+    files: result.files,
+  };
+};
+
+const ROUTES_HEAD = [
+  '# 라우트 목록',
+  '',
+  'BIVE가 프로젝트의 Next.js App Router 파일 위치에서 만든 목록이다. 판정 서버에는 이 경로로 HTTP 요청만 보낸다.',
+  '',
+];
+
+const routesText = (...lines: string[]): string => `${[...ROUTES_HEAD, ...lines].join('\n')}\n`;
+
+/** `renderRoutes`에 넘기는 페이지 항목 (폴더 이름 = 경로 조각). */
+const pageEntry = (urlPath: string): RouteEntry => {
+  const folders = urlPath.split('/').filter((s) => s !== '');
+  return {
+    path: urlPath,
+    kind: 'page',
+    methods: [],
+    file: `app/${folders.join('/')}/page.tsx`,
+    folders,
+  };
+};
+
+describe('테스트 작성 세션의 구현 산출 입력 방어 (M3-50 #295, ADR-131)', () => {
+  it('픽스처의 실제 라우트는 모두 그대로 실린다 (머리 안내 없음)', () => {
+    const repo = copyFixture(temps);
+    expect(renderRoutes(listAppRoutes(repo))).toBe(
+      routesText('- 페이지 GET /', '- API GET /api/auth/session', '- API GET /api/health'),
+    );
+  });
+
+  it('안전한 조각 패턴: Next.js 폴더 표기는 받고, 줄 나눔 · 제어 글자 · 공백 · 따옴표 · 백틱 · 마크다운 구조 글자 · 비 ASCII · 길이 상한 초과는 받지 않는다', () => {
+    for (const name of [
+      'api',
+      'a_b-c.d',
+      '.well-known',
+      '%5Fescaped',
+      '[id]',
+      '[...slug]',
+      '[[...slug]]',
+      '(group)',
+      '@slot',
+      '(.)photo',
+      '(..)photo',
+      '(..)(..)photo',
+      '(...)photo',
+      'a'.repeat(ROUTES_LIMITS.segment),
+    ]) {
+      expect([name, isSafeRouteSegment(name)]).toEqual([name, true]);
+    }
+    for (const name of [
+      '',
+      'a\nb',
+      'a\rb',
+      'a\u2028b',
+      'a\u0007b',
+      'a\tb',
+      'a b',
+      'a"b',
+      "a'b",
+      'a`b',
+      '#h',
+      '*s',
+      '<t>',
+      'a|b',
+      'a!b',
+      'a~b',
+      'a\\b',
+      'ü',
+      '\u200b',
+      '[id',
+      '[a](b)',
+      '(a)(b)',
+      '[[id]]',
+      '[...a b]',
+      'a'.repeat(ROUTES_LIMITS.segment + 1),
+      '(..)'.repeat(1000),
+      // 끝 줄 나눔 · 끝 공백 (패턴 끝 자리)
+      'a\n',
+      '[x]\n',
+      '(g)\n',
+      '@s\n',
+      'a\r',
+      'a ',
+    ]) {
+      expect([name, isSafeRouteSegment(name)]).toEqual([name, false]);
+    }
+  });
+
+  it('패턴 밖 폴더 이름(경로 그룹 포함)이 하나라도 든 경로는 통째로 싣지 않고 수만 적는다', () => {
+    const { worktree, sessionDir } = inputDirs();
+    putPage(worktree, 'app');
+    putPage(worktree, 'app', 'ok', '[id]');
+    putPage(worktree, 'app', '(shop)', '[...slug]');
+    putPage(worktree, 'app', 'a\nb');
+    putPage(worktree, 'app', 'ok', 'x\r\n- API GET /admin');
+    putPage(worktree, 'app', 'x y');
+    putPage(worktree, 'app', 'q`b');
+    putPage(worktree, 'app', '(g\nroup)', 'inner');
+    putPage(worktree, 'app', 'u\u2028v');
+    putPage(worktree, 'app', 'b\u0007c');
+    putPage(worktree, 'app', 'z'.repeat(ROUTES_LIMITS.segment + 1));
+    const { routes } = prepared(worktree, sessionDir);
+    expect(routes).toBe(
+      routesText(
+        ROUTES_NOTICES.unsafe(8),
+        '',
+        '- 페이지 GET /',
+        '- 페이지 GET /[...slug]',
+        '- 페이지 GET /ok/[id]',
+      ),
+    );
+    expect(ROUTES_NOTICES.unsafe(8)).toBe(
+      '(싣지 않은 경로 8건: 폴더 이름이 안전한 경로 글자 밖이거나 길이 상한(폴더 이름 100자 · 경로 200자)을 넘음)',
+    );
+    // 원문 조각은 어디에도 없다
+    for (const piece of ['admin', 'inner', 'q`b', 'x y', '\r', '\u2028', '\u0007', 'zzz']) {
+      expect([piece, routes.includes(piece)]).toEqual([piece, false]);
+    }
+  });
+
+  it('경로 길이: 상한과 같으면 싣고 하나 넘으면 싣지 않는다', () => {
+    const at = `/${'a'.repeat(99)}/${'b'.repeat(99)}`;
+    const over = `/${'c'.repeat(99)}/${'d'.repeat(100)}`;
+    expect([at.length, over.length]).toEqual([ROUTES_LIMITS.path, ROUTES_LIMITS.path + 1]);
+    expect(renderRoutes([pageEntry(at), pageEntry(over)])).toBe(
+      routesText(ROUTES_NOTICES.unsafe(1), '', `- 페이지 GET ${at}`),
+    );
+  });
+
+  it('항목 수 상한: 상한과 같으면 모두 싣고, 하나 넘으면 경로 순 앞에서부터 상한까지 싣고 넘친 수를 머리에 적는다', () => {
+    const name = (i: number): string => `/p${String(i).padStart(2, '0')}`;
+    const at = Array.from({ length: ROUTES_LIMITS.entries }, (_, i) => pageEntry(name(i)));
+    expect(renderRoutes(at)).toBe(routesText(...at.map((e) => `- 페이지 GET ${e.path}`)));
+    const over = Array.from({ length: ROUTES_LIMITS.entries + 1 }, (_, i) => pageEntry(name(i)));
+    expect(renderRoutes(over)).toBe(
+      routesText(
+        ROUTES_NOTICES.overflow(1),
+        '',
+        ...over.slice(0, ROUTES_LIMITS.entries).map((e) => `- 페이지 GET ${e.path}`),
+      ),
+    );
+    expect(ROUTES_NOTICES.overflow(1)).toBe(
+      '(상한을 넘어 싣지 않은 경로 1건: 상한 50건 · 4000자, 경로 순으로 앞에서부터 실음)',
+    );
+  });
+
+  it('글자 수 상한: 항목 줄(줄바꿈 포함) 합이 상한과 같으면 모두 싣고, 하나 넘으면 넘는 항목부터 싣지 않는다', () => {
+    // 줄 `- 페이지 GET <경로>` = 10 + 경로 길이, 줄바꿈 1. 경로 189자 × 20줄 = 4000자
+    const entry = (i: number, extra = 0): RouteEntry =>
+      pageEntry(`/p${String(i).padStart(2, '0')}${'a'.repeat(91 + extra)}/${'b'.repeat(93)}`);
+    const at = Array.from({ length: 20 }, (_, i) => entry(i));
+    expect(at.reduce((sum, e) => sum + `- 페이지 GET ${e.path}`.length + 1, 0)).toBe(
+      ROUTES_LIMITS.chars,
+    );
+    expect(renderRoutes(at)).toBe(routesText(...at.map((e) => `- 페이지 GET ${e.path}`)));
+    const over = [entry(0, 1), ...at.slice(1)];
+    expect(renderRoutes(over)).toBe(
+      routesText(
+        ROUTES_NOTICES.overflow(1),
+        '',
+        ...over.slice(0, 19).map((e) => `- 페이지 GET ${e.path}`),
+      ),
+    );
+    // 상한에 닿으면 멈춘다: 넘는 항목 뒤(경로 순)의 짧은 경로도 건너뛰어 싣지 않고 넘친 수에 든다
+    const tail = [...over, pageEntry('/q')];
+    expect(renderRoutes(tail)).toBe(
+      routesText(
+        ROUTES_NOTICES.overflow(2),
+        '',
+        ...over.slice(0, 19).map((e) => `- 페이지 GET ${e.path}`),
+      ),
+    );
+  });
+
+  it('순서는 입력 순서 · 로캘과 무관하게 경로 → 종류의 코드 단위 순이고, 넘칠 때도 그 순서로 앞에서부터 싣는다', () => {
+    const name = (i: number): string => `/p${String(i).padStart(2, '0')}`;
+    const entries = Array.from({ length: ROUTES_LIMITS.entries - 2 }, (_, i) => pageEntry(name(i)));
+    const route: RouteEntry = { ...pageEntry('/B'), kind: 'route', methods: ['GET'] };
+    const mixed = [...entries, pageEntry('/a'), route, pageEntry('/B')].reverse();
+    expect(renderRoutes(mixed)).toBe(
+      routesText(
+        ROUTES_NOTICES.overflow(1),
+        '',
+        '- 페이지 GET /B',
+        '- API GET /B',
+        '- 페이지 GET /a',
+        ...entries.slice(0, ROUTES_LIMITS.entries - 3).map((e) => `- 페이지 GET ${e.path}`),
+      ),
+    );
+  });
+
+  it('src가 일반 파일이면 던지지 않고 라우트 없음이다', () => {
+    const { worktree, sessionDir } = inputDirs();
+    fs.writeFileSync(path.join(worktree, 'src'), 'not a folder');
+    expect(listAppRoutes(worktree)).toEqual([]);
+    expect(prepared(worktree, sessionDir).routes).toBe(routesText('(라우트 없음)'));
+  });
+
+  it('라우트 나열은 링크 폴더를 따라가지 않는다: src가 링크면 src/app을 읽지 않고, 앱 폴더 안 링크 폴더도 건너뛴다', () => {
+    const { root, worktree, sessionDir } = inputDirs();
+    const outside = path.join(root, 'outside');
+    putPage(outside, 'app', 'secret');
+    putPage(outside, 'linked');
+    fs.symlinkSync(outside, path.join(worktree, 'src'));
+    expect(listAppRoutes(worktree)).toEqual([]);
+    expect(prepared(worktree, sessionDir).routes).toBe(routesText('(라우트 없음)'));
+
+    const second = inputDirs();
+    putPage(second.worktree, 'src', 'app', 'real');
+    fs.symlinkSync(outside, path.join(second.worktree, 'src', 'app', 'via-link'));
+    expect(prepared(second.worktree, second.sessionDir).routes).toBe(
+      routesText('- 페이지 GET /real'),
+    );
+  });
+
+  it('스키마 크기 상한: 상한과 같으면 바이트 그대로 사본을 두고, 하나 넘으면 사본 없이 routes.md 머리에 알린다', () => {
+    expect(PRISMA_SCHEMA_MAX_BYTES).toBe(1024 * 1024);
+    const at = inputDirs();
+    fs.mkdirSync(path.join(at.worktree, 'prisma'));
+    const bytes = Buffer.alloc(PRISMA_SCHEMA_MAX_BYTES, 0x61);
+    bytes.write('// é\n', 0, 'utf8');
+    fs.writeFileSync(path.join(at.worktree, 'prisma', 'schema.prisma'), bytes);
+    const kept = prepared(at.worktree, at.sessionDir);
+    expect(kept.schema?.equals(bytes)).toBe(true);
+    expect(kept.routes).toBe(routesText('(라우트 없음)'));
+
+    const over = inputDirs();
+    fs.mkdirSync(path.join(over.worktree, 'prisma'));
+    fs.writeFileSync(
+      path.join(over.worktree, 'prisma', 'schema.prisma'),
+      Buffer.alloc(PRISMA_SCHEMA_MAX_BYTES + 1, 0x61),
+    );
+    // 상한 넘는 파일은 열지도 않는다 (크기를 읽기 전에 본다)
+    const openSpy = vi.spyOn(fs, 'openSync');
+    let dropped: ReturnType<typeof prepared>;
+    try {
+      dropped = prepared(over.worktree, over.sessionDir);
+      expect(
+        openSpy.mock.calls.filter(([p]) =>
+          String(p).endsWith(path.join('prisma', 'schema.prisma')),
+        ),
+      ).toEqual([]);
+    } finally {
+      openSpy.mockRestore();
+    }
+    expect(dropped.schema).toBeNull();
+    expect(dropped.files).toEqual(['routes.md']);
+    expect(dropped.routes).toBe(
+      routesText(ROUTES_NOTICES.schema.too_large(PRISMA_SCHEMA_MAX_BYTES), '', '(라우트 없음)'),
+    );
+    expect(ROUTES_NOTICES.schema.too_large(PRISMA_SCHEMA_MAX_BYTES)).toBe(
+      '(데이터 스키마 사본 없음: prisma/schema.prisma가 크기 상한 1048576바이트를 넘음)',
+    );
+  });
+
+  it('스키마 크기 확인 뒤 파일이 커져도 읽은 바이트 수로 다시 막는다', () => {
+    const { worktree, sessionDir } = inputDirs();
+    fs.mkdirSync(path.join(worktree, 'prisma'));
+    const target = path.join(worktree, 'prisma', 'schema.prisma');
+    fs.writeFileSync(target, Buffer.alloc(PRISMA_SCHEMA_MAX_BYTES + 1, 0x61));
+    // 크기 확인(lstat) 때는 작은 파일이었던 것처럼 보이게 한다
+    const realLstat = fs.lstatSync.bind(fs);
+    const spy = vi.spyOn(fs, 'lstatSync').mockImplementation(((p: fs.PathLike, o?: unknown) => {
+      const stat = realLstat(p, o as fs.StatSyncOptions);
+      if (stat === undefined || String(p) !== target) return stat;
+      return Object.assign(Object.create(Object.getPrototypeOf(stat) as object) as fs.Stats, stat, {
+        size: 10,
+      });
+    }) as typeof fs.lstatSync);
+    try {
+      const result = prepared(worktree, sessionDir);
+      expect(spy).toHaveBeenCalledWith(target, expect.anything());
+      expect(result.schema).toBeNull();
+      expect(result.routes).toBe(
+        routesText(ROUTES_NOTICES.schema.too_large(PRISMA_SCHEMA_MAX_BYTES), '', '(라우트 없음)'),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('상위 prisma 폴더가 링크면 (작업 공간 안 · 밖 어디를 가리키든) 스키마 사본을 두지 않고 알린다', () => {
+    for (const where of ['inside', 'outside'] as const) {
+      const { root, worktree, sessionDir } = inputDirs();
+      const real = where === 'inside' ? path.join(worktree, 'db') : path.join(root, 'elsewhere');
+      fs.mkdirSync(real);
+      fs.writeFileSync(path.join(real, 'schema.prisma'), 'model User { id Int @id }\n');
+      fs.symlinkSync(real, path.join(worktree, 'prisma'));
+      const result = prepared(worktree, sessionDir);
+      expect([where, result.schema]).toEqual([where, null]);
+      expect(result.files).toEqual(['routes.md']);
+      expect(result.routes).toBe(
+        routesText(ROUTES_NOTICES.schema.not_regular, '', '(라우트 없음)'),
+      );
+    }
+  });
+
+  it('스키마 파일을 열지 못하면 사본 없이 그 까닭을 가려 알린다: 링크로 바뀜(ELOOP)은 링크, 그 밖(권한 등)은 읽지 못함', () => {
+    for (const [code, notice] of [
+      ['EACCES', ROUTES_NOTICES.schema.unreadable],
+      ['ELOOP', ROUTES_NOTICES.schema.not_regular],
+    ] as const) {
+      const { worktree, sessionDir } = inputDirs();
+      fs.mkdirSync(path.join(worktree, 'prisma'));
+      const target = path.join(worktree, 'prisma', 'schema.prisma');
+      fs.writeFileSync(target, 'model A { id Int @id }\n');
+      const realOpen = fs.openSync.bind(fs);
+      const spy = vi.spyOn(fs, 'openSync').mockImplementation(((
+        p: fs.PathLike,
+        ...rest: unknown[]
+      ) => {
+        if (String(p) === target) {
+          throw Object.assign(new Error(code), { code });
+        }
+        return (realOpen as (...args: unknown[]) => number)(p, ...rest);
+      }) as typeof fs.openSync);
+      try {
+        const result = prepared(worktree, sessionDir);
+        expect([code, result.schema]).toEqual([code, null]);
+        expect([code, result.routes]).toEqual([code, routesText(notice, '', '(라우트 없음)')]);
+      } finally {
+        spy.mockRestore();
+      }
+    }
+    expect(ROUTES_NOTICES.schema.unreadable).toBe(
+      '(데이터 스키마 사본 없음: prisma/schema.prisma를 읽지 못함)',
+    );
+  });
+
+  it('스키마 파일 자체가 링크면 사본을 두지 않고 알리며, prisma가 일반 파일이거나 스키마가 없으면 알림 없이 사본만 없다', () => {
+    const linked = inputDirs();
+    fs.mkdirSync(path.join(linked.worktree, 'prisma'));
+    fs.writeFileSync(path.join(linked.root, 'real.prisma'), 'model A { id Int @id }\n');
+    fs.symlinkSync(
+      path.join(linked.root, 'real.prisma'),
+      path.join(linked.worktree, 'prisma', 'schema.prisma'),
+    );
+    const viaLink = prepared(linked.worktree, linked.sessionDir);
+    expect(viaLink.schema).toBeNull();
+    expect(viaLink.routes).toBe(routesText(ROUTES_NOTICES.schema.not_regular, '', '(라우트 없음)'));
+
+    const asFile = inputDirs();
+    fs.writeFileSync(path.join(asFile.worktree, 'prisma'), 'not a folder');
+    const plain = prepared(asFile.worktree, asFile.sessionDir);
+    expect([plain.schema, plain.routes]).toEqual([null, routesText('(라우트 없음)')]);
+
+    const empty = inputDirs();
+    fs.mkdirSync(path.join(empty.worktree, 'prisma'));
+    const none = prepared(empty.worktree, empty.sessionDir);
+    expect([none.schema, none.routes]).toEqual([null, routesText('(라우트 없음)')]);
   });
 });
 
