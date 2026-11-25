@@ -198,7 +198,7 @@ export type StructureRun =
   /** 판정하지 않고 실행을 끝낸다 (겹침 · 구현 역할이 고칠 수 없는 오류) */
   | {
       readonly kind: 'halt';
-      readonly reason: string;
+      readonly reason: typeof BLOCK_DECLARATION_OVERLAP_REASON | typeof JUDGE_RUNNER_ERROR_REASON;
       readonly summary: StructureSummary;
       readonly message: string;
     };

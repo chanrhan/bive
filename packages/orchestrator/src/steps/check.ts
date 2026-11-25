@@ -25,6 +25,7 @@ import { effectiveRules } from '../norms/effective.js';
 import { contradictionHalt, judgeExistingRuleFailures } from './existing-rule.js';
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
 import {
+  BLOCK_DECLARATION_OVERLAP_REASON,
   readStructurePlan,
   STRUCTURE_STAGE,
   structureJudgmentsFrom,
@@ -148,13 +149,18 @@ export const createCheckExecutor =
           message: '판정할 승인된 규칙의 인수 테스트가 없습니다',
           ruleDirs: judged.ruleDirs,
         });
-      case 'structure_halt':
-        return halt(judged.structure.reason, {
+      case 'structure_halt': {
+        // 구조 검사가 판정하지 못했다: 겹침(사람이 선언을 고칠 일) · 구현 역할이 고칠 수 없는 실행기 오류
+        const structure = {
           ...base,
           stage: STRUCTURE_STAGE,
           message: judged.structure.message,
           structure: judged.structure.summary,
-        });
+        };
+        return judged.structure.reason === BLOCK_DECLARATION_OVERLAP_REASON
+          ? halt(BLOCK_DECLARATION_OVERLAP_REASON, structure)
+          : halt(JUDGE_RUNNER_ERROR_REASON, structure);
+      }
       case 'judged':
         break;
     }
