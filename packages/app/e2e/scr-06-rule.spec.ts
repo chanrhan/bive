@@ -463,7 +463,7 @@ test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
   }
 
   for (const width of [1280, WIDE_WIDTH] as const) {
-    test(`${width}px 창의 머리 배치는 이전과 같다: 보통 제목은 한 줄, 1440px에서는 표시 ID · 판정 배지가 제목 옆, 버튼은 오른쪽 끝 (#201)`, async ({
+    test(`${width}px 창의 머리 배치는 이전과 같다: 보통 제목은 한 줄, 표시 ID는 제목 바로 뒤(8px) 또는 다음 줄 왼쪽 끝, 판정 배지는 표시 ID 바로 뒤, 버튼은 오른쪽 끝 (#201)`, async ({
       page,
     }) => {
       await page.setViewportSize({ width, height: 800 });
@@ -479,18 +479,21 @@ test.describe('좁은 창의 목록 · 상세 배치 (#179, ADR-090)', () => {
       // 동작 묶음은 머리 오른쪽 끝
       expect(boxes.actions.x + boxes.actions.width, `${width}`).toBeCloseTo(boxes.head.width, 0);
       const middle = (box: { y: number; height: number }): number => box.y + box.height / 2;
-      if (width === WIDE_WIDTH) {
-        // 448px 상세: 표시 ID · 판정 배지는 제목과 같은 줄, 제목 바로 뒤 8px
-        expect(Math.abs(middle(boxes.id) - middle(boxes.title))).toBeLessThan(4);
-        expect(Math.abs(middle(boxes.badge) - middle(boxes.title))).toBeLessThan(4);
-        expect(boxes.id.x).toBeCloseTo(boxes.title.x + boxes.title.width + 8, 0);
+      // 줄 바꿈 위치는 글꼴 폭에 따라 다르다(CI와 이 VM의 한글 글꼴 폭이 다름). 그래서 어느 경우든 지켜지는 이전 배치를 본다:
+      // 표시 ID는 제목과 같은 줄이면 제목 바로 뒤 8px, 아니면 다음 줄 왼쪽 끝. 판정 배지는 표시 ID와 같은 줄 바로 뒤 8px
+      const idSameRow = Math.abs(middle(boxes.id) - middle(boxes.title)) < 4;
+      if (idSameRow) {
+        expect(boxes.id.x, `${width}`).toBeCloseTo(boxes.title.x + boxes.title.width + 8, 0);
       } else {
-        // 288px 상세: 표시 ID부터 다음 줄 왼쪽에서 시작하고 판정 배지 · 버튼과 한 줄
-        expect(boxes.id.x).toBe(0);
-        expect(boxes.id.y).toBeGreaterThanOrEqual(boxes.title.y + boxes.title.height - 1);
-        expect(Math.abs(middle(boxes.badge) - middle(boxes.id))).toBeLessThan(4);
-        expect(Math.abs(middle(boxes.actions) - middle(boxes.id))).toBeLessThan(8);
+        expect(boxes.id.x, `${width}`).toBe(0);
+        expect(boxes.id.y, `${width}`).toBeGreaterThanOrEqual(
+          boxes.title.y + boxes.title.height - 1,
+        );
       }
+      expect(Math.abs(middle(boxes.badge) - middle(boxes.id)), `${width}`).toBeLessThan(4);
+      expect(boxes.badge.x, `${width}`).toBeCloseTo(boxes.id.x + boxes.id.width + 8, 0);
+      // 448px 상세(1440px 창)에서는 표시 ID가 제목 옆에 들어간다
+      if (width === WIDE_WIDTH) expect(idSameRow).toBe(true);
       await page.screenshot({
         path: `${SCREENSHOT_DIR}SCR-06/규칙-머리-보통-제목-${width}.png`,
         fullPage: true,
