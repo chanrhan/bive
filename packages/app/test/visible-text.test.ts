@@ -44,6 +44,14 @@ describe('visibleLines (여러 줄 메시지)', () => {
     expect(visibleLines('첫 줄\u200b\n둘째 \u202e줄')).toBe('첫 줄\\u200b\n둘째 \\u202e줄');
     expect(visibleLines('a\r\nb\tc')).toBe('a\\r\nb\\tc');
   });
+
+  it('줄 구분(U+2028) · 문단 구분(U+2029)은 줄을 만들지 않고 표기로 (줄은 LF만, M3-35 #263)', () => {
+    const shown = visibleLines('첫 줄\u2028둘째\u2029셋째\n넷째');
+    expect(shown).toBe('첫 줄\\u2028둘째\\u2029셋째\n넷째');
+    // 결과에 남는 줄 나눔 글자는 LF 하나뿐이다 (CR · VT · FF · NEL · U+2028 · U+2029 없음)
+    expect(shown.split('\n')).toHaveLength(2);
+    expect(shown).not.toMatch(/[\r\v\f\u0085\u2028\u2029]/);
+  });
 });
 
 /** 오케스트레이터 `displayText`의 모양 (패키지 경계 밖이라 경로로 불러온다, 형식만 적는다). */

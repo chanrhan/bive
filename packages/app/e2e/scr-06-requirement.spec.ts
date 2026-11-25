@@ -703,7 +703,7 @@ test.describe('펼친 자식 규칙의 직접 편집 (#215 수용 기준 3, ADR-
     await expect(row.getByTestId('child-rule-toggle')).toContainText(newTitle);
     await expect(page.getByTestId('requirement-rules')).not.toContainText(FAILING_RULE.title);
     await expect(opened.getByTestId('rule-detail-title')).toHaveText(newTitle);
-    await expect(opened.getByTestId('rule-field-confirmation')).toHaveText('확인확인됨');
+    await expect(opened.getByTestId('rule-field-confirmation')).toHaveText('확인 상태확인됨');
     // 펼침 상태는 그대로이고 다른 자식 규칙 줄은 바뀌지 않는다
     await expect(row.getByTestId('child-rule-toggle')).toHaveAttribute('aria-expanded', 'true');
     await expect(childRule(page, PASSING_RULE.displayId)).toContainText(PASSING_RULE.title);

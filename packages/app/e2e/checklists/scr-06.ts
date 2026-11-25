@@ -17,9 +17,10 @@ import type {
   Rule,
   RuleJudgmentEntry,
   RuleWithJudgment,
+  Run,
 } from '@bive/shared';
 
-import { REQUIREMENTS } from './scr-02.js';
+import { PROJECT, REQUIREMENTS } from './scr-02.js';
 import type { ElementCheck, ScreenChecklist } from './types.js';
 
 export { PROJECT } from './scr-02.js';
@@ -161,6 +162,95 @@ export const RULES: RuleWithJudgment[] = [
   { rule: passingRule, judgment: { status: 'pass', latest: latestOf(PASSING_HISTORY) } },
   { rule: failingRule, judgment: { status: 'fail', latest: latestOf(FAILING_HISTORY) } },
   { rule: unjudgedRule, judgment: { status: 'unjudged', latest: null } },
+];
+
+/** 실행 1건 (`run.list` 가짜 응답 항목, 테스트 전용 데이터). */
+const runOf = (displayId: string, patch: Partial<Run>): Run => ({
+  id: `01JE00000000000000000000${displayId.slice(-2)}`,
+  displayId,
+  projectId: PROJECT.id,
+  type: 'A',
+  targetRuleIds: [failingRule.id],
+  status: 'failed',
+  currentStep: null,
+  lastCompletedStep: 'approval',
+  regressionCount: 0,
+  failureReason: null,
+  branch: `bive/${displayId}`,
+  worktreePath: `/work/.bive/${displayId}`,
+  baseBranch: 'main',
+  baseCommit: 'a1f26b1'.padEnd(40, '0'),
+  headCommit: null,
+  mergeCommit: null,
+  budgetSnapshot: {
+    run: { maxBudgetUsd: 5, maxTurns: 200 },
+    roles: { 'test-writer': { maxBudgetUsd: 2, maxTurns: 100 } },
+  },
+  modelSnapshot: { 'test-writer': 'test-model' },
+  costUsd: 0.05,
+  turns: 3,
+  toolManifest: [],
+  startedBy: { kind: 'human' },
+  createdAt: '2026-10-15T01:00:00.000Z',
+  startedAt: '2026-10-15T01:00:01.000Z',
+  endedAt: null,
+  ...patch,
+});
+
+/**
+ * 실행 이력 (M3-35 #263, ADR-123, 테스트 전용 데이터): RULE-002의 판정 기록. EXE-002는 검사(02:00)와 병합 재검사(02:10) 판정
+ * 두 건이다(한 줄로 보이고 병합 재검사 판정을 싣는다).
+ */
+export const RUN_HISTORY_JUDGMENTS: RuleJudgmentEntry[] = [
+  {
+    judgment: judgmentOf(failingRule.id, '01JD0000000000000000000023', {
+      status: 'fail',
+      judgedAt: '2026-10-16T02:10:00.000Z',
+      commit: 'd4e5f6a'.padEnd(40, '0'),
+      runId: RUN_2,
+      cases: [FAILED_CASE, PASSED_CASE],
+    }),
+    runDisplayId: 'EXE-002',
+  },
+  ...FAILING_HISTORY,
+];
+
+/**
+ * 실행 이력의 `run.list` 가짜 응답 (테스트 전용 데이터): EXE-001 병합 완료, EXE-002 기존 규칙 모순, EXE-003 판정 기록 없이 Red
+ * 확인에서 끝남(판정 실행기 오류), EXE-004 하루 예산 초과, EXE-005 표에 없는 옛 사유 값, EXE-006 다른 규칙만 대상.
+ */
+export const RUN_HISTORY_RUNS: Run[] = [
+  runOf('EXE-001', {
+    status: 'merged',
+    lastCompletedStep: 'screen_update',
+    headCommit: 'a1f26b1'.padEnd(40, '0'),
+    mergeCommit: 'e5f6a7b'.padEnd(40, '0'),
+    endedAt: '2026-10-15T02:30:00.000Z',
+  }),
+  runOf('EXE-002', {
+    failureReason: 'existing_rule_contradiction',
+    lastCompletedStep: 'check',
+    endedAt: '2026-10-16T02:20:00.000Z',
+  }),
+  runOf('EXE-003', {
+    failureReason: 'judge_runner_error',
+    lastCompletedStep: 'test_writing',
+    endedAt: '2026-10-17T01:00:00.000Z',
+  }),
+  runOf('EXE-004', {
+    status: 'budget_exceeded',
+    failureReason: 'project_daily_budget_exceeded',
+    endedAt: '2026-10-18T01:00:00.000Z',
+  }),
+  runOf('EXE-005', {
+    failureReason: 'legacy_reason_v0',
+    endedAt: '2026-10-19T01:00:00.000Z',
+  }),
+  runOf('EXE-006', {
+    targetRuleIds: [passingRule.id],
+    failureReason: 'step_error',
+    endedAt: '2026-10-20T01:00:00.000Z',
+  }),
 ];
 
 /** `judgment.list` 가짜 응답: 규칙 ID → 이력. */
@@ -320,7 +410,7 @@ const detail: ElementCheck[] = [
   },
   { label: '생성 주체 (이름)', testId: 'rule-field-author', text: '생성 주체에이전트 · 규칙 작성' },
   // 규칙 작성 역할이 바로 반영한 규칙은 미확인 (ADR-100 D1 · D2). 사람이 고치면 확인됨 (M7-03)
-  { label: '확인 상태 (미확인)', testId: 'rule-field-confirmation', text: '확인미확인확인' },
+  { label: '확인 상태 (미확인)', testId: 'rule-field-confirmation', text: '확인 상태미확인확인' },
   { label: '확인 상태 값', testId: 'rule-confirmation-state', text: '미확인' },
   // 미확인이면 [확인] (사람 주체 confirmation.set, ADR-100 D2 · M7-15)
   { label: '확인 버튼', testId: 'rule-confirm', role: 'button', name: '확인' },

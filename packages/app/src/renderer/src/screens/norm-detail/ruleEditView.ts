@@ -25,7 +25,8 @@ export const RULE_EDIT_TEXT = {
   statementLabel: '규칙 진술 편집',
   save: '저장',
   cancel: '취소',
-  confirmation: '확인',
+  /** 속성 줄 이름. 값(확인됨 · 미확인)과 버튼([확인])에 같은 낱말이 겹치지 않게 '확인 상태'다 (M3-35, ADR-123) */
+  confirmationState: '확인 상태',
   confirmed: '확인됨',
   unconfirmed: '미확인',
   saveFailed: '규칙 저장 실패',

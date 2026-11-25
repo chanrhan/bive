@@ -2,7 +2,7 @@
 // 정상 항목은 2줄째 예외가 비어 있다. 긴 텍스트는 말줄임 + 툴팁(title, 전체 문구).
 // 상태(판정 · 변이)는 정상이면 1줄 앞 흐린 점, 예외면 2줄째 예외(글자 + 색)로 그린다 (1.4 상태 배지).
 // 생성 주체는 아이콘만 (1.4 생성 주체: 목록은 아이콘).
-// 선택: 1줄 앞 종류 태그(`tag`), 2줄 끝 안 읽음 점(`unread`) — 승인 대기 카드 (SCR-17, ADR-056).
+// 선택: 1줄 앞 종류 태그(`tag`) — 확인할 것 카드 (SCR-17 자리, ADR-119). 안 읽음 점은 없다(ADR-119 · ADR-123).
 import './Card2Line.css';
 
 import { AuthorMark } from '../AuthorMark/AuthorMark.js';
@@ -28,7 +28,6 @@ export const Card2Line = ({
   dateTime,
   author,
   tag,
-  unread = false,
   onSelect,
   selected = false,
 }: Card2LineProps): React.JSX.Element => {
@@ -46,15 +45,6 @@ export const Card2Line = ({
     <time className="card-time" dateTime={dateTime}>
       {time}
     </time>
-  );
-  const unreadCell = unread && (
-    <span
-      className="card-unread"
-      data-testid="card-unread"
-      role="img"
-      aria-label="안 읽음"
-      title="안 읽음"
-    />
   );
   const body = (
     <>
@@ -89,18 +79,7 @@ export const Card2Line = ({
             testId="card-exception"
           />
         ))}
-        {time !== null && unread ? (
-          // 시각과 안 읽음 점은 한 덩어리로 줄바꿈된다. 좁은 줄에서 점만 다음 줄 왼쪽에 혼자 남지 않게 (#191, ADR-090)
-          <span className="card-end">
-            {timeCell}
-            {unreadCell}
-          </span>
-        ) : (
-          <>
-            {timeCell}
-            {unreadCell}
-          </>
-        )}
+        {timeCell}
       </span>
     </>
   );
@@ -109,7 +88,6 @@ export const Card2Line = ({
     'data-testid': 'card',
     'data-id': id,
     'data-problem': marks.length > 0 ? 'true' : 'false',
-    'data-unread': unread ? 'true' : 'false',
   };
   return onSelect === undefined ? (
     <div {...common}>{body}</div>

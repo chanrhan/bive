@@ -1,11 +1,14 @@
 // 규칙 상세가 목록 항목 밖에서 더 읽는 값 (SCR-03 상세 · SCR-06, NFR-03: 값은 RPC 결과에서만).
-// - 실행 이력: `judgment.list` 1회 → 판정 기록(최신부터) + 실행 표시 ID (ADR-073)
+// - 실행 이력: `judgment.list` 1회 → 판정 기록(최신부터) + 실행 표시 ID (ADR-073), `run.list` 1회 → 실행 상태 · 종료 사유와
+//   판정 없이 끝난 실행 (실행 하나가 한 줄, runHistoryView.ts, ADR-123)
 // - 부모 요구사항: 부모가 있으면 `requirement.get` 1회 → 표시 ID · 문장. 실패하면 보이지 않는다
 // - 변경 이력: `normChange.list` 1회 → 이 규칙이 대상인 규범 변경 기록 (M7-15, ADR-114)
 // 규칙이 바뀌면 다시 읽고, 늦게 온 이전 응답은 버린다. 실행 이력은 규칙의 최신 판정이 바뀌어도(실행 알림으로 규칙
 // 목록을 다시 읽어 새 판정이 생김, M1-19 · ADR-076) 다시 읽는다. 다시 읽는 동안은 지금 이력을 그대로 보인다.
-import type { NormChangeView, Requirement, RuleJudgmentEntry } from '@bive/shared';
-import { useEffect, useState } from 'react';
+import type { NormChangeView, Requirement, RuleJudgmentEntry, Run } from '@bive/shared';
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+import { useEventRefresh } from '../../runs/useEventRefresh.js';
 
 export type RuleHistoryLoad =
   { state: 'loading' } | { state: 'ready'; entries: RuleJudgmentEntry[] } | { state: 'error' };
@@ -41,6 +44,42 @@ export const useRuleHistory = (
 
   return loaded !== null && loaded.ruleId === ruleId ? loaded.load : LOADING;
 };
+
+export type ProjectRunsLoad = { state: 'loading' } | { state: 'ready'; runs: Run[] | null };
+
+/**
+ * 프로젝트의 실행 목록 (`run.list` 1회, M3-35 · ADR-123): 실행 이력 줄의 실행 상태 · 종료 사유와 판정 기록 없이 끝난 실행.
+ * 실행 상태 알림(`event.run.updated`) · 재접속 때 다시 읽는다(실행이 판정 없이 끝나도 줄이 바뀐다). 못 읽으면 `runs: null`
+ * (실행 이력은 판정 기록만으로 그린다).
+ */
+export const useProjectRuns = (projectId: string): ProjectRunsLoad => {
+  const [loaded, setLoaded] = useState<{ projectId: string; load: ProjectRunsLoad } | null>(null);
+  const seq = useRef(0);
+  const fetchRuns = useCallback((): Promise<void> => {
+    seq.current += 1;
+    const mine = seq.current;
+    const settle = (runs: Run[] | null): void => {
+      if (seq.current === mine) setLoaded({ projectId, load: { state: 'ready', runs } });
+    };
+    return window.bive.invoke('run.list', { projectId }).then(
+      ({ runs }) => settle(runs),
+      () => settle(null),
+    );
+  }, [projectId]);
+  useEffect(() => {
+    void fetchRuns();
+    return () => {
+      seq.current += 1;
+    };
+  }, [fetchRuns]);
+  useEventRefresh(projectId, RUN_STATUS_EVENT_NAMES, fetchRuns);
+  return loaded !== null && loaded.projectId === projectId ? loaded.load : LOADING_RUNS;
+};
+
+const LOADING_RUNS: ProjectRunsLoad = { state: 'loading' };
+
+/** 실행 목록을 다시 읽는 알림: 실행 상태 바뀜만 (단계 알림마다 다시 읽지 않는다). */
+const RUN_STATUS_EVENT_NAMES = ['event.run.updated'] as const;
 
 /** 규칙의 부모 요구사항. 부모가 없거나(해제됨) 조회 전 · 실패면 null. */
 export const useRuleParent = (projectId: string, parentId: string | null): Requirement | null => {

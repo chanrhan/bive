@@ -39,8 +39,10 @@ import {
   RISK_LABELS,
   RULE_KIND_LABELS,
   RuleKind,
+  RUN_FAILURE_REASON_LABELS,
   RUN_STATUS_LABELS,
   RUN_TYPE_LABELS,
+  RunFailureReason,
   RunStatus,
   RunType,
   SESSION_END_REASON_LABELS,
@@ -212,6 +214,17 @@ describe('실행 (architecture.md 4장, RUN-07)', () => {
       ],
       SESSION_END_REASON_LABELS,
     );
+  });
+
+  it('실행 종료 사유: 값마다 한국어 표시명, 문서 기호 없음 (M3-35 #263, ADR-123)', () => {
+    expectEnum(RunFailureReason, RunFailureReason.options, RUN_FAILURE_REASON_LABELS);
+    expect(Object.keys(RUN_FAILURE_REASON_LABELS)).toEqual(RunFailureReason.options);
+    for (const label of Object.values(RUN_FAILURE_REASON_LABELS)) {
+      expect(label).not.toMatch(/ADR|PRD|SCR|[\u2460-\u24ff]|[A-Z]{2,}-\d/);
+    }
+    expect(RUN_FAILURE_REASON_LABELS.existing_rule_contradiction).toBe('기존 규칙 모순');
+    expect(RUN_FAILURE_REASON_LABELS.objection_applied).toBe('이의 반영');
+    expect(RUN_FAILURE_REASON_LABELS.target_rule_retired).toBe('대상 규칙 폐기');
   });
 });
 

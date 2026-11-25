@@ -39,6 +39,7 @@ export const RULE_DETAIL_TEXT = {
   history: '실행 이력',
   noHistory: '실행 이력 없음',
   historyFailed: '실행 이력 불러오기 실패',
+  runsFailed: '실행 상태 불러오기 실패',
   none: '없음',
   retired: '폐기',
   retiredAt: '폐기 시각',
