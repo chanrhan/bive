@@ -714,6 +714,84 @@ describe('반영 모듈: 대상 블록 · 위험도 저장과 블록 선언 대�
     });
   });
 
+  it('옛 판만 깨졌으면 지금 선언(가장 큰 판)은 읽히고 규범 자료 · 규칙 생성은 되며, 판 목록 읽기만 던진다. 가장 큰 판이 깨져도 사람이 다음 판을 저장하면 풀린다', () => {
+    withStore((store) => {
+      const tamper = (version: number) =>
+        store.db
+          .prepare(
+            'INSERT INTO block_declarations (version, set_at, set_by, declaration) VALUES (?, ?, ?, ?)',
+          )
+          .run(version, iso(T0), '{"kind":"human"}', '{"blocks":[{"name":"비밀"}]}');
+      tamper(1);
+      const v2 = store.blockDeclarations.set(SAMPLE, { at: iso(T0 + 1_000), by: human });
+      expect(v2.version).toBe(2);
+      expect(store.blockDeclarations.current()).toEqual(v2);
+      expect(
+        collectNormInput(store, { requirementIds: [], ruleIds: [] }, NO_CASES).blocks?.version,
+      ).toBe(2);
+      expect(create(store, { targetBlocks: ['lib'] }).normChange.detail.after).toMatchObject({
+        blockDeclarationVersion: 2,
+      });
+      expect(() => store.blockDeclarations.list()).toThrow(
+        expect.objectContaining({ name: 'StoredBlockDeclarationError' }),
+      );
+      // 가장 큰 판이 깨짐 → 지금 선언을 읽지 못한다. 사람이 다음 판을 저장하면 다시 읽힌다
+      tamper(3);
+      expect(() => store.blockDeclarations.current()).toThrow(
+        expect.objectContaining({ name: 'StoredBlockDeclarationError' }),
+      );
+      const v4 = store.blockDeclarations.set(SAMPLE, { at: iso(T0 + 2_000), by: human });
+      expect(v4.version).toBe(4);
+      expect(store.blockDeclarations.current()).toEqual(v4);
+    });
+  });
+
+  it('깨진 선언 행에서 에이전트가 받는 규칙 생성 도구 결과는 인자 오류가 아니라 도구 실패이고, 저장된 값 · 스택 · 절대 경로가 없다', async () => {
+    withStore((store) => {
+      store.db
+        .prepare(
+          'INSERT INTO block_declarations (version, set_at, set_by, declaration) VALUES (1, ?, ?, ?)',
+        )
+        .run(iso(T0), '{"kind":"human"}', '{"blocks":[{"name":"비밀"}]}');
+    });
+    const dir = path.join(h.biveHome, 'work', h.project.id, 'sessions', 's2');
+    fs.mkdirSync(dir, { recursive: true });
+    const tools = createRoleTools({
+      role: 'rule-writer',
+      sessionRoot: dir,
+      biveHome: h.biveHome,
+      hooks: {
+        // 규칙 작성 서비스와 같은 길: 반영 모듈을 부르고 모르는 오류는 다시 던진다
+        proposeRule: (input) => {
+          const { rationale, contradiction, ...rest } = input;
+          withStore((store) =>
+            createAgentRule(
+              store,
+              {
+                payload: { ...rest, parentRequirementId: requirement.id },
+                rationale,
+                author: agent,
+                sessionId: newId(),
+                contradiction,
+                normInput: NORM_INPUT,
+              },
+              { now: () => T0, newId },
+            ),
+          );
+          return 'ok';
+        },
+      },
+    });
+    const result = await tools.execute('propose_rule', PROPOSAL);
+    expect(result).toMatchObject({ status: 'error', reason: 'tool_failed' });
+    expect(result.reason).not.toBe('invalid_args');
+    expect(result.content).toContain('블록 선언');
+    expect(result.content).not.toContain('비밀');
+    expect(result.content).not.toMatch(/\bat \w|\.ts:\d/);
+    expect(result.content).not.toContain(h.biveHome);
+    expect(withStore((store) => store.rules.list())).toEqual([]);
+  });
+
   it('저장된 선언 행이 깨졌으면(저장소 밖 변조) 에이전트 인자 오류가 아니라 저장소 오류로 닫히고, 세션 입력도 만들지 않으며 로그에는 판 · 건수 · 프로젝트 ID만 남는다', async () => {
     const warnings: string[] = [];
     const original = console.warn;
