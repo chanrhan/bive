@@ -1,6 +1,7 @@
 // 구현 · 검사 · 병합 재검사가 함께 쓰는 판정 절차 (JDG-01 · JDG-02 · RUN-08 · NFR-01, ADR-051 · ADR-058 · ADR-068 · ADR-069).
 // 판정은 실행 워크트리가 아니라 판정할 커밋의 깨끗한 체크아웃에서 돈다(`judge/checkout.ts`). 순서:
-//   체크아웃(추적 파일만) → 인수 테스트 해시 대조(Red 확인 기록과, 지정한 경우) → 의존성 새로 설치(`node_modules` 비공유)
+//   체크아웃(추적 파일만) → 인수 테스트 해시 대조(Red 확인 기록과, 지정한 경우) → 구조 검사(계획을 넘긴 경우: 검사 · 병합 재검사,
+//   `structure-check.ts`, 설치 전) → 의존성 새로 설치(`node_modules` 비공유)
 //   → 규범 저장소 확인(판정 직전) → 판정 러너 → 규범 저장소 확인(판정 뒤: 판정은 프로젝트 코드를 실행한다) → 체크아웃 삭제
 // 판정 결과의 해석(통과 · 미충족)과 저장은 호출한 단계가 한다. 판정 기록은 판정 러너가 케이스 결과를 낸(`completed`)
 // 판정에서만 만든다: 수집 오류 · 러너 오류는 규칙을 판정하지 못한 것이라 기록하지 않는다(단계 결과에만 남긴다).
@@ -31,6 +32,12 @@ import type { JudgeProfileName } from '../judge/profiles/types.js';
 import { ruleIdOfAcceptanceFile } from '../judge/report.js';
 import { type JudgeRunInput, JudgeRunner, type JudgeRunResult } from '../judge/runner.js';
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
+import {
+  runStructureCheck,
+  type StructureAnalyzer,
+  type StructurePlan,
+  type StructureRun,
+} from './structure-check.js';
 
 /** 구현 · 검사 판정 제한 시간 (기본): 서버 빌드 · 기동 · vitest 전체. */
 export const DEFAULT_JUDGE_TIMEOUT_MS = 10 * 60_000;
@@ -48,6 +55,10 @@ export interface JudgingOptions {
   profile?: JudgeProfileName;
   judgeTimeoutMs?: number;
   installTimeoutMs?: number;
+  /** 구조 검사의 파서 호출 (기본 `analyzeProject`, M3-03) */
+  analyzeStructure?: StructureAnalyzer;
+  /** 구조 검사 제한 시간 (기본 파서 기본값) */
+  structureTimeoutMs?: number;
 }
 
 const newId = createUlidGenerator();
@@ -160,6 +171,8 @@ export type CommitJudgeOutcome =
       readonly mismatches: NormMismatch[];
     }
   | { readonly kind: 'no_rules'; readonly ruleDirs: string[] }
+  /** 구조 검사가 판정하지 않고 끝낼 사정 (겹침 · 실행기 오류). 설치 · 판정은 하지 않았다 */
+  | { readonly kind: 'structure_halt'; readonly structure: Extract<StructureRun, { kind: 'halt' }> }
   | {
       readonly kind: 'judged';
       readonly result: JudgeRunResult;
@@ -172,6 +185,8 @@ export type CommitJudgeOutcome =
        * 케이스 이름을 파일에 적힌 이름과 대조할 때 쓴다(M7-12, ADR-118)
        */
       readonly acceptanceTexts?: Readonly<Record<string, string>>;
+      /** 구조 검사 결과 (계획을 넘긴 경우만, 설치 전 체크아웃에서) */
+      readonly structure?: Extract<StructureRun, { kind: 'judged' }>;
     };
 
 export interface CommitJudgeInput {
@@ -184,6 +199,8 @@ export interface CommitJudgeInput {
   readonly signal: AbortSignal;
   /** 인수 테스트 파일 내용을 결과에 싣는다 (설치 · 판정 전, 프로젝트 코드가 돌기 전에 읽는다) */
   readonly readAcceptanceTexts?: boolean;
+  /** 구조 검사 계획 (단계를 열 때 읽은 선언의 판 · 내장 규칙). 있으면 설치 전에 구조 검사를 한다 */
+  readonly structure?: StructurePlan;
 }
 
 /** 인수 테스트 파일 하나에서 읽는 상한 (넘는 부분은 대조에 쓰지 않는다: 그 뒤의 이름은 모르는 이름이 된다). */
@@ -237,6 +254,20 @@ export const judgeCommit = async (
       input.readAcceptanceTexts === true
         ? readAcceptanceTexts(checkout.dir, acceptanceHashes)
         : undefined;
+    // 구조 검사: 설치 전 체크아웃 그대로(추적 파일만)를 분석한다. 판정하지 않고 끝낼 사정이면 설치 · 판정을 하지 않는다
+    let structure: Extract<StructureRun, { kind: 'judged' }> | undefined;
+    if (input.structure !== undefined) {
+      const run = await runStructureCheck(checkout.dir, input.structure, {
+        signal: input.signal,
+        ...(options.analyzeStructure === undefined ? {} : { analyze: options.analyzeStructure }),
+        ...(options.structureTimeoutMs === undefined
+          ? {}
+          : { timeoutMs: options.structureTimeoutMs }),
+      });
+      input.signal.throwIfAborted();
+      if (run.kind === 'halt') return { kind: 'structure_halt', structure: run };
+      structure = run;
+    }
     const logFile = installLogFile(context);
     try {
       await (options.installDependencies ?? installDependencies)(checkout.dir, {
@@ -287,6 +318,7 @@ export const judgeCommit = async (
       ruleIds,
       acceptanceHashes,
       ...(acceptanceTexts === undefined ? {} : { acceptanceTexts }),
+      ...(structure === undefined ? {} : { structure }),
     };
   } finally {
     await checkout.dispose();

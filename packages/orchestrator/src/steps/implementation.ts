@@ -525,6 +525,9 @@ export const createImplementationExecutor =
         });
       case 'norm_mismatch':
         return normHalt(judged.moment, judged.mismatches, base);
+      case 'structure_halt':
+        // 구현 단계는 구조 검사 계획을 넘기지 않는다 (구조 검사는 검사 단계 · 병합 재검사, M3-03)
+        return halt('state_inconsistent', { ...base, message: '구현 판정에 구조 검사 결과가 있습니다' });
       case 'no_rules':
       case 'install_error':
         return {

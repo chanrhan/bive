@@ -218,8 +218,23 @@ export const saveNewRun = (
 };
 
 /**
+ * 내장 구조 규칙은 사람의 [실행] 대상으로 받지 않는다 (M3-03 #48, ADR-127). 내장 구조 규칙은 인수 테스트가 아니라 구조 검사로 판정하는
+ * 규칙이라 지금 파이프라인(유형 A: 테스트 작성 · Red 확인)에 맞지 않는다. 정적 검사 규칙의 실행 유형(M3-06)이 들어오면 그 이슈가
+ * 이 거부를 바꾼다. 내장 구조 규칙은 대상이 아니어도 모든 검사 단계 · 병합 재검사에서 판정된다.
+ * @throws {ConflictError} 대상에 내장 구조 규칙이 있음 (-32009, 아무것도 남지 않는다)
+ */
+const assertNoBuiltinTarget = (store: ProjectStore, ruleIds: readonly Ulid[]): void => {
+  for (const id of ruleIds) {
+    const rule = store.rules.get(id);
+    if (rule?.builtin === true) {
+      throw new ConflictError('규칙', rule.displayId, '내장 구조 규칙은 실행 대상으로 받지 않습니다');
+    }
+  }
+};
+
+/**
  * 실행을 만든다(실행 시작 확인): `saveNewRun`과 승인 기록 `run_start`(대상 규칙 포함)를 한 트랜잭션으로.
- * 판단 순서: 주체(-32020) → 설정(-32010) → 대상 규칙(없음 -32004 · 삭제됨 -32009).
+ * 판단 순서: 주체(-32020) → 설정(-32010) → 내장 구조 규칙(-32009) → 대상 규칙(없음 -32004 · 삭제됨 -32009).
  * @throws {RpcError} -32020 에이전트 주체 · -32010 설정 미비
  * @throws {NotFoundError} 대상 규칙이 없음
  * @throws {ConflictError} 대상 규칙이 삭제됨
@@ -234,6 +249,7 @@ export const createRun = (
   return store.transaction(() => {
     // 설정 검사(M1 필수 역할, ADR-057)와 스냅샷을 같은 트랜잭션에서 읽는다
     const settings = requireRunnableSettings(store);
+    assertNoBuiltinTarget(store, input.ruleIds);
     const at = timestamp(clock);
     const runId = clock.newId();
     const detail = saveNewRun(

@@ -14,12 +14,22 @@
 //   B⑧ · A4 · A5, ADR-118, `steps/existing-rule.ts`): 모순이면 `failed`(`existing_rule_contradiction`, 병합 없음), 모순 없음이면
 //   지금처럼 `unmet` → 구현 회귀(같은 회귀 상한)이고 다음 구현 세션은 판단 근거를 받는다. 대상 규칙이 함께 실패하면 판단 없이 회귀한다.
 //   이 실행에 모순 판단이 이미 있으면(재기동 · 재개) 판정하지 않고 끝낸다
+// - 구조 검사 (M3-03 #48, JDG-05, ADR-127, `steps/structure-check.ts`): 블록 선언이 있으면 같은 체크아웃에서 설치 전에 구조 검사를 하고
+//   내장 구조 규칙 두 개의 판정 기록을 인수 테스트 판정 기록과 같은 트랜잭션에 남긴다. 내장 규칙은 인수 테스트로 판정하지 않는다.
+//   내장 규칙이 실패하면 판단 세션 없이(폐기 · 대체할 수 없다, B⑨) 구현으로 회귀하고 다음 구현 세션은 위반(규칙 · 파일 쌍)을 앞 시도의
+//   사유로 받는다. 겹침 · 실행기 오류는 판정하지 않고 끝낸다. 선언이 없으면 구조 검사를 하지 않는다(지금과 같다)
 import type { Rule } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
 import { effectiveRules } from '../norms/effective.js';
 import { contradictionHalt, judgeExistingRuleFailures } from './existing-rule.js';
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
+import {
+  readStructurePlan,
+  STRUCTURE_STAGE,
+  structureJudgmentsFrom,
+  structureRuleIds,
+} from './structure-check.js';
 import {
   createNormGuard,
   judgeCommit,
@@ -73,8 +83,17 @@ export const createCheckExecutor =
     if (contradicted !== null) return contradicted;
     const norms = createNormGuard(context);
     const rules = approvedRules(context);
+    // 구조 검사 계획: 단계를 열 때 읽은 선언의 판 · 내장 구조 규칙 (선언이 없으면 없음)
+    const planned = readStructurePlan(context, rules);
+    if (planned.kind === 'halt') return planned.outcome;
+    const plan = planned.kind === 'plan' ? planned.plan : null;
+    const structureIds = structureRuleIds(plan);
+    // 인수 테스트로 판정하는 규칙 (내장 구조 규칙은 구조 검사가 판정한다)
+    const testedRules = rules.filter((rule) => !structureIds.includes(rule.id));
     const targets = context.read((store) =>
-      context.run.targetRuleIds.map((id) => store.rules.get(id)?.displayId ?? id),
+      context.run.targetRuleIds
+        .filter((id) => !structureIds.includes(id))
+        .map((id) => store.rules.get(id)?.displayId ?? id),
     );
     let unjudgedDirs: string[] = [];
     const judged = await judgeCommit(
@@ -82,8 +101,8 @@ export const createCheckExecutor =
       {
         commit,
         selectRules: (dirs) => {
-          unjudgedDirs = dirs.filter((dir) => !rules.some((rule) => rule.displayId === dir));
-          return rules
+          unjudgedDirs = dirs.filter((dir) => !testedRules.some((rule) => rule.displayId === dir));
+          return testedRules
             .filter((rule) => dirs.includes(rule.displayId))
             .map((rule) => rule.displayId);
         },
@@ -91,6 +110,7 @@ export const createCheckExecutor =
         norms,
         signal: context.signal,
         readAcceptanceTexts: true,
+        ...(plan === null ? {} : { structure: plan }),
       },
       options,
     );
@@ -128,6 +148,13 @@ export const createCheckExecutor =
           message: '판정할 승인된 규칙의 인수 테스트가 없습니다',
           ruleDirs: judged.ruleDirs,
         });
+      case 'structure_halt':
+        return halt(judged.structure.reason, {
+          ...base,
+          stage: STRUCTURE_STAGE,
+          message: judged.structure.message,
+          structure: judged.structure.summary,
+        });
       case 'judged':
         break;
     }
@@ -145,6 +172,7 @@ export const createCheckExecutor =
       ...judgeSummary(result),
       ruleIds,
       ...(unjudgedDirs.length > 0 ? { unjudgedDirs } : {}),
+      ...(judged.structure === undefined ? {} : { structure: judged.structure.summary }),
     };
     if (result.status === 'runner_error') {
       return halt(JUDGE_RUNNER_ERROR_REASON, { ...detail, stage: 'judge' });
@@ -152,15 +180,17 @@ export const createCheckExecutor =
     if (result.status === 'collect_error') {
       return { status: 'unmet', exitDetail: { ...detail, reason: 'collect_error' } };
     }
-    const judgedRules = rules.filter((rule) => ruleIds.includes(rule.displayId));
-    const recorded = recordJudgments(
-      context,
-      judgmentsFrom(result, judgedRules, {
-        runId: context.run.id,
-        stepId: context.step.id,
-        commit,
-      }),
-    );
+    const testJudged = testedRules.filter((rule) => ruleIds.includes(rule.displayId));
+    const judgedRules = [
+      ...testJudged,
+      ...rules.filter((rule) => structureIds.includes(rule.id)),
+    ];
+    // 인수 테스트 판정과 구조 검사 판정을 한 트랜잭션에 남긴다 (판정 1회)
+    const meta = { runId: context.run.id, stepId: context.step.id, commit };
+    const recorded = recordJudgments(context, [
+      ...judgmentsFrom(result, testJudged, meta),
+      ...structureJudgmentsFrom(judged.structure, { ...meta, judgedAt: result.endedAt }),
+    ]);
     const judgments = judgmentDigest(recorded, judgedRules);
     if (recorded.some((judgment) => judgment.status !== 'pass')) {
       // 대상 밖 규칙의 실패: 규칙을 맡는 역할의 판단 (판단 입력은 실패한 규칙 ID와 케이스 이름뿐, 실행기 출력은 넘기지 않는다)
