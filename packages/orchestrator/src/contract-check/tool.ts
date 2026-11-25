@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { signalTree, stopProcess } from '../judge/process.js';
 
@@ -81,16 +82,27 @@ export interface ToolRunResult {
   readonly stdout: string;
 }
 
-/** 도구 프로세스를 띄운다 (새 프로세스 그룹, 셸 없음, 표준 입력 없음). */
+/**
+ * BIVE의 도구 진입 (`runner/contract-tool.mjs`): 표준 입력이 닫히면(부모가 사라지면) 도구와 함께 끝난다. 소스 · 빌드 어느 쪽에서도
+ * 패키지 루트의 `runner/`다.
+ */
+export const TOOL_LAUNCHER = fileURLToPath(
+  new URL('../../runner/contract-tool.mjs', import.meta.url),
+);
+
+/**
+ * 도구 프로세스를 띄운다 (새 프로세스 그룹, 셸 없음). 진입은 {@link TOOL_LAUNCHER}이고 표준 입력은 부모가 쥔 파이프다: 아무것도 쓰지
+ * 않고, 부모가 어떤 까닭으로든 사라지면 닫혀 도구가 끝난다(스스로 끝나지 않는 prism 프록시가 고아로 남지 않게).
+ */
 export const spawnTool = (
   entry: string,
   args: readonly string[],
   options: Pick<ToolRunOptions, 'cwd' | 'env'>,
 ): ChildProcess =>
-  spawn(process.execPath, [entry, ...args], {
+  spawn(process.execPath, [TOOL_LAUNCHER, entry, ...args], {
     cwd: options.cwd,
     env: options.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     shell: false,
     detached: process.platform !== 'win32',
     windowsHide: true,

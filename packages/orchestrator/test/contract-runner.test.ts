@@ -25,6 +25,7 @@ import { readOpenApiDocument } from '../src/contract-check/openapi-document.js';
 import {
   classifyExchange,
   EXCHANGE_HEADER,
+  type ExchangeVerdict,
   prismArgs,
   validateWithPrism,
 } from '../src/contract-check/prism.js';
@@ -40,10 +41,13 @@ import type { JudgingOptions } from '../src/steps/judging.js';
 import { JudgeRunner } from '../src/judge/runner.js';
 import { readContractSource, registerHumanContract } from '../src/norms/contract.js';
 import { createCheckExecutor } from '../src/steps/check.js';
+import { createMergeExecutor } from '../src/steps/merge.js';
 import {
   disposeContracts,
   finishContracts,
+  missingContractVerdicts,
   prepareContracts,
+  trafficVerdict,
 } from '../src/steps/contract-check.js';
 import { verificationSummary } from '../src/verification/summary.js';
 import { human, userGit, withProject } from './helpers/engine-harness.js';
@@ -59,6 +63,7 @@ import {
 import { cleanup, REPO_ROOT } from './helpers/process.js';
 
 const newId = createUlidGenerator();
+const ORCHESTRATOR_SRC = path.join(REPO_ROOT, 'packages', 'orchestrator', 'src');
 const FIXTURE_OPENAPI = fs.readFileSync(
   path.join(REPO_ROOT, 'fixtures', 'sample-next-app', 'openapi.yaml'),
   'utf8',
@@ -100,9 +105,14 @@ const listen = async (
 };
 
 /** 픽스처 API를 흉내 내는 판정 서버. `mismatch`면 `/api/health`의 `ok`가 글이다(`contract-mismatch` 변형과 같은 위반). */
-const fakeApi = (mismatch = false) =>
+/** 헬스 체크 응답을 바꿔 넣는 구현 (판정받는 구현이 고르는 응답 모양). */
+type HealthResponder = (res: http.ServerResponse) => void;
+
+const fakeApi = (mismatch: boolean | HealthResponder = false) =>
   listen((req, res) => {
-    if (req.url === '/api/health') {
+    if (req.url === '/api/health' && typeof mismatch === 'function') {
+      mismatch(res);
+    } else if (req.url === '/api/health') {
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({ ok: mismatch ? 'yes' : true }));
     } else if (req.url === '/api/auth/session') {
@@ -711,7 +721,9 @@ afterAll(async () => {
 const trafficJudge = (
   calls: JudgeCall[],
   options: {
-    readonly mismatch?: boolean;
+    readonly mismatch?: boolean | HealthResponder;
+    /** 이 단계(검사 · 병합)에서만 `mismatch`를 쓴다 (기본 모든 단계) */
+    readonly mismatchIn?: 'check' | 'merge';
     readonly traffic?: (baseUrl: string) => Promise<void>;
     readonly proxied?: boolean[];
   } = {},
@@ -720,7 +732,8 @@ const trafficJudge = (
   return async (input, context) => {
     options.proxied?.push(Object.hasOwn(input, 'serverProxy'));
     if (input.serverProxy !== undefined) {
-      const api = await fakeApi(options.mismatch === true);
+      const applies = options.mismatchIn === undefined || options.mismatchIn === context.step.kind;
+      const api = await fakeApi(applies ? (options.mismatch ?? false) : false);
       const proxy = await input.serverProxy.start({ upstreamBaseUrl: api.url });
       try {
         await (
@@ -744,8 +757,11 @@ const contractPipeline = async (
   contracts: readonly { file: string; kind: 'openapi' | 'db-schema' | 'asyncapi'; text?: string }[],
   judge: (calls: JudgeCall[]) => NonNullable<JudgingOptions['judge']>,
   extra: JudgingOptions = {},
+  /** 병합 단계도 같은 판정 주입으로 바꾸고, 병합 전에 기준 브랜치를 바꿔 재검사가 돌게 한다 */
+  mergeRecheck = false,
 ): Promise<{ h: PipelineHarness; rules: Rule[]; checkCalls: JudgeCall[] }> => {
   const checkCalls: JudgeCall[] = [];
+  const mergeCalls: JudgeCall[] = [];
   const h = setupPipeline({
     temps: temps2,
     engines,
@@ -765,6 +781,21 @@ const contractPipeline = async (
         installDependencies: fakeInstall,
         ...extra,
       }),
+      ...(mergeRecheck
+        ? {
+            merge: async (context) => {
+              fs.writeFileSync(path.join(context.git.repoPath, 'USER-NOTE.md'), '사용자\n');
+              userGit(context.git.repoPath, 'add', 'USER-NOTE.md');
+              userGit(context.git.repoPath, 'commit', '-q', '-m', '사용자 커밋');
+              return createMergeExecutor({
+                judge: judge(mergeCalls),
+                installDependencies: fakeInstall,
+                checkTimeoutMs: 90_000,
+                ...extra,
+              })(context);
+            },
+          }
+        : {}),
     }),
   });
   const rules: Rule[] = [];
@@ -1004,6 +1035,578 @@ describe('검사 단계가 계약 검사 규칙을 종류별 실행기로 판정
     });
     expect(judgmentsOfRule(h, rules[0]!.id)).toEqual([]);
   }, 120_000);
+});
+
+// ── 검토 1회차: 검증하지 못한 요청은 닫힌 쪽 · 판별자 대응 값 · 남은 변이 · 남는 프로세스 ─────────────────
+
+/** 시험용 계약 판정 줄 (`trafficVerdict` · `prepareContracts` 단위 시험). */
+const planItem = (overrides: Partial<Contract> = {}) => ({
+  rule: { id: newId(), displayId: 'RULE-002' } as Rule,
+  contract: {
+    id: newId(),
+    displayId: 'CON-001',
+    kind: 'openapi',
+    sourceFile: 'openapi.yaml',
+    contentHash: 'a'.repeat(64),
+    sourceCommit: 'b'.repeat(40),
+    ...overrides,
+  } as Contract,
+  runner: 'openapi' as const,
+});
+
+const verdictOf = (
+  outcome: ExchangeVerdict['outcome'],
+  unverified?: ExchangeVerdict['unverified'],
+): ExchangeVerdict => ({
+  index: 0,
+  method: 'GET',
+  target: '/api/health',
+  outcome,
+  violations:
+    outcome === 'violation'
+      ? [{ location: 'response.body.ok', severity: 'Error', message: 'must be boolean' }]
+      : [],
+  truncated: false,
+  ...(unverified === undefined ? {} : { unverified }),
+});
+
+/** 판정받는 구현이 고를 수 있는 응답 모양 (검토 1회차 사례). 모두 계약과 다르거나 검증할 수 없는 응답이다. */
+const EVASIONS: readonly [string, HealthResponder][] = [
+  [
+    '501',
+    (res) => {
+      res.statusCode = 501;
+      res.setHeader('content-type', 'application/json');
+      res.end('{"ok":"yes"}');
+    },
+  ],
+  [
+    '304',
+    (res) => {
+      res.statusCode = 304;
+      res.end();
+    },
+  ],
+  [
+    '302 뒤 다른 경로',
+    (res) => {
+      res.statusCode = 302;
+      res.setHeader('location', '/api/other');
+      res.end();
+    },
+  ],
+  [
+    '깨진 JSON',
+    (res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end('{"ok":');
+    },
+  ],
+  [
+    '가짜 content-encoding',
+    (res) => {
+      res.setHeader('content-type', 'application/json');
+      res.setHeader('content-encoding', 'gzip');
+      res.end('{"ok":"yes"}');
+    },
+  ],
+  [
+    '기록 상한을 넘는 본문',
+    (res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(`{"ok":true,"pad":"${'x'.repeat(5 * 1024 * 1024)}"}`);
+    },
+  ],
+  [
+    '위반 JSON 뒤 공백 채움',
+    (res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(`{"ok":"yes"}${' '.repeat(5 * 1024 * 1024)}`);
+    },
+  ],
+];
+
+describe('검증하지 못한 요청은 닫힌 쪽이다: 실패(구현 회귀)이고 판정 없음이 아니다 (검토 1회차 B1)', () => {
+  it('trafficVerdict: 검증하지 못한 교환(prism이 다루지 못함 · 넘기지 않음 · 기록 불완전)과 기록 건수 상한 초과는 막는 fail, 계약 밖뿐이면 판정 없음', () => {
+    const item = planItem();
+    const extra = { overflow: 0, warnings: 0 };
+    const verdict = (exchanges: ExchangeVerdict[], overflow = 0) =>
+      trafficVerdict(item, { exchanges }, 'same', { ...extra, overflow });
+    for (const reason of ['status_differs', 'not_forwarded', 'incomplete'] as const) {
+      const judged = verdict([verdictOf('ok'), verdictOf('unverified', reason)]);
+      expect(judged, reason).toMatchObject({
+        kind: 'judged',
+        status: 'fail',
+        reason: 'response_unverified',
+        blocking: true,
+      });
+      expect(judged.kind === 'judged' ? judged.cases[1]?.name : null).toBe(
+        '검증하지 못한 응답 · GET /api/health',
+      );
+    }
+    // 기록 건수 상한을 넘은 요청: 계약 안인지 가릴 수 없다
+    expect(verdict([verdictOf('ok')], 1)).toMatchObject({
+      kind: 'judged',
+      status: 'fail',
+      reason: 'response_unverified',
+      blocking: true,
+    });
+    expect(verdict([verdictOf('outside')], 1)).toMatchObject({ status: 'fail' });
+    // 위반이 함께면 사유는 계약과 다른 응답
+    expect(verdict([verdictOf('violation'), verdictOf('unverified', 'incomplete')])).toMatchObject({
+      status: 'fail',
+      reason: 'response_mismatch',
+      blocking: true,
+    });
+    // 구현이 통제할 수 없는 사유만 판정 없음: 계약 안 요청 0건
+    expect(verdict([verdictOf('outside')])).toEqual({
+      kind: 'unjudged',
+      item,
+      reason: 'no_traffic',
+    });
+    expect(verdict([])).toMatchObject({ kind: 'unjudged', reason: 'no_traffic' });
+    expect(verdict([verdictOf('ok'), verdictOf('outside')])).toMatchObject({ status: 'pass' });
+  });
+
+  it('실제 기록 프록시 · prism: 501 · 304 · 302 뒤 다른 경로 · 깨진 JSON · 가짜 인코딩 · 상한 초과 본문 · 위반 JSON 뒤 공백 채움은 통과 · 계약 밖이 아니라 위반 또는 검증하지 못함이다', async () => {
+    const toolDir = tempDir();
+    fs.writeFileSync(path.join(toolDir, 'contract.yaml'), FIXTURE_OPENAPI);
+    for (const [label, respond] of EVASIONS) {
+      const api = await fakeApi(respond);
+      const recorder = new ExchangeRecorder();
+      const proxy = await recorder.start({ upstreamBaseUrl: api.url });
+      await fetch(`${proxy.baseUrl}/api/health`, { redirect: 'manual' })
+        .then((res) => res.arrayBuffer())
+        .catch(() => undefined);
+      await proxy.stop();
+      const result = await validateWithPrism({
+        toolDir,
+        documentFile: 'contract.yaml',
+        signal: never,
+        exchanges: recorder.exchanges(),
+      });
+      expect(
+        result.exchanges.map((item) => item.outcome),
+        label,
+      ).toHaveLength(1);
+      expect(['violation', 'unverified'], label).toContain(result.exchanges[0]?.outcome);
+      expect(
+        trafficVerdict(planItem(), result, 'same', { overflow: 0, warnings: 0 }),
+        label,
+      ).toMatchObject({ kind: 'judged', status: 'fail', blocking: true });
+    }
+  }, 120_000);
+
+  it('계약에 적힌 204 · 304는 통과하고, 계약에 적힌 302(Location)는 prism이 리다이렉트를 따라가 검증하지 못해 닫힌 쪽이다 (한계), 기록이 불완전해도 계약 밖 경로면 계약 밖이다', async () => {
+    const doc = `${FIXTURE_OPENAPI}  /r:
+    get:
+      responses:
+        '302':
+          description: 이동
+  /n:
+    delete:
+      responses:
+        '204':
+          description: 없음
+  /c:
+    get:
+      responses:
+        '304':
+          description: 바뀌지 않음
+`;
+    const toolDir = tempDir();
+    fs.writeFileSync(path.join(toolDir, 'contract.yaml'), doc);
+    const empty = { responseHeaders: [] as [string, string][], responseBody: Buffer.alloc(0) };
+    const result = await validateWithPrism({
+      toolDir,
+      documentFile: 'contract.yaml',
+      signal: never,
+      exchanges: [
+        exchange({ index: 0, method: 'DELETE', target: '/n', status: 204, ...empty }),
+        exchange({ index: 1, target: '/c', status: 304, ...empty }),
+        exchange({
+          index: 2,
+          target: '/r',
+          status: 302,
+          responseHeaders: [['location', '/elsewhere']],
+          responseBody: Buffer.alloc(0),
+        }),
+        exchange({ index: 3, target: '/api/other', complete: false }),
+        exchange({ index: 4, complete: false }),
+      ],
+    });
+    expect(result.exchanges.map((item) => [item.index, item.outcome, item.unverified])).toEqual([
+      [0, 'ok', undefined],
+      [1, 'ok', undefined],
+      [2, 'unverified', 'status_differs'],
+      [3, 'outside', undefined],
+      [4, 'unverified', 'incomplete'],
+    ]);
+  }, 60_000);
+
+  it('검사 단계: 구현이 그런 응답을 돌려주면 계약 판정은 fail로 기록되고 구현 회귀 뒤 상한으로 끝나 병합되지 않는다', async () => {
+    for (const [label, respond] of EVASIONS) {
+      const { h, rules } = await contractPipeline(
+        [{ file: 'openapi.yaml', kind: 'openapi' }],
+        (calls) =>
+          trafficJudge(calls, {
+            mismatch: respond,
+            traffic: async (url) => {
+              await fetch(`${url}/api/health`, { redirect: 'manual' })
+                .then((res) => res.arrayBuffer())
+                .catch(() => undefined);
+            },
+          }),
+      );
+      const detail = await runToEnd(h);
+      expect(detail.run, label).toMatchObject({
+        status: 'failed',
+        failureReason: 'regression_limit',
+      });
+      expect(Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'main')), label).toBe(0);
+      const judgments = judgmentsOfRule(h, rules[0]!.id);
+      expect(judgments.length, label).toBeGreaterThan(0);
+      expect(
+        judgments.every((judgment) => judgment.status === 'fail'),
+        label,
+      ).toBe(true);
+      expect(exitOf(detail, 'check'), label).toMatchObject({
+        reason: 'check_failed',
+        contracts: [{ outcome: 'fail', blocking: true }],
+      });
+    }
+  }, 900_000);
+});
+
+describe('판별자 대응 값도 바깥 참조다 (검토 1회차 B2, 대조군)', () => {
+  const PET = (discriminator: string, version = '3.1.0') => `openapi: ${version}
+info:
+  title: t
+  version: '1'
+paths:
+  /pets:
+    get:
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    Pet:
+      type: object
+      properties:
+        kind:
+          type: string
+      discriminator:
+        propertyName: kind
+${discriminator}
+`;
+
+  it('사전 검사: mapping 값과 defaultMapping이 문서 안 참조(#)도 스키마 이름도 아니면 바깥 참조이고, 판별자가 아닌 자리의 mapping 속성은 보지 않는다', () => {
+    expect(
+      readOpenApiDocument(PET("        mapping:\n          dog: '#/components/schemas/Pet'")),
+    ).toMatchObject({ kind: 'ok' });
+    expect(readOpenApiDocument(PET('        mapping:\n          dog: Pet'))).toMatchObject({
+      kind: 'ok',
+    });
+    for (const value of ["'http://127.0.0.1:9/dog.yaml'", "'./dog.yaml'", 'Dog', "'dog.json'"]) {
+      expect(
+        readOpenApiDocument(PET(`        mapping:\n          dog: ${value}`)),
+        value,
+      ).toMatchObject({
+        kind: 'external',
+        references: [
+          { pointer: '/components/schemas/Pet/discriminator/mapping/dog', key: 'mapping' },
+        ],
+      });
+    }
+    expect(readOpenApiDocument(PET('        mapping: x'))).toMatchObject({ kind: 'external' });
+    expect(
+      readOpenApiDocument(PET("        defaultMapping: 'https://x/def.yaml'", '3.2.0')),
+    ).toMatchObject({ kind: 'external', references: [{ key: 'defaultMapping' }] });
+    // 스키마의 속성 이름이 mapping이어도 판별자가 아니면 그대로다
+    expect(
+      readOpenApiDocument(
+        PET('        mapping:\n          dog: Pet').replace(
+          '        kind:\n          type: string',
+          '        kind:\n          type: string\n        mapping:\n          type: object',
+        ),
+      ),
+    ).toMatchObject({ kind: 'ok' });
+  });
+
+  it('대조군: 방어 없이 lint하면 redocly가 mapping 값 · defaultMapping(3.2)의 원격 주소에 요청한다. 실행기는 도구를 부르지 않고 요청 0건이다', async () => {
+    const remote = await listen((_req, res) => {
+      res.setHeader('content-type', 'application/yaml');
+      res.end('type: object\n');
+    });
+    const docs = [
+      PET(`        mapping:\n          dog: '${remote.url}/dog.yaml'`),
+      PET(`        defaultMapping: '${remote.url}/def.yaml'`, '3.2.0'),
+    ];
+    for (const doc of docs) {
+      const toolDir = tempDir();
+      fs.writeFileSync(path.join(toolDir, 'contract.yaml'), doc);
+      fs.writeFileSync(path.join(toolDir, 'c.yaml'), REDOCLY_CONFIG);
+      await runDirect(REDOCLY_ENTRY, lintArgs('contract.yaml', path.join(toolDir, 'c.yaml')), {
+        cwd: toolDir,
+        env: toolEnv(toolDir),
+      });
+    }
+    expect(remote.hits).toEqual(['/dog.yaml', '/def.yaml']);
+    remote.hits.length = 0;
+    for (const doc of docs) {
+      expect(
+        await prepareOpenApiContract(doc, { sourceFile: 'openapi.yaml', signal: never }),
+      ).toMatchObject({ kind: 'external' });
+    }
+    expect(remote.hits).toEqual([]);
+  }, 60_000);
+});
+
+describe('남은 변이를 닫는 시험 (검토 1회차 B3)', () => {
+  it('missingContractVerdicts: 계약 검사 규칙마다 판정 · 판정 없음이 정확히 하나여야 하고, 빠지거나 겹치면 빠진 규칙, 계획이 없으면 늘 빈 목록', () => {
+    const a = planItem();
+    const b = {
+      ...planItem({ displayId: 'CON-002' }),
+      rule: { id: newId(), displayId: 'RULE-003' } as Rule,
+    };
+    const plan = { items: [a, b] };
+    const unjudged = (item: typeof a) => ({
+      kind: 'unjudged' as const,
+      item,
+      reason: 'no_runner' as const,
+    });
+    expect(missingContractVerdicts(null, undefined)).toEqual([]);
+    expect(
+      missingContractVerdicts(plan, { kind: 'judged', verdicts: [unjudged(a), unjudged(b)] }),
+    ).toEqual([]);
+    expect(missingContractVerdicts(plan, { kind: 'judged', verdicts: [unjudged(a)] })).toEqual([
+      'RULE-003',
+    ]);
+    expect(
+      missingContractVerdicts(plan, {
+        kind: 'judged',
+        verdicts: [unjudged(a), unjudged(a), unjudged(b)],
+      }),
+    ).toEqual(['RULE-002']);
+    expect(missingContractVerdicts(plan, undefined)).toEqual(['RULE-002', 'RULE-003']);
+    expect(
+      missingContractVerdicts(plan, {
+        kind: 'halt',
+        reason: 'judge_runner_error',
+        message: 'x',
+        code: 'timeout',
+        ruleId: 'RULE-002',
+      }),
+    ).toEqual(['RULE-002', 'RULE-003']);
+  });
+
+  it('등록 해시와 다른 바이트(같은 경로 · 같은 커밋이라도)는 판정하지 않는다: 도구를 부르지 않고 판정 없음(등록 원본을 읽지 못함)', async () => {
+    const { root, commit } = plantedProject();
+    const source = await readContractSource(root, 'main', 'openapi.yaml');
+    if (!source.ok) throw new Error(source.code);
+    const run = async (contentHash: string) => {
+      const prepared = await prepareContracts(
+        root,
+        commit,
+        { items: [planItem({ sourceCommit: commit, contentHash })] },
+        { signal: never },
+      );
+      if (prepared.kind !== 'prepared') throw new Error(prepared.code);
+      try {
+        return prepared.prepared.items[0];
+      } finally {
+        disposeContracts(prepared.prepared);
+      }
+    };
+    expect(await run(source.contentHash)).toMatchObject({ kind: 'openapi' });
+    expect(await run('c'.repeat(64))).toMatchObject({
+      kind: 'unjudged',
+      reason: 'source_unreadable',
+    });
+  }, 60_000);
+
+  it('기록 프록시는 요청 · 응답의 상태 · 머리(location · set-cookie 여러 개 · cache-control · x-*) · 본문을 바이트 그대로 넘긴다 (리다이렉트 포함)', async () => {
+    const seen: { headers: string[]; body: string }[] = [];
+    const api = await listen((req, res) => {
+      let body = '';
+      req.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      req.on('end', () => {
+        seen.push({ headers: req.rawHeaders, body });
+        res.writeHead(
+          302,
+          'Found',
+          [
+            'Location',
+            '/다른/경로?x=1',
+            'Set-Cookie',
+            'a=1; Path=/',
+            'Set-Cookie',
+            'b=2; HttpOnly',
+            'Cache-Control',
+            'no-store',
+            'X-Bive-Test',
+            '값',
+            'Content-Type',
+            'application/octet-stream',
+          ].map((v) => Buffer.from(v).toString('latin1')),
+        );
+        res.end(Buffer.from([0, 1, 2, 255]));
+      });
+    });
+    const recorder = new ExchangeRecorder();
+    const proxy = await recorder.start({ upstreamBaseUrl: api.url });
+    const response = await new Promise<http.IncomingMessage & { body: Buffer }>(
+      (resolve, reject) => {
+        const req = http.request(`${proxy.baseUrl}/a?b=1`, {
+          method: 'PUT',
+          headers: { 'X-Custom': 'y', Cookie: 'c=3', 'Content-Type': 'text/plain' },
+        });
+        req.on('response', (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => resolve(Object.assign(res, { body: Buffer.concat(chunks) })));
+        });
+        req.on('error', reject);
+        req.end('요청 본문');
+      },
+    );
+    await proxy.stop();
+    expect(response.statusCode).toBe(302);
+    expect(response.statusMessage).toBe('Found');
+    const raw = response.rawHeaders;
+    const pairs = (list: string[]) =>
+      list.flatMap((value, i) => (i % 2 === 0 ? [[value.toLowerCase(), list[i + 1]]] : []));
+    const forwarded = pairs(raw).filter(
+      ([name]) => !['date', 'connection', 'keep-alive', 'transfer-encoding'].includes(name!),
+    );
+    expect(forwarded).toEqual([
+      ['location', Buffer.from('/다른/경로?x=1').toString('latin1')],
+      ['set-cookie', 'a=1; Path=/'],
+      ['set-cookie', 'b=2; HttpOnly'],
+      ['cache-control', 'no-store'],
+      ['x-bive-test', Buffer.from('값').toString('latin1')],
+      ['content-type', 'application/octet-stream'],
+    ]);
+    expect([...response.body]).toEqual([0, 1, 2, 255]);
+    expect(seen[0]?.body).toBe('요청 본문');
+    expect(
+      pairs(seen[0]!.headers).filter(([name]) =>
+        ['x-custom', 'cookie', 'content-type'].includes(name!),
+      ),
+    ).toEqual([
+      ['x-custom', 'y'],
+      ['cookie', 'c=3'],
+      ['content-type', 'text/plain'],
+    ]);
+    expect(recorder.exchanges()[0]).toMatchObject({
+      method: 'PUT',
+      target: '/a?b=1',
+      status: 302,
+      complete: true,
+    });
+  });
+
+  it('계약 검사 규칙의 표시 ID와 같은 인수 테스트 폴더가 있어도 인수 테스트로 판정하지 않는다', async () => {
+    // 계약 검사 규칙은 RULE-002가 된다 (시드 규칙 RULE-001 다음)
+    const { h, rules, checkCalls } = await contractPipeline(
+      [{ file: 'prisma/schema.prisma', kind: 'db-schema' }],
+      (calls) => trafficJudge(calls),
+    );
+    expect(rules[0]?.displayId).toBe('RULE-002');
+    fs.mkdirSync(path.join(h.repo, 'bive-acceptance', 'RULE-002'), { recursive: true });
+    fs.writeFileSync(
+      path.join(h.repo, 'bive-acceptance', 'RULE-002', 'x.acc.ts'),
+      "import { it } from 'vitest';\nit('통과', () => undefined);\n",
+    );
+    userGit(h.repo, 'add', '--all');
+    userGit(h.repo, 'commit', '-q', '-m', '계약 규칙 이름의 폴더');
+    const detail = await runToEnd(h);
+    expect(detail.run.status).toBe('merged');
+    expect(checkCalls.map((call) => call.input.ruleIds)).toEqual([['RULE-001']]);
+    expect(exitOf(detail, 'check')).toMatchObject({
+      ruleIds: ['RULE-001'],
+      unjudgedDirs: ['RULE-002'],
+    });
+    expect(judgmentsOfRule(h, rules[0]!.id)).toEqual([]);
+  }, 120_000);
+
+  it('병합 재검사도 계약을 판정한다: 검사 단계는 통과했지만 병합 커밋의 판정에서 계약과 다른 응답이면 병합하지 않고 병합 단계의 판정 기록을 남긴다', async () => {
+    const { h, rules } = await contractPipeline(
+      [{ file: 'openapi.yaml', kind: 'openapi' }],
+      (calls) => trafficJudge(calls, { mismatch: true, mismatchIn: 'merge' }),
+      {},
+      true,
+    );
+    const detail = await runToEnd(h);
+    expect(detail.run).toMatchObject({ status: 'failed', failureReason: 'check_failed' });
+    expect(Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
+    const mergeStep = detail.steps.find((step) => step.kind === 'merge')?.id;
+    const checkStep = detail.steps.find((step) => step.kind === 'check')?.id;
+    const judgments = judgmentsOfRule(h, rules[0]!.id);
+    expect(judgments.map((judgment) => [judgment.stepId, judgment.status])).toEqual([
+      [checkStep, 'pass'],
+      [mergeStep, 'fail'],
+    ]);
+    expect(exitOf(detail, 'merge').detail).toMatchObject({
+      recheck: { contracts: [{ outcome: 'fail', reason: 'response_mismatch', blocking: true }] },
+    });
+  }, 180_000);
+});
+
+describe('부모가 사라지면 도구 프로세스도 끝난다 (검토 1회차 B4)', () => {
+  /** 도구를 띄운 뒤 그 PID를 찍고 기다리는 부모 프로세스 (오케스트레이터 대신). */
+  const parentWith = (entry: string, args: string[], cwd: string) =>
+    spawn(
+      process.execPath,
+      [
+        '--conditions=@bive/source',
+        '--import',
+        'tsx',
+        '-e',
+        `const { spawnTool, toolEnv } = await import(${JSON.stringify(path.join(ORCHESTRATOR_SRC, 'contract-check', 'tool.ts'))});
+const child = spawnTool(${JSON.stringify(entry)}, ${JSON.stringify(args)}, { cwd: ${JSON.stringify(cwd)}, env: toolEnv(${JSON.stringify(cwd)}) });
+child.stdout.resume(); child.stderr.resume();
+console.log(child.pid);
+setInterval(() => {}, 1000);`,
+      ],
+      { cwd: path.join(ORCHESTRATOR_SRC, '..'), stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it('부모를 SIGKILL하면 스스로 끝나지 않는 도구(가짜 서버 · 실제 prism 프록시)도 정해진 시간 안에 사라진다', async () => {
+    const toolDir = tempDir();
+    fs.writeFileSync(path.join(toolDir, 'contract.yaml'), FIXTURE_OPENAPI);
+    const hangs = fakeTool('setInterval(() => {}, 1000);\n');
+    for (const [entry, args] of [
+      [hangs, []],
+      [PRISM_ENTRY, prismArgs('contract.yaml', 'http://127.0.0.1:9')],
+    ] as const) {
+      const parent = parentWith(entry, [...args], toolDir);
+      const pid = await new Promise<number>((resolve) =>
+        parent.stdout.once('data', (data: Buffer) => resolve(Number(String(data).trim()))),
+      );
+      // 도구가 떠 있다 (prism은 기동을 기다린다)
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      expect(alive(pid), entry).toBe(true);
+      parent.kill('SIGKILL');
+      const deadline = Date.now() + 5_000;
+      while (alive(pid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (alive(pid)) process.kill(pid, 'SIGKILL');
+      expect(alive(pid), entry).toBe(false);
+    }
+    expect(await waitGone(toolDir)).toEqual([]);
+  }, 60_000);
 });
 
 // ── 실제 판정 서버: 원본 pass · contract-mismatch 변형 fail ──────────────────

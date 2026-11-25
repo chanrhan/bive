@@ -9,7 +9,8 @@
 //   - 넘겼고 응답 쪽 위반(심각도 오류 · 경고: 경고는 계약에 없는 상태 코드라 본문을 대조하지 않은 것)이 있으면 위반
 //   - 넘겼고 위반이 없고 prism이 돌려준 상태가 기록된 상태와 같으면 통과
 //   - 넘기지 않았고 prism 응답이 "계약에 없는 경로 · 메서드"(404 `NO_PATH_MATCHED_ERROR` · 405 `NO_METHOD_MATCHED_ERROR`)면 계약 밖
-//   - 그 밖(넘겼는데 상태가 다름, 보안 요구 401, 본문 있는 GET 등 prism 오류, 기록 불완전)은 검증하지 못함
+//   - 그 밖(넘겼는데 상태가 다름, 보안 요구 401, 본문 있는 GET 등 prism 오류, 기록 불완전)은 검증하지 못함. 검증하지 못한 교환은
+//     계약 판정에서 실패다(`steps/contract-check.ts`: 판정받는 구현이 응답 모양으로 만들 수 있는 사유라 닫힌 쪽)
 import { type ChildProcess } from 'node:child_process';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -88,6 +89,11 @@ export interface ExchangeVerdict {
   readonly violations: readonly PrismViolation[];
   /** prism이 위반 머리를 잘랐다 (`Too many violations!`) */
   readonly truncated: boolean;
+  /**
+   * 검증하지 못한 까닭 (outcome `unverified`일 때): `status_differs` prism이 넘겼는데 돌려준 상태가 기록과 다름(prism이 응답을 다루지
+   * 못함), `not_forwarded` prism이 넘기지 않았고 계약 밖 오류도 아님, `incomplete` 기록이 불완전해 보내지 않음
+   */
+  readonly unverified?: 'status_differs' | 'not_forwarded' | 'incomplete';
 }
 
 export interface PrismResult {
@@ -172,7 +178,13 @@ export const classifyExchange = (
     if (response.status === exchange.status) {
       return { ...base, outcome: 'ok', violations: [], truncated: false };
     }
-    return { ...base, outcome: 'unverified', violations: [], truncated: false };
+    return {
+      ...base,
+      outcome: 'unverified',
+      violations: [],
+      truncated: false,
+      unverified: 'status_differs',
+    };
   }
   const problem = String(response.headers['content-type'] ?? '').startsWith(
     'application/problem+json',
@@ -180,7 +192,13 @@ export const classifyExchange = (
   if (problem && isRecord(body) && OUTSIDE_TYPES.includes(String(body.type))) {
     return { ...base, outcome: 'outside', violations: [], truncated: false };
   }
-  return { ...base, outcome: 'unverified', violations: [], truncated: false };
+  return {
+    ...base,
+    outcome: 'unverified',
+    violations: [],
+    truncated: false,
+    unverified: 'not_forwarded',
+  };
 };
 
 /** 재생 서버: 기록된 응답을 그대로 돌려주고, 받은 교환 번호를 센다. */
@@ -194,12 +212,13 @@ const startReplayServer = async (
     const raw = req.headers[EXCHANGE_HEADER];
     const index = typeof raw === 'string' && /^\d{1,9}$/u.test(raw) ? Number(raw) : -1;
     const exchange = exchanges.get(index);
-    if (exchange === undefined || exchange.status === null) {
+    if (exchange !== undefined) served.add(index);
+    if (exchange === undefined || !exchange.complete || exchange.status === null) {
+      // 기록이 불완전한 교환은 응답을 대조하지 않는다 (prism이 넘겼는지 = 계약 안인지만 센다)
       res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
       res.end('기록 없음');
       return;
     }
-    served.add(index);
     const headers: [string, string][] = exchange.responseHeaders.filter(
       ([name]) => !RESPONSE_DROP.has(name.toLowerCase()),
     ) as [string, string][];
@@ -340,7 +359,7 @@ export const prismArgs = (documentFile: string, upstream: string): string[] => [
 ];
 
 /**
- * 기록된 교환을 prism으로 검증한다. 기록이 불완전한 교환은 보내지 않고 검증하지 못한 것으로 둔다. prism을 띄우지 못하거나 제한 시간을
+ * 기록된 교환을 prism으로 검증한다. 기록이 불완전한 교환은 요청만 보내 계약 밖인지 가리고, 계약 밖이 아니면 검증하지 못한 것으로 둔다. prism을 띄우지 못하거나 제한 시간을
  * 넘거나 교환을 보내지 못하면 {@link ContractToolError}, 중단이면 신호의 사유로 던진다. prism과 재생 서버는 어떤 경우에도 정리한다.
  */
 export const validateWithPrism = async (options: PrismOptions): Promise<PrismResult> => {
@@ -352,8 +371,9 @@ export const validateWithPrism = async (options: PrismOptions): Promise<PrismRes
       .filter((item) => item.complete && item.status !== null)
       .map((item) => [item.index, item]),
   );
+  const all = new Map(options.exchanges.map((item) => [item.index, item]));
   const served = new Set<number>();
-  const replay = await startReplayServer(complete, served);
+  const replay = await startReplayServer(all, served);
   let child: ChildProcess | undefined;
   try {
     child = spawnTool(options.entry ?? PRISM_ENTRY, prismArgs(options.documentFile, replay.url), {
@@ -375,28 +395,28 @@ export const validateWithPrism = async (options: PrismOptions): Promise<PrismRes
     child.stdout?.resume();
     const verdicts: ExchangeVerdict[] = [];
     for (const exchange of options.exchanges) {
-      const recorded = complete.get(exchange.index);
-      if (recorded === undefined) {
-        verdicts.push({
-          index: exchange.index,
-          method: exchange.method,
-          target: exchange.target,
-          outcome: 'unverified',
-          violations: [],
-          truncated: false,
-        });
-        continue;
-      }
       let response: PrismResponse;
       try {
-        response = await sendToPrism(prismUrl, recorded, signal);
+        // 기록이 불완전한 교환도 요청은 보낸다: prism이 계약 밖 경로 · 메서드로 돌려주면 계약 밖이고, 넘기면 검증하지 못한 것이다
+        response = await sendToPrism(prismUrl, exchange, signal);
       } catch {
         options.signal.throwIfAborted();
         if (deadline.aborted)
           throw new ContractToolError('timeout', 'prism 검증이 제한 시간을 넘었습니다');
         throw new ContractToolError('replay_failed', 'prism에 교환을 보내지 못했습니다');
       }
-      verdicts.push(classifyExchange(recorded, served.has(recorded.index), response));
+      const verdict = classifyExchange(exchange, served.has(exchange.index), response);
+      verdicts.push(
+        complete.has(exchange.index) || verdict.outcome === 'outside'
+          ? verdict
+          : {
+              ...verdict,
+              outcome: 'unverified',
+              violations: [],
+              truncated: false,
+              unverified: 'incomplete',
+            },
+      );
     }
     return { exchanges: verdicts };
   } finally {

@@ -1,9 +1,13 @@
 // OpenAPI 계약 문서의 사전 검사 (M3-47 #292, ADR-132 ③).
-// 두 도구는 문서가 가리키는 바깥 자원을 받아 온다(실측: `@redocly/cli` 2.77.0은 원격 · 파일 `$ref`와 예시의 `externalValue`를,
-// `@stoplight/prism-cli` 5.14.2는 원격 `$ref`를 받아 오고, 끄는 선택 항목이 없다). 그래서 도구를 부르기 전에 이 모듈이 문서를 데이터로
-// 읽어 계약 파일 밖을 가리키는 값이 하나라도 있으면 도구를 부르지 않는다(닫힌 쪽).
+// 두 도구는 문서가 가리키는 바깥 자원을 받아 온다. 바깥 자료를 푸는 칸(도구 소스에서 리졸버를 부르는 자리, ADR-132 ③):
+//   - `@redocly/cli` 2.77.0: 모든 객체의 `$ref`, 예시의 `externalValue`, `discriminator.mapping`의 값 · `discriminator.defaultMapping`
+//     (참조처럼 생긴 글이면 `$ref`로 바꿔 푼다)
+//   - `@stoplight/prism-cli` 5.14.2: `$ref`(json-schema-ref-parser의 http · 파일 리졸버)
+//   끄는 선택 항목이 없어 도구를 부르기 전에 이 모듈이 문서를 데이터로 읽어 계약 파일 밖을 가리키는 값이 하나라도 있으면 도구를 부르지
+//   않는다(닫힌 쪽).
 // - 바깥을 가리키는 값: 키 `$ref` · `$dynamicRef` · `$recursiveRef` · `operationRef`의 값이 `#`로 시작하는 글이 아님(원격 주소 · 다른
-//   파일 · 글이 아닌 값), `externalValue` 키가 있음. 키 이름만 보고 자리(스키마 안 · 속성 이름 등)는 가리지 않는다(넓게 막는다)
+//   파일 · 글이 아닌 값), `externalValue` 키가 있음, 키 `discriminator` 아래 `mapping`의 값 · `defaultMapping`이 문서 안 참조(`#`로
+//   시작)도 스키마 이름(`components.schemas` · `definitions`의 키)도 아님. 키 이름만 보고 자리는 가리지 않는다(넓게 막는다)
 // - 문서를 읽지 못함(YAML · JSON 문법, 별칭 · 태그 · 중복 키, 여러 문서, 최상위가 객체가 아님)은 문서 형식 오류다
 // 이 모듈은 문서를 해석해 판정하지 않는다: 형식 · 일치 판정은 도구가 한다(ADR-033).
 import { parseAllDocuments } from 'yaml';
@@ -38,12 +42,27 @@ const escapePointer = (key: string): string => key.replaceAll('~', '~0').replace
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+/** 문서의 스키마 이름 (`components.schemas` · `definitions`의 키). */
+const schemaNames = (root: unknown): Set<string> => {
+  const names = new Set<string>();
+  if (!isRecord(root)) return names;
+  const components = root.components;
+  for (const table of [isRecord(components) ? components.schemas : undefined, root.definitions]) {
+    if (isRecord(table)) for (const name of Object.keys(table)) names.add(name);
+  }
+  return names;
+};
+
 /** 문서 값에서 바깥을 가리키는 값을 모은다 (깊이 우선, 문서 순서). */
 export const externalReferences = (
   root: unknown,
 ): { items: ExternalReference[]; total: number } => {
   const items: ExternalReference[] = [];
   let total = 0;
+  const names = schemaNames(root);
+  /** 판별자 대응 값이 문서 안인지: 문서 안 참조 또는 스키마 이름 */
+  const inside = (value: unknown): boolean =>
+    typeof value === 'string' && (value.startsWith('#') || names.has(value));
   const push = (pointer: string, key: string): void => {
     total += 1;
     if (items.length < MAX_EXTERNAL_REFERENCES) items.push({ pointer, key });
@@ -63,6 +82,19 @@ export const externalReferences = (
           if (typeof child !== 'string' || !child.startsWith('#')) push(here, key);
         } else if ((EXTERNAL_VALUE_KEYS as readonly string[]).includes(key)) {
           push(here, key);
+        } else if (key === 'discriminator' && isRecord(child)) {
+          if ('mapping' in child) {
+            const mapping = child.mapping;
+            if (!isRecord(mapping)) push(`${here}/mapping`, 'mapping');
+            else {
+              for (const [name, target] of Object.entries(mapping)) {
+                if (!inside(target)) push(`${here}/mapping/${escapePointer(name)}`, 'mapping');
+              }
+            }
+          }
+          if ('defaultMapping' in child && !inside(child.defaultMapping)) {
+            push(`${here}/defaultMapping`, 'defaultMapping');
+          }
         }
         children.push({ value: child, pointer: here });
       }

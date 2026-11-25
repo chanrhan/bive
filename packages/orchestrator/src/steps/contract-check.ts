@@ -10,8 +10,10 @@
 //   - 문서 형식 오류(데이터로 읽지 못함 · lint 오류): `fail`. 등록된 문서의 문제라 구현이 고칠 수 없어 회귀하지 않는다(단계 통과를 막지
 //     않는다: 막으면 그 프로젝트의 모든 실행이 회귀 상한으로 끝난다)
 //   - 트래픽 검증에서 계약과 다른 응답이 하나라도 있음: `fail`, 구현 회귀(구조 검사 실패와 같다)
-//   - 계약 밖을 가리키는 값(원격 · 파일 참조) · 경로 없는 문서 · 등록 원본을 읽지 못함 · 계약 안 요청이 없음 · 검증하지 못한 요청이 있음:
-//     판정 없음(기록 없음, 통과로 세지 않음, 다른 규칙을 막지 않음)
+//   - 검증하지 못한 요청(계약 안이거나 계약 안인지 가릴 수 없는 교환: prism이 다루지 못한 응답 · 넘기지 않은 요청 · 불완전한 기록 ·
+//     기록 건수 상한 초과): `fail`, 구현 회귀. 판정받는 구현이 응답 모양 · 크기로 만들 수 있는 사유라 판정 없음으로 두지 않는다
+//   - 계약 밖을 가리키는 값(원격 · 파일 참조) · 경로 없는 문서 · 등록 원본을 읽지 못함 · 계약 안 요청이 없음: 판정 없음(기록 없음,
+//     통과로 세지 않음, 다른 규칙을 막지 않음). 모두 등록 문서 · 인수 테스트 쪽 사유라 구현 코드가 고를 수 없다
 //   - 통과: 문서 형식 오류 0건이고, 계약 안 요청이 1건 이상이며 모두 검증되었고 위반이 0건일 때뿐
 // - 도구를 끝까지 못 돌림(띄우지 못함 · 시간 초과 · 출력 초과 · 예상 밖 종료 코드 · 출력 모양): 판정하지 않고 실행을 끝낸다
 //   (`judge_runner_error`, 단계 이름 `contract`). 통과로 읽히는 길이 없다. 중단 신호는 도구까지 이어지고 신호의 사유로 던진다
@@ -112,15 +114,20 @@ export const contractRuleIds = (plan: ContractPlan | null): string[] =>
 
 /** 판정 없음의 사유. */
 export type ContractUnjudgedReason =
-  | 'no_runner'
-  | 'source_unreadable'
-  | 'external_reference'
-  | 'no_operations'
-  | 'no_traffic'
-  | 'unverified';
+  'no_runner' | 'source_unreadable' | 'external_reference' | 'no_operations' | 'no_traffic';
 
-/** 판정 사유 (기록 · 단계 결과). */
-export type ContractVerdictReason = 'verified' | 'document_invalid' | 'response_mismatch';
+/**
+ * 판정 사유 (기록 · 단계 결과). `response_unverified`: 계약 안이거나 계약 안인지 가릴 수 없는 교환을 검증하지 못함(판정받는 구현이 응답
+ * 모양 · 크기로 만들 수 있는 사유라 실패로 본다)
+ */
+export type ContractVerdictReason =
+  'verified' | 'document_invalid' | 'response_mismatch' | 'response_unverified';
+
+const UNVERIFIED_TEXT: Readonly<Record<NonNullable<ExchangeVerdict['unverified']>, string>> = {
+  status_differs: '계약 대조 도구가 응답을 다루지 못함 (돌려준 상태가 기록과 다름)',
+  not_forwarded: '계약 대조 도구가 요청을 판정 서버로 넘기지 않음 (계약 밖 경로 · 메서드가 아님)',
+  incomplete: '요청 · 응답 기록이 불완전함 (기록 상한 초과 · 연결 끊김 · 판정 서버 오류)',
+};
 
 /** 계약 검사 규칙 하나의 판정 (기록 전). */
 export type ContractVerdict =
@@ -355,41 +362,54 @@ export const trafficVerdict = (
     result.exchanges.filter((exchange) => exchange.outcome === outcome).length;
   const ok = count('ok');
   const outside = count('outside');
-  const unverified = count('unverified') + extra.overflow;
   const violating = result.exchanges.filter((exchange) => exchange.outcome === 'violation');
+  const unverifiedExchanges = result.exchanges.filter(
+    (exchange) => exchange.outcome === 'unverified',
+  );
+  const unverified = unverifiedExchanges.length + extra.overflow;
+  const failing = violating.length + unverified;
   const notes = [
     `계약과 다른 응답 ${String(violating.length)}건`,
     `검증한 요청 ${String(ok)}건`,
     `계약 밖 요청 ${String(outside)}건`,
     ...(unverified > 0 ? [`검증하지 못한 요청 ${String(unverified)}건`] : []),
+    ...(extra.overflow > 0 ? [`기록 건수 상한을 넘은 요청 ${String(extra.overflow)}건`] : []),
     ...(extra.warnings > 0 ? [`문서 경고 ${String(extra.warnings)}건`] : []),
-    ...(violating.length > MAX_CONTRACT_CASES ? [`앞 ${String(MAX_CONTRACT_CASES)}건만 실음`] : []),
+    ...(failing > MAX_CONTRACT_CASES ? [`앞 ${String(MAX_CONTRACT_CASES)}건만 실음`] : []),
     SOURCE_AT_COMMIT_TEXT[sourceAtCommit],
   ];
-  if (violating.length > 0) {
+  // 계약과 다른 응답 · 검증하지 못한 요청(기록 건수 상한 초과 포함)은 실패다: 판정받는 구현이 응답으로 만들 수 있는 사유라 판정 없음으로
+  // 남기면 위반이 병합까지 간다 (닫힌 쪽)
+  if (failing > 0) {
+    const cases: JudgmentCase[] = [
+      ...violating.map((exchange): JudgmentCase => ({
+        name: `계약과 다른 응답 · ${shown(`${exchange.method} ${exchange.target}`)}`,
+        file: shown(item.contract.sourceFile),
+        line: null,
+        status: 'failed',
+        message: shown(
+          exchange.violations
+            .map((violation) => `${violation.location}: ${violation.message}`)
+            .join(' / '),
+        ),
+      })),
+      ...unverifiedExchanges.map((exchange): JudgmentCase => ({
+        name: `검증하지 못한 응답 · ${shown(`${exchange.method} ${exchange.target}`)}`,
+        file: shown(item.contract.sourceFile),
+        line: null,
+        status: 'failed',
+        message: UNVERIFIED_TEXT[exchange.unverified ?? 'status_differs'],
+      })),
+    ];
     return {
       kind: 'judged',
       item,
       status: 'fail',
-      reason: 'response_mismatch',
+      reason: violating.length > 0 ? 'response_mismatch' : 'response_unverified',
       blocking: true,
-      cases: [
-        summaryCase(item, 'failed', notes),
-        ...violating.slice(0, MAX_CONTRACT_CASES).map((exchange): JudgmentCase => ({
-          name: `계약과 다른 응답 · ${shown(`${exchange.method} ${exchange.target}`)}`,
-          file: shown(item.contract.sourceFile),
-          line: null,
-          status: 'failed',
-          message: shown(
-            exchange.violations
-              .map((violation) => `${violation.location}: ${violation.message}`)
-              .join(' / '),
-          ),
-        })),
-      ],
+      cases: [summaryCase(item, 'failed', notes), ...cases.slice(0, MAX_CONTRACT_CASES)],
     };
   }
-  if (unverified > 0) return { kind: 'unjudged', item, reason: 'unverified' };
   if (ok === 0) return { kind: 'unjudged', item, reason: 'no_traffic' };
   return {
     kind: 'judged',

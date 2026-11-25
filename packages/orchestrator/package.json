@@ -12,6 +12,7 @@
   },
   "files": [
     "dist",
+    "runner",
     "scenarios"
   ],
   "scripts": {
