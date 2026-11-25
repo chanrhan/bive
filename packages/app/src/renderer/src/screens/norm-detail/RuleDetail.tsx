@@ -24,7 +24,9 @@
 // - 제목 · 진술 · 테스트 케이스 이름은 숨은 글자를 보이는 표기로 그린다(visibleText). 실패 메시지는 줄을 살리고 숨은 글자만
 //   표기한다(visibleLines). 편집 입력에는 원문을 넣는다. 편집 중에는 [확인]이 없다. 변경 기록 검증이 깨졌으면 변경 이력을 펼친다
 // - 요구사항 상세가 자식 규칙으로 펼칠 때는 부모(`parent`)를 넘겨 requirement.get을 다시 부르지 않는다 (ADR-078)
-// - 값은 rule.list 항목 · judgment.list · requirement.get · blocks.get 결과에서만 (NFR-03)
+// - 최신 실행 (SCR-03 "최신 실행 링크", COST-02, M3-16 · ADR-134): 확인 상태 다음 줄. rule.get의 최신 실행 표시 ID ·
+//   실행 합계 비용 · 턴(값이 없으면 각각 "없음"), 대상으로 한 실행이 없으면 "없음". 이동 없이 글자만. 실행 알림에 다시 읽는다
+// - 값은 rule.list 항목 · judgment.list · requirement.get · blocks.get · rule.get 결과에서만 (NFR-03)
 import './RuleDetail.css';
 
 import type {
@@ -55,6 +57,7 @@ import {
   failureCases,
   judgedAtText,
   latestRunDisplayId,
+  latestRunParts,
   outputOpenByDefault,
   RULE_DETAIL_TEXT as TEXT,
   ruleAuthorName,
@@ -79,9 +82,11 @@ import { type RunHistoryRow, runHistoryRows } from './runHistoryView.js';
 import {
   type ProjectRunsLoad,
   type RuleHistoryLoad,
+  type RuleLatestRunLoad,
   type RuleNormChangesLoad,
   useProjectRuns,
   useRuleHistory,
+  useRuleLatestRun,
   useRuleNormChanges,
   useRuleParent,
 } from './useRuleDetailData.js';
@@ -232,6 +237,7 @@ export const RuleDetail = ({
   const latest = judgment.latest;
   const history = useRuleHistory(projectId, rule.id, latest?.id ?? null);
   const runs = useProjectRuns(projectId);
+  const latestRun = useRuleLatestRun(projectId, rule.id);
   const knownMatches = knownParent !== undefined && knownParent.id === rule.parentRequirementId;
   const fetchedParent = useRuleParent(projectId, knownMatches ? null : rule.parentRequirementId);
   const parent = knownMatches ? knownParent : fetchedParent;
@@ -418,6 +424,9 @@ export const RuleDetail = ({
             </p>
           )}
         </Field>
+        <Field id="latest-run" label={TEXT.latestRun}>
+          <LatestRun load={latestRun} />
+        </Field>
         {retirement !== undefined && (
           <Field id="retired-at" label={TEXT.retiredAt}>
             {retirement.retiredAt === null ? (
@@ -483,6 +492,37 @@ export const RuleDetail = ({
         </CollapsibleDetail>
       </div>
     </div>
+  );
+};
+
+/**
+ * 최신 실행 링크 (SCR-03 "최신 실행 링크", COST-02, ADR-134): 표시 ID · 실행 합계 비용 · 턴. 이동 대상 화면이 문서에 없고
+ * 실행 추적 화면(SCR-16)이 아직 없어 검증 화면의 실행 링크처럼 글자로만 보인다. 대상으로 한 실행이 없으면 "없음",
+ * 비용 · 턴을 모르면 각각 "없음"(0으로 보이지 않는다). 읽는 중에는 자리만 비운다.
+ */
+const LatestRun = ({ load }: { load: RuleLatestRunLoad }): React.JSX.Element => {
+  if (load.state === 'loading') {
+    return (
+      <span className="rule-latest-run" data-testid="rule-latest-run-loading" aria-busy="true" />
+    );
+  }
+  if (load.state === 'error') {
+    return (
+      <span className="rule-detail-error" data-testid="rule-latest-run-error">
+        {TEXT.latestRunFailed}
+      </span>
+    );
+  }
+  if (load.latestRun === null) {
+    return <span data-testid="rule-latest-run-none">{TEXT.none}</span>;
+  }
+  const parts = latestRunParts(load.latestRun);
+  return (
+    <span className="rule-latest-run" data-testid="rule-latest-run" data-run-id={load.latestRun.id}>
+      <span data-testid="rule-latest-run-id">{parts.id}</span>
+      <span data-testid="rule-latest-run-cost">{parts.cost}</span>
+      <span data-testid="rule-latest-run-turns">{parts.turns}</span>
+    </span>
   );
 };
 

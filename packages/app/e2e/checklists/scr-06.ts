@@ -4,7 +4,8 @@
 // - 기본(규칙): 진술 · 종류 · 검사 · 부모 요구사항 · 생성 주체(이름), 테스트 실행 결과(판정 · 시각 · 커밋 · 실행 · 케이스),
 //   테스트 출력(최신 판정이 실패라 자동 펼침: 실패 원인 = 케이스 이름 · `file:line` · 메시지), 실행 이력(최신부터).
 //   대상 블록(저장 순서, 지금 선언에 없는 이름은 "선언 외") · 위험도(M3-19 · ADR-126). 변이 상태는 미노출 (ADR-035). 규칙 화면 상세의 머리에는 [편집] · [실행] (ADR-076 · ADR-109),
-//   속성 줄에 확인 상태와 (미확인이면) [확인], 맨 아래 변경 이력(규범 변경 기록, 기본 접힘) (M7-03 · M7-15 · ADR-114)
+//   속성 줄에 확인 상태와 (미확인이면) [확인], 맨 아래 변경 이력(규범 변경 기록, 기본 접힘) (M7-03 · M7-15 · ADR-114).
+//   확인 상태 다음 줄에 최신 실행(표시 ID · 실행 합계 비용 · 턴, M3-16 · ADR-134)
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-073 (실행 이력 자리만 비움 · "실행 이력 불러오기 실패", 나머지 상세는 그대로)
 // - 기본(요구사항): 표시 ID · [편집] · [삭제], 본문, 생성 주체(이름), 자식 규칙 목록(접힘), 구현 위치(효력 있는 자식 규칙의
 //   대상 블록, 중복 없이 선언 순서, ADR-126). 변경 이력(P1)은 미노출 (ADR-035). 로딩 · 에러는 ADR-078 (자식 규칙 자리만 비움 · "자식 규칙 불러오기 실패", 나머지 상세는 그대로)
@@ -16,7 +17,9 @@ import type {
   NormChangeView,
   Requirement,
   Rule,
+  RuleGetResult,
   RuleJudgmentEntry,
+  RuleLatestRun,
   RuleWithJudgment,
   Run,
 } from '@bive/shared';
@@ -192,6 +195,20 @@ export const RULES: RuleWithJudgment[] = [
   { rule: failingRule, judgment: { status: 'fail', latest: latestOf(FAILING_HISTORY) } },
   { rule: unjudgedRule, judgment: { status: 'unjudged', latest: null } },
 ];
+
+/** 최신 실행 링크 (`rule.get` 가짜 응답의 `latestRun`, M3-16 #61 · ADR-134, 테스트 전용 데이터). */
+export const LATEST_RUN: RuleLatestRun = {
+  id: '01JE0000000000000000000003',
+  displayId: 'EXE-003',
+  costUsd: 0.354,
+  turns: 11,
+};
+
+/** `rule.get` 가짜 응답: 목록 항목 + 최신 실행 링크. */
+export const ruleGetOf = (
+  item: RuleWithJudgment,
+  latestRun: RuleLatestRun | null = LATEST_RUN,
+): RuleGetResult => ({ ...item, latestRun });
 
 /** 실행 1건 (`run.list` 가짜 응답 항목, 테스트 전용 데이터). */
 const runOf = (displayId: string, patch: Partial<Run>): Run => ({
@@ -456,6 +473,12 @@ const detail: ElementCheck[] = [
   // 미확인이면 [확인] (사람 주체 confirmation.set, ADR-100 D2 · M7-15)
   { label: '확인 버튼', testId: 'rule-confirm', role: 'button', name: '확인' },
   { label: '폐기 표시 없음 (효력 있는 규칙)', testId: 'rule-detail-retired', absent: true },
+  // 최신 실행 링크: 표시 ID · 실행 합계 비용 · 턴 (COST-02, M3-16 · ADR-134). 이동 없이 글자만
+  {
+    label: '최신 실행 (표시 ID · 비용 · 턴)',
+    testId: 'rule-field-latest-run',
+    text: '최신 실행EXE-003비용 $0.35턴 11',
+  },
   {
     label: '변경 이력 (기본 접힘)',
     role: 'button',

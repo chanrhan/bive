@@ -1,6 +1,7 @@
 // 규칙 상세의 표시 규칙 (screens.md SCR-03 상세 · SCR-06 · 1.4 상세 접힘, ADR-073). DOM · React에 의존하지 않는다
 // (test/rule-detail-view.test.ts).
-// - 값은 rule.list 항목(규칙 · 최신 판정) · judgment.list(판정 이력) · requirement.get(부모)에서만 만든다(NFR-03)
+// - 값은 rule.list 항목(규칙 · 최신 판정) · judgment.list(판정 이력) · requirement.get(부모) · rule.get(최신 실행 링크)에서만
+//   만든다(NFR-03)
 // - 테스트 출력은 기본 접힘, 최신 판정이 실패면 자동 펼침 (1.4)
 // - 실패 원인 = 최신 판정의 통과하지 않은 케이스(실행기 출력: 케이스 이름 · 메시지 · `file:line`)
 import type {
@@ -10,6 +11,7 @@ import type {
   JudgmentResult,
   RuleJudgmentEntry,
   RuleKind,
+  RuleLatestRun,
   TestCaseStatus,
 } from '@bive/shared';
 
@@ -17,6 +19,7 @@ import { AUTHOR_LABELS } from '../../components/AuthorMark/labels.js';
 import { formatCardTime } from '../../components/Card2Line/time.js';
 import { AGENT_ROLE_LABELS, CHECK_KIND_LABELS } from '../../proposals/labels.js';
 import { RULE_KIND_LABELS } from '../rules/rulesView.js';
+import { formatUsd } from '../verification/verificationView.js';
 
 export const RULE_DETAIL_TEXT = {
   statement: '진술',
@@ -45,7 +48,23 @@ export const RULE_DETAIL_TEXT = {
   retiredAt: '폐기 시각',
   successor: '대체 규칙',
   unknown: '알 수 없음',
+  latestRun: '최신 실행',
+  latestRunFailed: '최신 실행 불러오기 실패',
+  cost: '비용',
+  turns: '턴',
 } as const;
+
+/**
+ * 최신 실행 링크의 글 조각 (COST-02 · SCR-03, ADR-134): 표시 ID · "비용 $0.35" · "턴 12". 비용 표기는 검증 화면의 실행
+ * 링크와 같은 `formatUsd`다. 값이 없으면(`null`) 각각 "없음"이고 0으로 보이지 않는다. 0은 기록이 실제로 0일 때만이다.
+ */
+export const latestRunParts = (
+  run: RuleLatestRun,
+): { id: string; cost: string; turns: string } => ({
+  id: run.displayId,
+  cost: `${RULE_DETAIL_TEXT.cost} ${formatUsd(run.costUsd)}`,
+  turns: `${RULE_DETAIL_TEXT.turns} ${run.turns === null ? RULE_DETAIL_TEXT.none : String(run.turns)}`,
+});
 
 /**
  * 테스트 케이스 상태 표시명 (vitest 리포터 상태, shared TestCaseStatus).
