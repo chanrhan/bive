@@ -726,7 +726,7 @@ describe('테스트 작성 세션의 구현 산출 입력 방어 (M3-50 #295, AD
       '',
       'a\nb',
       'a\rb',
-      'a b',
+      'a\u2028b',
       'a\u0007b',
       'a\tb',
       'a b',
@@ -741,7 +741,7 @@ describe('테스트 작성 세션의 구현 산출 입력 방어 (M3-50 #295, AD
       'a~b',
       'a\\b',
       'ü',
-      '​',
+      '\u200b',
       '[id',
       '[a](b)',
       '(a)(b)',
@@ -749,6 +749,13 @@ describe('테스트 작성 세션의 구현 산출 입력 방어 (M3-50 #295, AD
       '[...a b]',
       'a'.repeat(ROUTES_LIMITS.segment + 1),
       '(..)'.repeat(1000),
+      // 끝 줄 나눔 · 끝 공백 (패턴 끝 자리)
+      'a\n',
+      '[x]\n',
+      '(g)\n',
+      '@s\n',
+      'a\r',
+      'a ',
     ]) {
       expect([name, isSafeRouteSegment(name)]).toEqual([name, false]);
     }
@@ -764,7 +771,7 @@ describe('테스트 작성 세션의 구현 산출 입력 방어 (M3-50 #295, AD
     putPage(worktree, 'app', 'x y');
     putPage(worktree, 'app', 'q`b');
     putPage(worktree, 'app', '(g\nroup)', 'inner');
-    putPage(worktree, 'app', 'u v');
+    putPage(worktree, 'app', 'u\u2028v');
     putPage(worktree, 'app', 'b\u0007c');
     putPage(worktree, 'app', 'z'.repeat(ROUTES_LIMITS.segment + 1));
     const { routes } = prepared(worktree, sessionDir);
@@ -781,7 +788,7 @@ describe('테스트 작성 세션의 구현 산출 입력 방어 (M3-50 #295, AD
       '(싣지 않은 경로 8건: 폴더 이름이 안전한 경로 글자 밖이거나 길이 상한(폴더 이름 100자 · 경로 200자)을 넘음)',
     );
     // 원문 조각은 어디에도 없다
-    for (const piece of ['admin', 'inner', 'q`b', 'x y', '\r', ' ', '\u0007', 'zzz']) {
+    for (const piece of ['admin', 'inner', 'q`b', 'x y', '\r', '\u2028', '\u0007', 'zzz']) {
       expect([piece, routes.includes(piece)]).toEqual([piece, false]);
     }
   });
@@ -829,6 +836,15 @@ describe('테스트 작성 세션의 구현 산출 입력 방어 (M3-50 #295, AD
         ...over.slice(0, 19).map((e) => `- 페이지 GET ${e.path}`),
       ),
     );
+    // 상한에 닿으면 멈춘다: 넘는 항목 뒤(경로 순)의 짧은 경로도 건너뛰어 싣지 않고 넘친 수에 든다
+    const tail = [...over, pageEntry('/q')];
+    expect(renderRoutes(tail)).toBe(
+      routesText(
+        ROUTES_NOTICES.overflow(2),
+        '',
+        ...over.slice(0, 19).map((e) => `- 페이지 GET ${e.path}`),
+      ),
+    );
   });
 
   it('순서는 입력 순서 · 로캘과 무관하게 경로 → 종류의 코드 단위 순이고, 넘칠 때도 그 순서로 앞에서부터 싣는다', () => {
@@ -846,6 +862,13 @@ describe('테스트 작성 세션의 구현 산출 입력 방어 (M3-50 #295, AD
         ...entries.slice(0, ROUTES_LIMITS.entries - 3).map((e) => `- 페이지 GET ${e.path}`),
       ),
     );
+  });
+
+  it('src가 일반 파일이면 던지지 않고 라우트 없음이다', () => {
+    const { worktree, sessionDir } = inputDirs();
+    fs.writeFileSync(path.join(worktree, 'src'), 'not a folder');
+    expect(listAppRoutes(worktree)).toEqual([]);
+    expect(prepared(worktree, sessionDir).routes).toBe(routesText('(라우트 없음)'));
   });
 
   it('라우트 나열은 링크 폴더를 따라가지 않는다: src가 링크면 src/app을 읽지 않고, 앱 폴더 안 링크 폴더도 건너뛴다', () => {
@@ -945,6 +968,38 @@ describe('테스트 작성 세션의 구현 산출 입력 방어 (M3-50 #295, AD
         routesText(ROUTES_NOTICES.schema.not_regular, '', '(라우트 없음)'),
       );
     }
+  });
+
+  it('스키마 파일을 열지 못하면 사본 없이 그 까닭을 가려 알린다: 링크로 바뀜(ELOOP)은 링크, 그 밖(권한 등)은 읽지 못함', () => {
+    for (const [code, notice] of [
+      ['EACCES', ROUTES_NOTICES.schema.unreadable],
+      ['ELOOP', ROUTES_NOTICES.schema.not_regular],
+    ] as const) {
+      const { worktree, sessionDir } = inputDirs();
+      fs.mkdirSync(path.join(worktree, 'prisma'));
+      const target = path.join(worktree, 'prisma', 'schema.prisma');
+      fs.writeFileSync(target, 'model A { id Int @id }\n');
+      const realOpen = fs.openSync.bind(fs);
+      const spy = vi.spyOn(fs, 'openSync').mockImplementation(((
+        p: fs.PathLike,
+        ...rest: unknown[]
+      ) => {
+        if (String(p) === target) {
+          throw Object.assign(new Error(code), { code });
+        }
+        return (realOpen as (...args: unknown[]) => number)(p, ...rest);
+      }) as typeof fs.openSync);
+      try {
+        const result = prepared(worktree, sessionDir);
+        expect([code, result.schema]).toEqual([code, null]);
+        expect([code, result.routes]).toEqual([code, routesText(notice, '', '(라우트 없음)')]);
+      } finally {
+        spy.mockRestore();
+      }
+    }
+    expect(ROUTES_NOTICES.schema.unreadable).toBe(
+      '(데이터 스키마 사본 없음: prisma/schema.prisma를 읽지 못함)',
+    );
   });
 
   it('스키마 파일 자체가 링크면 사본을 두지 않고 알리며, prisma가 일반 파일이거나 스키마가 없으면 알림 없이 사본만 없다', () => {

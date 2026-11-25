@@ -189,7 +189,7 @@ export const listAppRoutes = (worktree: string): RouteEntry[] => {
 };
 
 /** 사본을 두지 않은 데이터 스키마의 까닭 (`routes.md` 머리에 고정 문장으로 적는다). */
-export type SchemaOmission = 'too_large' | 'not_regular';
+export type SchemaOmission = 'too_large' | 'not_regular' | 'unreadable';
 
 /** `routes.md` 머리에 적는 고정 문장 (ADR-131). 원문(폴더 이름 · 스키마 내용)은 싣지 않는다. */
 export const ROUTES_NOTICES = {
@@ -204,6 +204,7 @@ export const ROUTES_NOTICES = {
       `(데이터 스키마 사본 없음: prisma/schema.prisma가 크기 상한 ${String(max)}바이트를 넘음)`,
     not_regular:
       '(데이터 스키마 사본 없음: prisma 폴더 또는 prisma/schema.prisma가 링크이거나 일반 폴더 · 파일이 아님)',
+    unreadable: '(데이터 스키마 사본 없음: prisma/schema.prisma를 읽지 못함)',
   },
 } as const;
 
@@ -246,6 +247,7 @@ export const renderRoutes = (
   if (options.schema === 'too_large') {
     notices.push(ROUTES_NOTICES.schema.too_large(PRISMA_SCHEMA_MAX_BYTES));
   } else if (options.schema === 'not_regular') notices.push(ROUTES_NOTICES.schema.not_regular);
+  else if (options.schema === 'unreadable') notices.push(ROUTES_NOTICES.schema.unreadable);
   if (unsafe > 0) notices.push(ROUTES_NOTICES.unsafe(unsafe));
   if (overflow > 0) notices.push(ROUTES_NOTICES.overflow(overflow));
   if (notices.length > 0) lines.push(...notices, '');
@@ -284,8 +286,10 @@ const readPrismaSchema = (worktree: string): SchemaRead => {
       target,
       fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
     );
-  } catch {
-    return { kind: 'not_regular' };
+  } catch (error) {
+    // 확인 뒤 링크로 바뀐 파일은 `O_NOFOLLOW`가 `ELOOP`로 거부한다. 그 밖(권한 · 사라짐 등)은 읽지 못함으로 알린다
+    const code = (error as NodeJS.ErrnoException).code;
+    return { kind: code === 'ELOOP' ? 'not_regular' : 'unreadable' };
   }
   try {
     if (!fs.fstatSync(fd).isFile()) return { kind: 'not_regular' };
@@ -372,7 +376,7 @@ export const prepareTestWriterInputs = (input: {
   const routes = listAppRoutes(worktree);
   // 데이터 스키마: 구현 산출이라 내용은 바이트 그대로 싣고, 상한 · 링크면 사본 없이 그 사실만 `routes.md` 머리에 적는다 (ADR-131)
   const schema = readPrismaSchema(worktree);
-  const omitted = schema.kind === 'too_large' || schema.kind === 'not_regular' ? schema.kind : null;
+  const omitted = schema.kind === 'ok' || schema.kind === 'absent' ? null : schema.kind;
   put(TEST_WRITER_INPUTS.routes, renderRoutes(routes, { schema: omitted }));
   if (schema.kind === 'ok') put(TEST_WRITER_INPUTS.prismaSchema, schema.bytes);
   if (input.blocks !== undefined && input.blocks !== null) {

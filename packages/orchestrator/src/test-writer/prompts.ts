@@ -23,7 +23,7 @@ export const TEST_WRITER_SYSTEM_PROMPT = [
   '작업 폴더에는 다음 입력 사본만 있다. 프로젝트 소스 코드는 없다.',
   `- ${TEST_WRITER_INPUTS.rulesDir}/<규칙 ID>.md: 대상 규칙의 진술`,
   `- ${TEST_WRITER_INPUTS.routes}: 라우트 목록`,
-  `- ${TEST_WRITER_INPUTS.prismaSchema}: 데이터 스키마 (있을 때. 사본을 두지 않았으면 그 사실을 ${TEST_WRITER_INPUTS.routes} 머리에 적는다)`,
+  `- ${TEST_WRITER_INPUTS.prismaSchema}: 데이터 스키마 (있을 때. 사본을 두지 않았으면 그 사실을 ${TEST_WRITER_INPUTS.routes} 머리에 적어 두었다)`,
   `- ${TEST_WRITER_INPUTS.blocks}: 블록 선언 읽기 전용 사본 (있을 때, 고칠 수 없다)`,
   `- ${ACCEPTANCE_DIR}/<규칙 ID>/: 기존 인수 테스트 (있을 때)`,
   '',
