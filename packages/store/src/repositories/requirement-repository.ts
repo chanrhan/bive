@@ -191,6 +191,32 @@ export class RequirementRepository {
   }
 
   /**
+   * '규칙화 불가'를 표시하고 사유를 남긴다 (NRM-08, ADR-137). `updatedAt` · `updatedBy`가 함께 바뀐다(요구사항 자체의 수정
+   * 기록이 사람 행동의 기록이다). 사유는 받은 그대로 저장한다. 이미 표시된 사유는 바꾸지 않는다.
+   * 누가 · 언제 부를 수 있는지(사람만, 자식 규칙 없음)는 호출한 쪽이 본다.
+   * @throws {ZodError} 빈 사유 · 주체 · 시각이 스키마 위반
+   * @throws {NotFoundError} 없는 ID
+   * @throws {ConflictError} 이미 삭제됐거나 이미 규칙화 불가인 요구사항
+   */
+  markUnrulable(id: string, reason: string, change: RequirementChange): Requirement {
+    const { by, at } = parseRequirementChange(change);
+    return withTransaction(this.#db, () => {
+      const current = this.#requireLive(id);
+      if (current.unrulable !== null) {
+        throw new ConflictError(ENTITY, id, '이미 규칙화 불가로 표시됐습니다');
+      }
+      const next = Requirement.parse({
+        ...current,
+        unrulable: { reason },
+        updatedAt: at,
+        updatedBy: by,
+      });
+      this.#update.run(toRow(next));
+      return next;
+    });
+  }
+
+  /**
    * 소프트 삭제한다: `deletedAt` · `updatedAt`을 변경 시각으로, `updatedBy`를 주체로 채운다. 행은 남는다.
    * @throws {ZodError} 주체 · 시각이 스키마 위반
    * @throws {NotFoundError} 없는 ID
