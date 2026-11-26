@@ -218,6 +218,58 @@ export const importedNamesOf = (set: SourceSet, target: string): Record<string, 
       .filter(([, names]) => names.length > 0),
   );
 
+/**
+ * `target` 모듈을 쓰는 파일: 직접 참조하는 파일(`importersOf`)과, 그 모듈이 내보낸 선언을 다른 모듈의 다시 내보내기 · 별칭을
+ * 거쳐 이름으로 가리키는 파일 (정렬, `target` 자신은 뺀다).
+ */
+export const moduleUsers = (set: SourceSet, target: string): string[] => {
+  const { checker } = set;
+  const moduleSymbol = checker.getSymbolAtLocation(set.sourceOf(target));
+  const exported = new Set<TS.Node>(
+    moduleSymbol === undefined
+      ? []
+      : checker
+          .getExportsOfModule(moduleSymbol)
+          .flatMap(
+            (symbol) =>
+              (symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol)
+                .declarations ?? [],
+          )
+          .filter((declaration) => toRel(declaration.getSourceFile().fileName) === target),
+  );
+  // 가져오기 · 다시 내보내기의 이름(이름을 바꾼 것 포함)이 별칭 사슬 끝에서 그 모듈의 선언에 닿는 파일
+  const viaAlias = set.files.filter((rel) => {
+    let found = false;
+    const visit = (node: TS.Node): void => {
+      if (found) return;
+      if (
+        ts.isImportSpecifier(node) ||
+        ts.isExportSpecifier(node) ||
+        ts.isNamespaceImport(node) ||
+        (ts.isImportClause(node) && node.name !== undefined)
+      ) {
+        const symbol = node.name === undefined ? undefined : checker.getSymbolAtLocation(node.name);
+        if (
+          symbol !== undefined &&
+          symbol.flags & ts.SymbolFlags.Alias &&
+          (checker.getAliasedSymbol(symbol).declarations ?? []).some((d) => exported.has(d))
+        ) {
+          found = true;
+          return;
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    for (const statement of set.sourceOf(rel).statements) {
+      if (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) visit(statement);
+    }
+    return found;
+  });
+  return [...new Set([...importersOf(set, target), ...viaAlias])]
+    .filter((rel) => rel !== target)
+    .sort();
+};
+
 /** 모듈 이름이 리터럴이 아닌 참조 (어느 모듈인지 알 수 없다). */
 export const computedModuleRefs = (set: SourceSet): string[] =>
   set.files.filter((rel) => moduleRefs(set, rel).some((ref) => ref.specifier === null));
@@ -298,7 +350,7 @@ export const topLevelDeclaration = (
   return found;
 };
 
-export type ReferenceForm = 'symbol' | 'binding' | 'string';
+export type ReferenceForm = 'symbol' | 'binding' | 'string' | 'untyped';
 
 export interface DeclarationRef {
   readonly rel: string;
@@ -326,6 +378,7 @@ export type StringRefMode = 'any' | 'access' | 'none';
  * - `symbol`: 타입 검사기가 그 선언으로 푼 식별자 · 대괄호 접근의 문자열 (별칭 변수 · `?.` 유무 · 매개변수로 넘긴 값 포함)
  * - `binding`: 구조 분해(`const { normChanges } = store`)의 속성 이름
  * - `string`: 그 밖의 같은 글자 문자열 리터럴 (`strings` 범위만, 보수적으로 센다)
+ * - `untyped`: 타입 검사기가 풀지 못한(타입을 지운 값의) 같은 이름 속성 접근 (`strings: 'any'`일 때만)
  */
 export const referencesTo = (
   set: SourceSet,
@@ -393,6 +446,15 @@ export const referencesTo = (
         (strings === 'any' || (strings === 'access' && selectsProperty(node)))
       ) {
         push('string');
+      } else if (
+        strings === 'any' &&
+        ts.isIdentifier(node) &&
+        ts.isPropertyAccessExpression(parent) &&
+        parent.name === node &&
+        checker.getSymbolAtLocation(node) === undefined
+      ) {
+        // 타입을 지운 값의 같은 이름 속성 (`(store as any).normChanges`): 흔치 않은 이름만 보수적으로 센다
+        push('untyped');
       }
     }
   }

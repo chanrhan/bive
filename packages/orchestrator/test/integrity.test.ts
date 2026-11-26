@@ -86,6 +86,7 @@ import {
   importersOf,
   memberDeclarations,
   moduleRefs,
+  moduleUsers,
   productSource,
   referencesTo,
   repositoryMethodsUsedIn,
@@ -1961,6 +1962,19 @@ export const write = (store: ProjectStore): void => {
   store['ruleRetirements'].record({} as never);
   void releaseConfirmation;
 };
+export { releaseConfirmation as release };
+`,
+  // 허용된 파일이 다시 내보낸 이름을 허용 밖 파일이 가져온다 (모듈 이름이 글에 없다)
+  'steps/__sample-reexport-chain.ts': `import { release } from '../norms/agent-rule.js';
+export const name = release;
+`,
+  // 타입을 지운 값의 속성 접근
+  'steps/__sample-untyped.ts': `import type { ProjectStore } from '@bive/store';
+export const write = (store: ProjectStore): void => {
+  const loose: any = store;
+  const repo = loose.normChanges;
+  repo.append({});
+};
 `,
   'steps/__sample-other.ts': `import type { ProjectStore } from '@bive/store';
 export const read = (store: ProjectStore): unknown => {
@@ -2000,6 +2014,8 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
     confirmationServiceImporters: (set: SourceSet) =>
       importersOf(set, 'confirmations/confirmation-service.ts'),
     normInputImporters: (set: SourceSet) => importersOf(set, 'norms/norm-input.ts'),
+    confirmationServiceUsers: (set: SourceSet) =>
+      moduleUsers(set, 'confirmations/confirmation-service.ts'),
     ruleWriterServiceImporters: (set: SourceSet) =>
       importersOf(set, 'rule-writer/rule-writer-service.ts'),
     normChanges: (set: SourceSet) => storeMemberUsers(set, 'normChanges'),
@@ -2047,6 +2063,7 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
   const TEXT_PATTERNS: Readonly<Record<keyof typeof CATCHERS, RegExp | null>> = {
     confirmationServiceImporters: /from '[./]+\/?confirmations\/confirmation-service\.js'/,
     normInputImporters: /from '[./]*(?:norms\/)?norm-input\.js'/,
+    confirmationServiceUsers: /from '[./]+\/?confirmations\/confirmation-service\.js'/,
     // 규칙 작성 서비스는 가져오는 파일 목록이 아니라 "엔진 · 단계 · 실행 · 판정 · 도구 · 에이전트는 가져오지 않는다"를 본다
     ruleWriterServiceImporters: null,
     normChanges: /\.normChanges\./,
@@ -2134,20 +2151,39 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
       ],
       [
         'steps/__sample-dynamic.ts',
-        ['confirmationServiceImporters', 'normInputImporters', 'ruleWriterServiceImporters'],
-        ['confirmationServiceImporters', 'normInputImporters'],
+        [
+          'confirmationServiceImporters',
+          'confirmationServiceUsers',
+          'normInputImporters',
+          'ruleWriterServiceImporters',
+        ],
+        ['confirmationServiceImporters', 'confirmationServiceUsers', 'normInputImporters'],
       ],
       [
         'steps/__sample-double-quote.ts',
-        ['confirmationServiceImporters', 'normInputImporters', 'ruleWriterServiceImporters'],
-        ['confirmationServiceImporters', 'normInputImporters'],
+        [
+          'confirmationServiceImporters',
+          'confirmationServiceUsers',
+          'normInputImporters',
+          'ruleWriterServiceImporters',
+        ],
+        ['confirmationServiceImporters', 'confirmationServiceUsers', 'normInputImporters'],
       ],
       [
         'steps/__sample-export-from.ts',
-        ['confirmationServiceImporters', 'normInputImporters', 'ruleWriterServiceImporters'],
+        [
+          'confirmationServiceImporters',
+          'confirmationServiceUsers',
+          'normInputImporters',
+          'ruleWriterServiceImporters',
+        ],
         [],
       ],
-      ['steps/__sample-namespace.ts', ['confirmationServiceImporters'], []],
+      [
+        'steps/__sample-namespace.ts',
+        ['confirmationServiceImporters', 'confirmationServiceUsers'],
+        [],
+      ],
       ['steps/__sample-require.ts', ['normInputImporters'], ['normInputImporters']],
       ['steps/__sample-require-alias.ts', ['normInputImporters'], ['normInputImporters']],
       [
@@ -2157,9 +2193,15 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
       ],
       [
         'confirmations/__sample-same-dir.ts',
-        ['confirmationServiceImporters'],
-        ['confirmationServiceImporters'],
+        ['confirmationServiceImporters', 'confirmationServiceUsers'],
+        ['confirmationServiceImporters', 'confirmationServiceUsers'],
       ],
+      [
+        'steps/__sample-reexport-chain.ts',
+        ['confirmationServiceUsers'],
+        ['confirmationServiceUsers'],
+      ],
+      ['steps/__sample-untyped.ts', ['normChanges'], ['normChanges']],
     ];
 
   it('잡는 함수 자체: 형태별 위반 표본은 잡히고(위 시험의 글자 대조는 놓친다), 허용된 파일 자리의 같은 형태는 허용 목록 안이며, 다른 저장소 · 다른 메서드 · 같은 낱말의 글은 잡히지 않는다', () => {
@@ -2172,15 +2214,17 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
       const hits = (Object.keys(CATCHERS) as CatcherName[]).filter((name) =>
         caught[name].includes(rel),
       );
-      expect(hits, rel).toEqual(expected);
+      expect([...hits].sort(), rel).toEqual([...expected].sort());
       // 위 시험의 글자 대조가 놓치는 것 (이 표본이 보강의 근거다)
       expect(
-        expected.filter((name) => {
-          const pattern = TEXT_PATTERNS[name];
-          return pattern !== null && !pattern.test(text);
-        }),
+        expected
+          .filter((name) => {
+            const pattern = TEXT_PATTERNS[name];
+            return pattern !== null && !pattern.test(text);
+          })
+          .sort(),
         rel,
-      ).toEqual(missedByText);
+      ).toEqual([...missedByText].sort());
     }
     // 규칙 작성 서비스: 위 시험은 정해진 폴더에서 `rule-writer/rule-writer-service.js'` 글자만 본다 (큰따옴표 · 동적 · 다시 내보내기는
     // 위 표본의 글자와 견준다)
@@ -2232,6 +2276,7 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
       'ruleWriterStartRetry',
       'normChanges',
       'confirmationServiceImporters',
+      'confirmationServiceUsers',
       'normInputImporters',
       'ruleWriterServiceImporters',
     ] as const) {
@@ -2272,14 +2317,20 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
           .filter(([, names]) => names.length > 0),
       ),
     );
-    // 규범 입력 모듈: 가져오는 파일 (위 M7-07 · M7-08 시험의 목록)
+    // 다시 내보내기 · 별칭을 거쳐 확인 서비스의 이름을 쓰는 파일도 같다
+    expect(CATCHERS.confirmationServiceUsers(set)).toEqual(
+      using(TEXT_PATTERNS.confirmationServiceImporters as RegExp),
+    );
+    // 규범 입력 모듈: 가져오는 파일 · 이름을 쓰는 파일 (위 M7-07 · M7-08 시험의 목록)
     expect(CATCHERS.normInputImporters(set)).toEqual(normInputImporters());
+    expect(moduleUsers(set, 'norms/norm-input.ts')).toEqual(normInputImporters());
     // 규칙 작성 서비스: 엔진 · 단계 · 실행 · 판정 · 도구 · 에이전트는 어떤 형태로도 참조하지 않고(위 M7-05 시험), 서비스를
     // 만드는 곳은 오케스트레이터 배선뿐이다 (클래스를 값 · 타입 어느 자리로든 쓰는 파일)
     expect(
-      CATCHERS.ruleWriterServiceImporters(set).filter((rel) =>
-        /^(engine|steps|runs|judge|tools|agent)\//.test(rel),
-      ),
+      [
+        ...CATCHERS.ruleWriterServiceImporters(set),
+        ...moduleUsers(set, 'rule-writer/rule-writer-service.ts'),
+      ].filter((rel) => /^(engine|steps|runs|judge|tools|agent)\//.test(rel)),
     ).toEqual([]);
     expect(
       filesReferencing(
@@ -2298,6 +2349,7 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
       if (
         pattern === null ||
         name === 'confirmationServiceImporters' ||
+        name === 'confirmationServiceUsers' ||
         name === 'normInputImporters'
       ) {
         continue;
@@ -2406,7 +2458,9 @@ describe('규범 표에 쓰는 날 SQL은 저장소 패키지 밖에 없다 (M3-
     expect(storeMemberUsers(set, 'db')).toEqual([]);
     expect(
       set.files.filter((rel) =>
-        moduleRefs(set, rel).some((ref) => ref.target === 'better-sqlite3'),
+        moduleRefs(set, rel).some((ref) =>
+          ['better-sqlite3', 'node:sqlite', 'sqlite'].includes(ref.target ?? ''),
+        ),
       ),
     ).toEqual([]);
   }, 60_000);
