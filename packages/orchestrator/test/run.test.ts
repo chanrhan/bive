@@ -13,13 +13,14 @@ import {
   type SettingsPatch,
   SETTINGS_INCOMPLETE_MESSAGE,
   SETTINGS_INCOMPLETE_REASON,
+  STEP_ROLES,
   type Step,
   type StepKind,
   TOOL_CALL_NAME_DISPLAY_MAX,
   TOOL_CALL_PATH_DISPLAY_MAX,
 } from '@bive/shared';
 import { openProjectStore, registerProject, type ProjectStore } from '@bive/store';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PipeServer } from '../src/ipc/server.js';
 import { runPaths } from '../src/run-paths.js';
@@ -291,6 +292,240 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
         status: 'waiting_approval',
       });
       expect(waiting.runs.map((r) => r.displayId)).toEqual(['EXE-002']);
+    });
+  });
+
+  describe('run.list {ruleId}: 규칙 상세의 실행 이력에 드는 실행만 (M3-42 #283, SCR-03 · ADR-135)', () => {
+    /** 실행 1건을 저장소에 바로 만든다 (대상 규칙 순서 그대로). 판정 기록을 남길 단계 시도(검사)를 함께 돌려준다. */
+    const storedRun = (store: ProjectStore, targetRuleIds: string[]) => {
+      const detail = store.runs.create({
+        id: newId(),
+        type: 'A',
+        targetRuleIds,
+        currentStep: 'approval',
+        baseBranch: 'main',
+        budgetSnapshot: { run: { maxBudgetUsd: 5, maxTurns: 200 }, roles: {} },
+        modelSnapshot: {},
+        startedBy: human,
+        createdAt: iso(T0),
+        steps: RUN_STEP_PLANS.A.map((kind) => ({
+          id: newId(),
+          kind,
+          attempt: 1,
+          status: 'pending' as const,
+          role: STEP_ROLES[kind],
+          startedAt: null,
+        })),
+      });
+      return { run: detail.run, check: stepOf(detail.steps, 'check') };
+    };
+    /** 그 실행의 검사 단계가 남긴 판정 기록 (대상이 아닌 규칙도 검사 단계는 효력 있는 규칙을 모두 판정한다). */
+    const judged = (
+      store: ProjectStore,
+      ruleIds: string[],
+      at: { run: { id: string }; check: Step } | null,
+    ): void => {
+      store.judgments.record(
+        ruleIds.map((ruleId) => ({
+          id: newId(),
+          ruleId,
+          runId: at?.run.id ?? null,
+          stepId: at?.check.id ?? null,
+          commit: SHA,
+          judgedAt: iso(T0 + 1_000),
+          status: 'pass' as const,
+          runner: 'vitest' as const,
+          exitCode: 0,
+          reporterPath: null,
+          cases: [],
+          quarantineReason: null,
+        })),
+      );
+    };
+    const listOf = async (ruleId?: string) =>
+      (
+        await h.client.call('run.list', {
+          projectId: h.project.id,
+          ...(ruleId === undefined ? {} : { ruleId }),
+        })
+      ).runs;
+
+    it('대상인 실행 · 판정만 한 실행 · 둘 다인 실행 · 여러 규칙 대상 실행을 표시 ID 순으로 한 번씩, 무관한 실행은 뺀다. 인자 없는 호출은 그대로 전부다', async () => {
+      const seeded = h.read((store) => {
+        const a = insertRule(store);
+        const b = insertRule(store);
+        const c = insertRule(store);
+        const targetOnly = storedRun(store, [a.id]); // EXE-001: A 대상, 판정 없음
+        const judgedOnly = storedRun(store, [b.id]); // EXE-002: B 대상, A는 판정만
+        judged(store, [b.id, a.id], judgedOnly);
+        const both = storedRun(store, [a.id]); // EXE-003: A 대상이고 판정도 함(판정 2건이어도 한 번)
+        judged(store, [a.id, a.id], both);
+        const unrelated = storedRun(store, [b.id, c.id]); // EXE-004: B · C 대상, A 판정 없음
+        judged(store, [b.id, c.id], unrelated);
+        const cOnly = storedRun(store, [c.id]); // EXE-005: C만
+        const multi = storedRun(store, [b.id, a.id]); // EXE-006: 여러 규칙 대상(A가 둘째)
+        // 실행 밖 판정(실행 없음)은 실행을 더하지 않는다
+        judged(store, [a.id], null);
+        return { a, b, c, runs: [targetOnly, judgedOnly, both, unrelated, cOnly, multi] };
+      });
+      const [targetOnly, judgedOnly, both, unrelated, cOnly, multi] = seeded.runs.map(
+        ({ run }) => run,
+      );
+      const all = await listOf();
+      // 인자 없는 호출: 프로젝트의 모든 실행 그대로 (응답 형식 · 값이 같다)
+      expect(all.map((run) => run.displayId)).toEqual([
+        'EXE-001',
+        'EXE-002',
+        'EXE-003',
+        'EXE-004',
+        'EXE-005',
+        'EXE-006',
+      ]);
+      expect(all).toEqual(h.read((store) => store.runs.list()));
+      const byId = new Map(all.map((run) => [run.id, run]));
+      // 규칙 기준 결과의 실행 값은 인자 없는 결과의 그 실행과 같다(칸을 줄이거나 바꾸지 않는다)
+      expect(await listOf(seeded.a.id)).toEqual(
+        [targetOnly, judgedOnly, both, multi].map((run) => byId.get(run?.id ?? '')),
+      );
+      expect((await listOf(seeded.b.id)).map((run) => run.id)).toEqual(
+        [judgedOnly, unrelated, multi].map((run) => run?.id),
+      );
+      expect((await listOf(seeded.c.id)).map((run) => run.id)).toEqual(
+        [unrelated, cOnly].map((run) => run?.id),
+      );
+    });
+
+    it('실행이 없는 규칙은 빈 목록, 상태를 함께 주면 둘 다 맞는 실행만', async () => {
+      const { lonely, rule, first } = h.read((store) => {
+        const lonely = insertRule(store);
+        const rule = insertRule(store);
+        const first = storedRun(store, [rule.id]);
+        storedRun(store, [rule.id]);
+        return { lonely, rule, first };
+      });
+      expect(await listOf(lonely.id)).toEqual([]);
+      h.read((store) => evaluateApprovalStep(store, first.run.id, { now: () => T0 }));
+      const running = await h.client.call('run.list', {
+        projectId: h.project.id,
+        ruleId: rule.id,
+        status: 'running',
+      });
+      expect(running.runs.map((run) => run.displayId)).toEqual(['EXE-001']);
+      const waiting = await h.client.call('run.list', {
+        projectId: h.project.id,
+        ruleId: rule.id,
+        status: 'waiting_approval',
+      });
+      expect(waiting.runs.map((run) => run.displayId)).toEqual(['EXE-002']);
+    });
+
+    it('표시 ID 자리수가 넘어가도 순번 순이다 (EXE-999 다음 EXE-1000, 사전식 순서가 아니다)', async () => {
+      const ids = h.read((store) => {
+        const rule = insertRule(store);
+        store.db
+          .prepare(
+            `INSERT INTO display_id_sequences (prefix, last_seq) VALUES ('EXE', 998)
+             ON CONFLICT (prefix) DO UPDATE SET last_seq = 998`,
+          )
+          .run();
+        const older = storedRun(store, [rule.id]);
+        const newer = storedRun(store, [insertRule(store).id]);
+        judged(store, [rule.id], newer);
+        return { rule, displayIds: [older.run.displayId, newer.run.displayId] };
+      });
+      expect(ids.displayIds).toEqual(['EXE-999', 'EXE-1000']);
+      expect((await listOf(ids.rule.id)).map((run) => run.displayId)).toEqual([
+        'EXE-999',
+        'EXE-1000',
+      ]);
+    });
+
+    it('없는 규칙 · 다른 프로젝트의 규칙 · 등록되지 않은 프로젝트는 -32004 (판정 이력 조회와 같음)', async () => {
+      const mine = h.read((store) => insertRule(store));
+      const other = registerProject(
+        {
+          id: newId(),
+          name: '다른 앱',
+          rootPath: '/work/other-app',
+          baseBranch: 'main',
+          createdAt: iso(T0),
+        },
+        { home: h.biveHome },
+      );
+      const store = openProjectStore(other.id, { home: h.biveHome, create: false });
+      let theirs: Rule;
+      try {
+        theirs = insertRule(store);
+      } finally {
+        store.close();
+      }
+      for (const [projectId, ruleId] of [
+        [h.project.id, newId()],
+        [h.project.id, theirs.id],
+        [other.id, mine.id],
+        [newId(), mine.id],
+      ] as const) {
+        expect(
+          (await rpcError(h.client.call('run.list', { projectId, ruleId }))).code,
+          `${projectId} ${ruleId}`,
+        ).toBe(ErrorCode.NotFound);
+      }
+    });
+
+    it('질의는 두 색인(대상 규칙 · 판정 기록의 규칙)으로 그 규칙의 행만 읽고 실행은 기본 키로 찾는다 (runs 전체를 훑지 않음)', () => {
+      // 저장소가 실제로 준비하는 문장을 소스에서 꺼내 계획을 본다(시험이 같은 SQL을 따로 적지 않게)
+      const source = readFileSync(
+        new URL('../../store/src/repositories/run-repository.ts', import.meta.url),
+        'utf8',
+      );
+      const statement = /#selectRunsByRule = db\.prepare<[^>]*>\(\s*`([^`]*)`/.exec(source)?.[1];
+      const order = /const ORDER = '([^']*)'/.exec(source)?.[1];
+      expect(statement).toBeDefined();
+      expect(order).toBeDefined();
+      const sql = (statement ?? '')
+        .replace('${RUN_COLUMNS}', 'id')
+        .replace('${ORDER}', order ?? '');
+      const plan = h.read((store) =>
+        store.db
+          .prepare<[{ rule_id: string; status: string | null }], { detail: string }>(
+            `EXPLAIN QUERY PLAN ${sql}`,
+          )
+          .all({ rule_id: newId(), status: null })
+          .map((row) => row.detail),
+      );
+      expect(plan).toContain('SEARCH runs USING INDEX sqlite_autoindex_runs_1 (id=?)');
+      expect(plan).toContain(
+        'SEARCH run_target_rules USING INDEX run_target_rules_rule (rule_id=?)',
+      );
+      expect(plan).toContain('SEARCH judgments USING INDEX judgments_rule_latest (rule_id=?)');
+      expect(plan.filter((line) => /^SCAN /.test(line))).toEqual([]);
+    });
+
+    it('형식이 깨진 실행 행은 그 행만 건너뛰고 경고한다 (인자 없는 목록과 같은 방식, ADR-094 · ADR-120)', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const { rule, runs } = h.read((store) => {
+          const rule = insertRule(store);
+          const runs = [
+            storedRun(store, [rule.id]),
+            storedRun(store, [rule.id]),
+            storedRun(store, [rule.id]),
+          ];
+          store.db
+            .prepare(`UPDATE runs SET tool_manifest = '[{"x":1}]' WHERE id = ?`)
+            .run(runs[1]?.run.id ?? '');
+          return { rule, runs };
+        });
+        expect((await listOf(rule.id)).map((run) => run.id)).toEqual([
+          runs[0]?.run.id,
+          runs[2]?.run.id,
+        ]);
+        expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+          `실행 기록 1건이 저장 형식에 맞지 않아 조회에서 건너뜀 (프로젝트 ${h.project.id})`,
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 

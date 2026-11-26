@@ -9,6 +9,7 @@ import os from 'node:os';
 import { type AgentSelection, selectAgent } from './agent/select.js';
 import { type InterruptedRun, PipelineEngine } from './engine/pipeline-engine.js';
 import type { StepExecutors } from './engine/types.js';
+import { blocksChangedNotifier } from './events/block-events.js';
 import { normChangeAppendedNotifier } from './events/norm-change-events.js';
 import { ProposalEventPublisher } from './events/proposal-events.js';
 import { ruleWriterChangedNotifier } from './events/rule-writer-events.js';
@@ -273,6 +274,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
         engine,
         onProposalChanged: proposalEvents.changed,
         ruleEditStarter,
+        // 블록 선언 새 판 저장 뒤 → event.blocks.changed (M3-42 #283, ADR-135). 기다리지 않는다
+        onBlocksChanged: blocksChangedNotifier({ sink: () => server, log }),
       }),
       ...(options.helloTimeoutMs === undefined ? {} : { helloTimeoutMs: options.helloTimeoutMs }),
       ...(options.notifyTimeoutMs === undefined

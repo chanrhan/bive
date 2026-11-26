@@ -43,6 +43,8 @@ export interface HandlerDeps {
   onProposalChanged?: ProposalChangeListener;
   /** 사람이 규칙 진술을 고친 뒤 실행 자동 시작 (M7-03, ADR-109). 생략하면 실행을 만들지 않는다 */
   ruleEditStarter?: RuleEditStarter;
+  /** 블록 선언 새 판이 저장된 뒤 부른다 (`event.blocks.changed`, M3-42 · ADR-135). 생략하면 알리지 않는다 */
+  onBlocksChanged?: (projectId: string, version: number) => void;
 }
 
 export const createHandlers = ({
@@ -54,6 +56,7 @@ export const createHandlers = ({
   engine,
   onProposalChanged,
   ruleEditStarter,
+  onBlocksChanged,
 }: HandlerDeps): MethodHandlers => ({
   ping: () => ({ pong: true, version: orchestratorVersion }),
   'system.status': () => ({
@@ -83,7 +86,11 @@ export const createHandlers = ({
   }),
   ...createConfirmationHandlers({ biveHome, now }),
   ...createNormChangeHandlers({ biveHome }),
-  ...createBlockHandlers({ biveHome, now }),
+  ...createBlockHandlers({
+    biveHome,
+    now,
+    ...(onBlocksChanged === undefined ? {} : { onChanged: onBlocksChanged }),
+  }),
   ...createContractHandlers({ biveHome, now }),
   ...createSettingsHandlers({ biveHome, now }),
   ...createRunHandlers({ biveHome, now, ...(engine === undefined ? {} : { engine }) }),

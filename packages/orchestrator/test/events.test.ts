@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 
 import {
+  type BlocksChangedEvent,
   createRequest,
   type JudgmentResult,
   type NormChangeAppendedEvent,
@@ -30,6 +31,7 @@ import { selectAgent } from '../src/agent/select.js';
 import type { StepExecutors } from '../src/engine/types.js';
 import { ProposalEventPublisher } from '../src/events/proposal-events.js';
 import { RunEventPublisher } from '../src/events/run-events.js';
+import { createBlockHandlers } from '../src/ipc/block-handlers.js';
 import {
   onNormChangeAppended,
   withRegisteredProjectStore,
@@ -65,7 +67,8 @@ type Received =
   | { method: 'event.step.updated'; params: StepUpdatedEvent }
   | { method: 'event.proposal.changed'; params: ProposalChangedEvent }
   | { method: 'event.ruleWriter.changed'; params: RuleWriterChangedEvent }
-  | { method: 'event.normChange.appended'; params: NormChangeAppendedEvent };
+  | { method: 'event.normChange.appended'; params: NormChangeAppendedEvent }
+  | { method: 'event.blocks.changed'; params: BlocksChangedEvent };
 
 /** 받은 알림을 차례대로 모은다. 알림을 받을 때마다 `onNotice`를 부른다(받은 순간의 재조회). */
 const collect = (
@@ -170,6 +173,8 @@ const runState = (notice: Received): string => {
       return `ruleWriter ${notice.params.requirementId}`;
     case 'event.normChange.appended':
       return `normChange ${String(notice.params.lastSeq)}`;
+    case 'event.blocks.changed':
+      return `blocks ${String(notice.params.version)}`;
   }
 };
 
@@ -800,6 +805,180 @@ describe('규범 변경 기록이 늘 때마다 event.normChange.appended (M7-14
       detach();
       detachOther();
     }
+  });
+});
+
+describe('블록 선언이 새 판으로 바뀔 때마다 event.blocks.changed (M3-42 #283, NRM-09 · ADR-135)', () => {
+  /** 블록 선언 (fixtures/blocks/sample-next-app.json과 같은 모양, `extra`면 블록 하나 더) */
+  const declarationOf = (extra: boolean) => ({
+    blocks: [
+      {
+        name: 'auth',
+        kind: 'domain',
+        include: ['src/app/api/auth/**'],
+        public: [],
+        dependsOn: ['lib'],
+        risk: 'high',
+      },
+      {
+        name: 'lib',
+        kind: 'shared',
+        include: ['src/lib/**'],
+        public: ['src/lib/db.ts'],
+        dependsOn: [],
+        risk: 'low',
+      },
+      ...(extra
+        ? [
+            {
+              name: 'health',
+              kind: 'domain',
+              include: ['src/app/api/health/**'],
+              public: [],
+              dependsOn: ['lib'],
+              risk: 'medium',
+            },
+          ]
+        : []),
+    ],
+  });
+
+  it('사람의 blocks.set이 저장한 판마다 커밋 뒤 1개가 가고(첫 판 · 다음 판 모두), 받은 순간 blocks.get이 그 판이다. 거부된 저장 · 조회는 알리지 않는다', async () => {
+    const s = await start();
+    const watcher = await client(s);
+    const caller = await client(s);
+    // 알림을 받은 순간 화면이 다시 조회하는 값 (렌더러의 blocks.get 재조회와 같다)
+    const seen: Promise<{ version: number; current: number | null }>[] = [];
+    const received = collect(watcher, (notice) => {
+      if (notice.method !== 'event.blocks.changed') return;
+      const { projectId, version } = notice.params;
+      seen.push(
+        caller
+          .call('blocks.get', { projectId })
+          .then(({ current }) => ({ version, current: current?.version ?? null })),
+      );
+    });
+    const blocksNotices = () =>
+      received.filter((n) => n.method === 'event.blocks.changed').map((n) => n.params);
+
+    // 첫 판: 내장 구조 규칙도 함께 만들어 규범 변경 알림도 가지만, 블록 선언 알림은 그와 따로 1개
+    await caller.call('blocks.set', {
+      projectId: s.project.id,
+      author: human,
+      declaration: declarationOf(false),
+    });
+    await waitFor(() => seen.length === 1, 10_000, '첫 판 알림');
+    // 다음 판: 내장 규칙이 이미 있어 규범 변경 기록이 늘지 않는다(규범 변경 알림만으로는 다시 읽을 수 없는 경로)
+    const normBefore = received.filter((n) => n.method === 'event.normChange.appended').length;
+    await caller.call('blocks.set', {
+      projectId: s.project.id,
+      author: human,
+      declaration: declarationOf(true),
+    });
+    await waitFor(() => seen.length === 2, 10_000, '다음 판 알림');
+    expect(await Promise.all(seen)).toEqual([
+      { version: 1, current: 1 },
+      { version: 2, current: 2 },
+    ]);
+
+    // 거부된 저장(에이전트 주체 · 규칙 위반)과 조회는 판을 만들지 않아 알리지 않는다
+    await expect(
+      caller.call('blocks.set', {
+        projectId: s.project.id,
+        author: { kind: 'agent', role: 'implementer' },
+        declaration: declarationOf(false),
+      }),
+    ).rejects.toMatchObject({ code: -32020 });
+    await expect(
+      caller.call('blocks.set', {
+        projectId: s.project.id,
+        author: human,
+        declaration: { blocks: [] },
+      }),
+    ).rejects.toMatchObject({ code: -32001 });
+    await caller.call('blocks.get', { projectId: s.project.id });
+    // 같은 연결 순서: 이 응답 뒤에 온 알림이 없으면 위 요청들은 알림을 내지 않았다
+    await caller.call('ping');
+    await watcher.call('ping');
+    expect(blocksNotices()).toEqual([
+      { projectId: s.project.id, version: 1 },
+      { projectId: s.project.id, version: 2 },
+    ]);
+    expect(received.filter((n) => n.method === 'event.normChange.appended')).toHaveLength(
+      normBefore,
+    );
+  }, 60_000);
+
+  describe('저장(커밋) 뒤에만 알린다 (ADR-135)', () => {
+    const declaration = {
+      blocks: [
+        {
+          name: 'lib',
+          kind: 'shared',
+          include: ['src/lib/**'],
+          public: [],
+          dependsOn: [],
+          risk: 'low',
+        },
+      ],
+    };
+    /** 처리기를 바로 부른다 (파이프 · 오케스트레이터 없이, 알림 함수는 시험이 준다). */
+    const setVia = (
+      deps: Parameters<typeof createBlockHandlers>[0],
+      projectId: string,
+    ): unknown => {
+      const handler = createBlockHandlers(deps)['blocks.set'];
+      if (handler === undefined) throw new Error('blocks.set 처리기 없음');
+      return (handler as (p: unknown, c: unknown) => unknown)(
+        { projectId, author: human, declaration },
+        { connectionId: 1 },
+      );
+    };
+    const currentVersion = (biveHome: string, projectId: string): number | null =>
+      withRegisteredProjectStore(
+        biveHome,
+        projectId,
+        (store) => store.blockDeclarations.current()?.version ?? null,
+      );
+
+    it('알림을 받은 순간 다른 연결로 읽어도 그 판이 이미 보인다', () => {
+      const biveHome = makeBiveHome();
+      const seeded = seedProject(biveHome, copyFixture(temps));
+      // 알림 함수 안에서 저장소를 따로 열어 읽는다: 커밋 전이면 그 판이 아직 보이지 않는다
+      const seen: [number, number | null][] = [];
+      setVia(
+        {
+          biveHome,
+          now: Date.now,
+          onChanged: (projectId, version) =>
+            seen.push([version, currentVersion(biveHome, projectId)]),
+        },
+        seeded.project.id,
+      );
+      expect(seen).toEqual([[1, 1]]);
+    });
+
+    it('같은 트랜잭션이 선언 저장 뒤 실패해 되돌려지면 알림이 하나도 없고 판도 남지 않는다', () => {
+      const biveHome = makeBiveHome();
+      const seeded = seedProject(biveHome, copyFixture(temps));
+      const calls: [string, number][] = [];
+      // 내장 구조 규칙의 ID를 만드는 함수가 던진다(선언 저장 뒤 · 같은 트랜잭션 안)
+      expect(() =>
+        setVia(
+          {
+            biveHome,
+            now: Date.now,
+            newId: () => {
+              throw new Error('주입: 내장 규칙 ID 실패');
+            },
+            onChanged: (projectId, version) => calls.push([projectId, version]),
+          },
+          seeded.project.id,
+        ),
+      ).toThrow('주입: 내장 규칙 ID 실패');
+      expect(calls).toEqual([]);
+      expect(currentVersion(biveHome, seeded.project.id)).toBeNull();
+    });
   });
 });
 

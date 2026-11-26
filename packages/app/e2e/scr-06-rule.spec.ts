@@ -11,8 +11,12 @@
 //    제목 · 진술의 숨은 글자(U+202E 등)는 보이는 표기로, 편집 입력에는 원문. 820 · 1280px 창의 머리줄 · 속성 줄 배치
 // 7) 이슈 #64(M3-19) 수용 기준 1: 속성 줄의 대상 블록(저장 순서, 지금 선언에 없는 이름은 "선언 외", 선언이 없으면 "블록 선언
 //    없음" 한 번) · 위험도(표시명), 값이 없으면 "없음". 블록 10개가 820 · 1100 · 1280 · 1440px 창에서 넘치거나 겹치지 않음 (ADR-126)
+// 8) 이슈 #283(M3-42): 실행 이력은 규칙 기준 조회(run.list {ruleId}) 1회, 블록 선언 알림 · 재접속 뒤 새 선언으로 "선언 외"를
+//    판단, 접히지 않는 상세에서 실행 이력 줄의 상태 칸이 한 줄 (ADR-135)
 // 규칙 화면(SCR-03)에서 카드를 눌러 들어온다. 데이터는 가짜 브리지의 rule.list · judgment.list · requirement.get ·
 // rule.update · normChange.list · confirmation.set 응답뿐이다.
+import { readFileSync } from 'node:fs';
+
 import { expect, type Page, test } from '@playwright/test';
 
 import {
@@ -49,6 +53,8 @@ import type {
   RuleWithJudgment,
 } from '@bive/shared';
 
+import { RUN_FAILURE_REASON_TEXT as RUN_FAILURE_REASON_LABELS } from '../src/renderer/src/screens/norm-detail/runHistoryView.js';
+import { RUN_STATUS_TEXT as RUN_STATUS_LABELS } from '../src/renderer/src/screens/verification/verificationView.js';
 import {
   allSettled,
   type BiveMock,
@@ -2165,5 +2171,310 @@ test.describe('최신 실행 링크의 비용 · 턴 (M3-16 #61 수용 기준 2,
       ]),
     ).toEqual([]);
     await page.screenshot({ path: `${SCREENSHOT_DIR}SCR-06/최신-실행-820.png`, fullPage: true });
+  });
+});
+
+test.describe('다시 읽기 다듬기 (#283 M3-42, SCR-03 · SCR-06 · NRM-09, ADR-135)', () => {
+  const runEvent = {
+    projectId: PROJECT.id,
+    runId: RUN_HISTORY_RUNS[4]?.id,
+    displayId: 'EXE-005',
+    status: 'failed',
+    currentStep: null,
+    regressionCount: 0,
+    costUsd: 0.05,
+  } as const;
+  const OTHER_PROJECT_ID = '01JA00000000000000000000FF';
+
+  const openHistory = async (page: Page, responses: MockResponses = {}): Promise<BiveMock> => {
+    const bive = await openRules(page, {
+      'run.list': { result: { runs: RUN_HISTORY_RUNS } },
+      ...responses,
+    });
+    await bive.setResponse('judgment.list', { result: { judgments: RUN_HISTORY_JUDGMENTS } });
+    await page.getByTestId('card').filter({ hasText: 'RULE-002' }).click();
+    await expect(page.getByTestId('rule-detail')).toHaveAttribute(
+      'data-selected-id',
+      FAILING_RULE.id,
+    );
+    await expect(page.getByTestId('history-row')).toHaveCount(5);
+    return bive;
+  };
+
+  test('실행 이력은 이 규칙 ID로 규칙 기준 조회만 부르고(인자 없는 run.list 없음), 실행 알림 뒤에도 그 조회 한 번이다', async ({
+    page,
+  }) => {
+    const bive = await openHistory(page);
+    await allSettled(bive, 'run.list');
+    await nextFrame(page);
+    const opened = await callsOf(bive, 'run.list');
+    // 상세를 열 때 실행 목록 읽기는 판정 이력 읽기와 같은 수(마운트마다 1회. 개발 모드는 마운트 효과가 두 번 돈다)
+    expect(opened.length).toBeGreaterThan(0);
+    expect(opened).toHaveLength((await callsOf(bive, 'judgment.list')).length);
+    for (const call of opened) {
+      expect(call.params).toEqual({ projectId: PROJECT.id, ruleId: FAILING_RULE.id });
+    }
+    // 실행 상태 알림 하나 → 같은 인자로 정확히 1회
+    await bive.setResponse('run.list', {
+      result: {
+        runs: RUN_HISTORY_RUNS.map((run) =>
+          run.displayId === 'EXE-005' ? { ...run, failureReason: 'target_rule_retired' } : run,
+        ),
+      },
+    });
+    await bive.emit('event.run.updated', runEvent);
+    await expect(
+      page.getByTestId('history-row').first().getByTestId('history-run-status'),
+    ).toHaveText('실패 · 대상 규칙 폐기');
+    await allSettled(bive, 'run.list');
+    await nextFrame(page);
+    const after = await callsOf(bive, 'run.list');
+    expect(after).toHaveLength(opened.length + 1);
+    expect(after.at(-1)?.params).toEqual({ projectId: PROJECT.id, ruleId: FAILING_RULE.id });
+    // 다른 규칙을 고르면 그 규칙 ID로 읽는다. 어느 때도 인자 없는(프로젝트 전체) 실행 목록은 부르지 않는다
+    await selectRule(page, bive, 'RULE-001', PASSING_RULE.id);
+    await expect
+      .poll(async () => (await callsOf(bive, 'run.list')).at(-1)?.params)
+      .toEqual({ projectId: PROJECT.id, ruleId: PASSING_RULE.id });
+    expect(
+      (await callsOf(bive, 'run.list')).filter(
+        (call) => (call.params as { ruleId?: unknown }).ruleId === undefined,
+      ),
+    ).toEqual([]);
+  });
+
+  test.describe('실행 이력 줄의 상태 칸', () => {
+    /** 상세가 접히는 기준 폭: RuleDetail.css의 `@container rule-detail (max-width: Npx)` 값을 읽는다 */
+    const collapseMax = (): number => {
+      const css = readFileSync(
+        new URL('../src/renderer/src/screens/norm-detail/RuleDetail.css', import.meta.url),
+        'utf8',
+      );
+      const found = /@container rule-detail \(max-width: (\d+)px\)/.exec(css)?.[1];
+      if (found === undefined) throw new Error('접힘 기준 폭을 찾지 못함');
+      return Number(found);
+    };
+    /** 표시명 표에서 가장 긴 것의 키 (화면이 쓰는 표, shared 표와 같음을 app/test가 대조한다) */
+    const longest = <K extends string>(labels: Record<K, string>): K =>
+      (Object.keys(labels) as K[]).reduce((a, b) => (labels[b].length > labels[a].length ? b : a));
+    // 가장 긴 상태 글: 종료 사유가 붙는 실행 상태(실패 · 예산 초과) 중 긴 것 + 가장 긴 종료 사유 표시명
+    const reason = longest(RUN_FAILURE_REASON_LABELS);
+    const status = longest({
+      failed: RUN_STATUS_LABELS.failed,
+      budget_exceeded: RUN_STATUS_LABELS.budget_exceeded,
+    });
+    const LONGEST_TEXT = `${RUN_STATUS_LABELS[status]} · ${RUN_FAILURE_REASON_LABELS[reason]}`;
+    const LONGEST_RUNS = RUN_HISTORY_RUNS.map((run) =>
+      run.displayId === 'EXE-005' ? { ...run, status, failureReason: reason } : run,
+    );
+
+    /** 상세 칸(컨테이너)의 내용 폭 */
+    const containerWidth = (page: Page): Promise<number> =>
+      page.getByTestId('rule-detail-body').evaluate((el) => {
+        const style = getComputedStyle(el);
+        return (
+          el.clientWidth -
+          Number.parseFloat(style.paddingLeft) -
+          Number.parseFloat(style.paddingRight)
+        );
+      });
+
+    /**
+     * 줄마다 상태 칸의 줄 바꿈 금지(계산된 스타일) · 한 줄인지(같은 줄의 한 줄짜리 실행 칸과 높이가 같음) · 줄 안에 있음 · 잘림.
+     * 글자 폭 · 픽셀 값을 고정 값으로 보지 않는다(CI의 한글 글꼴 폭이 다르다).
+     */
+    const statusLines = (page: Page) =>
+      page.getByTestId('rule-detail').evaluate((pane) =>
+        [...pane.querySelectorAll<HTMLElement>('[data-testid="history-row"]')].flatMap((row) => {
+          const cell = row.querySelector<HTMLElement>('[data-testid="history-run-status"]');
+          const run = row.querySelector<HTMLElement>('[data-testid="history-run"]');
+          if (cell === null || run === null) return [];
+          const box = cell.getBoundingClientRect();
+          const rowBox = row.getBoundingClientRect();
+          return [
+            {
+              run: row.getAttribute('data-run') ?? '',
+              whiteSpace: getComputedStyle(cell).whiteSpace,
+              oneLine: Math.abs(box.height - run.getBoundingClientRect().height) < 1,
+              inside: box.left >= rowBox.left - 0.5 && box.right <= rowBox.right + 0.5,
+              clipped: cell.scrollWidth > cell.clientWidth + 0.5,
+            },
+          ];
+        }),
+      );
+
+    // 접히지 않는 상세: 상태 칸이 앞 칸들 옆에 들어가지 못하는 폭(1480)과 들어가는 폭(1920 · 2560)
+    for (const width of [1480, 1920, 2560] as const) {
+      test(`${String(width)}×800: 접히지 않는 상세에서 가장 긴 상태 글도 상태 칸이 한 줄이고 줄 안에 있으며 가로 스크롤이 없다`, async ({
+        page,
+      }) => {
+        await page.setViewportSize({ width, height: 800 });
+        await openHistory(page, { 'run.list': { result: { runs: LONGEST_RUNS } } });
+        await expect(
+          page.getByTestId('history-row').first().getByTestId('history-run-status'),
+        ).toHaveText(LONGEST_TEXT);
+        expect(await containerWidth(page)).toBeGreaterThan(collapseMax());
+        const lines = await statusLines(page);
+        expect(lines.map((line) => line.run)).toEqual([
+          'EXE-005',
+          'EXE-004',
+          'EXE-003',
+          'EXE-002',
+          'EXE-001',
+        ]);
+        for (const line of lines) {
+          expect(line, line.run).toEqual({
+            run: line.run,
+            whiteSpace: 'nowrap',
+            oneLine: true,
+            inside: true,
+            clipped: false,
+          });
+        }
+        const pane = page.getByTestId('rule-detail');
+        expect(await horizontalOverflow(pane, '[data-testid="history-row"]')).toEqual([]);
+        await page.getByTestId('history-row').first().scrollIntoViewIfNeeded();
+        expect(await textClipping(pane, ['history-run'])).toEqual([]);
+        await page.screenshot({
+          path: `${SCREENSHOT_DIR}SCR-06/실행-이력-상태-${String(width)}.png`,
+          fullPage: true,
+        });
+      });
+    }
+
+    test('820×800: 접힌 상세에서는 상태 칸이 줄 전체 폭을 쓰고(낱말 단위 줄 바꿈 허용, ADR-123) 넘치거나 가로 스크롤이 생기지 않는다', async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: 820, height: 800 });
+      await openHistory(page, { 'run.list': { result: { runs: LONGEST_RUNS } } });
+      expect(await containerWidth(page)).toBeLessThanOrEqual(collapseMax());
+      const lines = await statusLines(page);
+      expect(lines).toHaveLength(5);
+      for (const line of lines) {
+        expect(line.whiteSpace, line.run).toBe('normal');
+        expect(line.inside, line.run).toBe(true);
+        expect(line.clipped, line.run).toBe(false);
+      }
+      expect(
+        await horizontalOverflow(page.getByTestId('rule-detail'), '[data-testid="history-row"]'),
+      ).toEqual([]);
+    });
+  });
+
+  test.describe('블록 선언이 바뀐 뒤 다시 읽기', () => {
+    const blocks = (page: Page) => page.getByTestId('rule-field-blocks');
+    const items = (page: Page) => blocks(page).getByTestId('block-item');
+    const undeclared = (page: Page) => blocks(page).locator('[data-undeclared="true"]');
+    /** 선언 이름만 바꾼 `blocks.get` 응답 (테스트 전용 데이터) */
+    const declared = (version: number, names: readonly string[]): typeof BLOCKS => ({
+      current: {
+        ...(BLOCKS.current as NonNullable<typeof BLOCKS.current>),
+        version,
+        declaration: {
+          blocks: names.map((name) => ({
+            name,
+            kind: 'domain' as const,
+            include: [`src/${name}/**`],
+            public: [],
+            dependsOn: [],
+            risk: 'low' as const,
+          })),
+        },
+      },
+    });
+    const changed = (version: number, projectId: string = PROJECT.id) => ({ projectId, version });
+    const openBlocks = async (page: Page, responses: MockResponses = {}): Promise<BiveMock> => {
+      const bive = await openRules(page, responses);
+      await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+      await expect(blocks(page).getByTestId('block-name')).toHaveText([
+        'lib',
+        'auth',
+        'legacy-mail',
+      ]);
+      return bive;
+    };
+
+    test('알림 뒤 화면을 다시 열지 않고: 선언에 생긴 이름은 "선언 외"가 사라지고, 빠진 이름은 생긴다. 알림 하나에 blocks.get 한 번', async ({
+      page,
+    }) => {
+      const bive = await openBlocks(page);
+      await expect(items(page)).toHaveText(['lib', 'auth', 'legacy-mail선언 외']);
+      await allSettled(bive, 'blocks.get');
+      const before = (await callsOf(bive, 'blocks.get')).length;
+
+      // legacy-mail이 선언에 생김
+      await bive.setResponse('blocks.get', {
+        result: declared(2, ['health', 'auth', 'lib', 'legacy-mail']),
+      });
+      await bive.emit('event.blocks.changed', changed(2));
+      await expect(items(page)).toHaveText(['lib', 'auth', 'legacy-mail']);
+      await expect(undeclared(page)).toHaveCount(0);
+
+      // auth가 선언에서 빠짐
+      await bive.setResponse('blocks.get', {
+        result: declared(3, ['health', 'lib', 'legacy-mail']),
+      });
+      await bive.emit('event.blocks.changed', changed(3));
+      await expect(items(page)).toHaveText(['lib', 'auth선언 외', 'legacy-mail']);
+      // 상세는 그대로 열려 있다(다시 고르지 않음)
+      await expect(page.getByTestId('rule-detail')).toHaveAttribute(
+        'data-selected-id',
+        FAILING_RULE.id,
+      );
+      await allSettled(bive, 'blocks.get');
+      await nextFrame(page);
+      const calls = await callsOf(bive, 'blocks.get');
+      expect(calls).toHaveLength(before + 2);
+      for (const call of calls) expect(call.params).toEqual({ projectId: PROJECT.id });
+    });
+
+    test('다른 프로젝트의 블록 선언 알림으로는 다시 읽지 않는다', async ({ page }) => {
+      const bive = await openBlocks(page);
+      await allSettled(bive, 'blocks.get');
+      const before = (await callsOf(bive, 'blocks.get')).length;
+      await bive.setResponse('blocks.get', {
+        result: declared(2, ['health', 'auth', 'lib', 'legacy-mail']),
+      });
+      await bive.emit('event.blocks.changed', changed(2, OTHER_PROJECT_ID));
+      // 다른 프로젝트 알림 뒤 이 프로젝트 알림을 보내 그 결과가 그려지면 센다: 앞 알림이 읽었다면 하나 더 많다
+      await bive.emit('event.blocks.changed', changed(2));
+      await expect(undeclared(page)).toHaveCount(0);
+      await allSettled(bive, 'blocks.get');
+      await nextFrame(page);
+      expect(await callsOf(bive, 'blocks.get')).toHaveLength(before + 1);
+    });
+
+    test('늦게 온 옛 선언 응답은 알림 뒤 먼저 온 새 선언을 덮지 않는다', async ({ page }) => {
+      // 처음 읽기(옛 선언: legacy-mail 없음)는 늦게, 알림 뒤 읽기(새 선언)는 바로 온다
+      const bive = await openRules(page, { 'blocks.get': { result: BLOCKS, delayMs: 1500 } });
+      await selectRule(page, bive, 'RULE-002', FAILING_RULE.id);
+      await bive.setResponse('blocks.get', {
+        result: declared(2, ['health', 'auth', 'lib', 'legacy-mail']),
+      });
+      await bive.emit('event.blocks.changed', changed(2));
+      await expect(items(page)).toHaveText(['lib', 'auth', 'legacy-mail']);
+      await allSettled(bive, 'blocks.get');
+      await nextFrame(page);
+      await expect(items(page)).toHaveText(['lib', 'auth', 'legacy-mail']);
+      await expect(undeclared(page)).toHaveCount(0);
+    });
+
+    test('오케스트레이터에 다시 붙으면(끊김 → 연결됨) 선언을 다시 읽어 새 선언으로 판단한다', async ({
+      page,
+    }) => {
+      const bive = await openBlocks(page);
+      await expect(undeclared(page)).toHaveCount(1);
+      // 끊긴 동안 잃은 알림을 회복하는지: 응답을 재접속 전에 바꿔 두고 알림 없이 재접속만 한다
+      await bive.setResponse('blocks.get', {
+        result: declared(2, ['health', 'auth', 'lib', 'legacy-mail']),
+      });
+      const connection = page.getByTestId('connection-status');
+      await bive.emit('system.connection', { state: 'disconnected' });
+      await expect(connection).toHaveAttribute('data-state', 'disconnected');
+      await bive.emit('system.connection', { state: 'connected', status: STATUS });
+      await expect(connection).toHaveAttribute('data-state', 'connected');
+      await expect(undeclared(page)).toHaveCount(0);
+      await expect(items(page)).toHaveText(['lib', 'auth', 'legacy-mail']);
+    });
   });
 });
