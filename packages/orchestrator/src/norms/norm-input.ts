@@ -18,8 +18,19 @@
 // - 효력 있는 계약이 있으면 규칙 절 뒤에 계약 절(표시 ID · 종류 · 원본 파일)을 싣는다(M3-04 #49, ADR-100 K1 · A14, ADR-129). 같은
 //   표시 값 변환 · 상한 · 줄이기(최근 등록 순으로 상한까지)를 따른다. 계약 내용은 싣지 않는다(목록만). 계약이 없으면 절이 없다
 //   (지금까지의 작업 지시 그대로). 계약 검사 규칙의 부모 줄은 그 계약을 가리킨다
-// - 저장소를 읽기만 한다. 대상 블록으로 고르기(M3-29)는 뒤 이슈가 더한다
-import type { BlockDeclarationRecord, SessionNormInput } from '@bive/shared';
+// - 대상 블록으로 고르기(M3-29 #231, ADR-100 K1, ADR-140): 블록 선언이 있고 기준 규칙(초점 규칙과 `blockBasisRuleIds`)이 모두 대상
+//   블록을 가지면, 효력 있는 규범 가운데 기준 블록과 이름이 겹치는 규칙 · 대상 블록이 없는 규칙 · 기준 규칙 자신, 그 규칙들의 부모
+//   요구사항 · 규칙이 없는 요구사항 · 초점 요구사항, 연결 계약만 남긴다({@link blockScopeOf}). 고른 범위에 A15의 줄이기를 그대로
+//   쓴다(먼저 고르고 그다음 줄인다). 블록으로 뺀 수(`outOfBlock`)와 상한으로 뺀 수(`omitted`)는 따로 남는다. 선언이 없거나 기준을
+//   정할 수 없으면 고르지 않는다(지금까지의 작업 지시 · 세션 기록 그대로). 역할을 보지 않는다: 부르는 쪽의 초점이 기준이다
+// - 저장소를 읽기만 한다
+import type {
+  BlockDeclarationRecord,
+  Contract,
+  Requirement,
+  Rule,
+  SessionNormInput,
+} from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
 import { displayText } from '../text-limit.js';
@@ -97,13 +108,17 @@ export const indentedText = (text: string): string =>
     .map((line) => `  ${taskHeaderText(line, TASK_HEADER_LIMITS.line)}`)
     .join('\n');
 
-/** 세션 기록에 남기는 규범 입력: 수 · 잘린 사실과 실은 항목의 표시 ID (ADR-100 A15, ADR-108). */
+/**
+ * 세션 기록에 남기는 규범 입력: 수 · 잘린 사실과 실은 항목의 표시 ID (ADR-100 A15, ADR-108). 대상 블록으로 골랐으면 기준 블록과
+ * 블록으로 뺀 수가 함께 남는다(M3-29, ADR-140).
+ */
 export const normInputRecord = (input: NormInput): SessionNormInput => ({
   summary: {
     requirements: { ...input.summary.requirements },
     rules: { ...input.summary.rules },
     ...(input.summary.contracts === undefined ? {} : { contracts: { ...input.summary.contracts } }),
     truncated: input.summary.truncated,
+    ...(input.summary.blocks === undefined ? {} : { blocks: [...input.summary.blocks] }),
   },
   requirementDisplayIds: input.requirements.map((entry) => entry.displayId),
   ruleDisplayIds: input.rules.map((entry) => entry.displayId),
@@ -120,11 +135,16 @@ export interface NormInputFocus {
   readonly ruleIds: readonly string[];
 }
 
-/** 한 종류의 수: 효력 있는 전체 · 실은 것 · 빠진 것. */
+/**
+ * 한 종류의 수: 효력 있는 전체 · 실은 것 · 상한으로 빠진 것. 대상 블록으로 골랐으면 블록 밖이라 뺀 것(`outOfBlock`)이 따로 있다
+ * (전체 = 실은 것 + 상한으로 빠진 것 + 블록 밖, M3-29 · ADR-140).
+ */
 export interface NormInputCount {
   readonly total: number;
   readonly included: number;
   readonly omitted: number;
+  /** 대상 블록으로 골라 뺀 수 (고르지 않았으면 칸이 없다) */
+  readonly outOfBlock?: number;
 }
 
 /** 입력 요약 (세션 기록 · 판단 기록에 남긴다). */
@@ -133,8 +153,10 @@ export interface NormInputSummary {
   readonly rules: NormInputCount;
   /** 효력 있는 계약이 있을 때만 (M3-04) */
   readonly contracts?: NormInputCount;
-  /** 상한 때문에 빠진 항목이 있는지 */
+  /** 상한 때문에 빠진 항목이 있는지 (블록 밖이라 뺀 것은 세지 않는다) */
   readonly truncated: boolean;
+  /** 대상 블록으로 골랐을 때만: 기준 블록 이름 (기준 규칙의 대상 블록, 처음 나온 순서) */
+  readonly blocks?: readonly string[];
 }
 
 /** 실은 요구사항 하나 (표시 값). */
@@ -224,11 +246,11 @@ const pick = <T extends { id: string; updatedAt: string; displayId: string }>(
   return new Set(ordered.slice(0, limit).map((item) => item.id));
 };
 
-const count = (total: number, included: number): NormInputCount => ({
-  total,
-  included,
-  omitted: total - included,
-});
+/** `pool` = 고른 범위의 수 (고르지 않았으면 `null`: 전체가 범위다). */
+const count = (total: number, included: number, pool: number | null = null): NormInputCount =>
+  pool === null
+    ? { total, included, omitted: total - included }
+    : { total, included, omitted: pool - included, outOfBlock: total - pool };
 
 /** 규범 입력을 모을 때의 선택. */
 export interface NormInputOptions {
@@ -238,10 +260,100 @@ export interface NormInputOptions {
    * 수(`casesUnknown`)로만 남는다
    */
   readonly isKnownCase: CaseNameFilter;
+  /**
+   * 대상 블록으로 고를 때 기준에 더하는 규칙 (초점 표시 · 줄이기의 우선은 받지 않는다, M3-29 · ADR-140). 이의 판단 세션이 실행의
+   * 대상 규칙을 기준에 더할 때 쓴다. 블록 선언이 없으면 쓰이지 않는다
+   */
+  readonly blockBasisRuleIds?: readonly string[];
+}
+
+/** 대상 블록으로 고른 범위 (M3-29, ADR-140). */
+export interface NormInputBlockScope {
+  /** 기준 블록 이름 (기준 규칙의 대상 블록, 처음 나온 순서) */
+  readonly blocks: readonly string[];
+  readonly requirementIds: ReadonlySet<string>;
+  readonly ruleIds: ReadonlySet<string>;
+  readonly contractIds: ReadonlySet<string>;
 }
 
 /**
+ * 대상 블록으로 고른 범위 (ADR-100 K1, ADR-140). 고르지 않으면 `null`(효력 있는 규범 전체가 범위다):
+ * - 블록 선언이 없음 · 기준 규칙이 없음(규칙 작성 세션: 아직 규칙이 없다) · 기준 규칙 가운데 하나라도 없거나 대상 블록이 빈 목록
+ * 고르면:
+ * - 규칙: 기준 규칙 자신, 대상 블록 이름이 기준 블록과 하나라도 같은 규칙(이름 그대로 비교, 선언에 없는 이름도 같다), 대상 블록이
+ *   빈 규칙(내장 구조 규칙 · 계약 검사 규칙 · 옛 규칙: 어느 블록에 걸리는지 모르므로 넣는다)
+ * - 요구사항: 초점 요구사항(초점 규칙의 부모 포함), 고른 규칙의 부모, 효력 있는 자식 규칙이 없는 요구사항(블록을 모른다)
+ * - 계약: 검사 규칙이 고른 규칙인 계약, 부모 요구사항이 고른 요구사항인 계약, 효력 있는 검사 규칙도 부모도 없는 계약
+ * 블록의 허용 의존(`dependsOn`)으로 넓히지 않는다(이름 기준 겹침)
+ */
+export const blockScopeOf = (
+  declared: boolean,
+  basisRuleIds: readonly string[],
+  focusRequirementIds: ReadonlySet<string>,
+  lookup: (ruleId: string) => Rule | null,
+  requirements: readonly Requirement[],
+  rules: readonly Rule[],
+  contracts: readonly Contract[],
+): NormInputBlockScope | null => {
+  if (!declared || basisRuleIds.length === 0) return null;
+  const basis = new Set<string>();
+  const blocks: string[] = [];
+  for (const ruleId of basisRuleIds) {
+    const rule = lookup(ruleId);
+    if (rule === null || rule.targetBlockIds.length === 0) return null;
+    basis.add(rule.id);
+    for (const name of rule.targetBlockIds) if (!blocks.includes(name)) blocks.push(name);
+  }
+  const ruleIds = new Set(
+    rules
+      .filter(
+        (rule) =>
+          basis.has(rule.id) ||
+          rule.targetBlockIds.length === 0 ||
+          rule.targetBlockIds.some((name) => blocks.includes(name)),
+      )
+      .map((rule) => rule.id),
+  );
+  const parents = new Set<string>();
+  const selectedParents = new Set<string>();
+  for (const rule of rules) {
+    if (rule.parentRequirementId === null) continue;
+    parents.add(rule.parentRequirementId);
+    if (ruleIds.has(rule.id)) selectedParents.add(rule.parentRequirementId);
+  }
+  const requirementIds = new Set(
+    requirements
+      .filter(
+        (requirement) =>
+          focusRequirementIds.has(requirement.id) ||
+          selectedParents.has(requirement.id) ||
+          !parents.has(requirement.id),
+      )
+      .map((requirement) => requirement.id),
+  );
+  const checkRulesOf = new Map<string, Rule[]>();
+  for (const rule of rules) {
+    if (rule.contractId === null) continue;
+    checkRulesOf.set(rule.contractId, [...(checkRulesOf.get(rule.contractId) ?? []), rule]);
+  }
+  const contractIds = new Set(
+    contracts
+      .filter((contract) => {
+        const checks = checkRulesOf.get(contract.id) ?? [];
+        if (checks.some((rule) => ruleIds.has(rule.id))) return true;
+        if (contract.parentRequirementId !== null) {
+          return requirementIds.has(contract.parentRequirementId);
+        }
+        return checks.length === 0;
+      })
+      .map((contract) => contract.id),
+  );
+  return { blocks, requirementIds, ruleIds, contractIds };
+};
+
+/**
  * 저장소에서 규범 입력을 모은다 (읽기만). 상한은 {@link NORM_INPUT_LIMITS}.
+ * 블록 선언이 있으면 먼저 대상 블록으로 고르고({@link blockScopeOf}, M3-29 · ADR-140), 고른 범위 안에서
  * 초점 규칙 → 초점 요구사항과 초점 규칙의 부모 → 그 요구사항들을 부모로 하는 규칙 순으로 먼저 남긴다(A15).
  */
 export const collectNormInput = (
@@ -250,15 +362,36 @@ export const collectNormInput = (
   options: NormInputOptions,
 ): NormInput => {
   const limits = NORM_INPUT_LIMITS;
-  const requirements = effectiveRequirements(store);
-  const rules = effectiveRules(store);
+  const allRequirements = effectiveRequirements(store);
+  const allRules = effectiveRules(store);
+  const contractsAll = effectiveContracts(store);
+  const blocks = store.blockDeclarations.current();
   const focusRules = new Set(focus.ruleIds);
   const focusRequirements = new Set(focus.requirementIds);
-  for (const rule of rules) {
+  for (const rule of allRules) {
     if (focusRules.has(rule.id) && rule.parentRequirementId !== null) {
       focusRequirements.add(rule.parentRequirementId);
     }
   }
+  const scope = blockScopeOf(
+    blocks !== null,
+    [...new Set([...focus.ruleIds, ...(options.blockBasisRuleIds ?? [])])],
+    focusRequirements,
+    (ruleId) => store.rules.get(ruleId),
+    allRequirements,
+    allRules,
+    contractsAll,
+  );
+  // 고른 범위 (고르지 않으면 효력 있는 전체)
+  const requirements =
+    scope === null
+      ? allRequirements
+      : allRequirements.filter((requirement) => scope.requirementIds.has(requirement.id));
+  const rules = scope === null ? allRules : allRules.filter((rule) => scope.ruleIds.has(rule.id));
+  const contracts =
+    scope === null
+      ? contractsAll
+      : contractsAll.filter((contract) => scope.contractIds.has(contract.id));
   const keptRequirements = pick(
     requirements,
     (requirement) => focusRequirements.has(requirement.id),
@@ -281,9 +414,8 @@ export const collectNormInput = (
   const displayIdOf = new Map(
     store.requirements.list().map((requirement) => [requirement.id, requirement.displayId]),
   );
-  const contracts = effectiveContracts(store);
   const contractDisplayIdOf = new Map(
-    contracts.map((contract) => [contract.id, contract.displayId]),
+    contractsAll.map((contract) => [contract.id, contract.displayId]),
   );
   const latest = store.judgments.latestForRules();
   const shownRequirements = requirements
@@ -334,8 +466,14 @@ export const collectNormInput = (
         focus: focusRules.has(rule.id),
       };
     });
-  const requirementCount = count(requirements.length, shownRequirements.length);
-  const ruleCount = count(rules.length, shownRules.length);
+  const pool = (selected: readonly unknown[]): number | null =>
+    scope === null ? null : selected.length;
+  const requirementCount = count(
+    allRequirements.length,
+    shownRequirements.length,
+    pool(requirements),
+  );
+  const ruleCount = count(allRules.length, shownRules.length, pool(rules));
   // 계약: 최근 등록 순으로 상한까지 고르고 표시 ID 순으로 싣는다 (초점이 없다)
   const keptContracts = pick(
     contracts.map((contract) => ({ ...contract, updatedAt: contract.createdAt })),
@@ -351,8 +489,9 @@ export const collectNormInput = (
       sourceFile: displayText(contract.sourceFile, NORM_INPUT_LIMITS.contractSourceFile).text,
     }));
   const contractCount =
-    contracts.length === 0 ? null : count(contracts.length, shownContracts.length);
-  const blocks = store.blockDeclarations.current();
+    contractsAll.length === 0
+      ? null
+      : count(contractsAll.length, shownContracts.length, pool(contracts));
   return {
     ...(blocks === null ? {} : { blocks }),
     requirements: shownRequirements,
@@ -364,6 +503,7 @@ export const collectNormInput = (
       ...(contractCount === null ? {} : { contracts: contractCount }),
       truncated:
         requirementCount.omitted > 0 || ruleCount.omitted > 0 || (contractCount?.omitted ?? 0) > 0,
+      ...(scope === null ? {} : { blocks: scope.blocks }),
     },
   };
 };
@@ -378,11 +518,30 @@ const heading = (
   counted: NormInputCount,
   limit: number,
   order: string = NORM_TRIM_ORDER,
-): string =>
-  counted.omitted === 0
-    ? `${label} (효력 ${String(counted.total)}건 중 ${String(counted.included)}건)`
-    : `${label} (효력 ${String(counted.total)}건 중 ${String(counted.included)}건만 실음, ` +
-      `${String(counted.omitted)}건 빠짐: 상한 ${String(limit)}건, ${order})`;
+): string => {
+  if (counted.outOfBlock === undefined) {
+    return counted.omitted === 0
+      ? `${label} (효력 ${String(counted.total)}건 중 ${String(counted.included)}건)`
+      : `${label} (효력 ${String(counted.total)}건 중 ${String(counted.included)}건만 실음, ` +
+          `${String(counted.omitted)}건 빠짐: 상한 ${String(limit)}건, ${order})`;
+  }
+  // 대상 블록으로 골랐다 (M3-29, ADR-140): 블록 밖으로 뺀 수와 상한으로 뺀 수를 따로 적는다
+  const scoped =
+    `${label} (효력 ${String(counted.total)}건 중 대상 블록 관련 ${String(counted.included + counted.omitted)}건, ` +
+    `블록 밖 ${String(counted.outOfBlock)}건 뺌`;
+  return counted.omitted === 0
+    ? `${scoped})`
+    : `${scoped}, 그중 ${String(counted.included)}건만 실음, ${String(counted.omitted)}건 빠짐: ` +
+        `상한 ${String(limit)}건, ${order})`;
+};
+
+/**
+ * 대상 블록으로 골랐을 때 자료 첫 줄에 두는 고정 문장 (M3-29, ADR-140): 세션이 자료를 "규범 전체"로 읽지 않게 한다. 블록 이름은
+ * 스키마(`BlockName`, 소문자 · 숫자 · -)를 지난 값이다.
+ */
+export const normInputScopeLine = (blocks: readonly string[]): string =>
+  `고른 범위: 대상 블록(${blocks.join(', ')})과 겹치거나 대상 블록이 없는 규칙과 작업 대상 규칙, 그 부모 요구사항 · 규칙이 없는 ` +
+  '요구사항 · 작업 대상 요구사항, 연결 계약만 실음. 블록 밖 규범은 싣지 않았고, 검사 단계는 효력 있는 규칙 전체를 판정한다';
 
 const parentText = (parent: NormInputParent): string => {
   if (parent.kind === 'requirement') return parent.displayId;
@@ -396,6 +555,7 @@ const parentText = (parent: NormInputParent): string => {
  */
 export const renderNormInput = (input: NormInput, focusLabel: string): string => {
   const lines: string[] = [NORM_INPUT_FRAME, NORM_INPUT_BEGIN];
+  if (input.summary.blocks !== undefined) lines.push(normInputScopeLine(input.summary.blocks));
   lines.push(heading('요구사항', input.summary.requirements, NORM_INPUT_LIMITS.requirements));
   if (input.requirements.length === 0) lines.push('- 없음');
   for (const requirement of input.requirements) {
@@ -466,8 +626,15 @@ const blockLines = (record: BlockDeclarationRecord): string[] => {
 
 /** 세션 기록 · 로그용 한 줄 요약. */
 export const normInputSummaryText = (summary: NormInputSummary): string => {
-  const part = (label: string, counted: NormInputCount) =>
-    `${label} ${String(counted.total)}건 중 ${String(counted.included)}건` +
-    (counted.omitted > 0 ? ` (${String(counted.omitted)}건 빠짐)` : '');
+  const part = (label: string, counted: NormInputCount) => {
+    const notes = [
+      ...(counted.omitted > 0 ? [`${String(counted.omitted)}건 빠짐`] : []),
+      ...(counted.outOfBlock === undefined ? [] : [`블록 밖 ${String(counted.outOfBlock)}건`]),
+    ];
+    return (
+      `${label} ${String(counted.total)}건 중 ${String(counted.included)}건` +
+      (notes.length > 0 ? ` (${notes.join(', ')})` : '')
+    );
+  };
   return `${part('요구사항', summary.requirements)}, ${part('규칙', summary.rules)}`;
 };

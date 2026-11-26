@@ -103,6 +103,8 @@ export interface SeedTexts {
   readonly requirement?: string;
   readonly title?: string;
   readonly statement?: string;
+  /** 대상 규칙의 대상 블록 이름 (기본 빈 목록, M3-29) */
+  readonly targetBlocks?: readonly string[];
 }
 
 /** 프로젝트 등록 + 설정 + 승인된 규칙 1개(`RULE-001`). */
@@ -142,7 +144,7 @@ export const seedProject = (
       checkKinds: ['test'],
       parentRequirementId: requirement.id,
       builtin: false,
-      targetBlockIds: [],
+      targetBlockIds: [...(texts.targetBlocks ?? [])],
       risk: null,
       contractId: null,
       author: { kind: 'agent', role: 'rule-writer' },
@@ -177,6 +179,8 @@ export interface SeedNormRule {
   readonly at: number;
   readonly normState?: NormState;
   readonly builtin?: boolean;
+  /** 대상 블록 이름 (기본 빈 목록, M3-29) */
+  readonly targetBlocks?: readonly string[];
 }
 
 /** 규칙 1개 (부모 없음 + 내장 아님이면 부모 해제 규칙과 같은 모양). */
@@ -189,7 +193,7 @@ export const seedNormRule = (store: ProjectStore, seed: SeedNormRule): Rule =>
     checkKinds: ['test'],
     parentRequirementId: seed.parent?.id ?? null,
     builtin: seed.builtin ?? false,
-    targetBlockIds: [],
+    targetBlockIds: [...(seed.targetBlocks ?? [])],
     risk: null,
     contractId: null,
     author: { kind: 'agent', role: 'rule-writer' },

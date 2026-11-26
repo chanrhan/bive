@@ -1967,7 +1967,8 @@ export class RuleWriterService implements RuleWriterLauncher {
     const runTargets = store.runs.get(request.run.id)?.targetRuleIds ?? [];
     const targets = cause.kind === 'check_failure' ? promptRules(runTargets) : [];
     // 검사 실패 판단의 초점은 두 쪽 규칙. 케이스 이름은 두 원인 모두 인수 테스트 파일에 적힌 것만 싣는다 (ADR-100 A5, ADR-118,
-    // ADR-121)
+    // ADR-121). 이의 판단은 실행의 대상 규칙도 대상 블록으로 고르는 기준에 든다(이의 대상이 대상 밖 규칙이어도 대상 규칙 쪽 규범이
+    // 빠지지 않는다. 초점 표시는 이의 대상에만, M3-29 · ADR-140)
     const norms = collectNormInput(
       store,
       {
@@ -1977,7 +1978,7 @@ export class RuleWriterService implements RuleWriterLauncher {
             ? [...targets.map((rule) => rule.id), ...request.ruleIds]
             : request.ruleIds,
       },
-      { isKnownCase },
+      { isKnownCase, blockBasisRuleIds: runTargets },
     );
     // 세션 행은 이 실행 · 판단을 청한 단계 시도에 묶는다(실행 안 판단 세션, 저장소가 규칙 작성 역할만 단계 역할과 달라도 받는다):
     // 하루 합계와 실행 합계 모두에 들고 `run.get`의 세션 목록에 나온다. 재기동 때는 그 실행의 세션으로 닫힌다 (M7-12, ADR-118)
