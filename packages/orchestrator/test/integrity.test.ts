@@ -1938,6 +1938,10 @@ export const all = confirmations;
   'steps/__sample-require.ts': `import { createRequire } from 'node:module';
 export const loaded: unknown = createRequire(import.meta.url)('../norms/norm-input.js');
 `,
+  'steps/__sample-require-alias.ts': `import { createRequire as make } from 'node:module';
+const load = make(import.meta.url);
+export const loaded: unknown = load('../norms/norm-input.js');
+`,
   'steps/__sample-type-import.ts': `export type Input = import('../norms/norm-input.js').NormInput;
 export type Service = import('../rule-writer/rule-writer-service.js').RuleWriterService;
 `,
@@ -2145,6 +2149,7 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
       ],
       ['steps/__sample-namespace.ts', ['confirmationServiceImporters'], []],
       ['steps/__sample-require.ts', ['normInputImporters'], ['normInputImporters']],
+      ['steps/__sample-require-alias.ts', ['normInputImporters'], ['normInputImporters']],
       [
         'steps/__sample-type-import.ts',
         ['normInputImporters', 'ruleWriterServiceImporters'],
@@ -2189,7 +2194,9 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
       );
     }
     // 이름이 리터럴이 아닌 동적 import는 어느 모듈인지 모르므로 따로 잡는다
-    expect(computedModuleRefs(set)).toEqual(['steps/__sample-computed.ts']);
+    expect(computedModuleRefs(set).filter((rel) => rel.includes('__sample'))).toEqual([
+      'steps/__sample-computed.ts',
+    ]);
     // 정상 표본: 허용된 파일(규칙 바로 반영 모듈) 자리의 같은 형태는 잡히되 제품의 허용 목록 안이다
     const productLists = {
       normChangesAppend: using(/\.normChanges\.append\(/),

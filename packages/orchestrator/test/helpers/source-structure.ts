@@ -134,6 +134,19 @@ const resolveTarget = (rel: string, specifier: string | null): string | null => 
 const moduleRefCache = new WeakMap<SourceSet, Map<string, ModuleRef[]>>();
 
 export const moduleRefs = (set: SourceSet, rel: string): ModuleRef[] => {
+  /**
+   * `require('x')` · `createRequire(…)('x')`와 그 별칭(`const req = createRequire(…)`, 다른 이름으로 가져온 `createRequire`):
+   * 부르는 값의 타입이 Node의 `require` 타입이면 require로 본다 (인자 하나, 부르는 것이 이름이나 호출인 것만 타입을 묻는다)
+   */
+  const isRequireCall = (call: TS.CallExpression): boolean => {
+    if (call.arguments.length !== 1) return false;
+    const callee = call.expression;
+    if (ts.isIdentifier(callee) && callee.text === 'require') return true;
+    if (!ts.isIdentifier(callee) && !ts.isCallExpression(callee)) return false;
+    const type = set.checker.getTypeAtLocation(callee);
+    const name = (type.aliasSymbol ?? type.getSymbol())?.getName();
+    return name === 'Require' || name === 'NodeRequire';
+  };
   const cache = moduleRefCache.get(set) ?? new Map<string, ModuleRef[]>();
   moduleRefCache.set(set, cache);
   const cached = cache.get(rel);
@@ -169,14 +182,7 @@ export const moduleRefs = (set: SourceSet, rel: string): ModuleRef[] => {
       push('require', literalText(node.moduleReference.expression), ['*']);
     } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
       push('dynamic', literalText(node.arguments[0]), ['*']);
-    } else if (
-      ts.isCallExpression(node) &&
-      ((ts.isIdentifier(node.expression) && node.expression.text === 'require') ||
-        // `createRequire(…)('x')`
-        (ts.isCallExpression(node.expression) &&
-          ts.isIdentifier(node.expression.expression) &&
-          node.expression.expression.text === 'createRequire'))
-    ) {
+    } else if (ts.isCallExpression(node) && isRequireCall(node)) {
       push('require', literalText(node.arguments[0]), ['*']);
     } else if (ts.isImportTypeNode(node)) {
       const argument = node.argument;
