@@ -718,6 +718,13 @@ describe('변이 생존의 자동 테스트 보강 · 재주입 (M3-54 #311 수�
       ),
     ).toEqual([]);
     expect(statusOf(h, h.rules[0] as Rule)).toBe('survived');
+    // 보강 실행이 끝났고(실패) 최신 기록은 여전히 첫 실행의 생존이어도, 같은 기록으로 다시 만들지 않는다 (연결이 이미 있다)
+    expect(
+      withProject(h.biveHome, h.projectId, (store) =>
+        reinforceSurvivedMutants(store, { runId: h.runId }, { now: Date.now, newId }),
+      ),
+    ).toEqual({ status: 'none' });
+    expect(runsOf(h)).toHaveLength(2);
   }, 90_000);
 
   it('검증됨 · 미검증 · 변이 없음은 보강 실행을 만들지 않고, 같은 변이 기록 · 같은 규칙에 끝나지 않은 보강 실행이 있으면 또 만들지 않는다', async () => {

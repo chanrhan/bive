@@ -345,7 +345,8 @@ const reinject = async (
     commit,
     status: mutationStatusOf(outcome),
     outcome,
-    mutant: cause.mutant,
+    // 실제로 다시 적용한 변이 (원인 기록의 변이와 같아야 한다)
+    mutant: checked.mutant.patch,
     recordedAt: new Date().toISOString(),
   };
   context.read((store) => store.mutations.record(record));
