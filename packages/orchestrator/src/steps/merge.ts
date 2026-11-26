@@ -29,6 +29,8 @@
 //   재검사 실패(병합 없음)다
 // - 병합 재검사의 계약 검사 (M3-47 #292, ADR-132): 계약 검사 규칙이 있으면 검사 단계와 같은 계약 검사를 병합 커밋의 판정에서 하고 판정
 //   기록을 남긴다. 계약과 다른 응답 · 도구를 끝까지 못 돌림은 재검사 실패(병합 없음)다. 등록된 문서의 형식 오류 · 판정 없음은 막지 않는다
+// - 실행 유형 (M3-06 #51, ADR-136): 검사한 커밋은 C만 테스트 작성 커밋이다. 유형 C는 병합을 부르기 전에 기준 커밋과 검사한 커밋 사이의
+//   변경이 대상 규칙 폴더 · BIVE 선언 파일뿐인지 다시 본다(소스 파일 쓰기 거부, 밖의 변경이 있으면 `failed`(`guard_violation`), 병합 없음)
 import type { JudgmentResult, Rule } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
@@ -41,6 +43,8 @@ import {
   TARGET_RULE_RETIRED,
 } from '../norms/effective.js';
 import { approvedRules } from './check.js';
+import { TEST_ONLY_STAGE } from './green-check.js';
+import { headStepKindOf, testOnlyViolations, unjudgedStaticTargets } from './run-type.js';
 import {
   CONTRACT_STAGE,
   contractJudgmentsFrom,
@@ -243,15 +247,40 @@ export const createMergeExecutor =
   async (context: StepContext): Promise<StepOutcome> => {
     const git = options.git ?? createGitRunner();
     const headCommit = context.run.headCommit;
+    const headKind = headStepKindOf(context.run.type);
     if (
       headCommit === null ||
       lastPassed(context.steps, 'check') === undefined ||
-      lastPassed(context.steps, 'implementation')?.commit !== headCommit
+      lastPassed(context.steps, headKind)?.commit !== headCommit
     ) {
       return halt('state_inconsistent', {
-        message: '검사를 통과한 구현 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다',
+        message:
+          headKind === 'implementation'
+            ? '검사를 통과한 구현 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다'
+            : '검사를 통과한 테스트 작성 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다',
         headCommit,
       });
+    }
+    // 유형 C: 병합되는 변경이 인수 테스트뿐인지 병합 전에 다시 본다 (소스 파일 쓰기 거부, 닫힌 쪽)
+    if (context.run.type === 'C') {
+      const targets = context.read((store) =>
+        context.run.targetRuleIds.map((id) => store.rules.get(id)?.displayId ?? id),
+      );
+      const outside = await testOnlyViolations(
+        git,
+        context.git.repoPath,
+        context.git.baseCommit,
+        headCommit,
+        targets,
+      );
+      if (outside.length > 0) {
+        return halt('guard_violation', {
+          stage: TEST_ONLY_STAGE,
+          message: '코드 유지 · 테스트만 실행에서 인수 테스트 폴더 밖의 파일이 바뀌었습니다',
+          changed: outside.slice(0, 50),
+          headCommit,
+        });
+      }
     }
     const tip = await git(
       ['rev-parse', '--verify', '--quiet', `refs/heads/${context.git.branch}^{commit}`],
@@ -410,10 +439,13 @@ export const createMergeExecutor =
       const blocking = recorded.filter((item) => !nonBlocking.has(item.ruleId));
       // 재검사가 도는 동안 대상 규칙이 폐기됐으면 통과여도 병합하지 않는다 (병합 직전, ADR-112)
       retiredDuringCheck = retiredTargets();
+      // 유형 B: 대상 정적 검사 규칙은 병합 커밋에서도 판정이 통과여야 한다 (판정 없음 · 막지 않는 실패는 재검사 실패, ADR-136 ⑫)
+      const unjudgedTargets = unjudgedStaticTargets(context.run, recorded, nonBlocking);
       const passed =
         retiredDuringCheck.length === 0 &&
         judged.result.status === 'completed' &&
-        blocking.every((item) => item.status === 'pass');
+        blocking.every((item) => item.status === 'pass') &&
+        unjudgedTargets.length === 0;
       if (
         retiredDuringCheck.length === 0 &&
         judged.result.status === 'completed' &&
@@ -428,6 +460,7 @@ export const createMergeExecutor =
       recheck = {
         mergeCommit: merge.mergeCommit,
         ruleIds: judged.ruleIds,
+        ...(unjudgedTargets.length === 0 ? {} : { unjudgedTargets }),
         ...judgeSummary(judged.result),
         judgments: judgmentDigest(recorded, judgedRules),
         ...(judged.structure === undefined ? {} : { structure: judged.structure.summary }),
@@ -443,14 +476,19 @@ export const createMergeExecutor =
               detail:
                 retiredDuringCheck.length > 0
                   ? `대상 규칙 폐기: ${retiredDuringCheck.join(', ')}`
-                  : judged.result.status === 'completed'
-                    ? `실패한 규칙: ${blocking
-                        .filter((item) => item.status !== 'pass')
-                        .map(
-                          (item) => judgedRules.find((rule) => rule.id === item.ruleId)?.displayId,
-                        )
+                  : unjudgedTargets.length > 0 && blocking.every((item) => item.status === 'pass')
+                    ? `판정되지 않은 대상 규칙: ${unjudgedTargets
+                        .map((id) => judgedRules.find((rule) => rule.id === id)?.displayId ?? id)
                         .join(', ')}`
-                    : `${judged.result.status}: ${judged.result.message ?? ''}`,
+                    : judged.result.status === 'completed'
+                      ? `실패한 규칙: ${blocking
+                          .filter((item) => item.status !== 'pass')
+                          .map(
+                            (item) =>
+                              judgedRules.find((rule) => rule.id === item.ruleId)?.displayId,
+                          )
+                          .join(', ')}`
+                      : `${judged.result.status}: ${judged.result.message ?? ''}`,
             }),
       };
     };

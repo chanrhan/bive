@@ -22,9 +22,14 @@
 //   종류의 실행기로 판정하고 판정 기록을 같은 트랜잭션에 남긴다. 계약 검사 규칙은 인수 테스트로 판정하지 않는다. 계약과 다른 응답은 구조
 //   검사 실패와 같이 구현으로 회귀하고, 등록된 문서의 형식 오류는 기록만 하고 단계 통과를 막지 않는다. 실행기가 없는 종류 · 판정할 수 없는
 //   계약은 판정 없음(기록 없음)이고 단계의 통과 · 회귀에 끼지 않는다. 도구를 끝까지 못 돌리면 판정하지 않고 끝낸다
+// - 실행 유형 (M3-06 #51, RUN-07, ADR-136, `steps/run-type.ts`): 판정할 커밋은 C만 테스트 작성 커밋(구현 생략)이다. 인수 테스트 보호의
+//   기준은 A = Red 확인, C · D = Green 확인의 해시, B = 기준 커밋(기준 커밋과 판정 커밋 사이에 `bive-acceptance/` 변경이 없어야 한다).
+//   판정 대상은 모든 유형이 같다(효력 있는 규칙 전부: D의 Green → Green). 유형 B의 대상 규칙(구조 · 계약 검사 규칙)은 판정 기록이
+//   `pass`여야 하고, 판정 없음 · 막지 않는 실패(등록 문서의 형식 오류)면 구현이 고칠 수 없어 회귀 없이 `failed`(`step_unmet`)다
 import type { Rule } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
+import { createGitRunner } from '../git/git-exec.js';
 import { effectiveContracts, effectiveRules } from '../norms/effective.js';
 import {
   CONTRACT_STAGE,
@@ -34,6 +39,7 @@ import {
   missingContractVerdicts,
   nonBlockingContractRuleIds,
   contractPlanOf,
+  type ContractPlanRead,
 } from './contract-check.js';
 import { contradictionHalt, judgeExistingRuleFailures } from './existing-rule.js';
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
@@ -56,8 +62,15 @@ import {
   MAX_LISTED,
   normHalt,
   recordJudgments,
-  redAcceptanceHashes,
 } from './judging.js';
+import {
+  acceptanceBaselineOf,
+  changedPathsBetween,
+  headStepKindOf,
+  missingBaselineMessage,
+  unjudgedStaticTargets,
+} from './run-type.js';
+import { ACCEPTANCE_DIR } from '../judge/config.js';
 
 export type CheckOptions = JudgingOptions;
 
@@ -67,6 +80,13 @@ export type CheckOptions = JudgingOptions;
  */
 export const approvedRules = (context: StepContext): Rule[] =>
   context.read((store) => effectiveRules(store));
+
+/** 단계를 열 때의 계약 검사 계획 (효력 있는 계약 검사 규칙 · 계약). 검사 단계와 유형 D의 기준 검사(Green 확인)가 같이 쓴다. */
+export const readContractPlan = (context: StepContext, rules: readonly Rule[]): ContractPlanRead =>
+  contractPlanOf(
+    rules,
+    context.read((store) => effectiveContracts(store)),
+  );
 
 const halt = (reason: string, exitDetail: Record<string, unknown>): StepOutcome => ({
   status: 'halt',
@@ -79,20 +99,41 @@ const halt = (reason: string, exitDetail: Record<string, unknown>): StepOutcome 
 export const createCheckExecutor =
   (options: CheckOptions = {}): StepExecutor =>
   async (context: StepContext): Promise<StepOutcome> => {
-    // 판정할 커밋 = 마지막 완료 단계(구현) 커밋
+    // 판정할 커밋 = 마지막 완료 단계(구현, 유형 C는 테스트 작성) 커밋
     const commit = context.run.headCommit;
-    if (commit === null || lastPassed(context.steps, 'implementation')?.commit !== commit) {
+    const headKind = headStepKindOf(context.run.type);
+    if (commit === null || lastPassed(context.steps, headKind)?.commit !== commit) {
       return halt('state_inconsistent', {
-        message: '구현 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다',
+        message:
+          headKind === 'implementation'
+            ? '구현 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다'
+            : '테스트 작성 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다',
         commit,
       });
     }
-    const expectedHashes = redAcceptanceHashes(context.steps);
-    if (expectedHashes === null) {
-      return halt('state_inconsistent', {
-        message: 'Red 확인 통과 기록(인수 테스트 해시)이 없습니다',
-      });
+    const baseline = acceptanceBaselineOf(context.run, context.steps);
+    if (baseline === null) {
+      return halt('state_inconsistent', { message: missingBaselineMessage(context.run.type) });
     }
+    // 유형 B: 인수 테스트를 쓰는 단계가 없다. 기준 커밋과 판정 커밋 사이에 인수 테스트 변경이 없어야 한다 (git 객체 비교)
+    if (baseline.kind === 'base_tree') {
+      const changed = await changedPathsBetween(
+        options.git ?? createGitRunner(),
+        context.git.repoPath,
+        context.git.baseCommit,
+        commit,
+        `${ACCEPTANCE_DIR}/`,
+      );
+      if (changed.length > 0) {
+        return halt('guard_violation', {
+          commit,
+          stage: 'acceptance_hash',
+          message: '기준 커밋 뒤 인수 테스트가 바뀌었습니다',
+          changed: changed.slice(0, MAX_LISTED),
+        });
+      }
+    }
+    const expectedHashes = baseline.kind === 'hashes' ? baseline.hashes : undefined;
     // 모순 판단으로 끝나야 할 실행은 다시 판정하지 않는다 (폐기된 규칙이 빠져 통과로 보이는 길을 막는다, ADR-100 A4)
     const contradicted = contradictionHalt(context);
     if (contradicted !== null) return contradicted;
@@ -104,10 +145,7 @@ export const createCheckExecutor =
     const plan = planned.kind === 'plan' ? planned.plan : null;
     const structureIds = structureRuleIds(plan);
     // 계약 검사 계획: 단계를 열 때 읽은 계약 검사 규칙 · 계약 (없으면 없음)
-    const contractPlanned = contractPlanOf(
-      rules,
-      context.read((store) => effectiveContracts(store)),
-    );
+    const contractPlanned = readContractPlan(context, rules);
     if (contractPlanned.kind === 'halt') return contractPlanned.outcome;
     const contractPlan = contractPlanned.kind === 'plan' ? contractPlanned.plan : null;
     const contractIds = contractRuleIds(contractPlan);
@@ -130,7 +168,7 @@ export const createCheckExecutor =
             .filter((rule) => dirs.includes(rule.displayId))
             .map((rule) => rule.displayId);
         },
-        expectedAcceptanceHashes: expectedHashes,
+        ...(expectedHashes === undefined ? {} : { expectedAcceptanceHashes: expectedHashes }),
         norms,
         signal: context.signal,
         readAcceptanceTexts: true,
@@ -161,7 +199,9 @@ export const createCheckExecutor =
           ...(judged.moment === undefined ? {} : { moment: judged.moment }),
           message:
             judged.stage === 'acceptance_hash'
-              ? 'Red 확인 뒤 인수 테스트가 바뀌었습니다'
+              ? baseline.kind === 'hashes' && baseline.from === 'green'
+                ? 'Green 확인 뒤 인수 테스트가 바뀌었습니다'
+                : 'Red 확인 뒤 인수 테스트가 바뀌었습니다'
               : '판정 중 인수 테스트 · 테스트 실행기 · 판정 설정이 바뀌었습니다',
           changed: judged.changed.slice(0, MAX_LISTED),
         });
@@ -259,6 +299,22 @@ export const createCheckExecutor =
     // 단계 통과를 막는 판정: 등록된 계약 문서의 형식 오류(구현이 고칠 수 없다)는 기록만 하고 빼고 본다
     const nonBlocking = nonBlockingContractRuleIds(judged.contracts);
     const blocking = recorded.filter((judgment) => !nonBlocking.has(judgment.ruleId));
+    // 유형 B의 대상 규칙은 판정 기록이 통과여야 한다. 판정 없음 · 막지 않는 실패는 구현이 고칠 수 없다 (판정 없이 병합하지 않는다)
+    {
+      const unjudgedTargets = unjudgedStaticTargets(context.run, recorded, nonBlocking);
+      if (unjudgedTargets.length > 0) {
+        return halt('step_unmet', {
+          ...detail,
+          judgments,
+          reason: 'target_unjudged',
+          message:
+            '대상 정적 검사 규칙의 판정이 통과가 아닙니다 (판정 없음 · 등록 문서의 형식 오류)',
+          ruleIds: context.read((store) =>
+            unjudgedTargets.map((id) => store.rules.get(id)?.displayId ?? id),
+          ),
+        });
+      }
+    }
     if (blocking.some((judgment) => judgment.status !== 'pass')) {
       // 대상 밖 규칙의 실패: 규칙을 맡는 역할의 판단 (판단 입력은 실패한 규칙 ID와 케이스 이름뿐, 실행기 출력은 넘기지 않는다)
       const existing = await judgeExistingRuleFailures(context, {

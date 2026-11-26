@@ -28,6 +28,7 @@ import {
   createUlidGenerator,
   ErrorCode,
   isFinalStepStatus,
+  isRunTypeSkippedStep,
   MAX_REGRESSION_COUNT,
   type ModelUsage,
   parseDisplayId,
@@ -71,6 +72,7 @@ import {
   startNextQueuedRun,
 } from '../runs/run-service.js';
 import { createCheckExecutor } from '../steps/check.js';
+import { createGreenCheckExecutor } from '../steps/green-check.js';
 import { createImplementationExecutor } from '../steps/implementation.js';
 import { createMergeExecutor } from '../steps/merge.js';
 import { createRedCheckExecutor } from '../steps/red-check.js';
@@ -97,7 +99,7 @@ import {
   type StepSessionRequest,
   type StepSessionResult,
   stepCommitMessage,
-  UNMET_POLICY,
+  UNMET_POLICY_BY_TYPE,
 } from './types.js';
 
 // 실행의 종료 상태는 `run-ending.ts`의 `runEnding()` 한 곳에서 정한다 (실행 서비스의 실행 대기 시작도 같은 함수를 쓴다)
@@ -182,11 +184,13 @@ export const screenUpdateStep: StepExecutor = async (context) => {
 
 /**
  * 기본 실행기: 유형 A 전체. 테스트 작성 · Red 확인(#28, ADR-068) · 구현 · 검사 · 병합(#29, ADR-069) · 변이 주입 `skipped` ·
- * 화면 갱신(#32, ADR-076). 제품 오케스트레이터의 실행은 이 목록으로 유형 A 끝(병합 · 화면 갱신)까지 간다.
+ * 화면 갱신(#32, ADR-076). 제품 오케스트레이터의 실행은 이 목록으로 유형 A 끝(병합 · 화면 갱신)까지 간다. 유형 C · D의 Green 확인
+ * (C: 새 테스트 전부 통과, D: 기준 커밋의 기존 검사 전부 통과)은 M3-06(ADR-136)이 더했다.
  */
 export const DEFAULT_STEP_EXECUTORS: StepExecutors = {
   test_writing: createTestWritingExecutor(),
   red_check: createRedCheckExecutor(),
+  green_check: createGreenCheckExecutor(),
   implementation: createImplementationExecutor(),
   check: createCheckExecutor(),
   mutation: skipMutationStep,
@@ -946,8 +950,12 @@ export class PipelineEngine {
     // 남은 단계의 실행기가 하나라도 없으면 워크트리 · 브랜치를 만들기 전에 끝낸다
     const plan: readonly StepKind[] =
       (RUN_STEP_PLANS as Partial<Record<string, readonly StepKind[]>>)[run.type] ?? [];
+    // 유형이 생략하는 단계는 실행기를 부르지 않는다 (RUN-07, ADR-136)
     const missing = plan.filter(
-      (kind) => kind !== 'approval' && this.#executors[kind as EngineStepKind] === undefined,
+      (kind) =>
+        kind !== 'approval' &&
+        !isRunTypeSkippedStep(run.type, kind) &&
+        this.#executors[kind as EngineStepKind] === undefined,
     );
     if (missing.length > 0) {
       return {
@@ -1006,6 +1014,10 @@ export class PipelineEngine {
     git: RunGitRef,
     signal: AbortSignal,
   ): Promise<StepOutcome | null> {
+    // 유형이 생략하는 단계: 실행기를 부르지 않고 생략으로 기록한다 (RUN-07, ADR-020 · ADR-136)
+    if (isRunTypeSkippedStep(detail.run.type, step.kind)) {
+      return { status: 'skipped', exitDetail: { reason: 'run_type', runType: detail.run.type } };
+    }
     const executor = this.#executors[step.kind as EngineStepKind];
     if (executor === undefined) {
       return {
@@ -1144,7 +1156,8 @@ export class PipelineEngine {
     git: RunGitRef | null,
   ): Promise<void> {
     const { run, steps } = detail;
-    const policy = UNMET_POLICY[step.kind as EngineStepKind];
+    // 유형별 미충족 정책 (회귀 상한은 모든 유형 공통, ADR-020 · ADR-136)
+    const policy = UNMET_POLICY_BY_TYPE[run.type][step.kind as EngineStepKind];
     if (policy === undefined) {
       await this.#halt(projectId, run, step, 'failed', 'step_unmet', exitDetail, git);
       return;

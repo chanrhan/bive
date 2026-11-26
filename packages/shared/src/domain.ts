@@ -1613,8 +1613,12 @@ export type NormChangeEntry = z.infer<typeof NormChangeEntry>;
 export const MAX_REGRESSION_COUNT = 2;
 
 /**
- * 실행 유형별 단계 순서 (RUN-02, architecture.md 4장, ADR-061). M1은 유형 A만 만든다.
- * 변이 주입은 P1(JDG-04)이라 M1 엔진이 `skipped`로 기록한다(roadmap M1-14). B · C · D는 RUN-07(M3)이 더한다.
+ * 실행 유형별 단계 순서 (RUN-02 · RUN-07, architecture.md 4장, ADR-061 · ADR-020 · ADR-136).
+ * 변이 주입은 P1(JDG-04)이라 엔진이 `skipped`로 기록한다(roadmap M1-14). 유형이 생략하는 단계도 계획에 두고 엔진이 `skipped`로
+ * 기록한다(`RUN_TYPE_SKIPPED_STEPS`, 화면의 파이프라인이 "생략"으로 보인다). 순서는 모든 유형이 `StepKind` 정의 순서를 따른다.
+ * - B 정적 검사: 테스트 작성 · Red 확인 생략
+ * - C 코드 유지 · 테스트만: Red 확인 대신 Green 확인, 구현 생략
+ * - D 리팩터링 · 되돌리기: 테스트 작성 · Red 확인 생략, 구현 앞 Green 확인이 기준 검사(기준 커밋의 기존 검사 전부 통과)
  */
 export const RUN_STEP_PLANS = {
   A: [
@@ -1627,9 +1631,58 @@ export const RUN_STEP_PLANS = {
     'merge',
     'screen_update',
   ],
-} as const satisfies Partial<Record<RunType, readonly StepKind[]>>;
+  B: [
+    'approval',
+    'test_writing',
+    'red_check',
+    'implementation',
+    'check',
+    'mutation',
+    'merge',
+    'screen_update',
+  ],
+  C: [
+    'approval',
+    'test_writing',
+    'green_check',
+    'implementation',
+    'check',
+    'mutation',
+    'merge',
+    'screen_update',
+  ],
+  D: [
+    'approval',
+    'test_writing',
+    'red_check',
+    'green_check',
+    'implementation',
+    'check',
+    'merge',
+    'screen_update',
+  ],
+} as const satisfies Record<RunType, readonly StepKind[]>;
 
-/** M1에서 만드는 실행 유형 (ADR-020: B · C · D는 enum만). */
+/**
+ * 유형이 생략하는 단계 (RUN-07, ADR-020 · ADR-136): 엔진이 실행기를 부르지 않고 `skipped`로 기록한다. 변이 주입은 유형과 무관하게
+ * 변이 주입 실행기가 `skipped`로 기록한다(P1).
+ */
+export const RUN_TYPE_SKIPPED_STEPS = {
+  A: [],
+  B: ['test_writing', 'red_check'],
+  C: ['implementation'],
+  D: ['test_writing', 'red_check'],
+} as const satisfies Record<RunType, readonly StepKind[]>;
+
+/** 그 유형이 생략하는 단계인지. */
+export const isRunTypeSkippedStep = (type: RunType, kind: StepKind): boolean =>
+  (RUN_TYPE_SKIPPED_STEPS[type] as readonly StepKind[]).includes(kind);
+
+/** 유형별 실제로 도는 단계의 역할 (생략 단계의 역할은 스냅샷에 넣지 않는다). */
+export const runTypeRoles = (type: RunType): AgentRole[] =>
+  stepRoles(RUN_STEP_PLANS[type].filter((kind) => !isRunTypeSkippedStep(type, kind)));
+
+/** 자동 시작 · 다시 시작 · 편집 뒤 시작이 만드는 실행 유형 (ADR-020 · ADR-136: B · C · D는 사람의 [실행]으로만). */
 export const M1_RUN_TYPE = 'A' as const satisfies RunType;
 
 /** 단계를 수행하는 에이전트 역할. 사람 · 판정기 · 오케스트레이터 단계는 `null` (architecture.md 4장 단계표). */

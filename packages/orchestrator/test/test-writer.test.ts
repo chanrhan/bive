@@ -1481,9 +1481,10 @@ describe('red-violation 시나리오 (수용 기준 4)', () => {
       'test-writer',
     ]);
     expect(scenario.roles['test-writer']?.sessions).toHaveLength(1);
-    // 기본 실행기 목록에 유형 A 전체가 등록돼 있다 (구현 · 검사 · 병합은 #29)
+    // 기본 실행기 목록에 유형 A 전체가 등록돼 있다 (구현 · 검사 · 병합은 #29). 유형 C · D의 Green 확인은 M3-06(#51)
     expect(Object.keys(DEFAULT_STEP_EXECUTORS).sort()).toEqual([
       'check',
+      'green_check',
       'implementation',
       'merge',
       'mutation',
