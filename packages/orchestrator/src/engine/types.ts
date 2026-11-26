@@ -166,7 +166,7 @@ export type StepOutcome =
 
 /** 단계 세션 요청 (`StepContext.runSession`). 역할 · 모델 · 한도는 단계와 실행 스냅샷으로 엔진이 정한다. */
 export interface StepSessionRequest {
-  /** 세션 루트(작업 폴더): implementer = 실행 워크트리, test-writer = 세션 폴더 (ADR-024) */
+  /** 세션 루트(작업 폴더): implementer = 실행 워크트리, test-writer · mutator = 세션 폴더 (ADR-024 · ADR-139) */
   readonly workDir: string;
   readonly systemPrompt: string;
   readonly prompt: string;
@@ -180,7 +180,7 @@ export interface StepSessionRequest {
    * 제안 · 이의 도구 훅 (도구 호출 기록은 엔진이 저장한다). `raiseObjection`이 `ok`를 돌려주면 엔진이 그 세션을 끝낸다
    * (종료 사유 `objection_raised`, M7-11 · ADR-115)
    */
-  readonly hooks?: Pick<RoleToolsHooks, 'proposeRule' | 'raiseObjection'>;
+  readonly hooks?: Pick<RoleToolsHooks, 'proposeRule' | 'raiseObjection' | 'proposeMutant'>;
   /**
    * 작업 지시에 실은 규범 입력의 기록 (ADR-108). 엔진이 세션 행을 만들 때 함께 남긴다(바뀌지 않는다). 생략하면 `null`
    */

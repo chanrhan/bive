@@ -23,6 +23,30 @@ export const MUTATION_STATUS_LABELS = {
 } as const satisfies Record<MutationStatus, string>;
 
 /**
+ * 변이 판정 결과 (JDG-04, M3-07 #52, ADR-139). 변이 상태는 이것에서만 정해진다(`mutationStatusOf`): 대상 규칙의 인수 테스트가
+ * 변이를 잡았으면(`killed`) '변이 검증됨', 모두 통과했으면(`survived`) '변이 생존', 그 밖은 판정하지 못한 것이라 '변이 미검증'이다
+ * (닫힌 쪽: 빌드 · 설치 · 수집 · 러너 오류를 검출로 세지 않는다).
+ * - `no_mutant`: 세션이 변이를 내지 않았다(세션 오류 포함)
+ * - `no_cases`: 판정은 끝났지만 대상 규칙의 케이스가 없거나 통과 · 실패가 아닌 케이스뿐
+ * - `checkout_error` · `install_error` · `collect_error` · `runner_error`: 판정하지 못함 (러너 오류에는 빌드 실패 · 시간 초과가 든다)
+ */
+export const MutationOutcome = z.enum([
+  'killed',
+  'survived',
+  'no_mutant',
+  'no_cases',
+  'checkout_error',
+  'install_error',
+  'collect_error',
+  'runner_error',
+]);
+export type MutationOutcome = z.infer<typeof MutationOutcome>;
+
+/** 판정 결과 → 변이 상태. */
+export const mutationStatusOf = (outcome: MutationOutcome): MutationStatus =>
+  outcome === 'killed' ? 'verified' : outcome === 'survived' ? 'survived' : 'unverified';
+
+/**
  * 실행 상태 7종 (architecture.md 4장 상태 기계, RUN-01). `queued`(실행 대기)는 승인 단계를 통과했지만 프로젝트에 진행 중 ·
  * 중단된 실행이나 먼저 기다리는 실행이 있어 시작을 기다리는 상태다(프로젝트당 동시 실행 1개, ADR-100 B⑥ · ADR-105).
  */
@@ -97,14 +121,22 @@ export const AUTHOR_KIND_LABELS = {
   agent: '에이전트',
 } as const satisfies Record<AuthorKind, string>;
 
-/** 에이전트 역할 (ADR-009). */
-export const AgentRole = z.enum(['rule-writer', 'planner', 'test-writer', 'implementer', 'chat']);
+/** 에이전트 역할 (ADR-009). `mutator`는 변이 주입 역할이다 (RUN-04 · JDG-04, M3-07 #52, ADR-139). */
+export const AgentRole = z.enum([
+  'rule-writer',
+  'planner',
+  'test-writer',
+  'implementer',
+  'mutator',
+  'chat',
+]);
 export type AgentRole = z.infer<typeof AgentRole>;
 export const AGENT_ROLE_LABELS = {
   'rule-writer': '규칙 작성',
   planner: '계획',
   'test-writer': '테스트 작성',
   implementer: '구현',
+  mutator: '변이 주입',
   chat: '채팅',
 } as const satisfies Record<AgentRole, string>;
 

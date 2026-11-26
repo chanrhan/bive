@@ -41,13 +41,14 @@ beforeEach(async () => {
 
 const FULL_ROLE: RoleSettings = { model: 'test-model', maxBudgetUsd: 2, maxTurns: 100 };
 
-/** M1 필수 역할 3개와 실행 전체 한도를 모두 채운 패치 (roadmap M1 흐름 2 · 6의 값). */
+/** 실행 필수 역할(M1의 3개 + 변이 주입, M3-07)과 실행 전체 한도를 모두 채운 패치. */
 const COMPLETE: SettingsPatch = {
   run: { maxBudgetUsd: 5, maxTurns: 200 },
   roles: {
     'rule-writer': { model: 'test-model', maxBudgetUsd: 1, maxTurns: 20 },
     'test-writer': FULL_ROLE,
     implementer: FULL_ROLE,
+    mutator: FULL_ROLE,
   },
 };
 
@@ -262,15 +263,18 @@ describe('settings.validateForRun (NFR-07)', () => {
         'roles.implementer.model',
         'roles.implementer.maxBudgetUsd',
         'roles.implementer.maxTurns',
+        'roles.mutator.model',
+        'roles.mutator.maxBudgetUsd',
+        'roles.mutator.maxTurns',
       ],
     });
   });
 
-  // 역할(rule-writer, test-writer, implementer) 모델이나 실행 전체 한도, 역할별 한도(USD, 턴) 중 하나라도 비면 거부
+  // 역할(rule-writer, test-writer, implementer, 변이 주입) 모델이나 실행 전체 한도, 역할별 한도(USD, 턴) 중 하나라도 비면 거부
   const holes: [string, SettingsPatch, string][] = [
     ['실행 전체 USD', { run: { maxBudgetUsd: null } }, 'run.maxBudgetUsd'],
     ['실행 전체 턴', { run: { maxTurns: null } }, 'run.maxTurns'],
-    ...(['rule-writer', 'test-writer', 'implementer'] as const).flatMap(
+    ...(['rule-writer', 'test-writer', 'implementer', 'mutator'] as const).flatMap(
       (role): [string, SettingsPatch, string][] => [
         [`${role} 모델`, { roles: { [role]: { model: null } } }, `roles.${role}.model`],
         [
@@ -325,6 +329,9 @@ describe('settings.validateForRun (NFR-07)', () => {
         'roles.implementer.model',
         'roles.implementer.maxBudgetUsd',
         'roles.implementer.maxTurns',
+        'roles.mutator.model',
+        'roles.mutator.maxBudgetUsd',
+        'roles.mutator.maxTurns',
       ]);
     }
     expect(() => h.read((store) => requireRunnableSettings(store))).toThrow('예산 · 모델 미설정');

@@ -559,6 +559,8 @@ describe('세션 한도 · 비용 기록 (M1-17, ADR-067)', () => {
       expect(usage?.steps.map((s) => [s.kind, s.costUsd])).toEqual([
         ['test_writing', 0.3],
         ['implementation', null],
+        // 변이 주입 단계도 역할 세션 단계다 (M3-07 #52): 세션이 없으면 null
+        ['mutation', null],
       ]);
       expect(store.runs.usage(newId())).toBeNull();
     });

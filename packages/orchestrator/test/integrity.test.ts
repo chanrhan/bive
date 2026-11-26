@@ -55,6 +55,7 @@ import {
   COMMAND_TOOL_NAMES,
   FILE_TOOL_NAMES,
   NORM_TOOL_NAMES,
+  MUTATION_TOOL_NAMES,
   OBJECTION_TOOL_NAMES,
   roleToolNames,
 } from '../src/tools/definitions.js';
@@ -152,6 +153,8 @@ const EXPECTED_ROLE_TOOLS: Readonly<Record<string, readonly string[]>> = {
     // 이의 제기 (M7-11 #223, ADR-115): 이의 기록만 남기고 세션을 끝낸다. 규범 쓰기 도구가 아니다(아래 시험이 단언)
     'raise_objection',
   ],
+  // 변이 주입 (M3-07 #52, ADR-139): 세션 폴더의 사본을 읽고 변이 1개를 낸다. 쓰기 · 명령 · 규범 도구가 없다
+  mutator: ['read_file', 'list_files', 'search_files', 'propose_mutant'],
   chat: [],
 };
 
@@ -170,6 +173,7 @@ const FIXED_TOOLS: readonly string[] = [
   'supersede_rule',
   'uphold_rule',
   'raise_objection',
+  'propose_mutant',
 ];
 
 /**
@@ -195,6 +199,7 @@ const OTHER_ROLE_TOOL_ARGS: Readonly<Record<string, Record<string, unknown>>> = 
   retire_rule: { ruleId: 'RULE-001', grounds: '무결성 시험: 응답 JSON의 time 필드를 담는다' },
   uphold_rule: { ruleId: 'RULE-001', grounds: '무결성 시험: 유지' },
   raise_objection: { ruleIds: ['RULE-001'], reason: '무결성 시험: 이의' },
+  propose_mutant: { path: 'src/app/api/health/route.ts', search: 'ok: true', replace: 'ok: false' },
   supersede_rule: {
     ruleId: 'RULE-001',
     grounds: '무결성 시험: 응답 JSON의 time 필드를 담는다',
@@ -325,6 +330,7 @@ describe('모든 역할 세션의 도구 목록에 승인 · 잠정 승인 · �
       ...COMMAND_TOOL_NAMES,
       ...NORM_TOOL_NAMES,
       ...OBJECTION_TOOL_NAMES,
+      ...MUTATION_TOOL_NAMES,
     ]).toEqual(FIXED_TOOLS);
     // 원본 역할 목록과 표의 역할이 같다 (역할이 늘면 표를 고쳐야 통과)
     expect([...ROLES].sort()).toEqual(Object.keys(EXPECTED_ROLE_TOOLS).sort());
@@ -1014,11 +1020,17 @@ describe('블록 선언을 쓰는 경로는 사람의 blocks.set 처리기뿐 (M
       'ipc/block-handlers.ts',
       'norms/agent-rule.ts',
       'norms/norm-input.ts',
+      // 변이 주입 단계: 대상 규칙의 대상 블록 include (M3-07 #52, ADR-139, 지금 판을 한 번 읽는다)
+      'steps/mutation.ts',
       'steps/structure-check.ts',
       'steps/test-writing.ts',
     ]);
     const structure = files.find((f) => f.rel === 'steps/structure-check.ts')?.text ?? '';
     expect(structure.match(/\.blockDeclarations\.[A-Za-z]+/g)).toEqual([
+      '.blockDeclarations.current',
+    ]);
+    const mutation = files.find((f) => f.rel === 'steps/mutation.ts')?.text ?? '';
+    expect(mutation.match(/\.blockDeclarations\.[A-Za-z]+/g)).toEqual([
       '.blockDeclarations.current',
     ]);
     for (const { rel, text } of files) {
@@ -1404,6 +1416,8 @@ describe('규칙 폐기 · 대체와 효력 판정의 코드 경로 (M7-09 #221,
       'runs/run-service.ts',
       'steps/check.ts',
       'steps/merge.ts',
+      // 변이 주입 단계: 금지 경로로 쓸 계약 원본 목록 (M3-07 #52, ADR-139, 읽기만)
+      'steps/mutation.ts',
       'verification/summary.ts',
     ]);
   });

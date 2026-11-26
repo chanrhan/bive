@@ -2523,6 +2523,47 @@
   - 실패가 늦게 드러나는 비용: 멈춘 잡이 제한까지 돌면 전보다 최대 10분 늦게 실패로 끝나고 그만큼 러너 시간을 쓴다. 정상 실행의 시간은 바뀌지 않는다.
   - 다시 정하는 조건: `checks`가 다시 25분을 넘으면 단위 테스트를 따로 잡으로 나누거나 무거운 시험을 줄인다. 묶음 하나가 30분을 넘으면 묶음의 파일을 다시 맞추거나 묶음을 늘린다.
 
+## ADR-139 변이 주입 역할 · 변이 판정 기록 · 고위험 우선 (1단계: 세션 · 도구 · 판정 · 저장 · 순서 · 예산 · 설정)
+
+- 상태: 제안 (에이전트) · 2026-11-26
+- 맥락: M3-07(#52). PRD JDG-04(규칙별 주입 결과 기록, 고위험 규칙부터, 변이 주입 단계 · 역할 추가)와 RUN-04(역할 분리: 변이 주입 역할). ADR-033은 변이 '생성'을 변이 주입 역할 세션의 고정 도구 `propose_mutant`(대상 블록 파일 안 단일 패치), '판정'을 vitest 판정 러너로 정했고, ADR-024는 이 역할도 설정에 모델 · 예산 칸을 둔다고 했다. ADR-100 명세 변경 목록의 JDG-04 행은 "변이 생존 시 테스트 보강(유형 C + 변이 재주입)을 사람 없이 자동 시작"으로 바꿨다. 이슈 댓글은 위험도 `null` 규칙의 자리와 인수 테스트가 없는 내장 구조 규칙의 처리를 이 ADR에 적게 했다. 지시서는 이 이슈를 ①(세션 · 도구 · 판정 · 저장) · ②(순서 · 예산) · ④(설정) → ③(단계 켜기 · 자동 보강 · 재주입 · 시나리오 · e2e) 순서로 하고, ①②④ 뒤 바뀐 파일이 25개를 넘으면 ③ 없이 멈추게 했다. ①②④에서 30개를 넘어 이 ADR은 ①②④만 정한다.
+- 결정:
+  - ① 역할: 새 역할 `mutator`(표시명 "변이 주입", shared `AgentRole` · `AGENT_ROLE_LABELS`, 앱 표 함께). 변이 주입 단계의 역할(`STEP_ROLES.mutation`)이다. 세션 틀은 기존 역할과 같다(SDK 내장 도구 없음, BIVE MCP 고정 도구만, 경로 가드, 세션 가드, 예산 = min(역할 잔여, 실행 잔여, 하루 잔여), 세션 · 도구 호출 기록).
+    | | 변이 주입 역할 |
+    |---|---|
+    | 세션 루트 | `$BIVE_HOME/work/<프로젝트>/sessions/<ID>` (단계가 끝나면 지움) |
+    | 읽는 것 | `rules/<표시 ID>.md`(대상 규칙 제목 · 진술), 대상 블록 `include`에 드는 판정 커밋의 추적 파일 사본(git 객체에서, 금지 경로 제외, 200개 · 4 MiB 상한) |
+    | 작업 지시 | 실행 · 규칙 표시 ID, 제목 · 진술 · 블록 패턴(표시 값), 사본 수 |
+    | 보지 못하는 것 | 인수 테스트(사본 없음 + 경로 가드가 `bive-acceptance/` 읽기를 이 역할에만 거부), 판정 기록 · 케이스 이름, 효력 있는 다른 규범(규범 입력 ADR-108을 주지 않는다: 그 자료에 케이스 이름이 있다), 실행 워크트리 |
+    | 도구 | `read_file` · `list_files` · `search_files` · `propose_mutant` (쓰기 · 명령 도구 없음) |
+    | 쓰는 것 | 없음 (`propose_mutant`의 변이는 콜백이 메모리에 받아 둔다) |
+    ADR-024의 "변이 주입 도구는 `propose_mutant`"에 읽기 도구 3종을 더했다: 소스를 작업 지시에 통째로 싣는 것보다 작고, 테스트 작성 역할의 세션 폴더 방식을 그대로 쓴다.
+  - ② `propose_mutant {path, search, replace}`: 파일 하나에서 정확히 한 번 나오는 `search`를 `replace`로 바꾼다(단일 패치 = 파일 하나 · 한 군데). 형식(스키마): `path` 1024자, `search` 1 ~ 2000자, `replace` 0 ~ 2000자, 같은 글 거부. 검증(판정 커밋의 git 객체, `mutation/mutant.ts`): 경로 형식(`/` 경로, 빈 구간 · `.` · `..` · 역슬래시 · 절대 경로 거부) → 금지 경로(대소문자 무시: 숨김 구간 `.git` · `.bive.json` · `.npmrc` · `.env` 등, `bive-acceptance/`, `node_modules`, `prisma/`, 패키지 · 잠금 · 작업 공간 파일, `*.config.*` · `tsconfig*.json`, 등록된 계약 원본) → 대상 규칙의 대상 블록 `include`(`matchesBlockPattern`) → 커밋에 있는 일반 파일 · 1 MiB · UTF-8 → 한 번만 나옴. 거부는 도구 결과(`path_denied` · `invalid_args` · `not_found` · `not_a_file` · `too_large`)로 돌려주고 판정하지 않는다(새 거부 사유 값 없음). 받아들이면 실행기를 닫는다(닫힘 이유 `mutant_proposed`, 세션마다 변이 1개, 뒤 호출은 `session_closed`). 도구 호출 기록에는 경로만 남긴다(변이 글은 변이 기록에만).
+  - ③ 판정: 실행의 마지막 완료 단계 커밋(`headCommit`, 검사 단계가 판정한 커밋)을 `judgeCommit`의 깨끗한 detached 체크아웃으로 만들고 인수 테스트 해시를 기준(유형 A는 Red 확인)과 대조한 뒤, 설치 전에 그 체크아웃의 파일만 바꾸고(새 선택 인자 `applyMutant`, 커밋하지 않음) 대상 규칙의 인수 테스트만 판정 러너로 돌린다. 체크아웃은 판정 뒤 지운다. 실행 워크트리 · 실행 브랜치 · 기준 브랜치에는 변이가 남지 않는다(시험이 브랜치 · 전체 이력 · 작업 트리를 단언).
+  - ④ 판정 결과(shared `MutationOutcome`, 상태는 `mutationStatusOf`에서만):
+    | 경우 | 결과 | 상태 |
+    |---|---|---|
+    | 대상 케이스 하나라도 `failed` | `killed` | 변이 검증됨 |
+    | 대상 케이스 1개 이상 · 전부 `passed` | `survived` | 변이 생존 |
+    | 세션이 변이를 내지 않음(세션 오류 포함) | `no_mutant` | 변이 미검증 (판정 · 설치 없음) |
+    | 케이스 0개 · 통과/실패가 아닌 케이스뿐 · 체크아웃에 폴더 없음 | `no_cases` | 변이 미검증 |
+    | 체크아웃 · 변이 적용 실패 / 설치 실패 / 수집 오류 / 러너 오류(빌드 실패 · 시간 초과 포함) | `checkout_error` · `install_error` · `collect_error` · `runner_error` | 변이 미검증 |
+    | 인수 테스트 변조 · 판정 입력 변조 | 기록 없음, 실행 `failed`(`guard_violation`) | — |
+    | 규범 저장소 불일치 | 기록 없음, 실행 `failed`(`judge_runner_error`, `norm_integrity`) | — |
+    판정할 수 없는 경우를 검출로 세지 않는다(닫힌 쪽). 판정 불가는 실행을 실패로 만들지 않는다(그 규칙만 미검증).
+  - ⑤ 저장: 마이그레이션 `project/0026_mutation_results`(새 표만, 추가 전용 트리거 3개, 상태 · 결과 짝과 "변이 없음 = `no_mutant`"를 표 CHECK로). shared `MutationResult {id, ruleId, runId, stepId, sessionId, commit, status, outcome, mutant, recordedAt}` · `MutantPatch`, store `MutationResultRepository`(`record` · `latestByRule` · `statusOf` · `listByRun`). 규칙의 변이 상태 = 가장 최근 기록(기록 시각 → ID)의 상태, 기록이 없으면 '변이 미검증'. 변이 글은 원문 저장이고 화면 · 세션 입력에 실을 때 표시 값으로 바꾼다(아직 싣는 곳 없음).
+  - ⑥ 대상과 순서: 대상은 그 실행의 대상 규칙만이다(RUN-02 단계는 실행의 것, COST-01 예산은 실행의 것, 수용 기준 "변이 대상 순서"). 빠지는 규칙(사유를 단계 결과 `excluded`에): 내장 규칙(구조 · 계약 검사: 인수 테스트로 판정하지 않는다, `builtin`), 블록 선언 없음, 대상 블록이 없거나 지금 선언에 없는 이름뿐(`no_target_blocks`: 변이를 낼 파일 범위가 없다), 인수 테스트 없음. 빠진 규칙은 기록 없이 '변이 미검증'으로 남는다(화면에 '변이 생존'으로 보이지 않는다). 순서는 위험도 high → medium → low → `null`(값이 있는 규칙 먼저, 가장 보수적), 같으면 표시 ID 순(길이 → 글자: `RULE-999` 다음 `RULE-1000`). 규칙마다 세션 1개 · 판정 1회를 차례로 하고 결과를 바로 남긴다.
+  - ⑦ 예산 소진: 다음 규칙의 세션을 열 예산이 없으면 엔진의 기존 규칙(COST-01 · ADR-057 · ADR-061 · ADR-104)대로 실행이 `budget_exceeded`(`budget_exhausted` · 한도 subtype · 집계 초과 · 하루 한도)로 끝난다. 변이 주입은 병합 앞이라 병합하지 않는다. 이미 남긴 규칙의 기록은 그대로, 남은 규칙은 기록 없이 '변이 미검증'이다. 변이 단계만 부분 완료로 병합까지 가는 새 길은 만들지 않았다(예산 초과는 실행 중단이라는 기존 규칙과 같게).
+  - ⑧ 유형별: 유형 B는 변이 주입 단계를 생략한다(`RUN_TYPE_SKIPPED_STEPS.B`에 더함, ADR-020 "변이 주입 단계는 A · C(보강)만"). 그래서 B · D의 예산 · 모델 스냅샷에는 변이 주입 역할이 없고, A · C에는 있다(`runTypeRoles`). 유형 B의 변이 주입 단계 결과는 `{reason: 'not_in_scope'}`에서 `{reason: 'run_type', runType: 'B'}`로 바뀐다(상태는 그대로 생략).
+  - ⑨ 설정: `RUN_REQUIRED_ROLES`에 `mutator`를 더했다. 설정 화면(SCR-21) 역할별 표에 implementer 다음 "변이 주입" 행(모델 · 한도 USD · 턴, 같은 칸 · 저장 · 검증). 비면 `settings.validateForRun`이 `SETTINGS_INCOMPLETE`이고 `run.create` · 자동 시작이 막힌다(모든 유형: 화면의 "설정 완료"와 실행 생성 가능 여부가 같다는 ADR-061을 지킨다. 실행 전 필수 역할은 유형과 무관한 고정 목록이라는 선례 = rule-writer). 기본값은 두지 않는다(다른 역할 선례, NFR-07 "예산 한도 없는 실행 금지"). 이행: 옛 설정은 읽을 때 기본값(전부 `null`)과 합쳐지므로(`SettingsRepository`) 변이 주입 칸만 빈 채로 읽혀, 사람이 채우기 전까지 실행이 막힌다(마이그레이션 없음).
+  - ⑩ 무결성 메모(한계에 적음): 변이 주입 역할이 빌드를 깨는 변이로 '검증됨'을 만들 수는 없다(빌드 · 기동 실패는 러너 오류 = 미검증). 서버를 요청 중에 죽이거나 모든 응답을 깨는 변이(예: 처리 함수 첫 줄에서 예외)는 케이스 실패로 나와 '검증됨'으로 센다: 판정 결과의 케이스 실패와 "테스트가 그 동작을 잡음"을 가를 정보가 판정 러너 결과에 없다.
+- 결과:
+  - 코드: shared `enums.ts`(`mutator`, `MutationOutcome`, `mutationStatusOf`), `domain.ts`(`MutationResult` · `MutantPatch` · `MUTANT_LIMITS`, `STEP_ROLES.mutation`, `RUN_REQUIRED_ROLES`, `RUN_TYPE_SKIPPED_STEPS.B`). store 0026 · `mutation-result-repository.ts` · `ProjectStore.mutations`. 오케스트레이터 `tools/definitions.ts`(`propose_mutant`, 역할 도구), `tools/executor.ts`(`proposeMutant` 훅 · `mutant_proposed`), `tools/path-guard.ts`(변이 주입 역할의 인수 테스트 읽기 거부), `steps/judging.ts`(`applyMutant`), `mutation/mutant.ts` · `mutation/prompts.ts`(새), `steps/mutation.ts`(새: `createMutationExecutor` · `compareMutationOrder` · `selectMutationTargets`). 앱 설정 화면 역할 행 · 역할 표시명.
+  - 시험: `orchestrator/test/mutation.test.ts`(검증됨 · 생존 저장, 브랜치에 남지 않음, 세션 역할 · 도구 · 폴더 · 예산, 도구 인자 거부 각각, 판정 불가 각각, 변이 없음, 순서, 대상 제외, 예산 소진, 설정 검사), `store/test/mutation-results.test.ts`, `app/e2e/scr-21-mutation-role.spec.ts`.
+  - 아직 하지 않은 것(③, 다음 작업): 변이 주입 실행기는 기본 실행기 목록에 넣지 않았다. 제품의 유형 A 변이 주입 단계는 아직 `skipped`(`not_in_scope`)다. 변이 생존의 유형 C 자동 보강 실행, 보강 세션이 받는 변이 자료, 재주입, 무한 고리 방지, `mutant-survives` 시나리오 · 파이프라인 e2e, 규칙 카드 예외 '변이 생존'(SCR-03)은 이 ADR의 범위 밖이다. ADR-136 한계 (b)("유형 C는 통과하는 테스트면 병합된다, 변이 재주입 전까지")는 아직 닫지 않았다.
+  - 한계: ⑩. 세션 폴더 사본이 상한(200개 · 4 MiB)을 넘는 블록은 일부 파일만 보인다(검증은 커밋 전체로 하므로 보이지 않는 파일도 변이 대상이 될 수 있다). 규칙의 대상 블록 이름이 선언에서 바뀌면 그 규칙은 변이 대상에서 빠진다(#286 사람 결정 대기). 위험도 `null`인 옛 규칙은 늘 맨 뒤라 예산이 빠듯하면 계속 미검증으로 남을 수 있다.
+  - 다시 정하는 조건: ③을 구현할 때 ⑦(예산 소진 뒤 실행의 끝)과 ⑧(유형 C 보강만 변이 주입)을 다시 본다. 판정 러너가 서버 종료 · 요청 실패를 케이스 실패와 가를 수 있게 되면 ⑩을 닫는다.
+
 ## ADR-141 M3-07 쪼개기와 변이 생존 자동 보강의 설계 결정: 시작 근거 · 보강 표시 · 변이 자료의 전달 · 재주입 · 고리 방지
 
 - 상태: 제안 (에이전트) · 2026-11-26

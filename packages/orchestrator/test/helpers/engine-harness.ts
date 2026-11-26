@@ -77,6 +77,8 @@ export const COMPLETE_SETTINGS: SettingsPatch = {
     'rule-writer': { model: 'test-model', maxBudgetUsd: 1, maxTurns: 20 },
     'test-writer': { model: 'test-model', maxBudgetUsd: 2, maxTurns: 100 },
     implementer: { model: 'test-model', maxBudgetUsd: 2, maxTurns: 100 },
+    // 변이 주입 역할도 실행 전 필수다 (M3-07 #52, ADR-139)
+    mutator: { model: 'test-model', maxBudgetUsd: 1, maxTurns: 50 },
   },
 };
 
