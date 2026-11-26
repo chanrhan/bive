@@ -28,6 +28,16 @@ export const ROLE_ROW_LABELS = {
 } as const satisfies Record<SettingsRoleRow, string>;
 
 /**
+ * 역할 행 이름의 모양: `id`는 역할 식별자 그대로(고정폭 글꼴), `text`는 한국어 표시명(본문 글꼴, M3-54 #311 · ADR-143 ⑬).
+ */
+export const ROLE_ROW_LABEL_KINDS = {
+  'rule-writer': 'id',
+  'test-writer': 'id',
+  implementer: 'id',
+  mutator: 'text',
+} as const satisfies Record<SettingsRoleRow, 'id' | 'text'>;
+
+/**
  * 입력 칸 하나의 키: `run.<필드>` 또는 `roles.<역할>.<필드>` (`MissingSetting`과 같은 경로)와 프로젝트 하루 한도
  * `dailyBudgetUsd`(필수 항목이 아니라 `MissingSetting`에 없다).
  */

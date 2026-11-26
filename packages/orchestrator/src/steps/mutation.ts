@@ -9,7 +9,7 @@
 //      케이스 없음 · 체크아웃 · 설치 · 수집 · 러너 오류)은 판정 불가(미검증, 검출로 세지 않는다)
 // 변이 생존 · 판정 불가는 실행을 실패로 만들지 않는다(단계 통과). 세션을 열 예산이 없으면 엔진이 실행을 예산 초과로 끝내고(병합 전), 남은
 // 규칙은 기록 없이 '변이 미검증'으로 남는다. 인수 테스트 변조 · 규범 저장소 불일치는 판정을 믿을 수 없어 실행을 끝낸다(검사 단계와 같다).
-// 기본 실행기 목록에는 아직 넣지 않았다(M3-07 ③: 단계를 켜기 · 자동 보강 · 재주입은 뒤 작업, ADR-139).
+// 기본 실행기 목록의 변이 주입 단계다(M3-54 #311, ADR-143). 유형 A만 새 변이를 내고 그 밖의 유형은 생략으로 기록한다.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -17,6 +17,7 @@ import {
   type Block,
   createUlidGenerator,
   type MutationOutcome,
+  type MutationReinforcement,
   type MutationResult,
   mutationStatusOf,
   type Risk,
@@ -46,9 +47,11 @@ import {
   type JudgingOptions,
   lastPassed,
   MAX_LISTED,
+  type NormGuard,
   normHalt,
 } from './judging.js';
 import { acceptanceBaselineOf, headStepKindOf, missingBaselineMessage } from './run-type.js';
+import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
 
 const newId = createUlidGenerator();
 
@@ -182,11 +185,221 @@ const writeMutant = (checkoutDir: string, mutant: CheckedMutant): void => {
   fs.writeFileSync(target, mutant.mutated);
 };
 
+/**
+ * 변이 하나를 판정 커밋의 격리 체크아웃에 적용해 그 규칙의 인수 테스트를 판정한다 (첫 주입 · 재주입 공통). 판정을 믿을 수 없으면
+ * (인수 테스트 · 판정 입력 변조, 규범 저장소 불일치) 실행을 끝내는 결과를 돌려준다.
+ */
+const judgeMutant = async (
+  context: StepContext,
+  input: {
+    readonly commit: string;
+    readonly rule: Rule;
+    readonly mutant: CheckedMutant;
+    readonly hashes: Readonly<Record<string, string>>;
+    readonly norms: NormGuard;
+    readonly options: MutationStepOptions;
+  },
+): Promise<
+  { kind: 'outcome'; outcome: MutationOutcome } | { kind: 'halt'; outcome: StepOutcome }
+> => {
+  const { commit, rule, mutant } = input;
+  const judged = await judgeCommit(
+    context,
+    {
+      commit,
+      selectRules: (dirs) => (dirs.includes(rule.displayId) ? [rule.displayId] : []),
+      expectedAcceptanceHashes: input.hashes,
+      norms: input.norms,
+      signal: context.signal,
+      applyMutant: (dir) => writeMutant(dir, mutant),
+    },
+    input.options,
+  );
+  const of = (outcome: MutationOutcome) => ({ kind: 'outcome', outcome }) as const;
+  switch (judged.kind) {
+    case 'acceptance_changed':
+      return {
+        kind: 'halt',
+        outcome: halt('guard_violation', {
+          commit,
+          stage: judged.stage,
+          ...(judged.moment === undefined ? {} : { moment: judged.moment }),
+          message: '변이 판정 중 인수 테스트 · 테스트 실행기 · 판정 설정이 바뀌었습니다',
+          changed: judged.changed.slice(0, MAX_LISTED),
+        }),
+      };
+    case 'norm_mismatch':
+      return { kind: 'halt', outcome: normHalt(judged.moment, judged.mismatches, { commit }) };
+    case 'checkout_error':
+      return of('checkout_error');
+    case 'install_error':
+      return of('install_error');
+    case 'no_rules':
+      return of('no_cases');
+    case 'structure_halt':
+    case 'contract_halt':
+      return of('runner_error');
+    case 'judged': {
+      const { result } = judged;
+      if (result.status === 'collect_error') return of('collect_error');
+      if (result.status === 'runner_error') return of('runner_error');
+      const cases = casesOf(result, rule.displayId);
+      if (cases.some((item) => item.status === 'failed')) return of('killed');
+      if (cases.length > 0 && cases.every((item) => item.status === 'passed'))
+        return of('survived');
+      return of('no_cases');
+    }
+  }
+};
+
+/**
+ * 보강 실행(유형 C + 변이 보강 연결)의 변이 주입 단계 = 재주입 (ADR-141 ⑥ · ADR-143). 새 세션을 열지 않고 원인 기록의 변이(살아남았던
+ * 같은 변이)를 판정 커밋(테스트 작성 커밋)에서 다시 검증해 격리 체크아웃에 적용하고 대상 규칙의 인수 테스트를 판정한다.
+ * - 검출: 그 규칙에 '변이 검증됨' 기록 · 단계 통과(→ 병합)
+ * - 생존: '변이 생존' 기록 · 미충족(→ 테스트 작성으로 회귀, 회귀 수 `regressionCount`, 상한 뒤 실패)
+ * - 판정 불가(변이를 더는 적용할 수 없음 · 체크아웃 · 설치 · 수집 · 러너 오류 · 케이스 없음): 기록 없이(규칙은 '변이 생존' 그대로) 실행을
+ *   끝낸다(닫힌 쪽: 검증됨으로 세지 않고 회귀로 헛돌지 않는다)
+ */
+const reinject = async (
+  context: StepContext,
+  link: MutationReinforcement,
+  options: MutationStepOptions,
+  git: ReturnType<typeof createGitRunner>,
+): Promise<StepOutcome> => {
+  const commit = context.run.headCommit;
+  if (
+    commit === null ||
+    lastPassed(context.steps, headStepKindOf(context.run.type))?.commit !== commit
+  ) {
+    return halt('state_inconsistent', {
+      message: '판정 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다',
+      commit,
+    });
+  }
+  const baseline = acceptanceBaselineOf(context.run, context.steps);
+  if (baseline === null || baseline.kind !== 'hashes') {
+    return halt('state_inconsistent', { message: missingBaselineMessage(context.run.type) });
+  }
+  const { cause, rule, declaration, contractFiles } = context.read((store) => {
+    const found = store.mutations.get(link.mutationResultId);
+    return {
+      cause: found,
+      rule: found === null ? null : store.rules.get(found.ruleId),
+      declaration: store.blockDeclarations.current()?.declaration.blocks ?? null,
+      contractFiles: effectiveContracts(store).map((contract) => contract.sourceFile),
+    };
+  });
+  if (
+    cause === null ||
+    cause.mutant === null ||
+    rule === null ||
+    !context.run.targetRuleIds.includes(rule.id)
+  ) {
+    return halt('state_inconsistent', {
+      message: '보강 실행의 원인 변이 기록을 읽지 못했습니다',
+      mutationResultId: link.mutationResultId,
+    });
+  }
+  const base = { commit, ruleId: rule.displayId, reinjected: link.mutationResultId };
+  const blocks = declaration === null ? [] : targetBlocksOf(rule, declaration);
+  const files = await listCommitFiles(git, context.git.repoPath, commit);
+  const checked = await checkMutant(cause.mutant, {
+    git,
+    repoPath: context.git.repoPath,
+    files: new Map(files.map((file) => [file.path, file])),
+    blocks,
+    contractFiles,
+  });
+  if (!checked.ok) {
+    return halt(JUDGE_RUNNER_ERROR_REASON, {
+      ...base,
+      stage: 'reinject',
+      message: '살아남았던 변이를 판정 커밋에 다시 적용할 수 없습니다',
+      detail: checked.result.reason ?? checked.result.status,
+    });
+  }
+  const judged = await judgeMutant(context, {
+    commit,
+    rule,
+    mutant: checked.mutant,
+    hashes: baseline.hashes,
+    norms: createNormGuard(context),
+    options,
+  });
+  if (judged.kind === 'halt') return judged.outcome;
+  const { outcome } = judged;
+  if (outcome !== 'killed' && outcome !== 'survived') {
+    return halt(JUDGE_RUNNER_ERROR_REASON, {
+      ...base,
+      stage: 'reinject',
+      message: '재주입 판정을 끝내지 못했습니다 (검증됨으로 세지 않는다)',
+      outcome,
+    });
+  }
+  const record: MutationResult = {
+    id: newId(),
+    ruleId: rule.id,
+    runId: context.run.id,
+    stepId: context.step.id,
+    sessionId: null,
+    commit,
+    status: mutationStatusOf(outcome),
+    outcome,
+    // 실제로 다시 적용한 변이 (원인 기록의 변이와 같아야 한다)
+    mutant: checked.mutant.patch,
+    recordedAt: new Date().toISOString(),
+  };
+  context.read((store) => store.mutations.record(record));
+  const detail = { ...base, status: record.status, outcome, mutationResultId: record.id };
+  return outcome === 'killed'
+    ? { status: 'passed', exitDetail: detail }
+    : { status: 'unmet', exitDetail: { ...detail, reason: MUTANT_SURVIVED_REASON } };
+};
+
+/** 재주입에서도 살아남은 미충족의 사유 (`exitDetail.reason`). */
+export const MUTANT_SURVIVED_REASON = 'mutant_survived';
+
+/** 변이 대상이 하나도 없어 생략한 변이 주입 단계의 사유 (`exitDetail.reason`). */
+export const NO_MUTATION_TARGETS = 'no_mutation_targets';
+
 /** 변이 주입 단계 실행기를 만든다. */
 export const createMutationExecutor =
   (options: MutationStepOptions = {}): StepExecutor =>
   async (context): Promise<StepOutcome> => {
     const git = options.git ?? createGitRunner();
+    // 유형 A만 새 변이를 낸다. 유형 C는 보강 실행(변이 보강 연결이 있음)일 때만 재주입한다 (ADR-020: 변이 주입은 A · C(보강)만,
+    // 유형 B는 계획에서 생략, D는 계획에 없음)
+    if (context.run.type === 'C') {
+      const link = context.read((store) => store.mutations.reinforcementOfRun(context.run.id));
+      if (link !== null) return reinject(context, link, options, git);
+    }
+    if (context.run.type !== 'A') {
+      return { status: 'skipped', exitDetail: { reason: 'run_type', runType: context.run.type } };
+    }
+    const { rules, declaration, contractFiles } = context.read((store) => ({
+      rules: context.run.targetRuleIds
+        .map((id) => store.rules.get(id))
+        .filter((rule): rule is Rule => rule !== null && rule.deletedAt === null),
+      declaration: store.blockDeclarations.current()?.declaration.blocks ?? null,
+      contractFiles: effectiveContracts(store).map((contract) => contract.sourceFile),
+    }));
+    // 블록 선언 · 대상 블록으로 대상이 하나도 없으면 커밋 · 해시를 보기 전에 세션 · 판정 없이 끝난다: 이 실행에서 한 일이 없으므로
+    // 생략으로 기록한다 (사유 `no_mutation_targets`, ADR-143)
+    const early = selectMutationTargets(
+      rules,
+      declaration,
+      rules.map((rule) => rule.displayId),
+    );
+    if (early.targets.length === 0) {
+      return {
+        status: 'skipped',
+        exitDetail: {
+          reason: NO_MUTATION_TARGETS,
+          commit: context.run.headCommit,
+          excluded: early.excluded.map(({ rule, reason }) => ({ ruleId: rule.displayId, reason })),
+        },
+      };
+    }
     // 판정할 커밋 = 마지막 완료 단계 커밋 (검사 단계가 판정한 커밋)
     const commit = context.run.headCommit;
     const headKind = headStepKindOf(context.run.type);
@@ -200,13 +413,6 @@ export const createMutationExecutor =
     if (baseline === null || baseline.kind !== 'hashes') {
       return halt('state_inconsistent', { message: missingBaselineMessage(context.run.type) });
     }
-    const { rules, declaration, contractFiles } = context.read((store) => ({
-      rules: context.run.targetRuleIds
-        .map((id) => store.rules.get(id))
-        .filter((rule): rule is Rule => rule !== null && rule.deletedAt === null),
-      declaration: store.blockDeclarations.current()?.declaration.blocks ?? null,
-      contractFiles: effectiveContracts(store).map((contract) => contract.sourceFile),
-    }));
     const acceptanceDirs = [
       ...new Set(
         Object.keys(baseline.hashes)
@@ -216,7 +422,6 @@ export const createMutationExecutor =
     ];
     const { targets, excluded } = selectMutationTargets(rules, declaration, acceptanceDirs);
     const excludedDetail = excluded.map(({ rule, reason }) => ({ ruleId: rule.displayId, reason }));
-    // 변이 대상이 없으면 세션 · 판정(설치 · 빌드) 없이 끝난다
     if (targets.length === 0) {
       return { status: 'passed', exitDetail: { commit, results: [], excluded: excludedDetail } };
     }
@@ -237,6 +442,7 @@ export const createMutationExecutor =
       // 세션 콜백이 채운다 (닫힘 안의 대입은 흐름 분석이 보지 못해 칸으로 둔다)
       const proposed: { mutant: CheckedMutant | null } = { mutant: null };
       let sessionId: string;
+      let sessionEnd: string;
       try {
         const inputs = await prepareSession(
           context,
@@ -276,64 +482,40 @@ export const createMutationExecutor =
           },
         });
         sessionId = session.sessionId;
+        sessionEnd = session.endReason;
       } finally {
         fs.rmSync(sessionDir, { recursive: true, force: true });
       }
       const { mutant } = proposed;
+      // 세션이 정상 종료하지 않았고 변이도 받지 못했으면 '변이 없음'으로 삼키지 않는다: 다른 역할의 세션 오류처럼 단계 미충족
+      // (변이 주입 단계에는 회귀 규칙이 없어 실행이 `step_unmet`으로 끝난다, ADR-143). 변이를 받았으면 세션 끝이 어떻든 판정한다
+      if (mutant === null && sessionEnd !== 'success') {
+        return {
+          status: 'unmet',
+          exitDetail: {
+            reason: 'session_error',
+            ruleId: rule.displayId,
+            sessionId,
+            endReason: sessionEnd,
+            commit,
+            results,
+          },
+        };
+      }
       let outcome: MutationOutcome;
       if (mutant === null) {
         outcome = 'no_mutant';
       } else {
-        const judged = await judgeCommit(
-          context,
-          {
-            commit,
-            selectRules: (dirs) => (dirs.includes(rule.displayId) ? [rule.displayId] : []),
-            expectedAcceptanceHashes: baseline.hashes,
-            norms,
-            signal: context.signal,
-            applyMutant: (dir) => writeMutant(dir, mutant),
-          },
+        const judged = await judgeMutant(context, {
+          commit,
+          rule,
+          mutant,
+          hashes: baseline.hashes,
+          norms,
           options,
-        );
-        switch (judged.kind) {
-          case 'acceptance_changed':
-            return halt('guard_violation', {
-              commit,
-              stage: judged.stage,
-              ...(judged.moment === undefined ? {} : { moment: judged.moment }),
-              message: '변이 판정 중 인수 테스트 · 테스트 실행기 · 판정 설정이 바뀌었습니다',
-              changed: judged.changed.slice(0, MAX_LISTED),
-            });
-          case 'norm_mismatch':
-            return normHalt(judged.moment, judged.mismatches, { commit });
-          case 'checkout_error':
-            outcome = 'checkout_error';
-            break;
-          case 'install_error':
-            outcome = 'install_error';
-            break;
-          case 'no_rules':
-            outcome = 'no_cases';
-            break;
-          case 'structure_halt':
-          case 'contract_halt':
-            outcome = 'runner_error';
-            break;
-          case 'judged': {
-            const { result } = judged;
-            if (result.status === 'collect_error') outcome = 'collect_error';
-            else if (result.status === 'runner_error') outcome = 'runner_error';
-            else {
-              const cases = casesOf(result, rule.displayId);
-              if (cases.some((item) => item.status === 'failed')) outcome = 'killed';
-              else if (cases.length > 0 && cases.every((item) => item.status === 'passed'))
-                outcome = 'survived';
-              else outcome = 'no_cases';
-            }
-            break;
-          }
-        }
+        });
+        if (judged.kind === 'halt') return judged.outcome;
+        outcome = judged.outcome;
       }
       const record: MutationResult = {
         id: newId(),

@@ -777,6 +777,64 @@ describe('규범', () => {
     ).toBe(false);
   });
 
+  it('자동 시작의 셋째 원인: 변이 기록 ID(mutationResultIds)도 셋 가운데 하나만, 대상 규칙과 같은 수, 자동 시작에만 (M3-54 #311 · ADR-143)', () => {
+    const entry = {
+      seq: 2,
+      at: AT,
+      kind: 'auto_start',
+      actor: { kind: 'orchestrator' },
+      targetRef: { entity: 'Run', id: ID.run },
+      sessionId: null,
+      runId: ID.run,
+      reason: '자동 시작',
+      detail: { mutationResultIds: [ID.judgment], ruleIds: [ID.rule] },
+      prevHash: APPROVAL_LOG_GENESIS_HASH,
+      hash: 'f'.repeat(64),
+    };
+    expect(NormChangeEntry.parse(entry)).toEqual(entry);
+    for (const detail of [
+      { mutationResultIds: [ID.judgment], causeSeqs: [1], ruleIds: [ID.rule] },
+      { mutationResultIds: [ID.judgment], ruleEditSeqs: [1], ruleIds: [ID.rule] },
+      { mutationResultIds: [ID.judgment, ID.step], ruleIds: [ID.rule] },
+      { mutationResultIds: [], ruleIds: [ID.rule] },
+      { mutationResultIds: ['x'], ruleIds: [ID.rule] },
+    ]) {
+      expect(NormChangeEntry.safeParse({ ...entry, detail }).success, JSON.stringify(detail)).toBe(
+        false,
+      );
+    }
+    expect(
+      NormChangeEntry.safeParse({
+        ...entry,
+        kind: 'created',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        sessionId: ID.run,
+        targetRef: { entity: 'Rule', id: ID.rule },
+        runId: null,
+        detail: { after: {}, mutationResultIds: [ID.judgment] },
+      }).success,
+    ).toBe(false);
+    // 시작 주체: 변이 보강 연결의 순번 1개
+    expect(
+      Run.shape.startedBy.safeParse({
+        kind: 'orchestrator',
+        causeSeqs: [3],
+        causeLog: 'mutation_reinforcements',
+      }).success,
+    ).toBe(true);
+    expect(
+      Run.shape.startedBy.safeParse({
+        kind: 'orchestrator',
+        causeSeqs: [3, 4],
+        causeLog: 'mutation_reinforcements',
+      }).success,
+    ).toBe(false);
+    expect(
+      Run.shape.startedBy.safeParse({ kind: 'orchestrator', causeSeqs: [3], causeLog: 'other' })
+        .success,
+    ).toBe(false);
+  });
+
   it('확인 상태: 두 값, 확인됨은 사람 · 시각 · 근거가 필수 (ADR-100 D2 · C1 · A1)', () => {
     expect(Confirmation.parse({ state: 'unconfirmed' })).toEqual({ state: 'unconfirmed' });
     const confirmed = {

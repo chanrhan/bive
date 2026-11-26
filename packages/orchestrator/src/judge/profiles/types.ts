@@ -34,6 +34,8 @@ export interface StartedServer {
   databasePath: string;
   /** 서버 종료 · 임시 데이터베이스 삭제. 여러 번 불러도 한 번만 수행한다 */
   stop: () => Promise<void>;
+  /** 서버 프로세스가 이미 끝났는지 (`stop` 전에 스스로 끝났으면 참, M3-54 · ADR-143) */
+  exited: () => boolean;
 }
 
 /** 서버 기동 실패. 러너가 `runner_error`로 바꾼다. */
