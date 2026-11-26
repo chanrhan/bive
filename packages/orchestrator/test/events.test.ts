@@ -31,6 +31,7 @@ import { selectAgent } from '../src/agent/select.js';
 import type { StepExecutors } from '../src/engine/types.js';
 import { ProposalEventPublisher } from '../src/events/proposal-events.js';
 import { RunEventPublisher } from '../src/events/run-events.js';
+import { createBlockHandlers } from '../src/ipc/block-handlers.js';
 import {
   onNormChangeAppended,
   withRegisteredProjectStore,
@@ -907,6 +908,78 @@ describe('블록 선언이 새 판으로 바뀔 때마다 event.blocks.changed (
       normBefore,
     );
   }, 60_000);
+
+  describe('저장(커밋) 뒤에만 알린다 (ADR-135)', () => {
+    const declaration = {
+      blocks: [
+        {
+          name: 'lib',
+          kind: 'shared',
+          include: ['src/lib/**'],
+          public: [],
+          dependsOn: [],
+          risk: 'low',
+        },
+      ],
+    };
+    /** 처리기를 바로 부른다 (파이프 · 오케스트레이터 없이, 알림 함수는 시험이 준다). */
+    const setVia = (
+      deps: Parameters<typeof createBlockHandlers>[0],
+      projectId: string,
+    ): unknown => {
+      const handler = createBlockHandlers(deps)['blocks.set'];
+      if (handler === undefined) throw new Error('blocks.set 처리기 없음');
+      return (handler as (p: unknown, c: unknown) => unknown)(
+        { projectId, author: human, declaration },
+        { connectionId: 1 },
+      );
+    };
+    const currentVersion = (biveHome: string, projectId: string): number | null =>
+      withRegisteredProjectStore(
+        biveHome,
+        projectId,
+        (store) => store.blockDeclarations.current()?.version ?? null,
+      );
+
+    it('알림을 받은 순간 다른 연결로 읽어도 그 판이 이미 보인다', () => {
+      const biveHome = makeBiveHome();
+      const seeded = seedProject(biveHome, copyFixture(temps));
+      // 알림 함수 안에서 저장소를 따로 열어 읽는다: 커밋 전이면 그 판이 아직 보이지 않는다
+      const seen: [number, number | null][] = [];
+      setVia(
+        {
+          biveHome,
+          now: Date.now,
+          onChanged: (projectId, version) =>
+            seen.push([version, currentVersion(biveHome, projectId)]),
+        },
+        seeded.project.id,
+      );
+      expect(seen).toEqual([[1, 1]]);
+    });
+
+    it('같은 트랜잭션이 선언 저장 뒤 실패해 되돌려지면 알림이 하나도 없고 판도 남지 않는다', () => {
+      const biveHome = makeBiveHome();
+      const seeded = seedProject(biveHome, copyFixture(temps));
+      const calls: [string, number][] = [];
+      // 내장 구조 규칙의 ID를 만드는 함수가 던진다(선언 저장 뒤 · 같은 트랜잭션 안)
+      expect(() =>
+        setVia(
+          {
+            biveHome,
+            now: Date.now,
+            newId: () => {
+              throw new Error('주입: 내장 규칙 ID 실패');
+            },
+            onChanged: (projectId, version) => calls.push([projectId, version]),
+          },
+          seeded.project.id,
+        ),
+      ).toThrow('주입: 내장 규칙 ID 실패');
+      expect(calls).toEqual([]);
+      expect(currentVersion(biveHome, seeded.project.id)).toBeNull();
+    });
+  });
 });
 
 describe('ProposalEventPublisher', () => {

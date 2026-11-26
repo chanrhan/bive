@@ -971,6 +971,49 @@ test.describe('다시 읽기 다듬기 (#283 M3-42, SCR-02 상세 · NRM-09, ADR
     await expect(page.getByTestId('requirement-rules')).toContainText(ADDED_CHILD.rule.title);
   });
 
+  test('상세를 열 때의 옛 자식 규칙 응답은 알림 뒤 새 목록을 반영한 다음 한 번도 그려지지 않는다 (그 자리의 글을 바뀔 때마다 기록)', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    // 자식 규칙 자리의 줄 수를 바뀔 때마다 페이지 안에 기록한다(잠깐 그려졌다 사라지는 값도 놓치지 않게)
+    await page.evaluate(() => {
+      const log: number[] = [];
+      (window as unknown as { __childRuleCounts: number[] }).__childRuleCounts = log;
+      const record = (): void => {
+        const section = document.querySelector('[data-testid="requirement-rules"]');
+        if (section === null) return;
+        const count = section.querySelectorAll('[data-testid="child-rule"]').length;
+        if (log.at(-1) !== count) log.push(count);
+      };
+      new MutationObserver(record).observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    });
+    // 상세를 열 때 읽기(옛 목록: 자식 규칙 3개)는 쥐고 있다가 늦게 풀린다
+    await bive.setResponse('rule.list', {
+      result: { rules: [...RULES, OTHER_RULE] },
+      delayMs: 1500,
+    });
+    await page.getByTestId('card').filter({ hasText: PARENT.displayId }).click();
+    await expect(page.getByTestId('requirement-rules-loading')).toHaveCount(1);
+    // 알림 → 화면 목록이 새 값(자식 규칙 4개)을 반영한다
+    await bive.setResponse('rule.list', { result: { rules: [...RULES, ADDED_CHILD, OTHER_RULE] } });
+    await bive.emit('event.normChange.appended', appended(2));
+    await expect(names(page)).toHaveCount(RULES.length + 1);
+    // 옛 응답이 풀려 도착한 뒤
+    await allSettled(bive, 'rule.list');
+    await nextFrame(page);
+    await expect(names(page)).toHaveCount(RULES.length + 1);
+    const counts = await page.evaluate(
+      () => (window as unknown as { __childRuleCounts: number[] }).__childRuleCounts,
+    );
+    // 기록 전체에 옛 값(자식 규칙 3개)이 없다: 로딩(0) 다음 바로 새 값(4)
+    expect(counts).not.toContain(RULES.length);
+    expect(counts.at(-1)).toBe(RULES.length + 1);
+  });
+
   test.describe('블록 선언이 바뀐 뒤 다시 읽기', () => {
     /** 선언 이름만 바꾼 `blocks.get` 응답 (테스트 전용 데이터) */
     const declared = (version: number, blockNames: readonly string[]): typeof BLOCKS => ({

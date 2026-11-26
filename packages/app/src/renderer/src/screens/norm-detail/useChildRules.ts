@@ -82,8 +82,9 @@ export const useChildRules = (
     if (seenListed.current === listed) return;
     seenListed.current = listed;
     if (listed.state === 'loading') return;
-    // 기다리던 요청(열 때 · 편집 뒤)이 있으면 다시 읽는다: 위 효과가 다시 돌며 그 요청의 응답을 버린다(이 목록보다 옛 값일 수
-    // 있다). 다시 읽은 값이 마지막에 남는다
+    // 기다리던 요청(열 때 · 편집 뒤)의 응답은 이 목록보다 옛 값일 수 있어 버린다: 바꾼 횟수를 올려 다시 렌더되기 전에 그 응답이
+    // 도착해도 그리지 않고, 위 효과를 다시 돌려 한 번 더 읽는다(다시 읽은 값이 마지막에 남는다)
+    replaced.current += 1;
     const dropped = inFlight.current;
     setLoaded({
       requirementId,
