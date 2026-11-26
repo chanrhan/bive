@@ -18,6 +18,12 @@ export const NORM_CHANGE_EVENT_NAMES = ['event.normChange.appended'] as const;
 /** 규칙 · 검증 화면이 다시 조회하는 알림: 실행 알림 + 규범 변경 알림 (폐기 · 대체 · 새 규칙은 실행 알림 없이도 생긴다). */
 export const NORM_VIEW_EVENT_NAMES = [...RUN_EVENT_NAMES, ...NORM_CHANGE_EVENT_NAMES] as const;
 
+/**
+ * 열린 규칙 · 요구사항 상세가 블록 선언(`blocks.get`)을 다시 조회하는 알림 이름 (shared `BLOCK_EVENT_NAMES`와 같음, 시험이
+ * 대조한다, M3-42 #283 · ADR-135).
+ */
+export const BLOCK_EVENT_NAMES = ['event.blocks.changed'] as const;
+
 /** 요구사항 상세의 규칙 작성 상태가 다시 조회하는 알림 이름 (shared `RULE_WRITER_EVENT_NAMES`와 같음, 시험이 대조한다). */
 export const RULE_WRITER_EVENT_NAMES = ['event.ruleWriter.changed'] as const;
 

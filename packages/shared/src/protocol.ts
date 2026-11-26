@@ -931,8 +931,16 @@ export const RunGetResult = z.strictObject({
 });
 export type RunGetResult = z.infer<typeof RunGetResult>;
 
-/** `run.list`: 표시 ID 순(= 생성 순). `status`로 거른다 (생략하면 전부). */
-export const RunListParams = z.strictObject({ projectId: Ulid, status: RunStatus.optional() });
+/**
+ * `run.list`: 표시 ID 순(= 생성 순). `status`로 거른다 (생략하면 전부). `ruleId`를 주면 그 규칙의 실행 이력에 드는 실행만
+ * (그 규칙이 대상인 실행 + 그 규칙의 판정 기록이 있는 실행, 규칙 상세의 실행 이력, M3-42 #283 · ADR-135). 없는 규칙 ID는 -32004.
+ * 결과 형식은 같다.
+ */
+export const RunListParams = z.strictObject({
+  projectId: Ulid,
+  status: RunStatus.optional(),
+  ruleId: Ulid.optional(),
+});
 export type RunListParams = z.infer<typeof RunListParams>;
 export const RunListResult = z.strictObject({ runs: z.array(Run) });
 export type RunListResult = z.infer<typeof RunListResult>;
@@ -1528,6 +1536,20 @@ export type NormChangeAppendedEvent = z.infer<typeof NormChangeAppendedEvent>;
 /** 규범 변경 알림 이름. 렌더러는 받으면 할 일 배지 · 확인할 것 · 규칙 · 검증 화면을 다시 조회한다. */
 export const NORM_CHANGE_EVENT_NAMES = ['event.normChange.appended'] as const;
 
+// ── 블록 선언 알림 (NRM-09, SCR-02 · SCR-03 · SCR-06, M3-42 #283, ADR-135) ──────────
+// - 사람의 `blocks.set`이 새 판을 저장한 뒤(커밋 뒤) 1개. 블록 선언을 쓰는 곳은 그 처리기 하나다. 기다리지 않는다
+// - 내용 없이 프로젝트 ID와 새 판 번호만 싣는다. 받는 쪽은 `blocks.get`을 다시 조회한다
+
+/** `event.blocks.changed`: 프로젝트의 블록 선언이 새 판으로 바뀜. */
+export const BlocksChangedEvent = z.strictObject({
+  projectId: Ulid,
+  version: z.int().positive(),
+});
+export type BlocksChangedEvent = z.infer<typeof BlocksChangedEvent>;
+
+/** 블록 선언 알림 이름. 렌더러는 받으면 열린 규칙 · 요구사항 상세의 블록 선언을 다시 조회한다. */
+export const BLOCK_EVENT_NAMES = ['event.blocks.changed'] as const;
+
 /** 알림 이름 → 파라미터 스키마. `event.*` 알림은 해당 이슈에서 추가한다. */
 export const NOTIFICATIONS = {
   'event.run.updated': { params: RunUpdatedEvent },
@@ -1535,6 +1557,7 @@ export const NOTIFICATIONS = {
   'event.proposal.changed': { params: ProposalChangedEvent },
   'event.ruleWriter.changed': { params: RuleWriterChangedEvent },
   'event.normChange.appended': { params: NormChangeAppendedEvent },
+  'event.blocks.changed': { params: BlocksChangedEvent },
 } as const satisfies Record<string, NotificationSpec>;
 
 export type NotificationParams<N extends NotificationName> = z.infer<

@@ -2,6 +2,7 @@
 // - `run.create`는 실행 시작 확인이다. 사람 주체만 받고(에이전트 주체 -32020), 설정이 비면 -32010으로 거부하며
 //   실행을 만들지 않는다. 실행 저장과 승인 기록 `run_start`는 한 트랜잭션이다
 // - `run.get`은 실행 · 단계 · 비용 집계와 세션 항목(받은 규범 입력의 기록 포함, ADR-108)을 돌려준다
+// - `run.list`는 `ruleId`를 주면 그 규칙이 대상이거나 그 규칙을 판정한 실행만 돌려준다(규칙 상세의 실행 이력, ADR-135)
 // - 승인 단계 판정 · 이후 단계 진행은 엔진(M1-14, ADR-066)이 한다: `run.create` 응답 뒤 승인 단계를 판정한다.
 //   파이프에서 상태를 바꾸는 RPC는 `run.create`와 `run.resume`(사람만, `interrupted`만)뿐이다
 import {
@@ -93,8 +94,15 @@ export const createRunHandlers = ({ biveHome, now, engine }: RunHandlerDeps): Ru
           throw new RpcError(ErrorCode.NotFound, `실행을 찾을 수 없습니다: ${id}`);
         return { ...detail, usage, sessions: sessionEntries(store, detail.run.id) };
       }),
-    'run.list': ({ projectId, status }) =>
-      withProjectStore(biveHome, projectId, (store) => ({ runs: store.runs.list({ status }) })),
+    'run.list': ({ projectId, status, ruleId }) =>
+      withProjectStore(biveHome, projectId, (store) => {
+        if (ruleId === undefined) return { runs: store.runs.list({ status }) };
+        // 규칙 기준 조회(규칙 상세의 실행 이력, ADR-135): 없는 규칙은 판정 이력 조회(`judgment.list`)와 같이 -32004
+        if (store.rules.get(ruleId) === null) {
+          throw new RpcError(ErrorCode.NotFound, `규칙을 찾을 수 없습니다: ${ruleId}`);
+        }
+        return { runs: store.runs.list({ status, ruleId }) };
+      }),
     'run.resume': ({ projectId, id, author }) => {
       if (engine === undefined) {
         throw new RpcError(ErrorCode.InternalError, '실행 엔진이 없습니다');

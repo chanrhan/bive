@@ -122,6 +122,11 @@ export interface RunRegression {
 
 export interface RunListFilter {
   readonly status?: RunStatus;
+  /**
+   * 그 규칙의 실행 이력에 드는 실행만: 그 규칙이 대상인 실행(`run_target_rules`)과 그 규칙의 판정 기록이 있는 실행
+   * (`judgments.run_id`, 대상이 아니어도 검사 단계 · 병합 재검사가 효력 있는 규칙을 모두 판정한다) (M3-42 #283, ADR-135)
+   */
+  readonly ruleId?: string;
 }
 
 const ENTITY = '실행';
@@ -339,6 +344,7 @@ export class RunRepository {
   readonly #selectRunByDisplayId;
   readonly #selectRuns;
   readonly #selectRunsByStatus;
+  readonly #selectRunsByRule;
   readonly #selectTargets;
   readonly #selectLatestTargeting;
   readonly #selectSteps;
@@ -391,6 +397,18 @@ export class RunRepository {
     this.#selectRuns = db.prepare<[], RunRow>(`SELECT ${RUN_COLUMNS} FROM runs ${ORDER}`);
     this.#selectRunsByStatus = db.prepare<[string], RunRow>(
       `SELECT ${RUN_COLUMNS} FROM runs WHERE status = ? ${ORDER}`,
+    );
+    // 그 규칙이 대상이거나 그 규칙을 판정한 실행 (색인 run_target_rules_rule · judgments_rule_latest로 그 규칙의 행만 읽고
+    // 실행은 기본 키로 찾는다. runs 전체를 훑지 않는다, ADR-135)
+    this.#selectRunsByRule = db.prepare<[{ rule_id: string; status: string | null }], RunRow>(
+      `SELECT ${RUN_COLUMNS} FROM runs
+       WHERE id IN (
+         SELECT run_id FROM run_target_rules WHERE rule_id = @rule_id
+         UNION
+         SELECT run_id FROM judgments WHERE rule_id = @rule_id AND run_id IS NOT NULL
+       )
+       AND (@status IS NULL OR status = @status)
+       ${ORDER}`,
     );
     this.#selectTargets = db.prepare<[string], { rule_id: string }>(
       'SELECT rule_id FROM run_target_rules WHERE run_id = ? ORDER BY position',
@@ -524,13 +542,15 @@ export class RunRepository {
   /**
    * 실행을 표시 ID 순(= 생성 순)으로. `status`를 주면 그 상태만. 저장 형식에 맞지 않는 행(저장소 밖에서 고친 행)은 그 행만
    * 건너뛰고 경고 한 줄을 남긴다(ADR-094 · ADR-120: 행 하나가 목록 · 재기동 복구 전체를 실패시키지 않는다). 그 행을 ID로
-   * 읽으면(`get`) 여전히 오류다.
+   * 읽으면(`get`) 여전히 오류다. `ruleId`를 주면 그 규칙이 대상이거나 그 규칙을 판정한 실행만(같은 순서 · 같은 건너뛰기).
    */
   list(filter: RunListFilter = {}): Run[] {
     const rows =
-      filter.status === undefined
-        ? this.#selectRuns.all()
-        : this.#selectRunsByStatus.all(filter.status);
+      filter.ruleId !== undefined
+        ? this.#selectRunsByRule.all({ rule_id: filter.ruleId, status: filter.status ?? null })
+        : filter.status === undefined
+          ? this.#selectRuns.all()
+          : this.#selectRunsByStatus.all(filter.status);
     const runs: Run[] = [];
     let skipped = 0;
     for (const row of rows) {
