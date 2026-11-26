@@ -4,7 +4,14 @@
 // 규범을 쓰는 도구는 규칙 작성 역할의 규칙 생성 · 폐기 · 대체 도구(`propose_rule` · `retire_rule` · `supersede_rule`)와 이의 판단의
 // 유지 도구(`uphold_rule`)뿐이다(M7-02 · M7-09 · M7-11, ADR-100 D1 · D4 · D5 · D6, ADR-103 · ADR-112 · ADR-115). 구현 역할의 이의
 // 제기 도구(`raise_objection`)는 이의 기록만 남기고 규범을 바꾸지 않는다(M7-11, ADR-100 D4 · I2, ADR-115).
-import { type AgentRole, CheckKind, Risk, RuleKind, RuleTargetBlocks } from '@bive/shared';
+import {
+  type AgentRole,
+  CheckKind,
+  MUTANT_LIMITS,
+  Risk,
+  RuleKind,
+  RuleTargetBlocks,
+} from '@bive/shared';
 import { z } from 'zod';
 
 import { CONTROL_CHARACTERS, EARS_FORMAT, earsStatementProblem } from './ears.js';
@@ -40,12 +47,20 @@ export const NORM_TOOL_NAMES = [
  * 끝난다(이후 호출은 모두 거부).
  */
 export const OBJECTION_TOOL_NAMES = ['raise_objection'] as const;
+/**
+ * 변이 제안 도구 (M3-07 #52, JDG-04 · RUN-04, ADR-033 · ADR-139). 변이 주입 역할에만 둔다: 대상 블록 파일 하나 안의 한 군데를 바꾸는
+ * 변이를 낸다. 작업 트리 · 인수 테스트 · 규범 · 설정을 바꾸지 않는다(판정은 오케스트레이터가 격리 체크아웃에서 한다). 받아들여지면
+ * 실행기가 닫힌다(세션마다 변이 1개).
+ */
+export const MUTATION_TOOL_NAMES = ['propose_mutant'] as const;
 
 export type FileToolName = (typeof FILE_TOOL_NAMES)[number];
 export type CommandToolName = (typeof COMMAND_TOOL_NAMES)[number];
 export type NormToolName = (typeof NORM_TOOL_NAMES)[number];
 export type ObjectionToolName = (typeof OBJECTION_TOOL_NAMES)[number];
-export type FixedToolName = FileToolName | CommandToolName | NormToolName | ObjectionToolName;
+export type MutationToolName = (typeof MUTATION_TOOL_NAMES)[number];
+export type FixedToolName =
+  FileToolName | CommandToolName | NormToolName | ObjectionToolName | MutationToolName;
 
 /**
  * 역할별 허용 도구. 세션 init의 도구 목록은 이것과 정확히 같아야 한다(session-guard.ts).
@@ -66,6 +81,8 @@ export const ROLE_TOOL_NAMES = {
     'install_package',
     'raise_objection',
   ],
+  // 변이 주입 역할: 세션 폴더의 읽기 전용 사본(대상 규칙 진술 · 대상 블록 소스)을 읽고 변이 1개를 낸다. 쓰기 · 명령 도구는 없다
+  mutator: ['read_file', 'list_files', 'search_files', 'propose_mutant'],
   chat: [],
 } as const satisfies Record<AgentRole, readonly FixedToolName[]>;
 
@@ -281,6 +298,28 @@ export const RaiseObjectionInput = z.strictObject({
 });
 export type RaiseObjectionInput = z.infer<typeof RaiseObjectionInput>;
 
+/**
+ * 변이 제안 (M3-07 #52, ADR-033 · ADR-139): 파일 하나(`path`, 프로젝트 루트 기준 `/` 경로) 안에서 정확히 한 번 나오는 글(`search`)을
+ * 다른 글(`replace`)로 바꾼다. 형식만 여기서 보고, 대상 블록 · 금지 경로 · 파일 존재 · 한 군데 여부는 주입한 콜백이 판정 커밋에서 본다.
+ */
+export const ProposeMutantInput = z
+  .strictObject({
+    path: z
+      .string()
+      .min(1)
+      .max(MUTANT_LIMITS.path)
+      .refine((value) => !value.includes('\0'), 'NUL 문자 불가')
+      .describe('바꿀 파일 (프로젝트 루트 기준 상대 경로, 대상 블록의 파일만)'),
+    search: z
+      .string()
+      .min(1)
+      .max(MUTANT_LIMITS.search)
+      .describe('파일 안에서 정확히 한 번 나오는 바꿀 글 (공백 · 줄바꿈 포함 글자 그대로)'),
+    replace: z.string().max(MUTANT_LIMITS.replace).describe('바꾼 글 (바꿀 글과 달라야 한다)'),
+  })
+  .refine((input) => input.search !== input.replace, '바꾼 글이 바꿀 글과 같음');
+export type ProposeMutantInput = z.infer<typeof ProposeMutantInput>;
+
 /** 도구 정의. SDK MCP 서버(M1-26)는 strict 스키마에서 만든 JSON 스키마로 노출하고 인자 검증은 실행기에 맡긴다. */
 export interface ToolDefinition {
   name: FixedToolName;
@@ -357,6 +396,12 @@ const DEFINITIONS: Record<FixedToolName, ToolDefinition> = {
     description:
       '규칙이 잘못됐다고 볼 때 규칙을 맡는 역할에 이의를 제기한다. 규칙 · 인수 테스트는 바뀌지 않고 이의 기록만 남는다. 부르면 이 세션은 바로 끝나고(이후 도구 호출은 모두 거부) 규칙을 맡는 역할이 폐기 · 대체 · 유지를 판단한다. 유지면 판단의 근거를 받아 구현을 다시 하고(검사 회귀와 같은 상한), 폐기 · 대체면 이 실행은 병합 없이 끝난다.',
     inputSchema: RaiseObjectionInput,
+  },
+  propose_mutant: {
+    name: 'propose_mutant',
+    description:
+      '대상 규칙을 어기게 만드는 변이 1개를 낸다: 대상 블록 파일 하나 안에서 정확히 한 번 나오는 글(search)을 다른 글(replace)로 바꾼다. 작업 트리는 바뀌지 않고, 오케스트레이터가 격리된 체크아웃에 적용해 대상 규칙의 인수 테스트로 판정한다. 인수 테스트 · 설정 · 잠금 · 계약 파일은 대상이 아니다. 받아들여지면 이 세션은 끝난다(이후 도구 호출은 모두 거부).',
+    inputSchema: ProposeMutantInput,
   },
 };
 

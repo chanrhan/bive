@@ -549,12 +549,7 @@ describe('유형 A 단계 순서 · 전이 (수용 기준 1)', () => {
           kind,
           attempt: 1,
           status: index === 0 ? ('running' as const) : ('pending' as const),
-          role:
-            kind === 'test_writing'
-              ? 'test-writer'
-              : kind === 'implementation'
-                ? 'implementer'
-                : null,
+          role: STEP_ROLES[kind],
           startedAt: index === 0 ? new Date().toISOString() : null,
         })),
       });
@@ -2127,13 +2122,21 @@ describe('실행 유형 B · C · D 단계 계획 · 상태 기계 (M3-06 #51 �
     ],
   };
   const SKIPPED: Record<Exclude<RunType, 'A'>, StepKind[]> = {
-    B: ['test_writing', 'red_check'],
+    // 유형 B는 변이 주입도 생략한다 (ADR-020 "변이 주입은 A · C(보강)만", M3-07 #52 · ADR-139)
+    B: ['test_writing', 'red_check', 'mutation'],
     C: ['implementation'],
     D: ['test_writing', 'red_check'],
   };
+  /** 세션을 여는 역할 (변이 주입 단계는 아직 기본 실행기가 생략으로 기록해 세션이 없다) */
   const ROLES: Record<Exclude<RunType, 'A'>, AgentRole[]> = {
     B: ['implementer'],
     C: ['test-writer'],
+    D: ['implementer'],
+  };
+  /** 예산 · 모델 스냅샷의 역할: 유형 C는 변이 주입(보강의 재주입) 역할도 든다 (M3-07 #52, ADR-139) */
+  const SNAPSHOT_ROLES: Record<Exclude<RunType, 'A'>, AgentRole[]> = {
+    B: ['implementer'],
+    C: ['test-writer', 'mutator'],
     D: ['implementer'],
   };
 
@@ -2182,8 +2185,8 @@ describe('실행 유형 B · C · D 단계 계획 · 상태 기계 (M3-06 #51 �
         });
       }
       expect(done.run).toMatchObject({ status: 'merged', regressionCount: 0, failureReason: null });
-      expect(Object.keys(done.run.budgetSnapshot.roles)).toEqual(ROLES[type]);
-      expect(Object.keys(done.run.modelSnapshot)).toEqual(ROLES[type]);
+      expect(Object.keys(done.run.budgetSnapshot.roles)).toEqual(SNAPSHOT_ROLES[type]);
+      expect(Object.keys(done.run.modelSnapshot)).toEqual(SNAPSHOT_ROLES[type]);
       expect(sessionsOf(h).map((s) => s.role)).toEqual(ROLES[type]);
       // 판정 · 병합할 커밋은 C만 테스트 작성 커밋, 나머지는 구현 커밋
       const head = stepOf(done, type === 'C' ? 'test_writing' : 'implementation').commit;

@@ -641,6 +641,14 @@ describe('세션 결과 저장 · 단계 → 역할 → 실행 합산 (수용 �
           1,
         ),
       },
+      // 변이 주입 단계도 역할 세션 단계다 (M3-07 #52): 세션이 없어 값이 없다
+      {
+        stepId: stepOf(done, 'mutation', 1).id,
+        kind: 'mutation',
+        attempt: 1,
+        role: 'mutator',
+        ...totals(null, null, null, 0),
+      },
     ]);
     expect(got.usage.roles).toEqual({
       'test-writer': totals(0.0842, 4, { 'model-a': usageOf(4620, 1880, 8200, 12100, 0.0842) }, 2),
@@ -653,6 +661,7 @@ describe('세션 결과 저장 · 단계 → 역할 → 실행 합산 (수용 �
         },
         1,
       ),
+      mutator: totals(null, null, null, 0),
     });
     expect(got.usage.run).toEqual(
       totals(
@@ -770,6 +779,7 @@ describe('값이 없는 세션 (수용 기준 2 · 집계와 한도의 차이)',
       ['test_writing', 1, 0.0421, 2],
       ['implementation', 1, null, null],
       ['implementation', 2, 0.0587, 3],
+      ['mutation', 1, null, null],
     ]);
     expect(got.usage.roles.implementer).toMatchObject({
       costUsd: 0.0587,
@@ -813,12 +823,14 @@ describe('값이 없는 세션 (수용 기준 2 · 집계와 한도의 차이)',
       'test-writer': totals(null, null, null, 3, 3),
       // 세션이 없는 역할도 null (0이 아님)
       implementer: totals(null, null, null, 0),
+      mutator: totals(null, null, null, 0),
     });
     expect(got.usage.steps.map((step) => [step.kind, step.costUsd, step.turns])).toEqual([
       ['test_writing', null, null],
       ['test_writing', null, null],
       ['test_writing', null, null],
       ['implementation', null, null],
+      ['mutation', null, null],
     ]);
     expect(done.steps.every((step) => step.costUsd === null && step.turns === null)).toBe(true);
     // 모델 호출 전에 끝난 세션은 한도에서 빼지 않는다

@@ -49,6 +49,7 @@ const COMPLETE: SettingsPatch = {
     'rule-writer': { model: 'test-model', maxBudgetUsd: 1, maxTurns: 20 },
     'test-writer': { model: 'test-model', maxBudgetUsd: 2, maxTurns: 100 },
     implementer: { model: 'impl-model', maxBudgetUsd: 3, maxTurns: 150 },
+    mutator: { model: 'mutator-model', maxBudgetUsd: 1, maxTurns: 50 },
   },
 };
 

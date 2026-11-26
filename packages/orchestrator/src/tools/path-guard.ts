@@ -174,6 +174,11 @@ export class PathGuard {
     for (const forbidden of FORBIDDEN_SEGMENTS) {
       if (segments.includes(forbidden)) return `${forbidden} 접근 불가`;
     }
+    // 변이 주입 역할은 인수 테스트를 보지 못한다(역할 분리: 그 테스트만 피하는 변이를 고르지 못하게, M3-07 #52 · ADR-139).
+    // 세션 폴더에 사본을 두지 않는 것과 이중이다
+    if (this.role === 'mutator' && segments[0] === ACCEPTANCE_DIR) {
+      return '변이 주입 역할은 인수 테스트에 접근할 수 없음';
+    }
     if (access !== 'write') return null;
     if (this.role === 'test-writer') {
       // 허용 판정은 글자 그대로 비교한다: `bive-acceptance/<규칙 폴더>/<파일…>`만
