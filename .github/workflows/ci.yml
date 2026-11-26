@@ -22,7 +22,8 @@ jobs:
   checks:
     name: checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # 최근 실측 14 ~ 19분, 20분 제한에 한 번 걸려 30분 (ADR-138)
+    timeout-minutes: 30
     steps:
       - name: 체크아웃
         uses: actions/checkout@v7
@@ -69,7 +70,7 @@ jobs:
         run: scripts/test-make-variant.sh
 
       # 로드맵 발행 스크립트의 재발행 시험 (M2-05, 가짜 gh 응답으로 돌고 GitHub를 부르지 않는다)과
-      # 파이프라인 e2e 묶음 대조 스크립트의 시험 (M3-24)
+      # 파이프라인 e2e 묶음 대조 스크립트의 시험 (M3-24), 이 워크플로의 잡 제한 시간 · needs 시험 (M3-52)
       - name: 파이썬 스크립트 검사
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
@@ -134,7 +135,8 @@ jobs:
   pipeline-e2e-group:
     name: pipeline-e2e-group (${{ matrix.group }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 최근 실측 묶음마다 12 ~ 21분 (ADR-138)
+    timeout-minutes: 40
     strategy:
       # 한 묶음이 실패해도 다른 묶음의 결과를 본다
       fail-fast: false
