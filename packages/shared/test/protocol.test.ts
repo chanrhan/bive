@@ -403,6 +403,92 @@ describe('requirement.* (M1-02, ADR-047)', () => {
       }),
     ).toMatchObject({ ok: false, error: { code: -32602 } });
   });
+
+  it('requirement.markUnrulable (M3-11 #56, ADR-137): 사유는 문자열이면 받고(빈 사유 · 상한은 처리기가 -32001), 주체 · 모르는 필드는 스키마가 본다', () => {
+    expect(isMethodName('requirement.markUnrulable')).toBe(true);
+    for (const reason of ['측정 기준 없음', '', ' ']) {
+      expect(
+        request('requirement.markUnrulable', { projectId: PROJECT, id: REQ, reason, author: human })
+          .ok,
+      ).toBe(true);
+    }
+    for (const params of [
+      { projectId: PROJECT, id: REQ, author: human },
+      { projectId: PROJECT, id: REQ, reason: 1, author: human },
+      { projectId: PROJECT, id: REQ, reason: '사유' },
+      { projectId: PROJECT, id: REQ, reason: '사유', author: human, force: true },
+    ]) {
+      const result = request('requirement.markUnrulable', params);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe(-32602);
+    }
+    const marked = { ...requirement, unrulable: { reason: '측정 기준 없음' } };
+    expect(
+      parseResponse('requirement.markUnrulable', {
+        jsonrpc: '2.0',
+        id: 5,
+        result: { requirement: marked },
+      }),
+    ).toMatchObject({ ok: true, result: { requirement: marked } });
+  });
+});
+
+describe('추적성 결함 응답 (M3-11 #56, ADR-137)', () => {
+  const REQ = '01JA0000000000000000000002';
+  const RULE = '01JA0000000000000000000003';
+  const traceability = {
+    requirementsWithoutRules: [{ id: REQ, displayId: 'REQ-001' }],
+    parentlessRules: [{ id: RULE, displayId: 'RULE-001' }],
+  };
+
+  it('rule.list의 traceability는 선택 칸이고, 표시 ID 접두가 맞지 않거나 모르는 칸이면 받는 쪽 -32602', () => {
+    expect(
+      parseResponse('rule.list', { jsonrpc: '2.0', id: 1, result: { rules: [] } }),
+    ).toMatchObject({ ok: true });
+    expect(
+      parseResponse('rule.list', { jsonrpc: '2.0', id: 2, result: { rules: [], traceability } }),
+    ).toEqual({ ok: true, id: 2, result: { rules: [], traceability } });
+    for (const broken of [
+      { ...traceability, requirementsWithoutRules: [{ id: REQ, displayId: 'RULE-001' }] },
+      { ...traceability, parentlessRules: [{ id: RULE, displayId: 'REQ-001' }] },
+      { ...traceability, unrulable: [] },
+      { requirementsWithoutRules: [] },
+    ]) {
+      expect(
+        parseResponse('rule.list', {
+          jsonrpc: '2.0',
+          id: 3,
+          result: { rules: [], traceability: broken },
+        }),
+      ).toMatchObject({ ok: false, error: { code: -32602 } });
+    }
+  });
+
+  it('verification.summary의 traceability · unrulable은 필수이고 규칙화 불가 수는 요구사항 수를 넘지 못한다', () => {
+    const base = {
+      basis: null,
+      compliance: { passed: 0, judgeable: 0 },
+      denominator: [],
+      confirmedCompliance: null,
+      confirmedDenominator: [],
+      agentRetiredRules: 0,
+      traceability,
+      unrulable: { count: 1, total: 2 },
+      costPerRunUsd: null,
+      rules: [],
+      pipeline: null,
+    };
+    const parse = (result: unknown) =>
+      parseResponse('verification.summary', { jsonrpc: '2.0', id: 1, result });
+    expect(parse(base)).toMatchObject({ ok: true });
+    expect(parse({ ...base, unrulable: { count: 0, total: 0 } })).toMatchObject({ ok: true });
+    expect(parse({ ...base, unrulable: { count: 3, total: 2 } })).toMatchObject({ ok: false });
+    for (const key of ['traceability', 'unrulable'] as const) {
+      const without: Record<string, unknown> = { ...base };
+      delete without[key];
+      expect(parse(without)).toMatchObject({ ok: false });
+    }
+  });
 });
 
 describe('rule.list · rule.get (M1-11, ADR-060)', () => {

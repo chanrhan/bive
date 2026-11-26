@@ -319,6 +319,9 @@ describe('verification.summary', () => {
       confirmedCompliance: null,
       confirmedDenominator: [],
       agentRetiredRules: 0,
+      // 추적성 결함 · 규칙화 불가 비율 (M3-11, ADR-137): 요구사항 · 규칙이 없으면 빈 목록과 0 / 0
+      traceability: { requirementsWithoutRules: [], parentlessRules: [] },
+      unrulable: { count: 0, total: 0 },
       costPerRunUsd: null,
       rules: [],
       pipeline: null,

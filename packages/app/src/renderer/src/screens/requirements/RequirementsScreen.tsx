@@ -3,6 +3,9 @@
 //   1회(규칙 화면과 같은 읽기, useRules. 다시 읽기는 규범 변경 알림 · 재접속 때만)에서 만든다. 규칙 목록을 읽는 동안은 목록 자리가 로딩이고(칩 값이 늦게 생겨
 //   다른 화면이 정한 필터가 지워지지 않게), 읽지 못하면 블록 칩만 0건 비활성이다 (ADR-126). 알림 · 재접속 뒤 다시 읽은 이 목록을
 //   열린 상세의 자식 규칙도 쓴다(알림 하나에 rule.list 한 번, M3-42 #283 · ADR-135)
+// - 추적성 결함(카드 예외 · 상태 칩)은 같은 rule.list 응답의 `traceability`에서만 온다(M3-11 #56 · ADR-137). 규칙 작성 세션이
+//   규칙 없이 끝나면 규범 변경 알림이 없으므로 규칙 작성 알림에도 rule.list를 다시 읽는다(알림 하나에 한 번)
+// - 상세의 [규칙화 불가]는 서버가 규칙 없는 요구사항으로 정한 것에만 보인다. 표시 = requirement.markUnrulable 1회
 // - [+ 새 요구사항]: 목록 맨 위 입력 줄 → requirement.create 1회 → 목록 다시 불러오기
 //   (저장 뒤 규칙 제안은 오케스트레이터 쪽 이슈 #21이 붙인다. 화면은 호출만 한다)
 // - 상세(SCR-06 규범 상세, norm-detail/RequirementDetail): 본문 · 생성 주체 · 자식 규칙(그 자리에서 펼침) · 직접 편집 ·
@@ -20,7 +23,7 @@ import { ListView } from '../../components/ListView/ListView.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { clearPendingSelection, peekPendingSelection } from '../../navigation/pendingSelection.js';
 import { useProject } from '../../project/ProjectContext.js';
-import { NORM_CHANGE_EVENT_NAMES } from '../../runs/refreshCoalescer.js';
+import { NORM_CHANGE_EVENT_NAMES, RULE_WRITER_EVENT_NAMES } from '../../runs/refreshCoalescer.js';
 import { RequirementDetail } from '../norm-detail/RequirementDetail.js';
 import { implementationBlocksByRequirement } from '../rules/blockView.js';
 import { useRules } from '../rules/useRules.js';
@@ -29,6 +32,7 @@ import {
   REQUIREMENTS_LIST_ID,
   requirementCard,
   requirementCriteria,
+  requirementDefectsOf,
   requirementKey,
   TEXT,
 } from './requirementsView.js';
@@ -52,10 +56,20 @@ export const RequirementsScreen = (): React.JSX.Element => {
   return <RequirementsPanes key={project.id} projectId={project.id} />;
 };
 
+/** 요구사항 화면이 rule.list를 다시 읽는 알림: 규범 변경(블록 칩 · 자식 규칙) + 규칙 작성(규칙 없이 끝난 세션의 추적성 결함). */
+const REQUIREMENT_RULE_EVENTS = [...NORM_CHANGE_EVENT_NAMES, ...RULE_WRITER_EVENT_NAMES] as const;
+
 const RequirementsPanes = ({ projectId }: { projectId: string }): React.JSX.Element => {
-  const { load: requirementsLoad, create, update, remove } = useRequirements(projectId);
-  // 블록 칩 값은 규칙의 대상 블록 · 폐기에서만 바뀐다: 규범 변경 알림 · 재접속 때만 다시 읽는다(실행 알림은 받지 않음)
-  const { load: rulesLoad } = useRules(projectId, NORM_CHANGE_EVENT_NAMES);
+  const {
+    load: requirementsLoad,
+    create,
+    update,
+    remove,
+    markUnrulable,
+  } = useRequirements(projectId);
+  // 블록 칩 값은 규칙의 대상 블록 · 폐기에서만 바뀐다: 규범 변경 · 규칙 작성 알림 · 재접속 때만 다시 읽는다(실행 알림은 받지 않음)
+  const { load: rulesLoad, traceability } = useRules(projectId, REQUIREMENT_RULE_EVENTS);
+  const defects = useMemo(() => requirementDefectsOf(traceability), [traceability]);
   // 규칙 목록을 읽는 동안은 목록 전체를 로딩으로 둔다(블록 칩 값이 아직 없어 지정된 선택이 지워지지 않게)
   const load =
     requirementsLoad.state === 'ready' && rulesLoad.state === 'loading'
@@ -65,9 +79,11 @@ const RequirementsPanes = ({ projectId }: { projectId: string }): React.JSX.Elem
     () =>
       requirementCriteria(
         implementationBlocksByRequirement(rulesLoad.state === 'ready' ? rulesLoad.items : []),
+        defects,
       ),
-    [rulesLoad],
+    [rulesLoad, defects],
   );
+  const card = useCallback((item: Requirement) => requirementCard(item, defects), [defects]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [inputOpen, setInputOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -119,7 +135,7 @@ const RequirementsPanes = ({ projectId }: { projectId: string }): React.JSX.Elem
             label={TEXT.list}
             items={items}
             itemKey={requirementKey}
-            card={requirementCard}
+            card={card}
             criteria={criteria}
             emptyText={TEXT.empty}
             selectedKey={selected?.id ?? null}
@@ -168,6 +184,8 @@ const RequirementsPanes = ({ projectId }: { projectId: string }): React.JSX.Elem
             rules={rulesLoad}
             onUpdate={(text) => update(selected.id, text)}
             onDelete={() => remove(selected.id)}
+            canMarkUnrulable={defects?.has(selected.id) === true && selected.unrulable === null}
+            onMarkUnrulable={(reason) => markUnrulable(selected.id, reason)}
           />
         )}
       </section>

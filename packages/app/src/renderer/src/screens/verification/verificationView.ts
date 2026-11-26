@@ -2,8 +2,10 @@
 // DOM · React에 의존하지 않는다 (test/verification-view.test.ts).
 // - 값은 `verification.summary` 결과에서만 만든다(NFR-03). 값이 없으면 '없음'(0 표시 금지, COST-02 · ADR-029)
 // - renderer는 shared를 import type으로만 가져오므로(architecture.md 2장) 표시명을 다시 적고 단위 테스트가 대조한다
-// - 지표 카드는 준수(전체 기준 · 사람 확인 기준) · 에이전트 폐기 규칙 · 실행당 비용 (ADR-100 D7 · B⑦, ADR-117).
-//   잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드는 기능 이슈 전까지 미노출 (ADR-035, 잠정 카드 자리는 폐기 규칙 카드가 대신한다)
+// - 지표 카드는 준수(전체 기준 · 사람 확인 기준) · 에이전트 폐기 규칙 · 규칙화 불가 비율 · 추적성 결함 · 실행당 비용 (ADR-100 D7 ·
+//   B⑦, ADR-117, NRM-06 · NRM-08 · ADR-137). 잠정 · 변이 카드는 기능 이슈 전까지 미노출 (ADR-035, 잠정 카드 자리는 폐기 규칙 카드)
+// - 규칙화 불가 비율 = '규칙화 불가' 요구사항 수 / 삭제되지 않은 요구사항 수(요구사항이 없으면 '없음', 0%로 보이지 않음).
+//   추적성 결함 = 규칙 없는 요구사항 수 + 부모 없는 규칙 수(센 값이라 0도 "0"). 두 카드는 요구사항 화면을 그 상태 칩으로 연다
 // - 코드 열람 영역 = `codeOpen.summary`의 사유별 건수. 기록이 하나도 없으면 '없음' (MET-01, M2-02 · ADR-088)
 import type {
   CodeOpenReason,
@@ -33,6 +35,13 @@ export const TEXT = {
   /** 에이전트가 폐기한 규칙 수 카드 (ADR-100 B⑦ · 명세 변경 목록 SCR-05, ADR-117) */
   agentRetired: '에이전트 폐기 규칙',
   agentRetiredHint: '폐기 · 대체 누적',
+  /** 규칙화 불가 비율 카드 (SCR-05 지표 카드, NRM-08, ADR-137) */
+  unrulable: '규칙화 불가 비율',
+  unrulableHint: '규칙화 불가 / 요구사항',
+  /** 추적성 결함 카드 (SCR-05 지표 카드, NRM-06, ADR-137) */
+  traceability: '추적성 결함',
+  traceabilityRequirements: '규칙 없는 요구사항',
+  traceabilityRules: '부모 없는 규칙',
   costPerRun: '실행당 비용',
   pipeline: '파이프라인',
   noRun: '실행 없음',
@@ -147,6 +156,20 @@ export const confirmedComplianceState = (
 
 /** 에이전트 폐기 규칙 수: 센 값이므로 0도 "0"이다(값 없음이 아니다, ADR-117). */
 export const agentRetiredText = (count: number): string => String(count);
+
+/** 규칙화 불가 비율 카드 값: "규칙화 불가 / 요구사항". 요구사항이 없으면 '없음'(0 / 0 · 0%로 보이지 않는다, ADR-117 · ADR-137). */
+export const unrulableText = ({ count, total }: VerificationSummaryResult['unrulable']): string =>
+  total === 0 ? TEXT.none : `${String(count)} / ${String(total)}`;
+
+/** 추적성 결함 카드 값: 규칙 없는 요구사항 수 + 부모 없는 규칙 수 (센 값이라 0도 "0", NRM-06). */
+export const traceabilityCount = (
+  traceability: VerificationSummaryResult['traceability'],
+): number => traceability.requirementsWithoutRules.length + traceability.parentlessRules.length;
+
+/** 추적성 결함 카드의 툴팁: 두 결함의 수. */
+export const traceabilityHint = (traceability: VerificationSummaryResult['traceability']): string =>
+  `${TEXT.traceabilityRequirements} ${String(traceability.requirementsWithoutRules.length)} · ` +
+  `${TEXT.traceabilityRules} ${String(traceability.parentlessRules.length)}`;
 
 /** 준수 카드의 전체 기준을 누르면 규칙 목록(`RULES_LIST_ID`)에 거는 필터: `준수 집계: 판정 가능`만 (분모 목록, JDG-03). */
 export const COMPLIANCE_FILTER: FilterState = Object.freeze({

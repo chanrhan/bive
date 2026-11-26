@@ -126,6 +126,17 @@ describe('시나리오 파일 스키마', () => {
     }
   });
 
+  it('no-rules (M3-11 #56, ADR-137): 규칙 작성 역할의 세션 1개뿐이고 도구 호출이 하나도 없이 정상 종료한다 (제안 0개)', () => {
+    expect(listScenarios()).toContain('no-rules');
+    const scenario = loadScenario('no-rules');
+    expect(scenario.name).toBe('no-rules');
+    expect(Object.keys(scenario.roles)).toEqual(['rule-writer']);
+    const sessions = scenario.roles['rule-writer']?.sessions ?? [];
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.turns.filter((turn) => 'tool' in turn)).toEqual([]);
+    expect(sessions[0]?.result.subtype).toBe('success');
+  });
+
   it('검사 실패 판단 시나리오 (M7-12, ADR-118): contradiction-missed는 둘째 요구사항이 모순을 보지 못하고 새 규칙만 만들고 판단 세션이 대체, accidental-break는 구현 시도 1이 time을 빼고 판단 세션이 모순 아님', () => {
     const toolsOf = (session: { turns: readonly unknown[] } | undefined): string[] =>
       (session?.turns ?? []).flatMap((turn) =>

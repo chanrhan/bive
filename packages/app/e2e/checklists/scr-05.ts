@@ -2,9 +2,10 @@
 // - 기본: 머리줄 "판정 기준 main@커밋" · 지표 카드(준수의 전체 기준 · 사람 확인 기준, 에이전트 폐기 규칙, 실행당 비용, ADR-117) ·
 //   코드 열람(사유 3종 건수, M2-02 · ADR-088) ·
 //   파이프라인(최근 실행의 단계 순서 · 현재 단계) · 규칙별 최신 판정 + 실행 링크(비용 합계 · 턴, 값 없으면 '없음').
-//   잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드, 준수 추이 그래프는 미노출 (ADR-035). [재개]는 최근 실행이 중단일 때만 (ADR-011)
+//   규칙화 불가 비율 · 추적성 결함 카드(M3-11 #56 · ADR-137). 잠정 · 변이 카드, 준수 추이 그래프는 미노출 (ADR-035).
+//   [재개]는 최근 실행이 중단일 때만 (ADR-011)
 // - 빈: 실행이 없으면 파이프라인 자리 "실행 없음"(ADR-029), 머리줄 "판정 기준 없음", 실행당 비용 '없음',
-//   열람 기록이 없으면 코드 열람 영역 값 '없음'(ADR-088)
+//   열람 기록이 없으면 코드 열람 영역 값 '없음'(ADR-088), 요구사항이 없으면 규칙화 불가 비율 '없음'(0 / 0 · 0%가 아님) · 추적성 결함 0
 // - 로딩 · 에러: 화면 정의서에 정의 없음 → ADR-072 (ADR-060과 같음: 로딩 = 자리 비움, 에러 = "검증 불러오기 실패")
 import type {
   CodeOpenSummaryResult,
@@ -16,10 +17,11 @@ import type {
   VerificationSummaryResult,
 } from '@bive/shared';
 
+import { REQUIREMENTS } from './scr-02.js';
 import { RULES } from './scr-03.js';
 import type { ElementCheck, ScreenChecklist } from './types.js';
 
-export { PROJECT } from './scr-02.js';
+export { PROJECT, REQUIREMENTS } from './scr-02.js';
 export { RULES } from './scr-03.js';
 
 /** 판정 기준 커밋 (테스트 전용 데이터, NFR-03). */
@@ -137,6 +139,21 @@ const CONFIRMED_DENOMINATOR = LIVE.filter(
 /** 에이전트 폐기 규칙 수 = 폐기된 RULE-007 하나 (RULE-006이 대체, 테스트 전용 데이터). */
 const AGENT_RETIRED = RULES.filter(({ retirement }) => retirement !== undefined).length;
 
+/**
+ * 추적성 결함 (테스트 전용 데이터, NFR-03): 규칙 없는 요구사항 REQ-001 · 부모 없는 규칙 RULE-003. 요구사항 화면의 `rule.list`
+ * 가짜 응답에도 같은 값을 실어 카드 → 요구사항 화면의 결과를 맞춘다.
+ */
+export const TRACEABILITY: VerificationSummaryResult['traceability'] = {
+  requirementsWithoutRules: [{ id: REQUIREMENTS[0]?.id ?? '', displayId: 'REQ-001' }],
+  parentlessRules: [{ id: RULES[2]?.rule.id ?? '', displayId: 'RULE-003' }],
+};
+
+/** 규칙화 불가 비율: 삭제되지 않은 요구사항 3개(REQ-001 · 002 · 003) 가운데 REQ-003 하나 (scr-02 가짜 데이터와 같다). */
+const UNRULABLE = {
+  count: REQUIREMENTS.filter((item) => item.deletedAt === null && item.unrulable !== null).length,
+  total: REQUIREMENTS.filter((item) => item.deletedAt === null).length,
+};
+
 /** `verification.summary` 가짜 응답: 기본 (테스트 전용 데이터, NFR-03). */
 export const SUMMARY: VerificationSummaryResult = {
   basis: { branch: 'main', commit: BASIS_COMMIT, runId: RUN_1 },
@@ -149,6 +166,8 @@ export const SUMMARY: VerificationSummaryResult = {
   },
   confirmedDenominator: CONFIRMED_DENOMINATOR,
   agentRetiredRules: AGENT_RETIRED,
+  traceability: TRACEABILITY,
+  unrulable: UNRULABLE,
   costPerRunUsd: 0.2,
   rules: rows(LIVE),
   pipeline: { run: run(), stages: stages('implementation', 'running'), queued: 0 },
@@ -244,6 +263,8 @@ export const EMPTY_SUMMARY: VerificationSummaryResult = {
   confirmedCompliance: { passed: 0, judgeable: 1, confirmed: 1 },
   confirmedDenominator: [LIVE[0]?.rule.id ?? ''],
   agentRetiredRules: 0,
+  traceability: { requirementsWithoutRules: [], parentlessRules: [] },
+  unrulable: { count: 0, total: 0 },
   costPerRunUsd: null,
   rules: LIVE.slice(0, 2).map(({ rule }) => ({
     rule,
@@ -273,16 +294,12 @@ export const EMPTY_CODE_OPEN_SUMMARY: CodeOpenSummaryResult = {
   total: 0,
 };
 
-/** 미노출 요소 (ADR-035): 다음 마일스톤 카드 · 그래프. */
+/** 미노출 요소 (ADR-035): 다음 마일스톤 카드 · 그래프. 규칙화 불가 · 추적성 결함 카드는 M3-11이 열었다(ADR-137). */
 const hidden: ElementCheck[] = [
   { label: '잠정 카드 미노출', testId: 'metric-provisional', absent: true },
   { label: '변이 카드 미노출', testId: 'metric-mutation', absent: true },
-  { label: '규칙화 불가 카드 미노출', testId: 'metric-unrulable', absent: true },
-  { label: '추적성 결함 카드 미노출', testId: 'metric-traceability', absent: true },
   { label: '잠정 승인 문구 없음', text: '잠정 승인', absent: true },
   { label: '변이 검증됨 문구 없음', text: '변이 검증됨', absent: true },
-  { label: '규칙화 불가 문구 없음', text: /규칙화 불가/, absent: true },
-  { label: '추적성 결함 문구 없음', text: /추적성 결함/, absent: true },
   { label: '준수 추이 미노출', text: /추이/, absent: true },
 ];
 
@@ -294,15 +311,23 @@ const hidden: ElementCheck[] = [
 export const TOOLTIPS = {
   'metric-compliance-all': { text: '통과 / 판정 가능', kind: 'action' },
   'metric-compliance-confirmed': { text: '통과 / 판정 가능 · 확인됨 규칙만', kind: 'action' },
+  'metric-unrulable': { text: '규칙화 불가 / 요구사항', kind: 'action' },
+  'metric-traceability': { text: '규칙 없는 요구사항 1 · 부모 없는 규칙 1', kind: 'action' },
   'code-open-hint': { text: '링크 경유 열기 시도 수 · 링크 밖 열람 미집계', kind: 'press' },
 } as const satisfies Record<string, { text: string; kind: 'action' | 'press' }>;
 
 const metrics = (
-  { all, confirmed, retired }: { all: string; confirmed: string; retired: string },
+  {
+    all,
+    confirmed,
+    retired,
+    unrulable,
+    traceability,
+  }: { all: string; confirmed: string; retired: string; unrulable: string; traceability: string },
   cost: string,
 ): ElementCheck[] => [
   { label: '지표 영역', role: 'region', name: '지표' },
-  { label: '지표 카드 3개', testId: 'metric-label', count: 3 },
+  { label: '지표 카드 5개', testId: 'metric-label', count: 5 },
   { label: '준수 카드', testId: 'metric-compliance', role: 'group', name: '준수' },
   { label: '준수 이름', text: '준수' },
   { label: '준수 기준 2개', testId: 'metric-part-label', count: 2 },
@@ -325,6 +350,18 @@ const metrics = (
     text: `에이전트 폐기 규칙 ${retired}`,
     attributes: { title: '폐기 · 대체 누적' },
   },
+  {
+    label: '규칙화 불가 비율 카드',
+    testId: 'metric-unrulable',
+    role: 'button',
+    text: `규칙화 불가 비율 ${unrulable}`,
+  },
+  {
+    label: '추적성 결함 카드',
+    testId: 'metric-traceability',
+    role: 'button',
+    text: `추적성 결함 ${traceability}`,
+  },
   { label: '실행당 비용 카드', testId: 'metric-cost-per-run' },
   { label: '실행당 비용 이름', text: '실행당 비용' },
   { label: '실행당 비용 값', text: cost },
@@ -338,7 +375,10 @@ export const verificationChecklist = {
       title: 'BIVE',
       elements: [
         { label: '머리줄', testId: 'verification-basis', text: '판정 기준 main@a1f26b1' },
-        ...metrics({ all: '2 / 5', confirmed: '1 / 3', retired: '1' }, '$0.20'),
+        ...metrics(
+          { all: '2 / 5', confirmed: '1 / 3', retired: '1', unrulable: '1 / 3', traceability: '2' },
+          '$0.20',
+        ),
         { label: '코드 열람 영역', testId: 'code-open', role: 'region', name: '코드 열람' },
         { label: '코드 열람 사유 3종', testId: 'code-open-label', count: 3 },
         { label: '화면 오류 건수', text: '화면 오류 2' },
@@ -373,7 +413,10 @@ export const verificationChecklist = {
       title: 'BIVE',
       elements: [
         { label: '머리줄', testId: 'verification-basis', text: '판정 기준 없음' },
-        ...metrics({ all: '0 / 2', confirmed: '0 / 1', retired: '0' }, '없음'),
+        ...metrics(
+          { all: '0 / 2', confirmed: '0 / 1', retired: '0', unrulable: '없음', traceability: '0' },
+          '없음',
+        ),
         { label: '코드 열람 영역', testId: 'code-open', role: 'region', name: '코드 열람' },
         { label: '코드 열람 값 없음', testId: 'code-open-none', text: '없음' },
         { label: '코드 열람 사유 미표시', testId: 'code-open-reason', absent: true },

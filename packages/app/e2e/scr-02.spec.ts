@@ -537,6 +537,108 @@ test.describe('필터 칩 (수용 기준 3)', () => {
   });
 });
 
+test.describe('추적성 결함 · 규칙화 불가 (M3-11 #56 수용 기준 3, NRM-06 · NRM-08 · ADR-137)', () => {
+  /**
+   * 서버의 추적성 결함 (테스트 전용 데이터): 규칙 없는 요구사항 REQ-002. REQ-003은 규칙화 불가로 표시한 직후 아직 다시 읽지 않은
+   * 옛 목록에 남은 경우다(서버는 규칙화 불가를 빼지만 화면이 늦게 받은 목록에 있을 수 있다).
+   */
+  const traceability = {
+    requirementsWithoutRules: [REQUIREMENTS[1], REQUIREMENTS[2]].map((item) => ({
+      id: (item as Requirement).id,
+      displayId: (item as Requirement).displayId,
+    })),
+    parentlessRules: [],
+  };
+  const withDefects: MockResponses = {
+    'rule.list': { result: { rules: REQUIREMENT_RULES, traceability } },
+  };
+  const exceptionsOf = (page: Page, displayId: string): Promise<string[]> =>
+    page
+      .getByTestId('card')
+      .filter({ hasText: displayId })
+      .getByTestId('card-exception')
+      .allTextContents();
+
+  test('카드 2줄째에 "추적성 결함"(위험 색)과 "규칙화 불가"(경고 색)를 구분해 보이고, 규칙화 불가인 요구사항은 결함으로 보이지 않는다', async ({
+    page,
+  }) => {
+    await openScreen(page, withDefects);
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    // 순서: 추적성 결함 · 규칙화 불가 · 미확인 · 실패 (ADR-114)
+    await expect.poll(() => exceptionsOf(page, 'REQ-002')).toEqual(['추적성 결함', '미확인']);
+    expect(await exceptionsOf(page, 'REQ-003')).toEqual(['규칙화 불가']);
+    expect(await exceptionsOf(page, 'REQ-001')).toEqual([]);
+    const card = (id: string) => page.getByTestId('card').filter({ hasText: id });
+    await expect(
+      card('REQ-002').getByTestId('card-exception').filter({ hasText: '추적성 결함' }),
+    ).toHaveAttribute('data-tone', 'danger');
+    await expect(card('REQ-003').getByTestId('card-exception')).toHaveAttribute(
+      'data-tone',
+      'warning',
+    );
+  });
+
+  test('상태 칩에 추적성 결함 · 규칙화 불가가 따로 세어지고, 추적성 결함을 고르면 규칙 없는 요구사항만 남는다', async ({
+    page,
+  }) => {
+    await openScreen(page, withDefects);
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    await chipButton(page, 'status').click();
+    expect(await menuOptions(page)).toEqual([
+      ['정상', '1', false],
+      ['추적성 결함', '1', false],
+      ['규칙화 불가', '1', false],
+      ['미확인', '1', false],
+      ['실패', '0', true],
+    ]);
+    await page.getByTestId('filter-option').filter({ hasText: '추적성 결함' }).click();
+    await page.keyboard.press('Escape');
+    await expect(chipButton(page, 'status')).toHaveText('상태: 추적성 결함');
+    expect(await cardIds(page)).toEqual(['REQ-002']);
+    await expect(page.getByTestId('list-result')).toHaveText('3개 중 1개 · 초기화');
+  });
+
+  test('응답에 추적성 결함이 없으면(옛 응답) 결함을 보이지 않는다 (규칙이 없다고 지어내지 않음)', async ({
+    page,
+  }) => {
+    await openScreen(page, { 'rule.list': { result: { rules: [] } } });
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    await expect(page.getByTestId('card-exception').filter({ hasText: '추적성 결함' })).toHaveCount(
+      0,
+    );
+  });
+
+  test('규칙 작성 알림 하나에 rule.list를 한 번 다시 읽어 규칙 없이 끝난 요구사항이 결함으로 보인다 (다른 프로젝트의 알림은 무시)', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    await allSettled(bive, 'rule.list');
+    const before = (await callsOf(bive, 'rule.list')).length;
+    await bive.setResponse('rule.list', {
+      result: {
+        rules: REQUIREMENT_RULES,
+        traceability: {
+          ...traceability,
+          requirementsWithoutRules: traceability.requirementsWithoutRules.slice(0, 1),
+        },
+      },
+    });
+    await bive.emit('event.ruleWriter.changed', {
+      projectId: '01JZZZZZZZZZZZZZZZZZZZZZZZ',
+      requirementId: (REQUIREMENTS[1] as Requirement).id,
+    });
+    await bive.emit('event.ruleWriter.changed', {
+      projectId: PROJECT.id,
+      requirementId: (REQUIREMENTS[1] as Requirement).id,
+    });
+    await expect.poll(() => exceptionsOf(page, 'REQ-002')).toEqual(['추적성 결함', '미확인']);
+    await nextFrame(page);
+    await allSettled(bive, 'rule.list');
+    expect((await callsOf(bive, 'rule.list')).length).toBe(before + 1);
+  });
+});
+
 test.describe('프로젝트 전환 (ADR-034 · ADR-053)', () => {
   test('다른 프로젝트가 열리면 이전 목록 없이 로딩부터 하고, 필터를 비우고 새 프로젝트로 다시 부른다', async ({
     page,

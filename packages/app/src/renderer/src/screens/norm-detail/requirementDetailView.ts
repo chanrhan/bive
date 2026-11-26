@@ -3,6 +3,7 @@
 // - 값은 requirement.list 항목(본문 · 생성 주체) · rule.list(자식 규칙)에서만 만든다(NFR-03)
 // - 자식 규칙 = 부모 요구사항 ID가 이 요구사항인 규범(삭제 제외), 받은 순서(표시 ID 순, ADR-060)
 // - 직접 편집 저장은 본문이 공백만이거나 바뀌지 않았으면 하지 않는다(빈 본문은 서버도 거부, ADR-047)
+// - 규칙화 불가 표시는 사유가 공백만이면 보내지 않는다(서버도 -32001, ADR-137)
 import type { Requirement, RuleWithJudgment } from '@bive/shared';
 
 export const REQUIREMENT_DETAIL_TEXT = {
@@ -19,6 +20,12 @@ export const REQUIREMENT_DETAIL_TEXT = {
   confirmRemove: '삭제 확인',
   saveFailed: '요구사항 저장 실패',
   removeFailed: '요구사항 삭제 실패',
+  /** 규칙화 불가 (NRM-08, SCR-02 "규칙화 불가 표시 항목", ADR-137) */
+  unrulable: '규칙화 불가',
+  unrulableLabel: '규칙화 불가 사유',
+  unrulablePlaceholder: '사유',
+  unrulableConfirm: '확인',
+  unrulableFailed: '규칙화 불가 표시 실패',
 } as const;
 
 /** 요구사항의 자식 규칙: 부모가 이 요구사항이고 삭제되지 않은 규칙. 순서는 받은 그대로. */
@@ -27,6 +34,9 @@ export const childRulesOf = (
   rules: readonly RuleWithJudgment[],
 ): RuleWithJudgment[] =>
   rules.filter(({ rule }) => rule.parentRequirementId === requirementId && rule.deletedAt === null);
+
+/** 규칙화 불가 사유를 보낼 수 있는가: 공백만이 아닐 때 (빈 사유는 서버도 -32001로 거부, ADR-137). */
+export const canSubmitUnrulable = (reason: string): boolean => reason.trim().length > 0;
 
 /** 편집한 본문을 저장할 수 있는가: 공백만이 아니고 지금 본문과 다를 때. */
 export const canSaveEdit = (requirement: Pick<Requirement, 'text'>, draft: string): boolean =>

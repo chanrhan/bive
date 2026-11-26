@@ -5,6 +5,9 @@
 // - 예외: 판정 상태의 예외(실패 · 미판정 · 격리 · 재검증 필요, 1.4 상태 배지) 다음에 규범 예외(폐기 · 미확인). 미확인은 옛 '잠정'
 //   자리다(ADR-100 명세 변경 목록 SCR-03). 폐기된 규칙은 더 판정하지 않으므로(ADR-112) 판정 예외 없이 폐기 · 미확인만 보인다.
 //   변이 생존은 변이 데이터가 생기면(P1) 더한다. 값은 rule.list 결과(규칙 필드 · 최신 판정 · 폐기 사실)에서만 도출한다(NFR-03)
+// - 추적성 결함(부모 없는 규칙, SCR-03 "결함: 요구사항과 연결되지 않은 규칙 (내장 구조 규칙 제외)")은 규범 예외 맨 앞
+//   "추적성 결함"(danger, 요구사항 카드와 같은 낱말 · 색). 서버가 정한 목록(`rule.list`의 `traceability.parentlessRules`)에 든
+//   규칙만이고 화면은 다시 세지 않는다(내장 · 폐기 규칙은 서버가 뺀다, M3-11 #56 · ADR-137). 목록을 모르면 보이지 않는다
 // - 필터: 판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류. 변이는 지금 값이 없어 0건 비활성 (ADR-035). 블록 · 위험도는
 //   규칙의 대상 블록 · 위험도에서 센다(블록 값은 목록 규칙이 가진 이름 전부, 이름 순. M3-19 #64 · ADR-126).
 //   폐기된 규칙은 기본 목록에서 빠지고 [폐기 포함]을 켜야 보인다(ListView `hidden`)
@@ -15,6 +18,7 @@ import type {
   Risk,
   RuleKind,
   RuleWithJudgment,
+  Traceability,
 } from '@bive/shared';
 
 import type { FilterCriterion } from '../../components/ListView/filter.js';
@@ -143,7 +147,12 @@ export const whenCondition = (statement: string): string | null => {
   return condition.length > (when[1] ?? '').length ? condition : null;
 };
 
-/** 카드의 규범 예외 (판정 예외 다음, 이 순서로). */
+/** 카드의 규범 예외 (판정 예외 다음, 이 순서로: 추적성 결함 · 폐기 · 미확인). */
+export const TRACEABILITY_MARK: ExceptionMark = {
+  key: 'traceability',
+  label: '추적성 결함',
+  tone: 'danger',
+};
 export const RETIRED_MARK: ExceptionMark = { key: 'retired', label: '폐기', tone: 'warning' };
 export const UNCONFIRMED_MARK: ExceptionMark = {
   key: 'unconfirmed',
@@ -164,13 +173,22 @@ export interface RuleCardData {
   author: AuthorKind;
 }
 
-export const ruleCard = (item: RuleWithJudgment): RuleCardData => {
+/** 서버가 정한 부모 없는 규칙 ID (`rule.list`의 `traceability.parentlessRules`). 모르면 `null`. */
+export type RuleDefects = ReadonlySet<string> | null;
+
+export const ruleDefectsOf = (
+  traceability: Pick<Traceability, 'parentlessRules'> | null,
+): RuleDefects =>
+  traceability === null ? null : new Set(traceability.parentlessRules.map((item) => item.id));
+
+export const ruleCard = (item: RuleWithJudgment, defects: RuleDefects = null): RuleCardData => {
   const { rule, judgment } = item;
   const retired = isRetiredRule(item);
   // 폐기된 규칙의 판정은 폐기 전 기록이다(폐기 뒤 판정하지 않음): 카드에는 지금의 예외(폐기)만
   const statuses: BadgeStatus[] = retired ? [] : [{ kind: 'judgment', status: judgment.status }];
   const note = whenCondition(rule.statement);
   const exceptions: ExceptionMark[] = [];
+  if (defects?.has(rule.id) === true) exceptions.push(TRACEABILITY_MARK);
   if (retired) exceptions.push(RETIRED_MARK);
   if (rule.confirmation.state === 'unconfirmed') exceptions.push(UNCONFIRMED_MARK);
   return {

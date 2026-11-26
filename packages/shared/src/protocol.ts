@@ -254,6 +254,34 @@ export type RequirementGetParams = z.infer<typeof RequirementGetParams>;
 export const RequirementListParams = z.strictObject({ projectId: Ulid });
 export type RequirementListParams = z.infer<typeof RequirementListParams>;
 
+/** 규칙화 불가 사유 상한 (UTF-16 코드 단위, 규칙 진술 상한과 같다, ADR-137). */
+export const UNRULABLE_REASON_MAX = 4000;
+
+/**
+ * `requirement.markUnrulable`: 사람이 요구사항에 '규칙화 불가'를 표시하고 사유를 남긴다 (NRM-08, M3-11 #56, ADR-137).
+ * - 사람 주체만 받는다(에이전트 -32020, 저장소를 열기 전). 빈 사유(공백만 포함)는 스키마가 아니라 도메인 검증으로 거부한다
+ *   (-32001 `data.reason = UNRULABLE_REASON_REQUIRED`), 상한 초과는 -32001 `UNRULABLE_REASON_INVALID`
+ * - 없는 요구사항 -32004. 삭제된 요구사항 · 이미 규칙화 불가 · 효력 있는 자식 규칙이 있음은 -32009
+ *   (`data.reason` = {@link UnrulableConflictReason}). 이미 표시한 사유는 바꾸지 않는다(되돌리는 동작도 없다)
+ * - 기록은 요구사항 자체의 수정 주체 · 시각이다(승인 기록에 쓰지 않음, 요구사항의 사람 편집과 같다). 같은 트랜잭션에서 확인됨
+ * - 규칙 작성 세션 · 재판단을 띄우지 않는다
+ */
+export const RequirementMarkUnrulableParams = z.strictObject({
+  projectId: Ulid,
+  id: Ulid,
+  reason: z.string(),
+  author: Author,
+});
+export type RequirementMarkUnrulableParams = z.infer<typeof RequirementMarkUnrulableParams>;
+
+/** `requirement.markUnrulable`이 -32009로 거부하는 이유 (`error.data.reason`). */
+export const UnrulableConflictReason = z.enum([
+  'requirement_deleted',
+  'already_unrulable',
+  'has_rules',
+]);
+export type UnrulableConflictReason = z.infer<typeof UnrulableConflictReason>;
+
 /** create · update · delete · get 결과. 이후 이슈가 자식 규칙 등 필드를 더할 수 있게 객체로 감싼다. */
 export const RequirementResult = z.strictObject({ requirement: Requirement });
 export type RequirementResult = z.infer<typeof RequirementResult>;
@@ -318,7 +346,29 @@ export const RuleListParams = z.strictObject({
   includeRetired: z.boolean().optional(),
 });
 export type RuleListParams = z.infer<typeof RuleListParams>;
-export const RuleListResult = z.strictObject({ rules: z.array(RuleWithJudgment) });
+/**
+ * 추적성 결함 (NRM-06, M3-11 #56, ADR-137). 서버가 저장소에서 한 번 정하고 화면은 다시 세지 않는다. 목록은 표시 ID 순이다.
+ * - `requirementsWithoutRules`: 규칙 없는 요구사항 = 삭제되지 않았고 '규칙화 불가'가 아니며 효력 있는 자식 규칙(삭제 · 폐기 ·
+ *   잠정이 아닌 규칙)이 하나도 없는 요구사항. 자식 규칙이 모두 폐기된 요구사항도 든다(ADR-112)
+ * - `parentlessRules`: 부모 없는 규칙 = 효력 있고 내장(`builtin`: 구조 규칙 · 계약 검사 규칙)이 아니며 부모 요구사항이 없거나
+ *   삭제된 규칙
+ */
+export const Traceability = z.strictObject({
+  requirementsWithoutRules: z.array(
+    z.strictObject({ id: Ulid, displayId: displayIdSchema('REQ') }),
+  ),
+  parentlessRules: z.array(z.strictObject({ id: Ulid, displayId: displayIdSchema('RULE') })),
+});
+export type Traceability = z.infer<typeof Traceability>;
+
+/**
+ * `rule.list` 결과. `traceability`는 같은 저장소 읽기에서 정한 추적성 결함이다(요구사항 · 규칙 화면이 카드 예외에 쓴다, ADR-137).
+ * 서버는 늘 싣는다. 이 칸이 없는 응답(옛 응답)을 읽는 화면은 결함을 모르는 것으로 본다
+ */
+export const RuleListResult = z.strictObject({
+  rules: z.array(RuleWithJudgment),
+  traceability: Traceability.optional(),
+});
 export type RuleListResult = z.infer<typeof RuleListResult>;
 
 /** `rule.get`: ID로 1건. 제안 ID는 규칙이 아니므로 -32004. */
@@ -460,6 +510,10 @@ export const DomainErrorReason = {
   RuleEditInvalid: 'RULE_EDIT_INVALID',
   /** 규칙 직접 편집에 바뀐 것이 없다 */
   RuleEditNoChange: 'RULE_EDIT_NO_CHANGE',
+  /** 규칙화 불가 사유가 비었다 (공백만 포함, NRM-08 · ADR-137) */
+  UnrulableReasonRequired: 'UNRULABLE_REASON_REQUIRED',
+  /** 규칙화 불가 사유가 상한을 넘는다 (ADR-137) */
+  UnrulableReasonInvalid: 'UNRULABLE_REASON_INVALID',
 } as const;
 export type DomainErrorReason = (typeof DomainErrorReason)[keyof typeof DomainErrorReason];
 
@@ -1165,6 +1219,14 @@ export const VerificationSummaryResult = z
      * 대상 규칙 수(전체 누적, 규칙마다 1)
      */
     agentRetiredRules: z.int().nonnegative(),
+    /** 추적성 결함 (NRM-06, ADR-137): `rule.list`의 `traceability`와 같은 함수로 정한다 */
+    traceability: Traceability,
+    /**
+     * 규칙화 불가 비율 (NRM-08, ADR-137): '규칙화 불가' 요구사항 수 / 삭제되지 않은 요구사항 수. 화면은 `total`이 0이면 '없음'이다
+     */
+    unrulable: z
+      .strictObject({ count: z.int().nonnegative(), total: z.int().nonnegative() })
+      .refine(({ count, total }) => count <= total, '규칙화 불가 수가 요구사항 수보다 큽니다'),
     costPerRunUsd: UsdOrNull,
     rules: z.array(VerificationRuleRow),
     pipeline: VerificationPipeline.nullable(),
@@ -1405,6 +1467,10 @@ export const METHODS = {
   'requirement.delete': { params: RequirementDeleteParams, result: RequirementResult },
   'requirement.get': { params: RequirementGetParams, result: RequirementResult },
   'requirement.list': { params: RequirementListParams, result: RequirementListResult },
+  'requirement.markUnrulable': {
+    params: RequirementMarkUnrulableParams,
+    result: RequirementResult,
+  },
   'rule.list': { params: RuleListParams, result: RuleListResult },
   'rule.get': { params: RuleGetParams, result: RuleGetResult },
   'rule.update': { params: RuleUpdateParams, result: RuleUpdateResult },

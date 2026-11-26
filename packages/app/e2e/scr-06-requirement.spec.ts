@@ -427,6 +427,200 @@ test.describe('직접 편집 (수용 기준 3)', () => {
   });
 });
 
+test.describe('[규칙화 불가] (#56 M3-11 수용 기준 2, NRM-08 · ADR-137)', () => {
+  /** 규칙 없는 요구사항 = REQ-002 (서버가 정한 추적성 결함, 테스트 전용 데이터). 자식 규칙은 없다. */
+  const BARE = REQUIREMENTS[1] as Requirement;
+  const UNRULABLE = REQUIREMENTS[2] as Requirement;
+  const traceability = {
+    requirementsWithoutRules: [{ id: BARE.id, displayId: BARE.displayId }],
+    parentlessRules: [],
+  };
+  const REASON = '측정 기준 없음 · 체감 속도';
+  const MARKED: Requirement = {
+    ...BARE,
+    unrulable: { reason: REASON },
+    updatedAt: '2026-10-17T00:00:00.000Z',
+    updatedBy: { kind: 'human' },
+    confirmation: {
+      state: 'confirmed',
+      at: '2026-10-17T00:00:00.000Z',
+      by: { kind: 'human' },
+      basis: { kind: 'requirement_record', at: '2026-10-17T00:00:00.000Z' },
+    },
+  };
+
+  /** 요구사항 화면을 열고 그 표시 ID의 카드를 고른다 (규칙 목록에는 PARENT의 자식 규칙만, 추적성 결함은 REQ-002). */
+  const openOne = async (
+    page: Page,
+    requirement: Requirement,
+    responses: MockResponses = {},
+  ): Promise<BiveMock> => {
+    const bive = await mockBive(page, {
+      responses: {
+        'system.status': { result: STATUS },
+        'project.current': { result: { project: PROJECT } },
+        'requirement.list': { result: { requirements: REQUIREMENTS } },
+        'rule.list': { result: { rules: RULES, traceability } },
+        'judgment.list': { result: { judgments: [] } },
+        'requirement.markUnrulable': { result: { requirement: MARKED } },
+        'blocks.get': { result: BLOCKS },
+        ...responses,
+      },
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: '요구사항', exact: true }).click();
+    await page.getByTestId('card').filter({ hasText: requirement.displayId }).click();
+    await expect(page.getByTestId('requirement-detail')).toHaveAttribute(
+      'data-selected-id',
+      requirement.id,
+    );
+    return bive;
+  };
+  const markButton = (page: Page) => page.getByTestId('requirement-unrulable');
+  const reasonInput = (page: Page) => page.getByTestId('requirement-unrulable-input');
+  const confirmButton = (page: Page) => page.getByTestId('requirement-unrulable-confirm');
+
+  test('[규칙화 불가]는 서버가 규칙 없는 요구사항으로 정한 것에만 있다 (규칙 있는 요구사항 · 이미 규칙화 불가인 요구사항에는 없음)', async ({
+    page,
+  }) => {
+    await openOne(page, BARE);
+    await expect(markButton(page)).toHaveText('규칙화 불가');
+    await page.getByTestId('card').filter({ hasText: PARENT.displayId }).click();
+    await expect(page.getByTestId('requirement-detail')).toHaveAttribute(
+      'data-selected-id',
+      PARENT.id,
+    );
+    await expect(page.getByTestId('requirement-edit')).toBeVisible();
+    await expect(markButton(page)).toHaveCount(0);
+    await page.getByTestId('card').filter({ hasText: UNRULABLE.displayId }).click();
+    await expect(page.getByTestId('requirement-edit')).toBeVisible();
+    await expect(markButton(page)).toHaveCount(0);
+    // 이미 규칙화 불가: 상세에 "규칙화 불가" 줄과 사유
+    await expect(page.getByTestId('requirement-field-unrulable')).toContainText('규칙화 불가');
+    await expect(page.getByTestId('requirement-unrulable-reason')).toHaveText('측정 기준 없음');
+  });
+
+  test('누르면 사유 입력이 열리고, 빈 사유(공백만)면 [확인]이 꺼져 Ctrl+Enter로도 보내지 않는다. 사유를 쓰면 [확인] 1회가 requirement.markUnrulable(사람, 사유 원문)을 부르고 상세 · 카드에 규칙화 불가와 사유가 보인다', async ({
+    page,
+  }) => {
+    const bive = await openOne(page, BARE);
+    await expect(
+      page.getByTestId('card').filter({ hasText: BARE.displayId }).getByTestId('card-exception'),
+    ).toHaveText(['추적성 결함', '미확인']);
+    await markButton(page).click();
+    await expect(reasonInput(page)).toBeFocused();
+    await expect(reasonInput(page)).toHaveAccessibleName('규칙화 불가 사유');
+    // 편집 · 삭제 버튼은 입력 중 숨는다 (본문 편집과 같은 틀)
+    await expect(page.getByTestId('requirement-edit')).toHaveCount(0);
+    await expect(confirmButton(page)).toBeDisabled();
+    for (const blank of ['   ', '　\t', '\n']) {
+      await reasonInput(page).fill(blank);
+      await expect(confirmButton(page)).toBeDisabled();
+      await reasonInput(page).press('Control+Enter');
+    }
+    expect(await callsOf(bive, 'requirement.markUnrulable')).toHaveLength(0);
+
+    await reasonInput(page).fill(REASON);
+    await expect(confirmButton(page)).toBeEnabled();
+    await bive.setResponse('requirement.list', {
+      result: { requirements: REQUIREMENTS.map((item) => (item.id === BARE.id ? MARKED : item)) },
+    });
+    await confirmButton(page).click();
+    await expect(page.getByTestId('requirement-unrulable-reason')).toHaveText(REASON);
+    expect(await callsOf(bive, 'requirement.markUnrulable')).toEqual([
+      {
+        method: 'requirement.markUnrulable',
+        params: { projectId: PROJECT.id, id: BARE.id, reason: REASON, author: { kind: 'human' } },
+      },
+    ]);
+    await expect(reasonInput(page)).toHaveCount(0);
+    await expect(markButton(page)).toHaveCount(0);
+    // 카드: 규칙화 불가만(아직 다시 읽지 않은 규칙 목록의 결함 표시는 앞서지 못한다), 확인됨이라 미확인 없음
+    await expect(
+      page.getByTestId('card').filter({ hasText: BARE.displayId }).getByTestId('card-exception'),
+    ).toHaveText(['규칙화 불가']);
+    await expect(page.getByTestId('requirement-action-error')).toHaveCount(0);
+  });
+
+  test('[취소] · Esc는 호출 없이 닫는다', async ({ page }) => {
+    const bive = await openOne(page, BARE);
+    await markButton(page).click();
+    await reasonInput(page).fill(REASON);
+    await page.getByTestId('requirement-unrulable-cancel').click();
+    await expect(reasonInput(page)).toHaveCount(0);
+    await markButton(page).click();
+    await expect(reasonInput(page)).toHaveValue('');
+    await reasonInput(page).fill(REASON);
+    await reasonInput(page).press('Escape');
+    await expect(reasonInput(page)).toHaveCount(0);
+    await expect(markButton(page)).toBeVisible();
+    expect(await callsOf(bive, 'requirement.markUnrulable')).toHaveLength(0);
+  });
+
+  test('표시 중 [확인] 연속 클릭(같은 틱) · Ctrl+Enter 두 번은 requirement.markUnrulable을 한 번만 부르고, 응답 뒤 실패 문구가 없다', async ({
+    page,
+  }) => {
+    const bive = await openOne(page, BARE, {
+      'requirement.markUnrulable': { result: { requirement: MARKED }, delayMs: 500 },
+    });
+    await markButton(page).click();
+    await reasonInput(page).fill(REASON);
+    await bive.setResponse('requirement.list', {
+      result: { requirements: REQUIREMENTS.map((item) => (item.id === BARE.id ? MARKED : item)) },
+    });
+    // 같은 틱에 두 번 누른다 (버튼이 비활성화되기 전)
+    await confirmButton(page).evaluate((button: HTMLButtonElement) => {
+      button.click();
+      button.click();
+    });
+    await expect(confirmButton(page)).toBeDisabled();
+    await expect(reasonInput(page)).toHaveAttribute('aria-busy', 'true');
+    await reasonInput(page).press('Control+Enter');
+    await reasonInput(page).press('Control+Enter');
+    await expect(page.getByTestId('requirement-unrulable-reason')).toHaveText(REASON);
+    await allSettled(bive, 'requirement.markUnrulable');
+    expect(await callsOf(bive, 'requirement.markUnrulable')).toHaveLength(1);
+    await expect(page.getByTestId('requirement-action-error')).toHaveCount(0);
+  });
+
+  test('거부되면 입력을 남긴 채 "규칙화 불가 표시 실패"이고 목록은 다시 읽지 않는다', async ({
+    page,
+  }) => {
+    const bive = await openOne(page, BARE, {
+      'requirement.markUnrulable': {
+        error: { code: -32009, message: '충돌', data: { reason: 'has_rules' } },
+      },
+    });
+    await allSettled(bive, 'requirement.list');
+    const listsBefore = (await callsOf(bive, 'requirement.list')).length;
+    await markButton(page).click();
+    await reasonInput(page).fill(REASON);
+    await reasonInput(page).press('Control+Enter');
+    await expect(page.getByTestId('requirement-action-error')).toHaveText('규칙화 불가 표시 실패');
+    await expect(
+      page.getByRole('alert').filter({ hasText: '규칙화 불가 표시 실패' }),
+    ).toBeVisible();
+    await expect(reasonInput(page)).toHaveValue(REASON);
+    await expect(confirmButton(page)).toBeEnabled();
+    expect(await callsOf(bive, 'requirement.markUnrulable')).toHaveLength(1);
+    expect(await callsOf(bive, 'requirement.list')).toHaveLength(listsBefore);
+  });
+
+  test('사유의 숨은 글자는 보이는 표기로 그린다 (U+202E)', async ({ page }) => {
+    const hidden = { ...UNRULABLE, unrulable: { reason: '측정\u202e기준 없음' } };
+    await openOne(page, hidden, {
+      'requirement.list': {
+        result: {
+          requirements: REQUIREMENTS.map((item) => (item.id === UNRULABLE.id ? hidden : item)),
+        },
+      },
+    });
+    await expect(page.getByTestId('requirement-unrulable-reason')).toHaveText(
+      '측정\\u202e기준 없음',
+    );
+  });
+});
+
 test.describe('1280×800 창의 버튼 문구 (#175)', () => {
   // 기본 창: 사이드바 · 목록 · 오른쪽 채팅(360px 고정)을 빼면 상세 폭이 가장 좁다
   test.use({ viewport: { width: 1280, height: 800 } });
