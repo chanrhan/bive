@@ -1978,7 +1978,8 @@ export class RuleWriterService implements RuleWriterLauncher {
             ? [...targets.map((rule) => rule.id), ...request.ruleIds]
             : request.ruleIds,
       },
-      { isKnownCase, blockBasisRuleIds: runTargets },
+      { isKnownCase },
+      { blockBasisRuleIds: runTargets },
     );
     // 세션 행은 이 실행 · 판단을 청한 단계 시도에 묶는다(실행 안 판단 세션, 저장소가 규칙 작성 역할만 단계 역할과 달라도 받는다):
     // 하루 합계와 실행 합계 모두에 들고 `run.get`의 세션 목록에 나온다. 재기동 때는 그 실행의 세션으로 닫힌다 (M7-12, ADR-118)

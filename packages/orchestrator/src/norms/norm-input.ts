@@ -18,7 +18,7 @@
 // - 효력 있는 계약이 있으면 규칙 절 뒤에 계약 절(표시 ID · 종류 · 원본 파일)을 싣는다(M3-04 #49, ADR-100 K1 · A14, ADR-129). 같은
 //   표시 값 변환 · 상한 · 줄이기(최근 등록 순으로 상한까지)를 따른다. 계약 내용은 싣지 않는다(목록만). 계약이 없으면 절이 없다
 //   (지금까지의 작업 지시 그대로). 계약 검사 규칙의 부모 줄은 그 계약을 가리킨다
-// - 대상 블록으로 고르기(M3-29 #231, ADR-100 K1, ADR-140): 블록 선언이 있고 기준 규칙(초점 규칙과 `blockBasisRuleIds`)이 모두 대상
+// - 대상 블록으로 고르기(M3-29 #231, ADR-100 K1, ADR-140): 블록 선언이 있고 기준 규칙(초점 규칙과 넷째 인자의 `blockBasisRuleIds`)이 모두 대상
 //   블록을 가지면, 효력 있는 규범 가운데 기준 블록과 이름이 겹치는 규칙 · 대상 블록이 없는 규칙 · 기준 규칙 자신, 그 규칙들의 부모
 //   요구사항 · 규칙이 없는 요구사항 · 초점 요구사항, 연결 계약만 남긴다({@link blockScopeOf}). 고른 범위에 A15의 줄이기를 그대로
 //   쓴다(먼저 고르고 그다음 줄인다). 블록으로 뺀 수(`outOfBlock`)와 상한으로 뺀 수(`omitted`)는 따로 남는다. 선언이 없거나 기준을
@@ -260,9 +260,12 @@ export interface NormInputOptions {
    * 수(`casesUnknown`)로만 남는다
    */
   readonly isKnownCase: CaseNameFilter;
+}
+
+/** 대상 블록으로 고를 때의 선택 (M3-29, ADR-140). 블록 선언이 없으면 쓰이지 않는다. */
+export interface NormInputBlockOptions {
   /**
-   * 대상 블록으로 고를 때 기준에 더하는 규칙 (초점 표시 · 줄이기의 우선은 받지 않는다, M3-29 · ADR-140). 이의 판단 세션이 실행의
-   * 대상 규칙을 기준에 더할 때 쓴다. 블록 선언이 없으면 쓰이지 않는다
+   * 고르는 기준에 더하는 규칙 (초점 표시 · 줄이기의 우선은 받지 않는다). 이의 판단 세션이 실행의 대상 규칙을 기준에 더할 때 쓴다
    */
   readonly blockBasisRuleIds?: readonly string[];
 }
@@ -358,6 +361,7 @@ export const collectNormInput = (
   store: ProjectStore,
   focus: NormInputFocus,
   options: NormInputOptions,
+  blockOptions: NormInputBlockOptions = {},
 ): NormInput => {
   const limits = NORM_INPUT_LIMITS;
   const allRequirements = effectiveRequirements(store);
@@ -373,7 +377,7 @@ export const collectNormInput = (
   }
   const scope = blockScopeOf(
     blocks !== null,
-    [...new Set([...focus.ruleIds, ...(options.blockBasisRuleIds ?? [])])],
+    [...new Set([...focus.ruleIds, ...(blockOptions.blockBasisRuleIds ?? [])])],
     focusRequirements,
     (ruleId) => store.rules.get(ruleId),
     allRequirements,

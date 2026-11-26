@@ -393,11 +393,9 @@ describe('고르는 규칙: 대상 블록과 겹치는 규칙 · 그 부모 요�
     const { store } = openStore();
     const w = seedWorld(store, { declared: true });
     // 초점 = 블록 밖 auth 규칙, 기준에 더함 = health 대상 규칙
-    const input = collectNormInput(
-      store,
-      { requirementIds: [], ruleIds: [w.auth.id] },
-      { ...NO_CASES, blockBasisRuleIds: [w.target.id] },
-    );
+    const input = collectNormInput(store, { requirementIds: [], ruleIds: [w.auth.id] }, NO_CASES, {
+      blockBasisRuleIds: [w.target.id],
+    });
     expect(input.summary.blocks).toEqual(['auth', 'health']);
     const shown = new Map(input.rules.map((entry) => [entry.displayId, entry.focus]));
     expect(shown.get(w.auth.displayId)).toBe(true);
@@ -612,11 +610,9 @@ describe('블록 선언이 없거나 기준 규칙에 대상 블록이 없으면
     // 기준에 더한 규칙이 비어도 전체
     expectWhole(
       store,
-      collectNormInput(
-        store,
-        { requirementIds: [], ruleIds: [w.target.id] },
-        { ...NO_CASES, blockBasisRuleIds: [w.legacy.id] },
-      ),
+      collectNormInput(store, { requirementIds: [], ruleIds: [w.target.id] }, NO_CASES, {
+        blockBasisRuleIds: [w.legacy.id],
+      }),
     );
   });
 
