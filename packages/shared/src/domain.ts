@@ -1856,10 +1856,21 @@ export const ModelUsage = z.strictObject({
 });
 export type ModelUsage = z.infer<typeof ModelUsage>;
 
-/** 규범 입력의 한 종류 수: 효력 있는 전체 · 실은 것 · 빠진 것 (ADR-106 · ADR-108). */
+/**
+ * 규범 입력의 한 종류 수: 효력 있는 전체 · 실은 것 · 상한으로 빠진 것 (ADR-106 · ADR-108). 대상 블록으로 골랐으면 블록 밖이라 뺀
+ * 수(`outOfBlock`)가 따로 있다(M3-29 #231, ADR-140. 고르지 않은 기록은 옛 모양 그대로).
+ */
 export const SessionNormInputCount = z
-  .strictObject({ total: NonNegativeInt, included: NonNegativeInt, omitted: NonNegativeInt })
-  .refine((count) => count.total === count.included + count.omitted, '전체 = 실은 것 + 빠진 것');
+  .strictObject({
+    total: NonNegativeInt,
+    included: NonNegativeInt,
+    omitted: NonNegativeInt,
+    outOfBlock: NonNegativeInt.optional(),
+  })
+  .refine(
+    (count) => count.total === count.included + count.omitted + (count.outOfBlock ?? 0),
+    '전체 = 실은 것 + 빠진 것 + 블록 밖',
+  );
 export type SessionNormInputCount = z.infer<typeof SessionNormInputCount>;
 
 /**
@@ -1874,6 +1885,8 @@ export const SessionNormInput = z
       rules: SessionNormInputCount,
       contracts: SessionNormInputCount.optional(),
       truncated: z.boolean(),
+      /** 대상 블록으로 골랐을 때만: 기준 블록 이름 (M3-29, ADR-140) */
+      blocks: z.array(BlockName).min(1).optional(),
     }),
     requirementDisplayIds: z.array(displayIdSchema('REQ')),
     ruleDisplayIds: z.array(displayIdSchema('RULE')),
@@ -1894,6 +1907,15 @@ export const SessionNormInput = z
         input.summary.rules.omitted > 0 ||
         (input.summary.contracts?.omitted ?? 0) > 0),
     '잘림은 빠진 항목이 있을 때만',
+  )
+  .refine(
+    (input) =>
+      [input.summary.requirements, input.summary.rules, input.summary.contracts].every(
+        (count) =>
+          count === undefined ||
+          (count.outOfBlock === undefined) === (input.summary.blocks === undefined),
+      ),
+    '블록 밖 수는 대상 블록으로 골랐을 때만',
   );
 export type SessionNormInput = z.infer<typeof SessionNormInput>;
 
