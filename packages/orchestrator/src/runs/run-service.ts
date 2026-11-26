@@ -15,6 +15,10 @@
 // - 단계 종료(`completeStep`)는 상태 저장 1회 = 트랜잭션 1회다 (RUN-01). 실패 · 회귀 · 중단 · 재개처럼 단계 순서를
 //   벗어나는 전이는 엔진(M1-14)이 `store.runs.transition`으로 직접 저장한다
 // - 엔진 · 상태 기계 · 세션 실행은 M1-14, 워크트리 · 브랜치는 M1-13이 맡는다
+// - 실행 유형 (M3-06 #51, RUN-07, ADR-136): 사람의 [실행]은 유형을 받거나(`type`) 대상 규칙으로 정한다(인수 테스트 검사 규칙만 = A,
+//   정적 검사 규칙(내장 구조 규칙 · 계약 검사 규칙)만 = B, 섞이면 거부). B는 정적 검사 규칙만, A · C · D는 인수 테스트 검사 규칙만
+//   받는다. 실행기가 없는 계약 종류의 계약 검사 규칙은 판정할 수 없어 대상으로 받지 않는다. 자동 시작 · 다시 시작 · 편집 뒤 시작은
+//   지금처럼 유형 A만 만든다(그 길에는 정적 검사 규칙이 대상으로 오지 않는다)
 import {
   type ApprovalLogEntry,
   type AgentRole,
@@ -25,15 +29,17 @@ import {
   isFinalStepStatus,
   M1_RUN_TYPE,
   RUN_STEP_PLANS,
+  type Rule,
   type Run,
   type RunCreateResult,
   type RunStarter,
   type RunStatus,
+  type RunType,
+  runTypeRoles,
   type Settings,
   type Step,
   STEP_ROLES,
   type StepKind,
-  stepRoles,
   type Ulid,
 } from '@bive/shared';
 import {
@@ -46,7 +52,8 @@ import {
 } from '@bive/store';
 
 import { runEnding } from '../engine/run-ending.js';
-import { ineffectiveRuleIds } from '../norms/effective.js';
+import { effectiveContracts, ineffectiveRuleIds } from '../norms/effective.js';
+import { contractRunnerOf } from '../steps/contract-check.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RpcError } from '../ipc/server.js';
 import { type AutoStartBlock, autoStartBlock } from '../settings/auto-start-gate.js';
@@ -57,6 +64,8 @@ export interface RunCreateInput {
   readonly ruleIds: readonly Ulid[];
   /** 실행 시작 확인 주체. 사람만 받는다 */
   readonly author: Author;
+  /** 실행 유형 (RUN-07). 생략하면 대상 규칙으로 정한다(`resolveRunType`) */
+  readonly type?: RunType;
 }
 
 /** 요청이 들어온 연결 (승인 기록 `clientId`). */
@@ -186,15 +195,18 @@ export const saveNewRun = (
     readonly runId: Ulid;
     readonly ruleIds: readonly Ulid[];
     readonly startedBy: RunStarter;
+    /** 실행 유형 (생략하면 유형 A: 자동 시작 · 다시 시작 · 편집 뒤 시작) */
+    readonly type?: RunType;
   },
   at: string,
   newId: () => Ulid,
 ): RunDetail => {
   const project = store.getProject();
   if (project === null) throw new NotFoundError('프로젝트', store.projectId);
-  const type = M1_RUN_TYPE;
+  const type = input.type ?? M1_RUN_TYPE;
   const plan: readonly StepKind[] = RUN_STEP_PLANS[type];
-  const { budgetSnapshot, modelSnapshot } = snapshotSettings(settings, stepRoles(plan));
+  // 예산 · 모델 스냅샷은 그 유형이 실제로 쓰는 역할만 (생략 단계의 역할은 넣지 않는다, ADR-061 · ADR-136)
+  const { budgetSnapshot, modelSnapshot } = snapshotSettings(settings, runTypeRoles(type));
   return store.runs.create({
     id: input.runId,
     type,
@@ -218,27 +230,89 @@ export const saveNewRun = (
 };
 
 /**
- * 내장 구조 규칙은 사람의 [실행] 대상으로 받지 않는다 (M3-03 #48, ADR-127). 내장 구조 규칙은 인수 테스트가 아니라 구조 검사로 판정하는
- * 규칙이라 지금 파이프라인(유형 A: 테스트 작성 · Red 확인)에 맞지 않는다. 정적 검사 규칙의 실행 유형(M3-06)이 들어오면 그 이슈가
- * 이 거부를 바꾼다. 내장 구조 규칙은 대상이 아니어도 모든 검사 단계 · 병합 재검사에서 판정된다.
- * @throws {ConflictError} 대상에 내장 구조 규칙이 있음 (-32009, 아무것도 남지 않는다)
+ * 정적 검사 규칙인지 (RUN-07 유형 B의 대상): 내장 구조 규칙(`builtin` · 검사 종류 `structure`)과 계약 검사 규칙(`builtin` · 계약 칸,
+ * 검사 종류 `contract`). 판정은 인수 테스트가 아니라 검사 단계의 구조 · 계약 검사가 한다(ADR-127 · ADR-132). 그 밖의 규칙(사람 ·
+ * 에이전트가 만든 규칙)은 검사 종류와 무관하게 인수 테스트로 판정하는 규칙이다(ADR-061: 지금 유형 A의 대상 그대로).
  */
-const assertNoBuiltinTarget = (store: ProjectStore, ruleIds: readonly Ulid[]): void => {
-  for (const id of ruleIds) {
+export const isStaticCheckRule = (
+  rule: Pick<Rule, 'builtin' | 'checkKinds' | 'contractId'>,
+): boolean =>
+  rule.builtin &&
+  (rule.contractId === null
+    ? rule.checkKinds.length > 0 && rule.checkKinds.every((kind) => kind === 'structure')
+    : rule.checkKinds.length > 0 && rule.checkKinds.every((kind) => kind === 'contract'));
+
+/**
+ * 실행 유형을 정하고 대상 규칙이 그 유형에 맞는지 본다 (RUN-07, ADR-136). 없는 규칙은 여기서 보지 않는다(뒤의 저장이 -32004).
+ * - `type` 생략: 대상이 모두 정적 검사 규칙이면 B, 모두 인수 테스트 검사 규칙이면 A, 섞이면 거부
+ * - B: 정적 검사 규칙만. 계약 검사 규칙은 계약 종류에 실행기가 있어야 한다(판정할 수 없는 대상으로 구현 세션을 돌리지 않는다)
+ * - A · C · D: 인수 테스트 검사 규칙만 (정적 검사 규칙은 테스트 작성 · Red/Green 확인 · 구현 판정에 맞지 않는다)
+ * 내장 규칙 · 계약 검사 규칙은 대상이 아니어도 모든 검사 단계 · 병합 재검사에서 판정된다.
+ * @throws {ConflictError} 섞임 · 유형에 맞지 않는 대상 · 실행기 없는 계약 종류 (-32009, 아무것도 남지 않는다)
+ */
+export const resolveRunType = (
+  store: ProjectStore,
+  ruleIds: readonly Ulid[],
+  requested: RunType | undefined,
+): RunType => {
+  const rules = ruleIds.flatMap((id) => {
     const rule = store.rules.get(id);
-    if (rule?.builtin === true) {
+    return rule === null ? [] : [rule];
+  });
+  const staticRules = rules.filter(isStaticCheckRule);
+  const testRules = rules.filter((rule) => !isStaticCheckRule(rule));
+  // 정적 검사 규칙이 아닌 내장 규칙(지금은 없다)은 어느 유형으로도 받지 않는다
+  const odd = testRules.find((rule) => rule.builtin);
+  if (odd !== undefined) {
+    throw new ConflictError('규칙', odd.displayId, '실행 대상으로 받지 않는 내장 규칙입니다');
+  }
+  const type = requested ?? (staticRules.length > 0 && testRules.length === 0 ? 'B' : 'A');
+  if (requested === undefined && staticRules.length > 0 && testRules.length > 0) {
+    throw new ConflictError(
+      '규칙',
+      (staticRules[0] as Rule).displayId,
+      '정적 검사 규칙과 인수 테스트 검사 규칙을 한 실행의 대상으로 함께 받지 않습니다',
+    );
+  }
+  if (type === 'B') {
+    const wrong = testRules[0];
+    if (wrong !== undefined) {
       throw new ConflictError(
         '규칙',
-        rule.displayId,
-        '내장 구조 규칙은 실행 대상으로 받지 않습니다',
+        wrong.displayId,
+        '정적 검사 실행은 구조 검사 · 계약 검사 규칙만 대상으로 받습니다',
       );
     }
+    const contracts = staticRules.some((rule) => rule.contractId !== null)
+      ? effectiveContracts(store)
+      : [];
+    for (const rule of staticRules) {
+      if (rule.contractId === null) continue;
+      const contract = contracts.find((item) => item.id === rule.contractId) ?? null;
+      if (contract === null || contractRunnerOf(contract) === null) {
+        throw new ConflictError(
+          '규칙',
+          rule.displayId,
+          '검사 실행기가 없는 계약 종류의 규칙은 실행 대상으로 받지 않습니다',
+        );
+      }
+    }
+    return type;
   }
+  const wrong = staticRules[0];
+  if (wrong !== undefined) {
+    throw new ConflictError(
+      '규칙',
+      wrong.displayId,
+      '구조 검사 · 계약 검사 규칙은 정적 검사 실행의 대상으로만 받습니다',
+    );
+  }
+  return type;
 };
 
 /**
  * 실행을 만든다(실행 시작 확인): `saveNewRun`과 승인 기록 `run_start`(대상 규칙 포함)를 한 트랜잭션으로.
- * 판단 순서: 주체(-32020) → 설정(-32010) → 내장 구조 규칙(-32009) → 대상 규칙(없음 -32004 · 삭제됨 -32009).
+ * 판단 순서: 주체(-32020) → 설정(-32010) → 유형 · 대상 종류(`resolveRunType`, -32009) → 대상 규칙(없음 -32004 · 삭제됨 -32009).
  * @throws {RpcError} -32020 에이전트 주체 · -32010 설정 미비
  * @throws {NotFoundError} 대상 규칙이 없음
  * @throws {ConflictError} 대상 규칙이 삭제됨
@@ -253,13 +327,13 @@ export const createRun = (
   return store.transaction(() => {
     // 설정 검사(M1 필수 역할, ADR-057)와 스냅샷을 같은 트랜잭션에서 읽는다
     const settings = requireRunnableSettings(store);
-    assertNoBuiltinTarget(store, input.ruleIds);
+    const type = resolveRunType(store, input.ruleIds, input.type);
     const at = timestamp(clock);
     const runId = clock.newId();
     const detail = saveNewRun(
       store,
       settings,
-      { runId, ruleIds: input.ruleIds, startedBy: { kind: 'human' } },
+      { runId, ruleIds: input.ruleIds, startedBy: { kind: 'human' }, type },
       at,
       clock.newId,
     );

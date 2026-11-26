@@ -72,12 +72,12 @@ export const createRunHandlers = ({ biveHome, now, engine }: RunHandlerDeps): Ru
   const clock: RunClock = { now, newId: createUlidGenerator(now) };
 
   return {
-    'run.create': ({ projectId, ruleIds, author }, context) => {
+    'run.create': ({ projectId, ruleIds, author, type }, context) => {
       assertHumanRunStarter(author);
       const created = withProjectStore(biveHome, projectId, (store) =>
         createRun(
           store,
-          { ruleIds, author },
+          { ruleIds, author, ...(type === undefined ? {} : { type }) },
           { clientId: `pipe-${String(context.connectionId)}` },
           clock,
         ),

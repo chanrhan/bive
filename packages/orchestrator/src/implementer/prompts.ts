@@ -3,6 +3,8 @@
 // 효력 있는 규범(요구사항 · 규칙)은 작업 지시에 규칙 작성 역할과 같은 틀 · 상한의 읽기 전용 자료로 싣는다(M7-08 #220, ADR-100
 // K1 · A14, ADR-108). 도구 목록은 그대로다(규범은 도구가 아니라 작업 지시로만). 머리의 대상 규칙 값 · 인수 테스트 위치와 앞 시도의
 // 사유도 표시 값이라 틀보다 앞에서 표시 줄을 흉내 내지 못한다(ADR-108).
+import type { RunType } from '@bive/shared';
+
 import { ACCEPTANCE_DIR } from '../judge/config.js';
 import {
   indentedText,
@@ -41,8 +43,25 @@ export interface ImplementerPromptRule {
 }
 
 /**
+ * 실행 유형별 작업 지시의 끝 문장 (RUN-07, ADR-136). 유형 A는 M1 문장 그대로다. 유형 B의 대상 규칙은 정적 검사 규칙(구조 · 계약)이라
+ * 인수 테스트가 없고 검사 단계가 판정한다. 유형 D는 기존 검사 전부가 통과하는 상태(Green → Green)를 지킨다.
+ */
+export const IMPLEMENTER_TASK_CLOSING: Readonly<Record<RunType, readonly string[]>> = {
+  A: ['대상 인수 테스트가 통과하도록 구현하라.'],
+  B: [
+    '대상 규칙은 정적 검사 규칙(구조 검사 · 계약 검사)이다. 인수 테스트는 없고, 세션이 끝나면 BIVE가 검사 단계에서 구조 · 계약 검사와 효력 있는 규칙 전체의 인수 테스트로 판정한다.',
+    '대상 규칙의 정적 검사가 통과하도록 프로젝트 코드를 고쳐라.',
+  ],
+  C: ['대상 인수 테스트가 통과하도록 구현하라.'],
+  D: [
+    '리팩터링 · 되돌리기 실행이다. 시작 전 기존 검사는 모두 통과했고, 세션 뒤에도 효력 있는 규칙 전체의 검사가 모두 통과해야 한다.',
+    '대상 인수 테스트가 통과하도록 구현하라.',
+  ],
+};
+
+/**
  * 구현 작업 지시 (첫 사용자 메시지). `norms`는 효력 있는 규범 자료(초점 = 대상 규칙), `feedback`은 앞 시도가 끝나지 못한
- * 이유. 머리의 제목 · 진술 · 파일 위치와 사유는 표시 값이다(ADR-108).
+ * 이유. 머리의 제목 · 진술 · 파일 위치와 사유는 표시 값이다(ADR-108). `runType`을 생략하면 유형 A 문장이다.
  */
 export const implementerTaskPrompt = (input: {
   runDisplayId: string;
@@ -50,6 +69,7 @@ export const implementerTaskPrompt = (input: {
   acceptanceFiles: readonly string[];
   norms: NormInput;
   feedback: string | null;
+  runType?: RunType;
 }): string => {
   const lines = [`실행: ${input.runDisplayId}`, '', '대상 규칙'];
   for (const rule of input.rules) {
@@ -66,6 +86,6 @@ export const implementerTaskPrompt = (input: {
     lines.push('', '앞 시도가 구현 · 검사 단계를 끝내지 못한 이유', indentedText(input.feedback));
   }
   lines.push('', renderNormInput(input.norms, NORM_INPUT_FOCUS_LABEL));
-  lines.push('', '대상 인수 테스트가 통과하도록 구현하라.');
+  lines.push('', ...IMPLEMENTER_TASK_CLOSING[input.runType ?? 'A']);
   return lines.join('\n');
 };

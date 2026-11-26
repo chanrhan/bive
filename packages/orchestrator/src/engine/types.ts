@@ -7,6 +7,7 @@ import {
   type Project,
   type Run,
   type RunStatus,
+  type RunType,
   type SessionEndReason,
   type SessionNormInput,
   type Step,
@@ -52,13 +53,40 @@ export const MAX_TEST_RETRY_COUNT = 2;
  * - 테스트 작성 미충족 → 새 세션으로 재시도, Red 미충족 → 테스트 작성으로 회귀 (테스트 재시도 수, 상한 2)
  * - 구현 미충족 → 구현 재시도, 검사 미충족 → 구현으로 회귀 (`regressionCount`, 상한 2)
  */
-export const UNMET_POLICY: Partial<
-  Record<EngineStepKind, { readonly to: StepKind; readonly counter: 'test_retry' | 'regression' }>
-> = {
+export const UNMET_POLICY: UnmetPolicy = {
   test_writing: { to: 'test_writing', counter: 'test_retry' },
   red_check: { to: 'test_writing', counter: 'test_retry' },
   implementation: { to: 'implementation', counter: 'regression' },
   check: { to: 'implementation', counter: 'regression' },
+};
+
+export type UnmetPolicy = Partial<
+  Record<EngineStepKind, { readonly to: StepKind; readonly counter: 'test_retry' | 'regression' }>
+>;
+
+/**
+ * 유형별 미충족 정책 (RUN-07, ADR-020 · ADR-136). 회귀 상한(`regressionCount` 2회)은 모든 유형이 같다. 정책이 없는 단계의 미충족은
+ * 실행 `failed`(`step_unmet`)다.
+ * - A: `UNMET_POLICY` 그대로
+ * - B · D: 구현 미충족 → 구현 재시도, 검사 미충족 → 구현 회귀. D의 기준 검사(Green 확인) 미충족은 회귀 없이 실패(시작 거부)
+ * - C: 테스트 작성 미충족 → 재시도, Green 확인 미충족 → 테스트 작성으로 회귀(테스트 재시도 수, Red 확인과 같은 길), 검사 미충족 →
+ *   구현이 없으므로 테스트 작성으로 회귀(`regressionCount`)
+ */
+export const UNMET_POLICY_BY_TYPE: Readonly<Record<RunType, UnmetPolicy>> = {
+  A: UNMET_POLICY,
+  B: {
+    implementation: { to: 'implementation', counter: 'regression' },
+    check: { to: 'implementation', counter: 'regression' },
+  },
+  C: {
+    test_writing: { to: 'test_writing', counter: 'test_retry' },
+    green_check: { to: 'test_writing', counter: 'test_retry' },
+    check: { to: 'test_writing', counter: 'regression' },
+  },
+  D: {
+    implementation: { to: 'implementation', counter: 'regression' },
+    check: { to: 'implementation', counter: 'regression' },
+  },
 };
 
 /**

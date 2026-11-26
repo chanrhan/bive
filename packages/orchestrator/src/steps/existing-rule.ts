@@ -98,6 +98,9 @@ export const judgeExistingRuleFailures = async (
       return rule === undefined ? [] : [{ rule, judgment }];
     });
   if (failed.length === 0) return { kind: 'not_applicable' };
+  // 모순 판단은 새 동작을 더하는 유형 A만 청한다 (M3-06, ADR-136): 정적 검사 · 테스트만 · 리팩터링 실행은 기존 규칙을 폐기 ·
+  // 대체할 근거를 만들지 않으므로 판단 없이 지금처럼 다룬다(검사 → 회귀, 병합 재검사 → 재검사 실패)
+  if (context.run.type !== 'A') return { kind: 'not_applicable' };
   const targets = context.run.targetRuleIds;
   if (failed.some(({ rule }) => targets.includes(rule.id) || rule.builtin)) {
     return { kind: 'not_applicable' };

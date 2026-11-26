@@ -51,7 +51,8 @@ const shown = (value: string): string => displayText(value, MAX_TEXT_CHARS, 'end
 /** 실행기가 있는 계약 종류. */
 export type ContractRunnerKind = 'openapi';
 
-const runnerOf = (contract: Contract): ContractRunnerKind | null =>
+/** 계약 종류의 실행기 (없으면 `null`). 유형 B 실행의 대상 검증(`runs/run-service.ts`)도 이 표를 쓴다. */
+export const contractRunnerOf = (contract: Pick<Contract, 'kind'>): ContractRunnerKind | null =>
   contract.kind === 'openapi' ? 'openapi' : null;
 
 /** 단계를 열 때 읽은 계약 검사 계획의 한 줄: 계약 검사 규칙과 그 계약. */
@@ -103,7 +104,7 @@ export const contractPlanOf = (
         },
       };
     }
-    items.push({ rule, contract, runner: runnerOf(contract) });
+    items.push({ rule, contract, runner: contractRunnerOf(contract) });
   }
   return { kind: 'plan', plan: { items } };
 };
