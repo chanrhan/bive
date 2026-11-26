@@ -1,0 +1,151 @@
+# 변이 생존 → 자동 테스트 보강 → 재주입 검출 (M3-54 #311, ADR-100 B④ · ADR-141 · ADR-143, roadmap M3 완료 기준 흐름 3).
+# e2e/pipeline/mutant-survives.test.ts가 쓴다. 블록 선언(fixtures/blocks/sample-next-app.json)을 먼저 저장하므로 내장 구조 규칙이
+# RULE-001 · RULE-002이고 이 시나리오의 규칙은 RULE-003이다.
+# - 유형 A 실행(EXE-001): 테스트 작성 세션이 service 필드가 글인지만 보는 약한 인수 테스트를 쓰고, 구현 세션이 서비스 이름을 담는다.
+#   변이 주입 세션이 서비스 이름을 다른 글로 바꾸는 변이를 내면 약한 테스트가 통과해 변이 생존 → 실행은 병합
+# - 유형 C 보강 실행(EXE-002, 사람 조작 없음): 테스트 작성 세션이 서비스 이름 값 자체를 보는 테스트를 더하고, 변이 주입 단계가 같은 변이를
+#   재주입해 그 테스트가 잡는다 → 변이 검증됨 → 병합
+# 세션은 실행 표시 ID(vars의 runId)로 고른다. 형식: src/agent/scenario.ts. 대상 픽스처: fixtures/sample-next-app.
+name: mutant-survives
+description: 유형 A의 변이가 살아남아 자동 유형 C 보강 실행이 생기고, 보강 테스트가 재주입된 같은 변이를 잡아 변이 검증됨
+roles:
+  rule-writer:
+    sessions:
+      - turns:
+          - tool: propose_rule
+            args:
+              parentRequirementId: '{{requirementId}}'
+              title: 헬스 체크 응답의 서비스 이름
+              statement: WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON의 service 필드에 서비스 이름 sample-next-app을 담는다
+              kind: business
+              checkKinds: [test]
+              targetBlocks: [health]
+              risk: medium
+              rationale: 요구사항의 '서비스 이름 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
+              contradiction: { verdict: none }
+          - message: 규칙 1건을 반영했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0312
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 1840
+              outputTokens: 620
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 5200
+              costUSD: 0.0312
+  test-writer:
+    sessions:
+      - when: { runId: EXE-001 }
+        turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-service.acc.ts
+              content: |
+                // {{ruleId}}: 헬스 체크 응답의 서비스 이름. 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                describe('GET /api/health 서비스 이름', () => {
+                  it('응답 JSON의 service가 비어 있지 않은 글이다', async () => {
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as { service?: unknown };
+                    expect(typeof body.service).toBe('string');
+                    expect(String(body.service).length).toBeGreaterThan(0);
+                  });
+                });
+          - message: 인수 테스트 1개를 작성했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0421
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2310
+              outputTokens: 940
+              cacheReadInputTokens: 4100
+              cacheCreationInputTokens: 6050
+              costUSD: 0.0421
+      - when: { runId: EXE-002 }
+        turns:
+          - tool: write_file
+            args:
+              path: bive-acceptance/{{ruleId}}/health-service-name.acc.ts
+              content: |
+                // {{ruleId}}: 서비스 이름 값 자체 (살아남은 변이를 잡는 보강 테스트). 기동된 서버에 HTTP로만 요청한다.
+                import { describe, expect, inject, it } from 'vitest';
+
+                describe('GET /api/health 서비스 이름 값', () => {
+                  it('응답 JSON의 service가 sample-next-app이다', async () => {
+                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
+                    expect(res.status).toBe(200);
+                    const body = (await res.json()) as { service?: unknown };
+                    expect(body.service).toBe('sample-next-app');
+                  });
+                });
+          - message: 보강 테스트 1개를 더했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0398
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 2210
+              outputTokens: 880
+              cacheReadInputTokens: 4000
+              cacheCreationInputTokens: 5900
+              costUSD: 0.0398
+  implementer:
+    sessions:
+      - turns:
+          - tool: write_file
+            args:
+              path: src/app/api/health/route.ts
+              content: |
+                import { getDb } from '@/lib/db';
+
+                // 요청마다 실행한다(빌드 시점 정적 생성 금지).
+                export const dynamic = 'force-dynamic';
+
+                /** 데이터베이스를 한 번 읽어 연결을 확인한 뒤 상태와 서비스 이름을 돌려준다. */
+                export async function GET(): Promise<Response> {
+                  await getDb().item.count();
+                  return Response.json({ ok: true, service: 'sample-next-app' });
+                }
+          - message: 헬스 체크 응답에 서비스 이름(service)을 추가했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0587
+          num_turns: 2
+          modelUsage:
+            model-a:
+              inputTokens: 3120
+              outputTokens: 1180
+              cacheReadInputTokens: 9800
+              cacheCreationInputTokens: 7400
+              costUSD: 0.0587
+  mutator:
+    sessions:
+      - when: { runId: EXE-001 }
+        turns:
+          - tool: read_file
+            args:
+              path: src/app/api/health/route.ts
+          - tool: propose_mutant
+            args:
+              path: src/app/api/health/route.ts
+              search: "service: 'sample-next-app'"
+              replace: "service: 'unknown-service'"
+          - message: 서비스 이름을 다른 글로 바꾸는 변이를 냈습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0213
+          num_turns: 3
+          modelUsage:
+            model-a:
+              inputTokens: 1500
+              outputTokens: 300
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 2400
+              costUSD: 0.0213
