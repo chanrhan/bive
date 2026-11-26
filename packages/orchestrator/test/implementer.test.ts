@@ -34,6 +34,11 @@ import {
 } from '../src/norms/norm-input.js';
 import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { readContractSource, registerHumanContract } from '../src/norms/contract.js';
+import {
+  CHECK_FAILED_HEADER,
+  describeImplementationUnmet,
+  STRUCTURE_FAILED_HEADER,
+} from '../src/steps/implementation.js';
 import { NORM_INTEGRITY_STAGE } from '../src/steps/judging.js';
 import {
   human,
@@ -1466,4 +1471,89 @@ describe('구현 세션의 규범 입력: 효력 있는 요구사항 · 규칙�
     );
     expect(prompt).not.toContain(INJECTED);
   }, 60_000);
+});
+
+describe('앞 시도 사유의 머리 문장: 구조 위반은 인수 테스트 실패와 다른 머리 아래 (M3-51 #296, ADR-144)', () => {
+  // 검사 단계 미충족(`check_failed`)의 판정 요약 (검사 실행기가 남기는 모양, steps/check.ts · judging.ts의 judgmentDigest)
+  const acceptance = {
+    judgmentId: 'j1',
+    ruleId: 'RULE-001',
+    status: 'fail',
+    failedCases: [
+      {
+        name: '취소 거절',
+        file: 'bive-acceptance/RULE-001/cancel.acc.ts',
+        line: 3,
+        status: 'failed',
+        message: 'expected 409',
+      },
+    ],
+  };
+  const structure = {
+    judgmentId: 'j2',
+    ruleId: 'RULE-005',
+    status: 'fail',
+    failedCases: [
+      {
+        name: '구조 검사 · 블록 선언 판 1',
+        file: '블록 선언',
+        line: null,
+        status: 'failed',
+        message: '위반 1건',
+      },
+      {
+        name: '선언하지 않은 방향의 가져오기 · health → auth',
+        file: 'src/app/api/health/probe.ts',
+        line: null,
+        status: 'failed',
+        message: '가져온 파일: src/app/api/auth/session/route.ts',
+      },
+    ],
+  };
+  const passed = { judgmentId: 'j3', ruleId: 'RULE-004', status: 'pass', failedCases: [] };
+  const builtin = new Set(['RULE-004', 'RULE-005']);
+  const checkFailed = (...judgments: unknown[]) => ({
+    commit: 'a'.repeat(40),
+    reason: 'check_failed',
+    judgments,
+  });
+  const ACCEPTANCE_TEXT = [
+    '검사(승인된 규칙 전체 인수 테스트): 실패한 규칙이 있다',
+    '- RULE-001',
+    '  - bive-acceptance/RULE-001/cancel.acc.ts:3 취소 거절 (expected 409)',
+  ].join('\n');
+  const STRUCTURE_TEXT = [
+    '구조 검사(블록 선언): 통과하지 않은 내장 구조 규칙이 있다 (인수 테스트 실패가 아니다)',
+    '- RULE-005',
+    '  - 블록 선언 구조 검사 · 블록 선언 판 1 (위반 1건)',
+    '  - src/app/api/health/probe.ts 선언하지 않은 방향의 가져오기 · health → auth (가져온 파일: src/app/api/auth/session/route.ts)',
+  ].join('\n');
+
+  it('머리 문장은 고정 글이다', () => {
+    expect(CHECK_FAILED_HEADER).toBe('검사(승인된 규칙 전체 인수 테스트): 실패한 규칙이 있다');
+    expect(STRUCTURE_FAILED_HEADER).toBe(
+      '구조 검사(블록 선언): 통과하지 않은 내장 구조 규칙이 있다 (인수 테스트 실패가 아니다)',
+    );
+  });
+
+  it('구조 위반만: 구조 검사 머리 아래에만 싣고 인수 테스트 실패 머리는 없다', () => {
+    expect(describeImplementationUnmet(checkFailed(passed, structure), builtin)).toBe(
+      STRUCTURE_TEXT,
+    );
+  });
+
+  it('인수 테스트 실패만: 글자까지 예전과 같다 (내장 구조 규칙이 통과로 함께 있어도, 내장 규칙이 없는 프로젝트여도)', () => {
+    expect(describeImplementationUnmet(checkFailed(acceptance, passed), builtin)).toBe(
+      ACCEPTANCE_TEXT,
+    );
+    expect(describeImplementationUnmet(checkFailed(acceptance), new Set())).toBe(ACCEPTANCE_TEXT);
+  });
+
+  it('둘 다: 인수 테스트 실패 머리 아래 인수 테스트 규칙, 그 뒤 구조 검사 머리 아래 내장 구조 규칙 (판정 요약 순서와 무관)', () => {
+    const both = `${ACCEPTANCE_TEXT}\n${STRUCTURE_TEXT}`;
+    expect(describeImplementationUnmet(checkFailed(structure, passed, acceptance), builtin)).toBe(
+      both,
+    );
+    expect(describeImplementationUnmet(checkFailed(acceptance, structure), builtin)).toBe(both);
+  });
 });

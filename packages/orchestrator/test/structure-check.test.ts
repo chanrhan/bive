@@ -16,7 +16,10 @@ import {
   BUILTIN_STRUCTURE_RULES,
   createUlidGenerator,
   type JudgmentResult,
+  METHODS,
   type Rule,
+  RUN_OVERLAP_FILES_LIMIT,
+  type RunListResult,
 } from '@bive/shared';
 import { ConflictError, type ProjectStore } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -26,6 +29,7 @@ import { loadScenario, ScenarioSchema } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { NormJudgeRequest, StepExecutor } from '../src/engine/types.js';
+import { createRunHandlers } from '../src/ipc/run-handlers.js';
 import type { PipeServer } from '../src/ipc/server.js';
 import {
   BUILTIN_RULE_CREATED_REASON,
@@ -36,6 +40,7 @@ import {
 import { recordObjection } from '../src/norms/objection.js';
 import { RuleWriterService } from '../src/rule-writer/rule-writer-service.js';
 import { createRun, saveNewRun } from '../src/runs/run-service.js';
+import { CHECK_FAILED_HEADER, STRUCTURE_FAILED_HEADER } from '../src/steps/implementation.js';
 import {
   MAX_STRUCTURE_CASES,
   missingStructureJudgments,
@@ -563,6 +568,18 @@ const judgmentsIn = (h: PipelineHarness, runId: string = h.runId): JudgmentResul
 const structureJudgments = (h: PipelineHarness, ruleId: string, runId?: string) =>
   judgmentsIn(h, runId).filter((judgment) => judgment.ruleId === ruleId);
 
+/** `run.list` 처리기의 응답 (shared 스키마를 지난 값, M3-51 #296). `ruleId`를 주면 규칙 기준 조회(규칙 상세의 실행 이력). */
+const runList = async (h: PipelineHarness, ruleId?: string): Promise<RunListResult> => {
+  const handler = createRunHandlers({ biveHome: h.biveHome, now: Date.now })['run.list'];
+  if (handler === undefined) throw new Error('run.list 처리기 없음');
+  return METHODS['run.list'].result.parse(
+    await handler(
+      { projectId: h.project.id, ...(ruleId === undefined ? {} : { ruleId }) },
+      { connectionId: 1 },
+    ),
+  );
+};
+
 describe('검사 단계의 구조 검사: undeclared-import 변형에서 방향 규칙 실패 (수용 기준 2 · 4)', () => {
   it('대상이 아닌 실행에서 내장 규칙이 깨지면 판단 세션 없이 구현으로 회귀하고(위반을 앞 시도의 사유로) 상한 뒤 실패한다. 판정 기록은 실행기 dependency-cruiser · 선언 판 · 위반 파일 쌍', async () => {
     const h = setup({ ...retryScenario(), prepareRepo: undeclaredImport });
@@ -659,6 +676,15 @@ describe('검사 단계의 구조 검사: undeclared-import 변형에서 방향 
     });
     // 다음 구현 세션은 위반(내장 규칙 · 파일 쌍)을 앞 시도의 사유로 받는다
     const second = h.sessions.filter((spec) => spec.role === 'implementer')[1];
+    // 구조 위반은 인수 테스트 실패와 다른 머리 문장 아래에 실린다 (대상 규칙은 통과: 인수 테스트 실패 머리는 없다, M3-51 #296)
+    expect(second?.prompt).toContain(
+      [
+        `  ${STRUCTURE_FAILED_HEADER}`,
+        `  - ${direction.displayId}`,
+        '    - 블록 선언 구조 검사 · 블록 선언 판 1 (위반 1건)',
+      ].join('\n'),
+    );
+    expect(second?.prompt).not.toContain(CHECK_FAILED_HEADER);
     expect(second?.prompt).toContain(
       [
         `  - ${direction.displayId}`,
@@ -1143,6 +1169,47 @@ describe('구조 검사가 돌지 않았는데 통과로 저장되는 길이 없
     expect(
       judgmentsIn(h).filter((judgment) => judgment.stepId === stepOf(detail, 'check').id),
     ).toEqual([]);
+    // 겹친 파일 목록이 단계 결과에 남는다 (M3-51 #296, ADR-144): 파서 순서(경로 정렬) · 파일마다 맞은 블록 이름(선언 순서) · 전체 수
+    const overlaps = (
+      exitOf(detail, 'check').detail as {
+        structure: { overlaps: { items: { file: string; blocks: string[] }[]; total: number } };
+      }
+    ).structure.overlaps;
+    expect(overlaps.items).toContainEqual({
+      file: 'src/app/api/auth/session/route.ts',
+      blocks: ['auth', 'app'],
+    });
+    expect(overlaps.items).toContainEqual({
+      file: 'src/app/api/health/route.ts',
+      blocks: ['health', 'app'],
+    });
+    expect(overlaps.items.every((item) => item.blocks.at(-1) === 'app')).toBe(true);
+    expect(overlaps.items.map((item) => item.file)).toEqual(
+      overlaps.items.map((item) => item.file).toSorted(),
+    );
+    expect(overlaps.total).toBe(overlaps.items.length);
+    // 겹친 파일은 그 실행의 대상 규칙 실행 이력(run.list {ruleId})에 보조 표시로 실린다. 판정 기록이 없는 내장 규칙의 실행 이력에는
+    // 그 실행이 들지 않는다(조회를 넓히지 않았다)
+    const targetId = detail.run.targetRuleIds[0] ?? '';
+    const listed = await runList(h, targetId);
+    expect(listed.runs.map((run) => run.id)).toEqual([h.runId]);
+    expect(listed.failureNotes).toEqual([
+      {
+        kind: 'block_declaration_overlap',
+        runId: h.runId,
+        files: overlaps.items,
+        total: overlaps.total,
+      },
+    ]);
+    expect((await runList(h)).failureNotes).toEqual(listed.failureNotes);
+    const builtinIds = withProject(h.biveHome, h.project.id, (store) =>
+      store.rules
+        .list()
+        .filter((rule) => rule.builtin)
+        .map((rule) => rule.id),
+    );
+    expect(builtinIds).toHaveLength(2);
+    for (const id of builtinIds) expect(await runList(h, id)).toEqual({ runs: [] });
   }, 90_000);
 
   it('선언이 없는데 내장 규칙 행이 있거나, 같은 제목의 내장 행이 둘이면 검사 단계가 state_inconsistent로 끝나고 판정 기록 · 병합이 없다', async () => {
@@ -1198,6 +1265,9 @@ describe('구조 검사가 돌지 않았는데 통과로 저장되는 길이 없
     expect(
       judgmentsIn(twice).filter((judgment) => judgment.stepId === stepOf(second, 'check').id),
     ).toEqual([]);
+    // 같은 제목의 행이 둘 · 선언 없이 내장 행만 있음은 선언을 다시 저장해도 풀리지 않아 안내(보조 표시)가 없다 (ADR-144)
+    expect(await runList(twice)).toEqual({ runs: [second.run] });
+    expect(await runList(orphan)).toEqual({ runs: [first.run] });
     expect(Number(userGit(twice.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
   }, 120_000);
 
@@ -1293,11 +1363,35 @@ describe('구조 검사가 돌지 않았는데 통과로 저장되는 길이 없
     );
     const second = await runToEnd(missing);
     expect(second.run).toMatchObject({ status: 'failed', failureReason: 'state_inconsistent' });
-    expect(exitOf(second, 'check').detail).toMatchObject({
-      stage: 'structure',
-      declarationVersion: 1,
+    // 처리 (M3-51 #296, ADR-144): 지금 동작 그대로(검사 단계가 판정 없이 끝나고 내장 규칙을 메우지 않는다). 기록 · 안내도 그대로다
+    expect(exitOf(second, 'check')).toEqual({
+      reason: 'state_inconsistent',
+      detail: {
+        stage: 'structure',
+        message:
+          '블록 선언은 있는데 내장 구조 규칙이 하나씩 있지 않습니다 (블록 선언을 다시 저장하면 없는 규칙이 생깁니다)',
+        declarationVersion: 1,
+        builtinRules: { 'structure.public-api-only': [], 'structure.declared-direction': [] },
+      },
     });
+    expect(attempts(second, 'check')).toEqual(['check#1:failed']);
     expect(missing.judgeCalls.filter((call) => call.kind === 'check')).toEqual([]);
+    withProject(missing.biveHome, missing.project.id, (store) => {
+      expect(store.rules.list().filter((rule) => rule.builtin)).toEqual([]);
+      expect(
+        store.judgments
+          .listByRun(missing.runId)
+          .filter((judgment) => judgment.stepId === stepOf(second, 'check').id),
+      ).toEqual([]);
+    });
+    // 안내는 그 실행의 대상 규칙 실행 이력(run.list {ruleId})에 보조 표시로 실린다 (화면이 고정 안내를 그린다)
+    const missingTarget = second.run.targetRuleIds[0] ?? '';
+    expect(await runList(missing, missingTarget)).toEqual({
+      runs: [second.run],
+      failureNotes: [{ kind: 'builtin_rules_missing', runId: missing.runId }],
+    });
+    // 같은 실행 상태 불일치가 아닌 실행(선언을 읽지 못함 = 판정 실행기 오류)에는 보조 표시가 없다
+    expect(await runList(broken)).toEqual({ runs: [first.run] });
   }, 120_000);
 
   it('중단 신호는 파서 호출에 닿고, 중단된 단계는 판정 기록 없이 중단으로 남는다', async () => {
@@ -1688,6 +1782,43 @@ describe('구조 검사 결과 → 내장 규칙 판정 (단위, 파서 출력 �
     });
     late.abort(reason);
     await expect(pending).rejects.toBe(reason);
+  });
+
+  it('겹침의 요약에 겹친 파일을 남긴다: 경로는 판정 기록 케이스와 같은 표시 값(숨은 글자 표기 · 길이 상한), 상한까지만 싣고 전체 수 · 파일마다 맞은 블록 이름 (M3-51 #296, ADR-144)', async () => {
+    const many = Array.from({ length: MAX_STRUCTURE_CASES + 7 }, (_, i) => ({
+      file: `src/app/f${String(i).padStart(2, '0')}.ts`,
+      blocks: ['auth', 'app'],
+    }));
+    many[0] = { file: 'src/app/\u202eevil\u0007\n.ts', blocks: ['auth', 'health', 'app'] };
+    many[1] = { file: `src/app/${'a'.repeat(400)}.ts`, blocks: ['health', 'app'] };
+    // 파서가 담은 수(items)보다 전체(total)가 더 크다 (파서 상한)
+    const outcome = await run(
+      analysis({ status: 'overlap', overlaps: capped(many, many.length + 500) }),
+    );
+    if (outcome.kind !== 'halt') throw new Error('끝나지 않음');
+    expect(outcome.reason).toBe('block_declaration_overlap');
+    const overlaps = outcome.summary.overlaps;
+    expect(overlaps?.total).toBe(MAX_STRUCTURE_CASES + 7 + 500);
+    expect(overlaps?.items).toHaveLength(MAX_STRUCTURE_CASES);
+    expect(RUN_OVERLAP_FILES_LIMIT).toBe(MAX_STRUCTURE_CASES);
+    expect(overlaps?.items[0]).toEqual({
+      file: 'src/app/\\u202eevil\\u0007\\n.ts',
+      blocks: ['auth', 'health', 'app'],
+    });
+    // 판정 기록 케이스와 같은 변환: 300자, 양 끝을 남기고 가운데를 줄인다
+    const long = overlaps?.items[1]?.file ?? '';
+    expect(long.length).toBeLessThanOrEqual(300);
+    expect(long).toContain('…');
+    expect(long.startsWith('src/app/aaa')).toBe(true);
+    expect(long.endsWith('aaa.ts')).toBe(true);
+    expect(overlaps?.items.slice(2).map((item) => item.file)).toEqual(
+      many.slice(2, MAX_STRUCTURE_CASES).map((item) => item.file),
+    );
+    // \uc228\uc740 \uae00\uc790(\uc81c\uc5b4 \u00b7 \uc11c\uc2dd)\ub294 \ud558\ub098\ub3c4 \ub0a8\uc9c0 \uc54a\ub294\ub2e4
+    expect(overlaps?.items.filter((item) => /[\p{Cc}\p{Cf}]/u.test(item.file))).toEqual([]);
+    // 겹침이 아닌 결과에는 겹친 파일 칸이 없다
+    const checked = await run(analysis({ status: 'checked', violations: capped([]) }));
+    expect(checked.summary).not.toHaveProperty('overlaps');
   });
 
   it('두 내장 규칙의 판정이 모두 있는지 확인한다: 하나라도 빠지거나 겹치면 빠진 규칙, 계획이 없으면 늘 빈 목록', async () => {
