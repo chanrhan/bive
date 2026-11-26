@@ -42,7 +42,11 @@ import { CONTRACT_RULE_CREATED_REASON } from '../src/norms/contract.js';
 import { NORM_INPUT_BEGIN } from '../src/norms/norm-input.js';
 import { recordObjection, UNDECIDED_REASON } from '../src/norms/objection.js';
 import { RuleWriterService } from '../src/rule-writer/rule-writer-service.js';
-import { AUTO_START_REASON, CONTRADICTION_RESTART_REASON } from '../src/runs/auto-start.js';
+import {
+  AUTO_START_REASON,
+  CONTRADICTION_RESTART_REASON,
+  MUTATION_REINFORCEMENT_REASON,
+} from '../src/runs/auto-start.js';
 import { RULE_EDIT_START_REASON } from '../src/runs/rule-edit-start.js';
 import {
   BIVE_MCP_SERVER,
@@ -1003,8 +1007,10 @@ describe('블록 선언을 쓰는 경로는 사람의 blocks.set 처리기뿐 (M
     expect(structure.match(/\.blockDeclarations\.[A-Za-z]+/g)).toEqual([
       '.blockDeclarations.current',
     ]);
+    // 변이 주입 단계: 새 변이(유형 A)와 재주입(보강 실행)이 각각 지금 판을 한 번 읽는다 (M3-54)
     const mutation = files.find((f) => f.rel === 'steps/mutation.ts')?.text ?? '';
     expect(mutation.match(/\.blockDeclarations\.[A-Za-z]+/g)).toEqual([
+      '.blockDeclarations.current',
       '.blockDeclarations.current',
     ]);
     for (const { rel, text } of files) {
@@ -1195,6 +1201,7 @@ const NORM_CHANGE_FIXED_REASONS: Readonly<Record<string, string>> = {
   UNDECIDED_REASON,
   AUTO_START_REASON,
   CONTRADICTION_RESTART_REASON,
+  MUTATION_REINFORCEMENT_REASON,
   RULE_EDIT_START_REASON,
   BUILTIN_RULE_CREATED_REASON,
   CONTRACT_RULE_CREATED_REASON,
@@ -1943,6 +1950,12 @@ describe('변이 판정 기록을 쓰는 곳은 변이 주입 단계 실행기 �
         .map((f) => f.rel)
         .sort();
     expect(using(/\.mutations\.record\(/)).toEqual(['steps/mutation.ts']);
+    // 변이 보강 연결(보강 실행의 원인)을 쓰는 곳은 자동 시작 모듈 하나 (M3-54 #311, ADR-143)
+    expect(using(/\.mutations\.linkReinforcement\(/)).toEqual(['runs/auto-start.ts']);
+    expect(using(/'mutation_reinforcements'/)).toEqual([
+      'engine/start-basis.ts',
+      'runs/auto-start.ts',
+    ]);
     expect(using(/\bmutation_results\b/)).toEqual([]);
     for (const { rel, text } of files) {
       if (/^(tools|agent|mutation)\//.test(rel)) {

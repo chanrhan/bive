@@ -26,9 +26,20 @@ import { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
 import { createAgentRule, retireAgentRule, supersedeAgentRule } from '../src/norms/agent-rule.js';
 import { checkRunStartBasis } from '../src/engine/start-basis.js';
-import { createRun, evaluateApprovalStep, startNextQueuedRun } from '../src/runs/run-service.js';
+import {
+  createRun,
+  evaluateApprovalStep,
+  saveNewRun,
+  startNextQueuedRun,
+} from '../src/runs/run-service.js';
 import { type Orchestrator, startOrchestrator } from '../src/orchestrator.js';
-import { AUTO_START_REASON, AutoStarter, autoStartRun } from '../src/runs/auto-start.js';
+import {
+  AUTO_START_REASON,
+  type AutoStartedRun,
+  AutoStarter,
+  autoStartRun,
+  reinforceSurvivedMutants,
+} from '../src/runs/auto-start.js';
 import { connect, type TestClient } from './helpers/client.js';
 import {
   COMPLETE_SETTINGS,
@@ -40,7 +51,17 @@ import {
   testExecutors,
   withProject,
 } from './helpers/engine-harness.js';
+import {
+  allPass,
+  cleanupMutationHarness,
+  type Harness as MutationHarness,
+  HEALTH,
+  runToEnd as mutationRunToEnd,
+  setup as setupMutation,
+} from './helpers/mutation-harness.js';
 import { makeBiveHome, waitFor } from './helpers/process.js';
+
+const VALID = { path: HEALTH, search: 'ok: true', replace: 'ok: false' };
 
 const temps: string[] = [];
 const running: { orchestrator: Orchestrator; client: TestClient }[] = [];
@@ -1189,4 +1210,141 @@ describe('AutoStarter: 세션 종료 알림 → 자동 시작 → 엔진 (ADR-10
     expect(maxRunning).toBe(1);
     expect(h.read(counts)).toEqual({ runs: 2, autoStarts: 2, approvals: 0 });
   }, 60_000);
+});
+
+describe('변이 생존의 자동 테스트 보강: 기존 자동 시작의 문과 시작 근거 (M3-54 #311 수용 기준 2, ADR-141 ② · ③ · ADR-143)', () => {
+  afterEach(cleanupMutationHarness, 60_000);
+
+  const AUTO = { ...COMPLETE_SETTINGS, dailyBudgetUsd: 10 };
+  const SURVIVING = {
+    rules: [{ blocks: ['health'], risk: 'medium' as const }],
+    sessions: { 'RULE-001': [{ tool: 'propose_mutant', args: VALID } as const] },
+    decide: allPass,
+    noAutoStart: true,
+  };
+  const clock = { now: Date.now, newId };
+  const reinforce = (h: MutationHarness) =>
+    withProject(h.biveHome, h.projectId, (store) =>
+      reinforceSurvivedMutants(store, { runId: h.runId }, clock),
+    );
+
+  it('생존이면 유형 C 보강 실행 1개(대상 = 그 규칙, 시작 주체 = 오케스트레이터, 원인 = 그 변이 기록)와 자동 시작 항목 1건, 엔진의 시작 근거 대조를 지난다', async () => {
+    const h = setupMutation({ ...SURVIVING, settings: AUTO });
+    await mutationRunToEnd(h);
+    const outcome = reinforce(h);
+    if (outcome.status !== 'started') throw new Error(`보강 실행 없음: ${outcome.status}`);
+    const [{ detail, normChange }] = outcome.runs as [AutoStartedRun];
+    const survived = withProject(h.biveHome, h.projectId, (store) =>
+      store.mutations.listByRun(h.runId),
+    )[0]!;
+    expect(detail.run).toMatchObject({
+      type: 'C',
+      status: 'waiting_approval',
+      targetRuleIds: [survived.ruleId],
+      startedBy: { kind: 'orchestrator', causeLog: 'mutation_reinforcements' },
+    });
+    expect(normChange).toMatchObject({
+      kind: 'auto_start',
+      actor: { kind: 'orchestrator' },
+      targetRef: { entity: 'Run', id: detail.run.id },
+      detail: { mutationResultIds: [survived.id], ruleIds: [survived.ruleId] },
+    });
+    expect(
+      withProject(h.biveHome, h.projectId, (store) => checkRunStartBasis(store, detail.run)),
+    ).toEqual({ mismatch: null, runStartEntries: 0, autoStartEntries: 1 });
+  }, 90_000);
+
+  it.each([
+    ['하루 한도 비움', { dailyBudgetUsd: null }, 'project_daily_budget_unset'],
+    [
+      '하루 한도에 이름',
+      { ...COMPLETE_SETTINGS, dailyBudgetUsd: 0 },
+      'project_daily_budget_exceeded',
+    ],
+  ] as const)(
+    '기존 문(%s)에 걸리면 보강 실행을 만들지 않는다 (기록 없음)',
+    async (_name, settings, reason) => {
+      const h = setupMutation({ ...SURVIVING, settings: AUTO });
+      await mutationRunToEnd(h);
+      withProject(h.biveHome, h.projectId, (store) =>
+        store.settings.update(settings, { by: human, at: new Date().toISOString() }),
+      );
+      expect(reinforce(h)).toEqual({ status: 'skipped', reason });
+      expect(
+        withProject(h.biveHome, h.projectId, (store) => store.runs.list().map((run) => run.type)),
+      ).toEqual(['A']);
+    },
+    90_000,
+  );
+
+  it('설정이 비면(변이 주입 역할 칸) 만들지 않는다', async () => {
+    const h = setupMutation({ ...SURVIVING, settings: AUTO });
+    await mutationRunToEnd(h);
+    withProject(h.biveHome, h.projectId, (store) =>
+      store.settings.update(
+        { roles: { mutator: { model: null } } },
+        { by: human, at: new Date().toISOString() },
+      ),
+    );
+    expect(reinforce(h)).toEqual({ status: 'skipped', reason: 'settings_incomplete' });
+  }, 90_000);
+
+  it('그 사이 규칙이 효력을 잃었으면 만들지 않는다', async () => {
+    const h = setupMutation({ ...SURVIVING, settings: AUTO });
+    await mutationRunToEnd(h);
+    withProject(h.biveHome, h.projectId, (store) =>
+      store.db
+        .prepare("UPDATE rules SET norm_state = 'provisional' WHERE id = ?")
+        .run(h.rules[0]!.id),
+    );
+    expect(reinforce(h)).toEqual({ status: 'none' });
+  }, 90_000);
+
+  it('위조한 원인은 시작 근거 대조가 거부한다: 연결 없는 원인 · 다른 기록을 가리키는 항목 · 유형 A 보강', async () => {
+    const h = setupMutation({ ...SURVIVING, settings: AUTO });
+    await mutationRunToEnd(h);
+    const outcome = reinforce(h);
+    if (outcome.status !== 'started') throw new Error('보강 실행 없음');
+    const real = outcome.runs[0]!.detail.run;
+    const check = (run: typeof real) =>
+      withProject(h.biveHome, h.projectId, (store) => checkRunStartBasis(store, run).mismatch);
+    // 시작 주체의 순번이 이 실행의 연결이 아님 (다른 순번)
+    expect(check({ ...real, startedBy: { ...real.startedBy, causeSeqs: [99] } as never })).toBe(
+      'cause_mismatch',
+    );
+    // 유형 C가 아닌 실행이 같은 원인을 쓴다
+    expect(check({ ...real, type: 'A' })).toBe('cause_mismatch');
+    // 연결은 없고 자동 시작 항목만 있는 실행 (오케스트레이터 밖에서 쓴 위조 항목)
+    const forged = withProject(h.biveHome, h.projectId, (store) => {
+      const settings = store.settings.get();
+      const runId = newId();
+      const saved = saveNewRun(
+        store,
+        settings,
+        {
+          runId,
+          ruleIds: [real.targetRuleIds[0]!],
+          type: 'C',
+          startedBy: { kind: 'orchestrator', causeSeqs: [7], causeLog: 'mutation_reinforcements' },
+        },
+        new Date().toISOString(),
+        newId,
+      );
+      store.normChanges.append({
+        at: new Date().toISOString(),
+        kind: 'auto_start',
+        actor: { kind: 'orchestrator' },
+        targetRef: { entity: 'Run', id: runId },
+        sessionId: null,
+        runId,
+        reason: '위조',
+        detail: {
+          mutationResultIds: [store.mutations.reinforcementOfRun(real.id)!.mutationResultId],
+          ruleIds: [real.targetRuleIds[0]!],
+        },
+      });
+      return saved.run;
+    });
+    expect(check(forged)).toBe('cause_mismatch');
+  }, 90_000);
 });
