@@ -1,6 +1,8 @@
 // 추적성 결함 · 규칙화 불가 (M3-11 #56, NRM-06 · NRM-08, ADR-100 명세 변경 목록 NRM-06, ADR-112 · ADR-137).
 // 실제 Unix 소켓 · 임시 BIVE_HOME · 실제 SQLite 저장소. 값은 `rule.list`의 `traceability`와 `verification.summary`의
 // `traceability` · `unrulable`로 읽는다(같은 함수). 규칙화 불가 표시는 `requirement.markUnrulable`(사람 전용).
+import { execFileSync } from 'node:child_process';
+
 import {
   type Author,
   createUlidGenerator,
@@ -25,8 +27,9 @@ import {
 } from '../src/rule-writer/rule-writer-service.js';
 import { requirementsWithoutRules, traceabilityOf } from '../src/verification/summary.js';
 import type { TestClient } from './helpers/client.js';
+import { commitAcceptanceFiles, initAcceptanceRepo } from './helpers/acceptance-commit.js';
 import { seedNormRequirement, seedNormRule } from './helpers/engine-harness.js';
-import { cleanup } from './helpers/process.js';
+import { cleanup, makeBiveHome } from './helpers/process.js';
 import { iso, type ProjectHarness, startProjectHarness, T0 } from './helpers/project-harness.js';
 
 const human = { kind: 'human' } as const satisfies Author;
@@ -294,6 +297,36 @@ describe('추적성 결함의 개수와 목록 (NRM-06, ADR-137)', () => {
     expect(
       requirementsWithoutRules([{ ...requirement, deletedAt: iso(T0) }], [], new Set()),
     ).toEqual([]);
+  });
+});
+
+describe('계약 검사 규칙 (ADR-129 ⑤, ADR-137 ①)', () => {
+  it('실제 등록(contract.register)으로 생긴 계약 검사 규칙(내장 · 부모 없음 · contractId 있음)은 부모 없는 규칙이 아니고 개수에도 들지 않는다', async () => {
+    const repo = initAcceptanceRepo(makeBiveHome());
+    const commit = commitAcceptanceFiles(repo, {
+      'openapi.yaml': 'openapi: 3.1.0\ninfo:\n  title: 샘플\n  version: 1.0.0\npaths: {}\n',
+    });
+    execFileSync('git', ['update-ref', 'refs/heads/main', commit], { cwd: repo });
+    const h = await startProjectHarness({ servers, clients }, { rootPath: repo });
+    const registered = await h.client.call('contract.register', {
+      projectId: h.project.id,
+      file: 'openapi.yaml',
+      kind: 'openapi',
+      author: human,
+    });
+    const checkRule = h.read((store) =>
+      store.rules.list().find((item) => item.contractId === registered.contract.id),
+    );
+    // 대조: 정말 내장 · 부모 없음 · 효력 있는 규칙이다
+    expect(checkRule).toMatchObject({
+      builtin: true,
+      parentRequirementId: null,
+      normState: 'approved',
+      deletedAt: null,
+    });
+    const empty = { requirementsWithoutRules: [], parentlessRules: [] };
+    expect(await listed(h)).toEqual(empty);
+    expect((await summarized(h)).traceability).toEqual(empty);
   });
 });
 

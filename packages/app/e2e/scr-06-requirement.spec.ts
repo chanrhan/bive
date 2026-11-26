@@ -557,6 +557,32 @@ test.describe('[규칙화 불가] (#56 M3-11 수용 기준 2, NRM-08 · ADR-137)
     expect(await callsOf(bive, 'requirement.markUnrulable')).toHaveLength(0);
   });
 
+  test('표시 중 [확인] 연속 클릭(같은 틱) · Ctrl+Enter 두 번은 requirement.markUnrulable을 한 번만 부르고, 응답 뒤 실패 문구가 없다', async ({
+    page,
+  }) => {
+    const bive = await openOne(page, BARE, {
+      'requirement.markUnrulable': { result: { requirement: MARKED }, delayMs: 500 },
+    });
+    await markButton(page).click();
+    await reasonInput(page).fill(REASON);
+    await bive.setResponse('requirement.list', {
+      result: { requirements: REQUIREMENTS.map((item) => (item.id === BARE.id ? MARKED : item)) },
+    });
+    // 같은 틱에 두 번 누른다 (버튼이 비활성화되기 전)
+    await confirmButton(page).evaluate((button: HTMLButtonElement) => {
+      button.click();
+      button.click();
+    });
+    await expect(confirmButton(page)).toBeDisabled();
+    await expect(reasonInput(page)).toHaveAttribute('aria-busy', 'true');
+    await reasonInput(page).press('Control+Enter');
+    await reasonInput(page).press('Control+Enter');
+    await expect(page.getByTestId('requirement-unrulable-reason')).toHaveText(REASON);
+    await allSettled(bive, 'requirement.markUnrulable');
+    expect(await callsOf(bive, 'requirement.markUnrulable')).toHaveLength(1);
+    await expect(page.getByTestId('requirement-action-error')).toHaveCount(0);
+  });
+
   test('거부되면 입력을 남긴 채 "규칙화 불가 표시 실패"이고 목록은 다시 읽지 않는다', async ({
     page,
   }) => {
@@ -581,7 +607,7 @@ test.describe('[규칙화 불가] (#56 M3-11 수용 기준 2, NRM-08 · ADR-137)
   });
 
   test('사유의 숨은 글자는 보이는 표기로 그린다 (U+202E)', async ({ page }) => {
-    const hidden = { ...UNRULABLE, unrulable: { reason: '측정‮기준 없음' } };
+    const hidden = { ...UNRULABLE, unrulable: { reason: '측정\u202e기준 없음' } };
     await openOne(page, hidden, {
       'requirement.list': {
         result: {
