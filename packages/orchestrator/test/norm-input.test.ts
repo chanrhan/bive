@@ -12,6 +12,7 @@ import path from 'node:path';
 
 import {
   type BlockDeclaration,
+  type Contract,
   type Requirement,
   type RoleSettings,
   type Rule,
@@ -30,6 +31,7 @@ import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { ensureBuiltinStructureRules } from '../src/norms/builtin-rules.js';
 import { registerHumanContract } from '../src/norms/contract.js';
 import {
+  blockScopeOf,
   collectNormInput,
   NORM_INPUT_BEGIN,
   NORM_INPUT_END,
@@ -409,6 +411,58 @@ describe('고르는 규칙: 대상 블록과 겹치는 규칙 · 그 부모 요�
 });
 
 // ── 상한과 줄이는 규칙 (수용 기준 2) ─────────────────────────────
+
+describe('blockScopeOf: 연결 계약 · 요구사항의 범위 (검사 규칙에 대상 블록이 있는 경우까지, ADR-140)', () => {
+  // 지금 계약 검사 규칙은 늘 대상 블록이 비어 함께 들어온다. 검사 규칙에 대상 블록이 생겨도 계약이 맞게 골라지는지 고르는 함수로 본다
+  const req = (id: string) => ({ id }) as unknown as Requirement;
+  const ruleOf = (
+    id: string,
+    targetBlockIds: string[],
+    parentRequirementId: string | null,
+    contractId: string | null = null,
+  ) => ({ id, targetBlockIds, parentRequirementId, contractId }) as unknown as Rule;
+  const contractOf = (id: string, parentRequirementId: string | null) =>
+    ({ id, parentRequirementId }) as unknown as Contract;
+  const rules = [
+    ruleOf('target', ['health'], 'r-health'),
+    ruleOf('auth', ['auth'], 'r-auth'),
+    ruleOf('check-in', ['health'], null, 'c-check-in'),
+    ruleOf('check-out', ['auth'], null, 'c-check-out'),
+    ruleOf('check-out-2', ['auth'], null, 'c-parent-in'),
+    ruleOf('check-out-3', ['auth'], null, 'c-parent-out'),
+  ];
+  const scope = blockScopeOf(
+    true,
+    ['target'],
+    new Set(['r-health']),
+    (id) => rules.find((item) => item.id === id) ?? null,
+    [req('r-health'), req('r-auth'), req('r-none')],
+    rules,
+    [
+      contractOf('c-check-in', null),
+      contractOf('c-check-out', null),
+      contractOf('c-parent-in', 'r-health'),
+      contractOf('c-parent-out', 'r-auth'),
+      contractOf('c-loose', null),
+      contractOf('c-loose-parent-in', 'r-none'),
+      contractOf('c-loose-parent-out', 'r-auth'),
+    ],
+  );
+
+  it('계약: 검사 규칙이 고른 규칙이거나, 부모 요구사항이 고른 요구사항이거나, 검사 규칙도 부모도 없으면 넣고 나머지는 뺀다', () => {
+    expect([...(scope?.contractIds ?? [])]).toEqual([
+      'c-check-in',
+      'c-parent-in',
+      'c-loose',
+      'c-loose-parent-in',
+    ]);
+  });
+
+  it('요구사항: 초점 · 고른 규칙의 부모 · 효력 있는 자식 규칙이 없는 요구사항만 (블록 밖 규칙만 있는 요구사항은 뺀다)', () => {
+    expect([...(scope?.requirementIds ?? [])]).toEqual(['r-health', 'r-none']);
+    expect([...(scope?.ruleIds ?? [])]).toEqual(['target', 'check-in']);
+  });
+});
 
 describe('고른 범위가 상한을 넘으면 A15의 줄이기를 그 범위에 쓰고 잘린 수 · 블록 밖 수를 따로 남긴다 (수용 기준 2, ADR-100 A15)', () => {
   it('health 규칙 55개 + 가장 최근의 auth 규칙 5개: 먼저 고르고(auth 5개 뺌) 그다음 최근 변경 순으로 50개를 남긴다', () => {

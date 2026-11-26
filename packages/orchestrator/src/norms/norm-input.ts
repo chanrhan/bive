@@ -296,19 +296,17 @@ export const blockScopeOf = (
   contracts: readonly Contract[],
 ): NormInputBlockScope | null => {
   if (!declared || basisRuleIds.length === 0) return null;
-  const basis = new Set<string>();
   const blocks: string[] = [];
   for (const ruleId of basisRuleIds) {
     const rule = lookup(ruleId);
     if (rule === null || rule.targetBlockIds.length === 0) return null;
-    basis.add(rule.id);
     for (const name of rule.targetBlockIds) if (!blocks.includes(name)) blocks.push(name);
   }
+  // 기준 규칙 자신은 대상 블록이 모두 기준 블록이라 늘 든다
   const ruleIds = new Set(
     rules
       .filter(
         (rule) =>
-          basis.has(rule.id) ||
           rule.targetBlockIds.length === 0 ||
           rule.targetBlockIds.some((name) => blocks.includes(name)),
       )
