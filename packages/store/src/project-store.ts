@@ -20,6 +20,7 @@ import { NormChangeRepository } from './repositories/norm-change-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { ProposalRepository } from './repositories/proposal-repository.js';
 import { RequirementRepository } from './repositories/requirement-repository.js';
+import { ReviewQueueRepository } from './repositories/review-queue-repository.js';
 import { RuleRepository } from './repositories/rule-repository.js';
 import { RuleRetirementRepository } from './repositories/rule-retirement-repository.js';
 import { RuleWriterRequestRepository } from './repositories/rule-writer-request-repository.js';
@@ -89,6 +90,11 @@ export class ProjectStore {
    * 가장 최근 기록의 상태(기록이 없으면 '변이 미검증')다.
    */
   readonly mutations: MutationResultRepository;
+  /**
+   * 검토 대기열 (TODO-02, M3-08 #53, ADR-145). 항목은 실행의 종료 상태 저장과 같은 문장에서 DB가 넣는다. 처리(열림 → 처리됨 한 번)와
+   * 사람이 시작한 테스트 보강 연결은 오케스트레이터의 검토 대기열 모듈만 쓴다.
+   */
+  readonly reviewQueue: ReviewQueueRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -115,6 +121,7 @@ export class ProjectStore {
     this.blockDeclarations = new BlockDeclarationRepository(db, projectId);
     this.contracts = new ContractRepository(db, this.sequences);
     this.mutations = new MutationResultRepository(db);
+    this.reviewQueue = new ReviewQueueRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */
