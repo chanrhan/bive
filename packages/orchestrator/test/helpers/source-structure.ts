@@ -688,7 +688,7 @@ export const sqlStatementText = (text: string): string =>
     .replace(/\/\*[\s\S]*?(?:\*\/|$)/g, ' ')
     .replace(/--[^\n]*/g, ' ')
     .replace(
-      /(\b(?:INTO|UPDATE(?:\s+OR\s+\w+)?|FROM)\s+(?:["`\[]?\w+["`\]]?\s*\.\s*)?)?'(?:[^']|'')*'/gi,
+      /(\b(?:INTO|UPDATE(?:\s+OR\s+\w+)?|FROM)\s+(?:["`[]?\w+["`\]]?\s*\.\s*)?)?'(?:[^']|'')*'/gi,
       (match: string, keyword: string | undefined) => (keyword === undefined ? "''" : match),
     );
 
