@@ -167,3 +167,85 @@ M3(판정 확장)는 M7(사후 확인 전환, ADR-100) 위에서 시작한다. m
 - **픽스처**: `fixtures/sample-next-app/openapi.yaml`(`GET /api/health` · `GET /api/auth/session`), 변형 `scripts/make-variant.sh contract-mismatch`.
 - **CI 시간 주의**: `contract-runner.test.ts`가 판정 묶음(파일 하나씩)에 들어 단위 테스트가 길어졌다. 수정 2회차 중 `checks` 잡이 20분 제한에 한 번 걸렸고(단위 테스트 11분), 응답 모양 일곱 사례를 함께 돌리게 바꾼 뒤 약 14분 30초다. 오케스트레이터에 무거운 시험을 더하는 이슈는 이 여유(약 5분)를 본다.
 - 한계(ADR-132): 작업마다 다뤘는지는 보지 않는다, 요청은 검증하지 않는다, 계약에 적힌 3xx와 4 MiB 넘는 응답은 실패로 닫힌다, 인수 테스트가 앱 코드를 불러오면 요청이 프록시를 지나지 않을 수 있다(#117 계열), 패키징된 Electron 앱의 도구 경로는 확인하지 못함.
+
+### M3-42 (#283, PR #302, main `800a7ea`, ADR-135, 마이그레이션 없음)
+- **`run.list`의 선택 인자 `ruleId`**: 그 규칙이 대상인 실행 ∪ 그 규칙의 판정 기록이 있는 실행(`RunRepository`의 규칙 기준 질의, 색인 `run_target_rules_rule` · `judgments_rule_latest`, 표시 ID 순, 깨진 행 건너뜀). 없는 규칙 · 다른 프로젝트의 규칙은 -32004. `status`와 함께 주면 둘 다 적용. 인자 없는 호출은 그대로. 앱에서 `run.list`를 부르는 곳은 규칙 상세의 `useRuleRuns` 하나(`{projectId, ruleId}`).
+- **요구사항 화면의 `rule.list`**: 알림 · 재접속에는 화면의 `{projectId, includeRetired: true}` 한 번만. 열린 상세의 자식 규칙(`useChildRules`)은 그 결과에서 `retirement` 없는 항목을 골라 쓴다. 상세를 열 때 · 편집 뒤의 자체 읽기는 그대로. 늦은 옛 응답은 `replaced` 횟수로 버린다(이 방어는 시험으로 고정하지 못함: ADR-135 한계).
+- **새 알림 `event.blocks.changed {projectId, version}`**: `blocks.set`이 커밋된 뒤에만(`ipc/block-handlers.ts`의 `onChanged`, `events/block-events.ts`). 거부 · 되돌려진 저장에는 없다. 선언을 쓰는 경로는 `blocks.set` 하나(구조 시험). 앱은 `BLOCK_EVENT_NAMES`(공용 `useEventRefresh`)로 `blocks.get`을 다시 읽는다(`useBlockDeclaration`). 저장소 밖 DB 편집에는 알림이 없다.
+- **실행 이력 줄**: 접히지 않는 폭(상세 내용 폭 400px 초과)에서 flex-wrap, 상태 칸은 `nowrap` · 줄어들지 않음. 남는 폭에 안 들어가면 칸째 다음 줄로 내려간다(1480px 창에서는 모든 줄이 그렇다). 실행 추적 화면(SCR-16)이 생기면 다시 본다.
+- 한계(ADR-135): 규칙 기준 조회에 상한 없음, 판정 50건 밖의 실행은 줄이 없음, e2e의 "1회" 단언은 `judgment.list` 호출 수와의 상대 비교(StrictMode 이중 마운트). 가짜 브리지(`bive-mock`)는 `rule.list`의 `includeRetired`를 무시한다.
+
+### M3-52 (#305, PR #306, main `ea883a7`, ADR-138)
+- CI 잡 제한 시간: `checks` 30분(전 20분), `pipeline-e2e-group` 40분(전 30분). 집계 잡 `pipeline-e2e` · `ci`는 5분 그대로. `scripts/test_ci_workflow.py`가 이 값과 `needs`를 단언한다(값을 바꾸려면 시험도 함께).
+- 실측(2026-11-26): `checks` 14 ~ 19분, 묶음 12 ~ 21분. 러너 편차가 크다(같은 커밋이 35 ~ 55% 느려진 적 있음). `checks`가 25분을 넘기 시작하면 단위 테스트를 따로 잡으로 나누거나 무거운 시험을 줄인다(ADR-138).
+- main의 ADR 끝은 지금 135 · 138이다(136 = PR #303, 137 = PR #304가 채운다).
+
+### M3-06 (#51, PR #303, main `50372e6`, ADR-136, 마이그레이션 · 앱 코드 변경 없음)
+- **단계 계획**(shared `RUN_STEP_PLANS`): 생략 단계도 계획에 두고 엔진이 실행기를 부르지 않고 `skipped`(`{reason: 'run_type', runType}`)로 기록한다. B: 승인 · 테스트 작성(생략) · Red(생략) · 구현 · 검사 · 변이(생략) · 병합 · 화면. C: 승인 · 테스트 작성 · Green · 구현(생략) · 검사 · 변이(생략) · 병합 · 화면. D: 승인 · 테스트 작성(생략) · Red(생략) · Green(= 기준 검사, `green_check` 종류 재사용) · 구현 · 검사 · 병합 · 화면. 변이는 지금 모든 유형에서 `skipped`(M3-07).
+- **회귀**: B · D는 구현 · 검사 실패 → 구현. C는 Green 미충족 → 테스트 작성(재시도 수, 상한 뒤 `test_retry_limit`), 검사 실패 → 테스트 작성(`regressionCount`). D의 기준 검사 미충족은 회귀 없이 `step_unmet`. 최악 세션 수: A 테스트 작성 3 + 구현 3, B 구현 3, C 테스트 작성 5, D 구현 3. 검사 실패 판단 세션(ADR-118)은 유형 A만.
+- **`run.create`**(`runs/run-service.ts`의 `resolveRunType`): 선택 인자 `type`. 없으면 유도(인수 테스트 검사 규칙만 = A, 정적 검사 규칙만 = B, 섞이면 -32009). C · D는 명시할 때만. 정적 검사 규칙 = `builtin`인 구조 규칙 · 계약 검사 규칙(`isStaticCheckRule`: 사람 규칙의 검사 종류가 `structure`여도 아님). B는 정적 검사 규칙만, A · C · D는 인수 테스트 검사 규칙만. 실행기 없는 계약 종류는 B로도 거부. 자동 시작 · 다시 시작 · 편집 뒤 시작은 유형 A 그대로(유형 C 자동 시작은 M3-30).
+- **유형 B**: 구현 단계에서 판정하지 않는다. 검사 단계와 병합 재검사 모두 대상 규칙의 판정이 `pass`여야 한다(`steps/run-type.ts`의 `unjudgedStaticTargets`: 판정 없음 · 막지 않는 실패 → 검사 `step_unmet`, 재검사 실패). 대상 밖 규칙의 막는 실패도 막는다. 인수 테스트 보호는 기준 커밋 대비 `bive-acceptance/` 변경 없음(추가 · 삭제 · 수정).
+- **유형 C**: Green 확인은 `judgeCommit` + `evaluateGreen`(대상마다 케이스 1개 이상 전부 `passed`. skip · todo · 0건 · 수집 오류 · 러너 오류는 통과 아님). 소스 변경 거부 세 겹: 테스트 작성 세션의 경로 가드, Green 확인 전 대조, 병합 직전 대조(`isTestOnlyPath`: 대상 규칙 폴더와 BIVE 선언 파일만).
+- **유형 D**: 기준 커밋을 새로 판정. 막는 판정 전부 `pass` · 대상 판정 있음 · 수집 오류 없음이어야 Green. 판정 없음은 통과로 세지 않지만 막지도 않는다. Green이 아니면 구현 세션 0회 · 커밋 · 병합 · 판정 기록 0건. 대상은 인수 테스트 검사 규칙만.
+- 화면: 내장 규칙 [실행]이 유형 B 실행을 만든다(앱 요청은 그대로). 파이프라인 표시는 생략 단계를 "생략"으로, `green_check`를 "Green 확인"으로 보인다.
+- 파이프라인 e2e `run-type-b.test.ts` + 시나리오 `scenarios/run-type-b.yaml`(묶음 2). 등록된 프로젝트 폴더는 미추적 `.bive.json` 때문에 `scripts/make-variant.sh`를 쓸 수 없어 변형 내용을 사람 커밋으로 올린다.
+- 한계(ADR-136): 인수 테스트가 하나도 없는 프로젝트에서 B · D는 닫힌 쪽으로 끝난다, 유형 C는 통과하는 테스트면 병합된다(변이 재주입 전까지), 유형 C의 검사 실패 사유가 다음 테스트 작성 세션에 전달되지 않는다, D의 구현 세션에 작업 지시를 넘기는 길이 없다, C · D를 만드는 화면 경로가 없다(RPC · CLI만), 승인 기록 `run_start`는 유형을 싣지 않는다.
+
+### M3-11 (#56, PR #304, main `e5e3a09`, ADR-137, 마이그레이션 없음)
+- **추적성 결함의 정의는 `orchestrator/src/verification/summary.ts` 한 곳**(`requirementsWithoutRules` · `parentlessRuleDefects` · `traceabilityOf`). 효력 판정은 `norms/effective.ts`의 `isEffectiveRule` 그대로. 규칙 없는 요구사항 = 효력 있는 자식 규칙이 없는 요구사항(자식이 모두 폐기 포함, 규칙 작성 중 포함). 부모 없는 규칙 = 효력 있는 비내장 규칙의 부모가 `null`이거나 삭제됨. 뺌: 규칙화 불가 · 삭제된 요구사항, `builtin` 규칙(구조 · 계약 검사), 폐기 · 삭제 규칙.
+- **응답**: `rule.list` 결과에 `traceability`(선택 칸), `verification.summary`에 `traceability` · `unrulable{count,total}`(필수 칸). 화면은 서버 값만 쓰고 다시 세지 않는다.
+- **`requirement.markUnrulable({projectId, id, reason, author})`**: 사람만(에이전트 -32020), 공백만인 사유 -32001 `UNRULABLE_REASON_REQUIRED`, 4000자 초과 -32001, 없는 요구사항 -32004, 삭제됨 · 이미 표시됨 · 효력 있는 자식 규칙 있음 -32009(`data.reason`). 승인 기록 없음(ADR-100 A2: 요구사항의 사람 편집은 승인 기록에 쓰지 않는다), 같은 트랜잭션에서 확인됨. 풀기 없음. 규칙 작성 세션 · 재판단을 띄우지 않는다.
+- **화면**: 요구사항 상세 [규칙화 불가] + 사유 입력(공백만이면 [확인] 비활성, 요청 중 한 번만). 요구사항 카드 예외 '추적성 결함' · '규칙화 불가'(규칙화 불가가 앞선다), 규칙 카드 예외 '추적성 결함'(부모 없는 규칙). 검증 화면 카드 "규칙화 불가 비율 N / M"(분모 0이면 '없음') · "추적성 결함 N"(부모 없는 규칙 포함, 누르면 요구사항이 상태 필터로 열림). 요구사항 화면은 규칙 작성 알림에도 `rule.list`를 한 번 읽는다.
+- 시나리오 `scenarios/no-rules.yaml`.
+- 한계(ADR-137): 표시 뒤에도 규칙 작성 세션이 뜰 수 있어 "규칙화 불가이면서 규칙 있음"이 될 수 있다(대기 · 진행 중이던 세션, 마지막 시도가 생략 · 실패인 요구사항을 고칠 때), 검증 화면은 규칙 작성 알림 · 요구사항 변경에 다시 읽지 않는다, 추적성 결함 카드 수와 그 카드로 연 요구사항 목록 수가 다를 수 있다(부모 없는 규칙), 뒤의 요구사항 편집이 수정 시각을 덮어 표시 시각이 사라진다.
+
+### M3-52 · M3-53 뒤의 로드맵 사실 (PR #309, main `0c5fa5b`, ADR-141)
+- M3-07(#52)은 수용 기준 1 · 2 · 4번만 맡는다. 3번(변이 주입 단계 켜기 · 변이 생존의 자동 유형 C 보강 · 재주입 · `mutant-survives`)은 **M3-54(#311)**. M3-08(검토 대기열)은 M3-54를 기다린다. 규칙 카드 예외 '변이 생존' · 변이 필터 칩 · `rule.list`의 변이 상태 칸은 M3-15의 몫.
+- ADR-141의 결정(M3-54가 구현): 시작 근거 = 변이 결과 기록(생존)을 원인으로 하는 새 원인 종류(마이그레이션), 보강 표시 = 실행과 변이 결과를 잇는 새 표, 변이 글 = ADR-128 방식 자료로 테스트 작성 세션에, 예산 소진 = 기존 규칙, 재주입 = 같은 변이 다시 적용, 보강의 고리 · 중복 방지.
+
+### M3-07 (#52, PR #308, main `6a356b4`, ADR-139, 마이그레이션 `project/0026_mutation_results`)
+- **제품의 변이 주입 단계는 아직 `skipped`다**(`DEFAULT_STEP_EXECUTORS.mutation` = `skipMutationStep`). `steps/mutation.ts`의 `createMutationExecutor`는 시험에서만 돈다. 켜는 것은 M3-54(#311).
+- **역할 `mutator`**(표시명 "변이 주입", `STEP_ROLES.mutation`). 세션 폴더: `rules/<ID>.md`(대상 규칙 제목 · 진술) + 대상 블록 include에 드는 판정 커밋 파일의 사본(git 객체에서, 일반 blob만, 200개 · 4 MiB 상한, 넘치면 빠진 수를 작업 지시에). 인수 테스트는 사본에서 빠지고 경로 가드가 이 역할의 `bive-acceptance/` 읽기 · 목록을 거부한다. 규범 입력 · 케이스 이름은 주지 않는다. 도구: `read_file` · `list_files` · `search_files` · `propose_mutant`(쓰기 없음).
+- **`propose_mutant {path, search, replace}`**(`mutation/mutant.ts`): `search` 1 ~ 2000자, `replace` 0 ~ 2000자, 같은 글 거부, 세션마다 1개(받으면 실행기가 닫힘). 거부: 블록 밖(선언과 같은 매처), 인수 테스트, 숨김 경로, `node_modules`, 루트 `prisma/`, 패키지 · 잠금 파일, `*.config.*` · `tsconfig*`, 계약 원본, `..` · 절대 경로 · 역슬래시, 커밋에 없는 파일, 1 MiB 초과 · 글이 아님, 바꿀 글 없음 · 여러 번 나옴. 도구 호출 기록에는 경로만 남는다.
+- **판정**: `judgeCommit`의 선택 인자 `applyMutant`(해시 대조 뒤 · 설치 전에 격리 체크아웃의 파일을 바꿈, 커밋하지 않음). 대상 규칙의 인수 테스트만. 대상 케이스 하나라도 실패 = `killed`(변이 검증됨), 모두 통과 = `survived`(변이 생존, 실행은 그대로), 변이 없음 · 케이스 0 · skip만 · 체크아웃 · 설치 · 수집 · 러너 오류 = 변이 미검증(결과 값으로 구분). 인수 테스트 변조 = 기록 없음 + `guard_violation`.
+- **저장**: 표 `mutation_results`(0026: 상태와 결과의 짝 CHECK, 추가 전용 트리거 3개), `MutationResultRepository`. 쓰는 곳은 `steps/mutation.ts` 한 곳. 기록이 없으면 '변이 미검증'.
+- **대상과 순서**: 실행의 대상 규칙만. 위험도 high → medium → low → 없음, 같으면 표시 ID 순(길이 → 글자). 대상 아님: 내장 규칙 · 블록 선언 없음 · 대상 블록 없음 · 인수 테스트 없음. 예산 소진이면 실행 `budget_exceeded`(병합 없음).
+- **설정**: SCR-21에 "변이 주입" 행. `RUN_REQUIRED_ROLES`에 `mutator` → **모든 유형의 실행 생성 · 자동 시작이 이 칸을 요구**(기본값 없음, 옛 설정은 사람이 채울 때까지 `SETTINGS_INCOMPLETE`). 시험 도우미 `COMPLETE_SETTINGS`와 e2e 가짜 설정은 채워져 있다. 예산 스냅샷의 변이 주입 역할은 유형 A · C에만(유형 B의 변이 단계는 생략 단계, 사유 `run_type`).
+- 한계(ADR-139)와 M3-54로 넘긴 것: 변이를 받은 뒤 세션을 끝내는 장치 없음, 서버를 죽이는 변이가 '검증됨'으로 세어짐(판정 러너는 서버 프로세스를 쥐고 있어 가를 수 있다), 세션 폴더의 `rules/<ID>.md`가 블록 include `rules/**`의 사본과 겹칠 수 있음, include `**` 블록의 인수 테스트 사본 제외 시험 · 저장 한 곳 구조 시험 없음, `prisma` 거부가 루트 폴더만 봄, 설정 화면의 "변이 주입" 행 머리가 고정폭 글꼴.
+- **CI 시간**: 이 PR 뒤 `checks`가 21 ~ 22분(제한 30분, ADR-138의 다시 보는 선 25분). 무거운 단위 시험을 더하는 이슈는 시간을 재고 보고한다.
+
+### M3-29 (#231, PR #310, main `08bf069`, ADR-140, 마이그레이션 없음)
+- **규범 입력의 대상 블록 고르기**(`norms/norm-input.ts`의 `blockScopeOf`, `collectNormInput`의 넷째 선택 인자 `{ blockBasisRuleIds }`). 고르는 때: 효력 있는 요구사항 · 규칙 · 계약 가운데 **어느 종류든 기존 상한(`NORM_INPUT_LIMITS`, 각 50)을 넘고**(ADR-100 K1의 "규범이 많아지면"), 블록 선언이 있고, 기준 규칙이 모두 대상 블록을 가질 때. 그 밖(상한 안 · 선언 없음 · 기준 없음 · 기준 규칙 하나라도 대상 블록이 빔 · 없는 규칙 ID)은 전체이고 글자까지 예전과 같다.
+- 세션별 기준: 규칙 작성(새 요구사항 · 다시 시도) = 없음 → 늘 전체. 요구사항 재판단 = 효력 있는 자식 규칙. 테스트 작성 · 구현 = 실행의 대상 규칙. 이의 판단 = 이의 대상 + 실행의 대상 규칙. 검사 실패 판단 = 실행의 대상 + 실패한 규칙. 유형 B(내장 규칙 대상)는 대상 블록이 비어 전체. 역할 목록은 하드코딩하지 않았다(새 역할은 부르는 쪽의 초점 규칙이 기준).
+- 겹침 = 대상 블록 이름이 정확히 같음(`dependsOn`으로 넓히지 않음). 늘 넣는 것: 대상 블록이 빈 규칙(내장 구조 · 계약 검사 · 옛 규칙), 초점 요구사항, 고른 규칙의 부모, 효력 있는 자식 규칙이 없는 요구사항. 계약: 검사 규칙 · 부모 요구사항이 고른 범위에 든 것 + 둘 다 없는 것(지금은 사실상 전부).
+- 먼저 고르고 그다음 기존 A15 줄이기. 세션 기록 `SessionNormInput`에 선택 칸: 종류별 `outOfBlock`, `summary.blocks`. 고른 세션에만 자료 첫 줄의 고정 문장(`normInputScopeLine`)과 머리말의 수.
+- 검사 단계 · 병합 재검사는 그대로(효력 있는 규칙 전체 판정): 최종 방어선.
+- 한계(ADR-140): 이름 기준 겹침이라 간접 영향을 못 본다, 판단 세션의 대체 도구가 만든 새 규칙과 블록 밖 규칙의 모순을 그 세션이 못 본다, 인용 검사는 효력 있는 규칙 전체를 기준으로 봐 세션이 못 본 규칙과 겹치는 조각이 거부될 수 있다, 판단 기록의 `input`은 블록 밖 수와 상한으로 잘린 수를 구분하지 않는다.
+
+### M3-31 (#259, PR #312, main `e59a4dd`, ADR-142, 제품 코드 변경 없음)
+- **구조 시험이 구문 트리 + 타입 검사기로 잡는다**(`orchestrator/test/helpers/source-structure.ts`, `integrity.test.ts`의 M3-31 절). 기존 정규식 시험과 허용 목록은 그대로이고 새 시험은 "구문 트리가 찾은 파일 = 정규식이 찾은 파일"을 단언한다(허용 목록은 기존 시험 한 곳).
+- 잡는 것: 저장소 접근(`normChanges` · `rules.create` · `ruleRetirements` · `confirmations`)과 확인 서비스 · 규범 입력 · 규칙 작성 서비스 모듈의 사용을 별칭 · 구조 분해 · 대괄호 · 동적 import · 큰따옴표 · `export … from` · 네임스페이스 · 다시 내보내기 사슬 · 타입을 지운 값의 흔치 않은 이름으로 써도. 날 SQL(네 표에 쓰는 문장: 오케스트레이터 · app · shared · parser의 src, 주석 · 네 가지 따옴표 · 색인 지정 포함)과 오케스트레이터의 `store.db` · SQLite 모듈 사용. 종료 상태 리터럴(오케스트레이터 src 전체, `engine/run-ending.ts`만 제외: 삼항 · 변수 · 스프레드 · 계산 키. 허용은 정확한 경로의 선언 기준).
+- **새 코드를 쓸 때**: 실행의 실패 쪽 종료 상태는 `runEnding`을 거친다(어느 폴더에서든 `{ run: { status: 'failed' … } }`를 직접 쓰면 빨강). 네 표에 쓰는 SQL은 store 패키지 안에서만. 허용 목록을 넓혀야 하면 멈추고 보고.
+- 못 잡는 형태와 그 성질을 지키는 행동 시험 이름은 ADR-142의 표. 대상은 `.ts`만이다. `integrity.test.ts` 단독 약 15 ~ 20초.
+
+### M3-54 (#311, PR #313, main `bb8bd53`, ADR-143, 마이그레이션 `project/0027_mutation_reinforcements`)
+- **제품의 변이 주입 단계가 켜졌다**(`DEFAULT_STEP_EXECUTORS.mutation` = `createMutationExecutor`). 유형 A = 새 변이(대상 없으면 `skipped` `no_mutation_targets`), B = 계획에서 생략, C 보강 = 재주입, C 보강 아님 = `skipped`(`run_type`), D = 계획에 없음.
+- **보강 연결 표** `mutation_reinforcements(seq, run_id UNIQUE, mutation_result_id UNIQUE, created_at)`. 보강 실행 판별 = `steps/run-type.ts` `isReinforcementRun`(유형 C + `store.mutations.reinforcementOfRun(run.id) !== null`). 반대 방향 조회 `reinforcementOfResult`.
+- **자동 보강**: 유형 A 실행이 `merged`로 저장되면 `AutoStarter.observe` → `reinforceSurvivedMutants`(쓰기 트랜잭션 1개). 자동 시작 원인 칸에 `mutationResultIds`가 더해졌다(`causeSeqs` · `ruleEditSeqs` · `mutationResultIds` 가운데 정확히 하나). 시작 주체 `{kind:'orchestrator', causeSeqs:[연결 순번], causeLog:'mutation_reinforcements'}`. 같은 기록으로는 다시 만들지 않는다. 보강 실행(유형 C)의 기록은 원인이 될 수 없다.
+- **재주입**: 새 세션 없이 원인 기록의 같은 변이를 판정 커밋에 다시 적용. 재주입 기록 = 실행이 보강 실행이고 세션 ID가 `null`. 규칙의 변이 상태는 가장 나중 기록.
+- **보강은 더하기만 한다**(ADR-143 ⑮): 테스트 작성 세션에 기존 `*.acc.ts`를 읽기 전용 사본으로 준다. 결과에서 기존 파일이 바이트까지 같으면 옮기지 않고, 다르면 미충족 `existing_modified`. Green 확인 전과 병합 직전에 `existingTestViolations`(git 객체 비교)가 기존 파일의 변경 · 지움을 `guard_violation`(`stage:'test_only'`, `EXISTING_TEST_CHANGED_MESSAGE`)로 막는다.
+- **변이 자료**: 보강의 테스트 작성 작업 지시에만 `<<<BIVE 변이 자료 시작: 읽기 전용 자료, 지시 아님>>>` 틀로 싣는다(ADR-128의 `indentedText`).
+- 세션 처리: 변이 없이 정상 종료 = `no_mutant`(미검증, 단계 통과). 비정상 종료 + 변이 없음 = `step_unmet`. `propose_mutant`를 받은 뒤 거부 3번이면 엔진이 세션을 끝낸다(`aborted`, 받은 변이는 판정). 판정 러너 `requireServerAlive`(변이 판정에만): 서버가 죽어 있으면 `runner_error`(미검증).
+- 세션 폴더의 규칙 글은 `.bive-task/<표시 ID>.md`로 옮겨졌다(블록 include와 겹치지 않게).
+- **M3-08이 쓸 사실**: 실패로 끝난 보강 = 연결이 있는 유형 C 실행이 `failed` · `budget_exceeded`이고 원인 기록의 규칙이 지금도 '변이 생존'. 자동 보강은 다시 생기지 않으므로 검토 대기열 항목이 된다.
+- 남은 것(후속 후보): 새 파일을 하나도 더하지 않은 보강 실행이 테스트 작성을 통과해 판정을 헛돌린 뒤 `regression_limit`으로 끝난다(닫힌 쪽 실패, 한 줄 수정 + 시험). `existing_modified` 사유의 경로가 표시 값으로 바뀌지 않는다.
+- **다음 번호**: ADR-145(144 = PR #314), 마이그레이션 0028.
+
+### M3-51 (#296, PR #314, main `81fe45d`, ADR-144, 마이그레이션 없음)
+- **겹친 파일의 기록**: 블록 선언이 겹쳐 구조 검사가 실패하면 `steps/structure-check.ts`가 단계 결과에 `overlaps`(경로는 표시 값 변환, 앞 20개, `total` = 전체 수, 경로마다 블록 이름)를 남긴다.
+- **응답**: `run.list`가 해당 실행에만 `failureNotes`를 싣는다(`runs/failure-notes.ts`, 저장된 단계 결과만 읽고 shared 스키마 `safeParse`). 해당 실행이 없으면 응답은 예전과 같은 `{runs}`.
+- **화면**: 규칙 상세의 실행 이력(`runHistoryView.ts` `noteFits`)에 "겹친 파일" · 경로 · 블록 이름 · "외 N개". **대상 규칙의 상세에만 보인다**(내장 구조 규칙 상세에는 안 보임: 한계).
+- **내장 규칙 없는 프로젝트**: 내장 규칙을 자동으로 만들지 않는다(ADR-127 ①). `state_inconsistent`에 "내장 구조 규칙 없음 · 블록 선언 다시 저장 필요" 안내만 붙는다. 다른 `state_inconsistent` 사유에는 안 붙는다.
+- **구현 세션의 앞 시도 사유**: 구조 위반은 별도 머리 문장 아래(`steps/implementation.ts`), 기준은 `structureRuleDisplayIds`(내장 구조 규칙의 고정 제목 대조 `isBuiltinStructureRule`). **계약 검사 규칙도 `builtin: true`지만 기존 머리 `CHECK_FAILED_HEADER` 아래 그대로다**(시험이 고정).
+- ADR-127 본문의 한계 문장 두 곳에 "(ADR-144로 닫음)"이 덧붙었다(선례: PR #288 · #298).
+- 후속 후보: 겹침을 내장 구조 규칙 상세에서도 보이기(SCR-16 때), "겹친 파일" 글씨 구분, 병합 재검사의 겹침 표시.
