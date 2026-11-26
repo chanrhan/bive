@@ -1814,7 +1814,7 @@ describe('구조 검사 결과 → 내장 규칙 판정 (단위, 파서 출력 �
     expect(overlaps?.items.slice(2).map((item) => item.file)).toEqual(
       many.slice(2, MAX_STRUCTURE_CASES).map((item) => item.file),
     );
-    // \uc228\uc740 \uae00\uc790(\uc81c\uc5b4 \u00b7 \uc11c\uc2dd)\ub294 \ud558\ub098\ub3c4 \ub0a8\uc9c0 \uc54a\ub294\ub2e4
+    // 숨은 글자(제어 · 서식)는 하나도 남지 않는다
     expect(overlaps?.items.filter((item) => /[\p{Cc}\p{Cf}]/u.test(item.file))).toEqual([]);
     // 겹침이 아닌 결과에는 겹친 파일 칸이 없다
     const checked = await run(analysis({ status: 'checked', violations: capped([]) }));

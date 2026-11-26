@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { APPROVAL_LOG_GENESIS_HASH, type JudgmentResult, METHODS } from '@bive/shared';
+import { APPROVAL_LOG_GENESIS_HASH, type JudgmentResult, METHODS, type Rule } from '@bive/shared';
 import {
   bivePaths,
   canonicalJson,
@@ -33,7 +33,13 @@ import {
   type NormInput,
 } from '../src/norms/norm-input.js';
 import { retireAgentRule } from '../src/norms/agent-rule.js';
-import { readContractSource, registerHumanContract } from '../src/norms/contract.js';
+import {
+  contractRuleText,
+  readContractSource,
+  registerHumanContract,
+} from '../src/norms/contract.js';
+import { BUILTIN_STRUCTURE_RULE_TEXTS } from '../src/norms/builtin-rules.js';
+import { structureRuleDisplayIds } from '../src/steps/structure-check.js';
 import {
   CHECK_FAILED_HEADER,
   describeImplementationUnmet,
@@ -1555,5 +1561,74 @@ describe('앞 시도 사유의 머리 문장: 구조 위반은 인수 테스트 
       both,
     );
     expect(describeImplementationUnmet(checkFailed(acceptance, structure), builtin)).toBe(both);
+  });
+
+  // 계약 검사 규칙도 내장(builtin) 행이다(norms/contract.ts). 구조 머리 아래로 가는 것은 내장 구조 규칙(고정 제목)뿐이다
+  const ruleRow = (displayId: string, title: string, patch: Partial<Rule> = {}): Rule => ({
+    id: `01JC00000000000000000000${displayId.slice(-2)}`,
+    displayId,
+    title,
+    statement: 'WHILE 블록 선언이 있으면 THE SYSTEM SHALL 따른다',
+    kind: 'architecture',
+    checkKinds: ['structure'],
+    parentRequirementId: null,
+    parentDetachedAt: null,
+    builtin: true,
+    targetBlockIds: [],
+    risk: null,
+    contractId: null,
+    author: { kind: 'human' },
+    normState: 'approved',
+    createdAt: '2026-11-26T00:00:00.000Z',
+    updatedAt: '2026-11-26T00:00:00.000Z',
+    deletedAt: null,
+    confirmation: { state: 'unconfirmed' },
+    ...patch,
+  });
+  const contractRule = ruleRow('RULE-006', contractRuleText('CON-001').title, {
+    kind: 'tech-constraint',
+    checkKinds: ['contract'],
+    contractId: '01JF0000000000000000000001',
+  });
+  const RULES: Rule[] = [
+    ruleRow('RULE-001', '주문 취소 거절', { builtin: false, kind: 'business' }),
+    ruleRow('RULE-004', BUILTIN_STRUCTURE_RULE_TEXTS['structure.public-api-only'].title),
+    ruleRow('RULE-005', BUILTIN_STRUCTURE_RULE_TEXTS['structure.declared-direction'].title),
+    contractRule,
+  ];
+
+  it('구조 머리의 기준(structureRuleDisplayIds)은 내장 구조 규칙의 고정 제목뿐이고, 같은 내장 행인 계약 검사 규칙 · 일반 규칙은 들지 않는다', () => {
+    expect([...structureRuleDisplayIds(RULES)]).toEqual(['RULE-004', 'RULE-005']);
+    expect(structureRuleDisplayIds([contractRule]).size).toBe(0);
+  });
+
+  it('계약 검사 규칙의 실패는 구조 머리가 아니라 기존 머리(CHECK_FAILED_HEADER) 아래에만 실린다 (계약 실패만이면 글자까지 예전과 같다)', () => {
+    const contract = {
+      judgmentId: 'j4',
+      ruleId: 'RULE-006',
+      status: 'fail',
+      failedCases: [
+        {
+          name: '계약과 다른 응답',
+          file: 'openapi.yaml',
+          line: null,
+          status: 'failed',
+          message: 'GET /api/health',
+        },
+      ],
+    };
+    const CONTRACT_ITEM = ['- RULE-006', '  - openapi.yaml 계약과 다른 응답 (GET /api/health)'];
+    const ids = structureRuleDisplayIds(RULES);
+    expect(describeImplementationUnmet(checkFailed(contract, passed), ids)).toBe(
+      [CHECK_FAILED_HEADER, ...CONTRACT_ITEM].join('\n'),
+    );
+    expect(describeImplementationUnmet(checkFailed(contract, structure, acceptance), ids)).toBe(
+      [
+        CHECK_FAILED_HEADER,
+        ...CONTRACT_ITEM,
+        ...ACCEPTANCE_TEXT.split('\n').slice(1),
+        STRUCTURE_TEXT,
+      ].join('\n'),
+    );
   });
 });
