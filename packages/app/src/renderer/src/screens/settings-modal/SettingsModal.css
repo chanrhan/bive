@@ -167,7 +167,7 @@
 }
 
 /* 한국어 표시명 행 머리(변이 주입)는 본문 글꼴: 고정폭 글꼴은 한글 글자 사이가 벌어져 보인다 (M3-54 #311) */
-.settings-roles [data-testid='settings-role-mutator'] .settings-role-name {
+.settings-roles .settings-role-name[data-label-kind='text'] {
   font-family: var(--font-sans);
 }
 

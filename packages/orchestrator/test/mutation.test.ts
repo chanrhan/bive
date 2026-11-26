@@ -15,12 +15,14 @@ import { JudgeCheckoutError } from '../src/judge/checkout.js';
 import { mutantPathProblem } from '../src/mutation/mutant.js';
 import { MUTATOR_SYSTEM_PROMPT } from '../src/mutation/prompts.js';
 import { validateSettingsForRun } from '../src/settings/settings-service.js';
+import { EXISTING_TEST_CHANGED_MESSAGE, TEST_ONLY_STAGE } from '../src/steps/green-check.js';
 import { compareMutationOrder, selectMutationTargets } from '../src/steps/mutation.js';
+import { EXISTING_MODIFIED_REASON } from '../src/steps/test-writing.js';
 import { roleToolNames } from '../src/tools/definitions.js';
 import { COMPLETE_SETTINGS, human, newId, userGit, withProject } from './helpers/engine-harness.js';
 import { reinforceSurvivedMutants } from '../src/runs/auto-start.js';
 import { createRun } from '../src/runs/run-service.js';
-import type { JudgeCall, JudgeDecision } from './helpers/pipeline-harness.js';
+import { type JudgeCall, type JudgeDecision, setupPipeline } from './helpers/pipeline-harness.js';
 import {
   AUTH,
   DECLARATION,
@@ -28,8 +30,10 @@ import {
   LIB,
   allPass,
   cleanupMutationHarness,
+  engines,
   mainTip,
   mutationsOf,
+  redFromWorktree,
   runToEnd,
   setup,
   statusOf,
@@ -37,6 +41,7 @@ import {
   toolCallsOf,
   runsOf,
   settleAll,
+  temps,
 } from './helpers/mutation-harness.js';
 
 afterEach(cleanupMutationHarness, 60_000);
@@ -786,5 +791,271 @@ describe('변이 생존의 자동 테스트 보강 · 재주입 (M3-54 #311 수�
         reinforceSurvivedMutants(store, { runId: second }, clock),
       ),
     ).toEqual({ status: 'none' });
+  }, 90_000);
+});
+
+describe('보강 실행은 대상 규칙 폴더에 더하기만 한다 (M3-54 #311, ADR-100 B④ · NFR-01 · ADR-143 ⑮)', () => {
+  const EXISTING = 'bive-acceptance/RULE-001/mutation.acc.ts';
+  const ADDED = 'bive-acceptance/RULE-001/reinforce-added.acc.ts';
+  const addedTest = (name: string): string =>
+    `import { it } from 'vitest';\nit('${name}', () => undefined);\n`;
+  const writeAdded = (rel = ADDED, name = '보강 케이스') => ({
+    tool: 'write_file',
+    args: { path: rel, content: addedTest(name) },
+  });
+  /** 첫 주입은 생존, 재주입(변이 적용 + 보강 파일 있음)은 검출. Green 확인 · 병합 재검사(변이 없음)는 통과. */
+  const killedByAdded = (call: JudgeCall): JudgeDecision =>
+    Object.fromEntries(
+      (call.input.ruleIds ?? []).map((id) => [
+        id,
+        call.status.includes('M src/') &&
+        call.acceptance.some((file) => file.includes('/reinforce-'))
+          ? (['failed', 'passed'] as const)
+          : (['passed', 'passed'] as const),
+      ]),
+    );
+  type SetupInput = Parameters<typeof setup>[0];
+  const setupAddOnly = (testWriter: SetupInput['testWriter'], extra: Partial<SetupInput> = {}) =>
+    setup({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: { 'RULE-001': [{ tool: 'propose_mutant', args: VALID_MUTANT }] },
+      decide: killedByAdded,
+      settings: AUTO_SETTINGS,
+      testWriter,
+      ...extra,
+    });
+  const reinforcingRun = async (h: ReturnType<typeof setup>) => {
+    expect((await runToEnd(h)).run.status).toBe('merged');
+    await settleAll(h);
+    const runs = runsOf(h);
+    expect(runs.map((detail) => detail.run.type)).toEqual(['A', 'C']);
+    return runs[1]!;
+  };
+  const ruleFolderOnMain = (h: ReturnType<typeof setup>) =>
+    userGit(h.repo, 'ls-tree', '-r', '--name-only', 'main', 'bive-acceptance/RULE-001/').split(
+      '\n',
+    );
+
+  it('(가) 세션이 새 파일 하나만 내면 기존 인수 테스트는 바이트까지 그대로 main에 남고 새 파일이 더해지며, 재주입이 검출해 병합된다', async () => {
+    const h = setupAddOnly([[writeAdded(), { message: '보강 테스트 1개를 더했다.' }]]);
+    const before = userGit(h.repo, 'show', `main:${EXISTING}`);
+    const reinforcing = await reinforcingRun(h);
+    expect(reinforcing.run.status).toBe('merged');
+    // 세션은 기존 인수 테스트를 읽기 전용 사본으로 받았고, 작업 지시에 "새 파일만 더한다"가 있다
+    const writerIndex = h.sessions.findIndex((spec) => spec.role === 'test-writer');
+    expect(h.sessionFiles[writerIndex]).toContain(EXISTING);
+    expect(h.sessionTexts[writerIndex]?.[EXISTING]).toBe(`${before}\n`);
+    expect(h.sessions[writerIndex]?.prompt).toContain(
+      '기존 테스트 파일은 고칠 수 없고 새 파일만 더한다',
+    );
+    const writing = reinforcing.steps.find((step) => step.kind === 'test_writing');
+    expect(writing?.exitDetail).toMatchObject({ removedFiles: [], preservedFiles: [EXISTING] });
+    expect((writing?.exitDetail as { files: string[] }).files).not.toContain(EXISTING);
+    // main: 기존 파일 바이트 그대로 + 새 파일
+    expect(userGit(h.repo, 'show', `main:${EXISTING}`)).toBe(before);
+    expect(ruleFolderOnMain(h)).toEqual([EXISTING, ADDED]);
+    // 재주입은 기존 + 새 케이스 전부를 판정했다
+    const reinjection = h.judgeCalls.at(-1)!;
+    expect(reinjection.input.runId).toBe(reinforcing.run.id);
+    expect(reinjection.status).toContain(`M ${HEALTH}`);
+    expect(reinjection.acceptance).toEqual(expect.arrayContaining([EXISTING, ADDED]));
+    expect(statusOf(h, h.rules[0] as Rule)).toBe('verified');
+  }, 90_000);
+
+  it('(나) 기존 파일을 덮어쓰려는 세션 결과는 받지 않는다: 그 시도는 미충족(existing_modified)이고 사유가 다음 시도에 가며, 기존 바이트는 그대로다', async () => {
+    const h = setupAddOnly([
+      [
+        { tool: 'write_file', args: { path: EXISTING, content: addedTest('바꾼 기존 케이스') } },
+        writeAdded(),
+        { message: '기존 테스트를 고쳤다.' },
+      ],
+      [writeAdded(), { message: '새 파일만 더했다.' }],
+    ]);
+    const before = userGit(h.repo, 'show', `main:${EXISTING}`);
+    const reinforcing = await reinforcingRun(h);
+    const writings = reinforcing.steps.filter((step) => step.kind === 'test_writing');
+    expect(writings.map((step) => step.status)).toEqual(['failed', 'passed']);
+    expect(writings[0]?.exitDetail).toMatchObject({
+      reason: EXISTING_MODIFIED_REASON,
+      modified: [EXISTING],
+    });
+    const writers = h.sessions.filter((spec) => spec.role === 'test-writer');
+    expect(writers).toHaveLength(2);
+    expect(writers[1]?.prompt).toContain('기존 인수 테스트 파일은 고칠 수 없다 (새 파일만 더한다)');
+    expect(writers[1]?.prompt).toContain(EXISTING);
+    expect(reinforcing.run.status).toBe('merged');
+    expect(userGit(h.repo, 'show', `main:${EXISTING}`)).toBe(before);
+    expect(ruleFolderOnMain(h)).toEqual([EXISTING, ADDED]);
+  }, 90_000);
+
+  it('(라) 대조를 지나친 기존 파일 변경(시험이 워크트리에 직접 넣어 커밋됨)은 Green 확인이 막는다', async () => {
+    const h = setupAddOnly([[writeAdded(), { message: '보강.' }]], {
+      executors: (current) => ({
+        ...current,
+        test_writing: async (context) => {
+          const outcome = await current.test_writing!(context);
+          if (context.run.type === 'C') {
+            fs.appendFileSync(path.join(context.git.worktreePath, EXISTING), '// 직접 고침\n');
+          }
+          return outcome;
+        },
+      }),
+    });
+    const before = userGit(h.repo, 'show', `main:${EXISTING}`);
+    const reinforcing = await reinforcingRun(h);
+    expect(reinforcing.run).toMatchObject({ status: 'failed', failureReason: 'guard_violation' });
+    const green = reinforcing.steps.find((step) => step.kind === 'green_check');
+    expect(green?.exitDetail).toMatchObject({
+      reason: 'guard_violation',
+      detail: {
+        stage: TEST_ONLY_STAGE,
+        message: EXISTING_TEST_CHANGED_MESSAGE,
+        changed: [EXISTING],
+      },
+    });
+    expect(userGit(h.repo, 'show', `main:${EXISTING}`)).toBe(before);
+  }, 90_000);
+
+  it('(라) Green 확인을 지나친 기존 파일 지움은 병합 직전 대조가 막는다', async () => {
+    const h = setupAddOnly([[writeAdded(), { message: '보강.' }]], {
+      executors: (current) => ({
+        ...current,
+        // Green 확인 · 재주입은 통과로 두고(대조를 지나친 상태), 테스트 작성 커밋에서 기존 파일을 지운다
+        green_check: redFromWorktree,
+        mutation: (context) =>
+          context.run.type === 'C'
+            ? Promise.resolve({ status: 'passed' as const })
+            : current.mutation!(context),
+        test_writing: async (context) => {
+          const outcome = await current.test_writing!(context);
+          if (context.run.type === 'C') fs.rmSync(path.join(context.git.worktreePath, EXISTING));
+          return outcome;
+        },
+      }),
+    });
+    const before = userGit(h.repo, 'show', `main:${EXISTING}`);
+    const reinforcing = await reinforcingRun(h);
+    expect(reinforcing.run).toMatchObject({ status: 'failed', failureReason: 'guard_violation' });
+    const merge = reinforcing.steps.find((step) => step.kind === 'merge');
+    expect(merge?.exitDetail).toMatchObject({
+      reason: 'guard_violation',
+      detail: {
+        stage: TEST_ONLY_STAGE,
+        message: EXISTING_TEST_CHANGED_MESSAGE,
+        changed: [EXISTING],
+      },
+    });
+    expect(userGit(h.repo, 'show', `main:${EXISTING}`)).toBe(before);
+  }, 90_000);
+});
+
+describe('보강이 아닌 유형 C · 보강 실행의 생존 기록 (M3-54 #311, ADR-143 ① · ⑪)', () => {
+  it('블록 선언이 있는 프로젝트에서도 보강이 아닌 유형 C 실행의 변이 주입 단계는 생략(run_type)이고 세션 · 판정 · 기록이 없다', async () => {
+    const h = setup({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: { 'RULE-001': [{ tool: 'propose_mutant', args: VALID_MUTANT }] },
+      noAutoStart: true,
+    });
+    const plain = withProject(h.biveHome, h.projectId, (store) =>
+      createRun(
+        store,
+        { ruleIds: [h.rules[0]!.id], author: human, type: 'C' },
+        { clientId: null },
+        { now: Date.now, newId },
+      ),
+    ).run.id;
+    expect(h.engine.evaluateApproval(h.projectId, plain)).toBe(true);
+    await h.engine.settled();
+    const detail = runsOf(h).find((item) => item.run.id === plain)!;
+    expect(detail.run).toMatchObject({ type: 'C', status: 'merged' });
+    expect(detail.steps.find((step) => step.kind === 'mutation')).toMatchObject({
+      status: 'skipped',
+      exitDetail: { reason: 'run_type', runType: 'C' },
+    });
+    expect(h.sessions.filter((spec) => spec.role === 'mutator')).toEqual([]);
+    expect(h.judgeCalls).toEqual([]);
+    expect(
+      withProject(h.biveHome, h.projectId, (store) => store.mutations.listByRun(plain)),
+    ).toEqual([]);
+  }, 90_000);
+
+  it('보강 실행의 재주입이 한 번 생존했다가 검출돼 병합되면(생존 기록을 가진 병합된 유형 C 실행) 새 보강 실행은 생기지 않는다: 유형 A가 아닌 실행은 원인 후보가 아니다', async () => {
+    let mutated = 0;
+    const h = setup({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: { 'RULE-001': [{ tool: 'propose_mutant', args: VALID_MUTANT }] },
+      // 첫 주입 생존 · 재주입 1회째 생존 · 2회째 검출
+      decide: (call) => {
+        if (call.status.includes('M src/')) mutated += 1;
+        return Object.fromEntries(
+          (call.input.ruleIds ?? []).map((id) => [
+            id,
+            mutated >= 3 && call.status.includes('M src/')
+              ? (['failed', 'passed'] as const)
+              : (['passed', 'passed'] as const),
+          ]),
+        );
+      },
+      settings: AUTO_SETTINGS,
+    });
+    await runToEnd(h);
+    await settleAll(h);
+    const runs = runsOf(h);
+    expect(runs.map((detail) => [detail.run.type, detail.run.status])).toEqual([
+      ['A', 'merged'],
+      ['C', 'merged'],
+    ]);
+    const reinforcing = runs[1]!;
+    expect(
+      withProject(h.biveHome, h.projectId, (store) =>
+        store.mutations.listByRun(reinforcing.run.id).map((item) => item.status),
+      ),
+    ).toEqual(['survived', 'verified']);
+    // 엔진 저장 이벤트 뒤에도 실행은 두 개뿐이고, 보강 실행을 원인으로 직접 불러도 유형 조건이 막는다
+    await settleAll(h);
+    expect(runsOf(h)).toHaveLength(2);
+    expect(
+      withProject(h.biveHome, h.projectId, (store) =>
+        reinforceSurvivedMutants(store, { runId: reinforcing.run.id }, { now: Date.now, newId }),
+      ),
+    ).toEqual({ status: 'not_applicable' });
+  }, 90_000);
+});
+
+describe('서버 생존 필수의 범위 (M3-54 #311, ADR-143 ④)', () => {
+  it('Red 확인 · 구현 · 검사 판정의 러너 입력에는 서버 생존 필수가 없다 (서버가 끝나도 예전처럼 케이스 결과를 쓴다)', async () => {
+    const h = setupPipeline({ temps, engines });
+    expect(h.engine.evaluateApproval(h.project.id, h.runId)).toBe(true);
+    await h.engine.settled();
+    const kinds = new Set(h.judgeCalls.map((call) => call.kind));
+    expect([...kinds].sort()).toEqual(['check', 'implementation', 'red_check']);
+    expect(h.judgeCalls.filter((call) => 'requireServerAlive' in call.input)).toEqual([]);
+  }, 90_000);
+
+  it('변이 판정(첫 주입 · 재주입)만 서버 생존 필수이고, 보강 실행의 Green 확인에는 없다', async () => {
+    const h = setup({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: { 'RULE-001': [{ tool: 'propose_mutant', args: VALID_MUTANT }] },
+      decide: allPass,
+      settings: AUTO_SETTINGS,
+      testWriter: [
+        [
+          {
+            tool: 'write_file',
+            args: {
+              path: 'bive-acceptance/RULE-001/reinforce-x.acc.ts',
+              content: "import { it } from 'vitest';\nit('x', () => undefined);\n",
+            },
+          },
+          { message: '보강.' },
+        ],
+      ],
+    });
+    await runToEnd(h);
+    await settleAll(h);
+    const seen = h.judgeCalls.map((call) => [call.kind, call.input.requireServerAlive ?? null]);
+    expect(seen).toContainEqual(['green_check', null]);
+    expect(seen.filter(([kind]) => kind === 'mutation').length).toBeGreaterThanOrEqual(2);
+    expect(seen.filter(([kind, alive]) => (kind === 'mutation') !== (alive === true))).toEqual([]);
   }, 90_000);
 });

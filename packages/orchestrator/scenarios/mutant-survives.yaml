@@ -3,8 +3,8 @@
 # RULE-001 · RULE-002이고 이 시나리오의 규칙은 RULE-003이다.
 # - 유형 A 실행(EXE-001): 테스트 작성 세션이 service 필드가 글인지만 보는 약한 인수 테스트를 쓰고, 구현 세션이 서비스 이름을 담는다.
 #   변이 주입 세션이 서비스 이름을 다른 글로 바꾸는 변이를 내면 약한 테스트가 통과해 변이 생존 → 실행은 병합
-# - 유형 C 보강 실행(EXE-002, 사람 조작 없음): 테스트 작성 세션이 서비스 이름 값 자체를 보는 테스트를 더하고, 변이 주입 단계가 같은 변이를
-#   재주입해 그 테스트가 잡는다 → 변이 검증됨 → 병합
+# - 유형 C 보강 실행(EXE-002, 사람 조작 없음): 테스트 작성 세션이 서비스 이름 값 자체를 보는 새 테스트 파일만 더하고(기존 테스트는
+#   다시 쓰지 않는다: 보강은 더하기만, ADR-143 ⑮), 변이 주입 단계가 같은 변이를 재주입해 그 테스트가 잡는다 → 변이 검증됨 → 병합
 # 세션은 실행 표시 ID(vars의 runId)로 고른다. 형식: src/agent/scenario.ts. 대상 픽스처: fixtures/sample-next-app.
 name: mutant-survives
 description: 유형 A의 변이가 살아남아 자동 유형 C 보강 실행이 생기고, 보강 테스트가 재주입된 같은 변이를 잡아 변이 검증됨
@@ -69,23 +69,7 @@ roles:
               costUSD: 0.0421
       - when: { runId: EXE-002 }
         turns:
-          # 유형 C의 테스트 작성 결과는 대상 규칙 폴더를 통째로 정한다(기존 테스트 사본은 세션에 없다): 기존 테스트도 다시 쓴다
-          - tool: write_file
-            args:
-              path: bive-acceptance/{{ruleId}}/health-service.acc.ts
-              content: |
-                // {{ruleId}}: 헬스 체크 응답의 서비스 이름. 기동된 서버에 HTTP로만 요청한다.
-                import { describe, expect, inject, it } from 'vitest';
-
-                describe('GET /api/health 서비스 이름', () => {
-                  it('응답 JSON의 service가 비어 있지 않은 글이다', async () => {
-                    const res = await fetch(new URL('/api/health', inject('baseUrl')));
-                    expect(res.status).toBe(200);
-                    const body = (await res.json()) as { service?: unknown };
-                    expect(typeof body.service).toBe('string');
-                    expect(String(body.service).length).toBeGreaterThan(0);
-                  });
-                });
+          # 보강은 새 파일만 더한다(기존 테스트는 읽기 전용 사본으로 받고 고칠 수 없다, ADR-143 ⑮)
           - tool: write_file
             args:
               path: bive-acceptance/{{ruleId}}/health-service-name.acc.ts
@@ -101,7 +85,7 @@ roles:
                     expect(body.service).toBe('sample-next-app');
                   });
                 });
-          - message: 기존 테스트를 그대로 두고 보강 테스트 1개를 더했습니다.
+          - message: 보강 테스트 1개를 더했습니다.
         result:
           subtype: success
           total_cost_usd: 0.0398

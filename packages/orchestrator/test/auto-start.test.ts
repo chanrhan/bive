@@ -26,6 +26,7 @@ import { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
 import { createAgentRule, retireAgentRule, supersedeAgentRule } from '../src/norms/agent-rule.js';
 import { checkRunStartBasis } from '../src/engine/start-basis.js';
+import { runEnding } from '../src/engine/run-ending.js';
 import {
   createRun,
   evaluateApprovalStep,
@@ -1346,5 +1347,120 @@ describe('변이 생존의 자동 테스트 보강: 기존 자동 시작의 문�
       return saved.run;
     });
     expect(check(forged)).toBe('cause_mismatch');
+  }, 90_000);
+
+  it('보강 실행도 프로젝트당 진행 중 1개 · 실행 대기를 따르고, 차례가 와 시작할 때 하루 한도 문을 다시 본다', async () => {
+    const h = setupMutation({ ...SURVIVING, settings: AUTO });
+    await mutationRunToEnd(h);
+    const at = () => new Date().toISOString();
+    // 자리를 차지한 실행 (사람의 실행, 진행 중)
+    const holder = withProject(h.biveHome, h.projectId, (store) => {
+      const created = createRun(
+        store,
+        { ruleIds: [h.rules[0]!.id], author: human },
+        { clientId: null },
+        clock,
+      ).run.id;
+      expect(evaluateApprovalStep(store, created, clock).run.status).toBe('running');
+      return created;
+    });
+    const outcome = reinforce(h);
+    if (outcome.status !== 'started') throw new Error(`보강 실행 없음: ${outcome.status}`);
+    const reinforcing = outcome.runs[0]!.detail.run;
+    // 자리가 없으면 승인 단계를 지나도 실행 대기 (다음 단계는 시작하지 않음)
+    const queued = withProject(h.biveHome, h.projectId, (store) =>
+      evaluateApprovalStep(store, reinforcing.id, clock),
+    );
+    expect(queued).toMatchObject({ approved: true, run: { status: 'queued', startedAt: null } });
+    expect(queued.steps.filter((step) => step.status === 'running')).toEqual([]);
+    // 기다리는 사이 오늘 지출이 하루 한도에 이르렀다 → 차례가 오면 같은 문으로 끝난다 (시작하지 않음)
+    withProject(h.biveHome, h.projectId, (store) => {
+      store.settings.update({ ...COMPLETE_SETTINGS, dailyBudgetUsd: 0 }, { by: human, at: at() });
+      const held = store.runs.get(holder)!;
+      store.runs.transition(holder, {
+        expectedStatus: 'running',
+        run: { ...runEnding(held, 'failed', 'test_end').run, endedAt: at() },
+      });
+    });
+    const advanced = withProject(h.biveHome, h.projectId, (store) =>
+      startNextQueuedRun(store, clock),
+    );
+    expect(advanced.started).toBeNull();
+    expect(
+      advanced.failed.map((detail) => [detail.run.id, detail.run.status, detail.run.failureReason]),
+    ).toEqual([[reinforcing.id, 'budget_exceeded', 'project_daily_budget_exceeded']]);
+  }, 90_000);
+
+  it('원인 기록의 실행이 병합으로 끝나지 않았으면(실패한 유형 A의 생존) 연결 · 시작 근거를 직접 써도 대조가 거부한다', async () => {
+    const h = setupMutation({ ...SURVIVING, settings: AUTO });
+    await mutationRunToEnd(h);
+    const at = () => new Date().toISOString();
+    const forged = withProject(h.biveHome, h.projectId, (store) => {
+      const ruleId = h.rules[0]!.id;
+      // 실패로 끝난 유형 A 실행과 그 실행의 '변이 생존' 기록
+      const origin = createRun(
+        store,
+        { ruleIds: [ruleId], author: human },
+        { clientId: null },
+        clock,
+      );
+      evaluateApprovalStep(store, origin.run.id, clock);
+      store.runs.transition(origin.run.id, {
+        expectedStatus: 'running',
+        run: { ...runEnding(origin.run, 'failed', 'test_end').run, endedAt: at() },
+      });
+      const survived = store.mutations.record({
+        id: newId(),
+        ruleId,
+        runId: origin.run.id,
+        stepId: origin.steps.find((step) => step.kind === 'mutation')!.id,
+        sessionId: null,
+        commit: 'a'.repeat(40),
+        status: 'survived',
+        outcome: 'survived',
+        mutant: VALID,
+        recordedAt: at(),
+      });
+      // 보강 실행 · 연결 · 자동 시작 항목을 오케스트레이터와 같은 모양으로 쓴다
+      const runId = newId();
+      const seq = store.mutations.nextReinforcementSeq();
+      const saved = saveNewRun(
+        store,
+        store.settings.get(),
+        {
+          runId,
+          ruleIds: [ruleId],
+          type: 'C',
+          startedBy: {
+            kind: 'orchestrator',
+            causeSeqs: [seq],
+            causeLog: 'mutation_reinforcements',
+          },
+        },
+        at(),
+        newId,
+      );
+      store.mutations.linkReinforcement({
+        seq,
+        runId,
+        mutationResultId: survived.id,
+        createdAt: at(),
+      });
+      store.normChanges.append({
+        at: at(),
+        kind: 'auto_start',
+        actor: { kind: 'orchestrator' },
+        targetRef: { entity: 'Run', id: runId },
+        sessionId: null,
+        runId,
+        reason: '위조',
+        detail: { mutationResultIds: [survived.id], ruleIds: [ruleId] },
+      });
+      expect(store.runs.get(origin.run.id)?.status).toBe('failed');
+      return saved.run;
+    });
+    expect(
+      withProject(h.biveHome, h.projectId, (store) => checkRunStartBasis(store, forged).mismatch),
+    ).toBe('cause_mismatch');
   }, 90_000);
 });

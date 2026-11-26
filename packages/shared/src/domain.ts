@@ -1635,7 +1635,8 @@ export const MAX_REGRESSION_COUNT = 2;
 
 /**
  * 실행 유형별 단계 순서 (RUN-02 · RUN-07, architecture.md 4장, ADR-061 · ADR-020 · ADR-136).
- * 변이 주입은 P1(JDG-04)이라 엔진이 `skipped`로 기록한다(roadmap M1-14). 유형이 생략하는 단계도 계획에 두고 엔진이 `skipped`로
+ * 변이 주입은 변이 주입 실행기가 유형 A(새 변이) · 보강 실행인 유형 C(재주입)에서만 돌리고, 대상이 없거나 그 밖의 유형이면
+ * `skipped`로 기록한다(M3-54 #311, ADR-143). 유형이 생략하는 단계도 계획에 두고 엔진이 `skipped`로
  * 기록한다(`RUN_TYPE_SKIPPED_STEPS`, 화면의 파이프라인이 "생략"으로 보인다). 순서는 모든 유형이 `StepKind` 정의 순서를 따른다.
  * - B 정적 검사: 테스트 작성 · Red 확인 생략
  * - C 코드 유지 · 테스트만: Red 확인 대신 Green 확인, 구현 생략
@@ -1704,7 +1705,10 @@ export const isRunTypeSkippedStep = (type: RunType, kind: StepKind): boolean =>
 export const runTypeRoles = (type: RunType): AgentRole[] =>
   stepRoles(RUN_STEP_PLANS[type].filter((kind) => !isRunTypeSkippedStep(type, kind)));
 
-/** 자동 시작 · 다시 시작 · 편집 뒤 시작이 만드는 실행 유형 (ADR-020 · ADR-136: B · C · D는 사람의 [실행]으로만). */
+/**
+ * 자동 시작 · 다시 시작 · 편집 뒤 시작이 만드는 실행 유형 (ADR-020 · ADR-136: B · C · D는 사람의 [실행]으로만). 예외는 변이 생존의
+ * 자동 테스트 보강으로, 오케스트레이터가 유형 C 실행을 만든다(M3-54 #311, ADR-141 · ADR-143).
+ */
 export const M1_RUN_TYPE = 'A' as const satisfies RunType;
 
 /** 단계를 수행하는 에이전트 역할. 사람 · 판정기 · 오케스트레이터 단계는 `null` (architecture.md 4장 단계표). */

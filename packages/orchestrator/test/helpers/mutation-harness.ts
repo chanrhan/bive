@@ -18,11 +18,15 @@ import type { AgentAdapter, SessionSpec } from '../../src/agent/adapter.js';
 import { loadScenario } from '../../src/agent/scenario.js';
 import { ScriptedAdapter } from '../../src/agent/scripted-adapter.js';
 import { PipelineEngine } from '../../src/engine/pipeline-engine.js';
-import type { StepExecutor } from '../../src/engine/types.js';
+import type { StepExecutor, StepExecutors } from '../../src/engine/types.js';
 import { hashAcceptanceFiles } from '../../src/judge/checkout.js';
+import { ensureBuiltinStructureRules } from '../../src/norms/builtin-rules.js';
 import { AutoStarter } from '../../src/runs/auto-start.js';
 import { createRun } from '../../src/runs/run-service.js';
+import { createGreenCheckExecutor } from '../../src/steps/green-check.js';
+import { createMergeExecutor } from '../../src/steps/merge.js';
 import { createMutationExecutor, type MutationStepOptions } from '../../src/steps/mutation.js';
+import { createTestWritingExecutor } from '../../src/steps/test-writing.js';
 import {
   COMPLETE_SETTINGS,
   copyFixture,
@@ -117,6 +121,8 @@ export const writeScenario = (
   extra: {
     readonly subtypes?: Record<string, 'error_during_execution'>;
     readonly noMutator?: boolean;
+    /** 테스트 작성 역할의 세션 대본 (열리는 순서대로) */
+    readonly testWriter?: readonly Turn[][];
   } = {},
 ): string => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bive-mutation-'));
@@ -143,6 +149,11 @@ export const writeScenario = (
             ],
           },
         };
+  if (extra.testWriter !== undefined) {
+    scenario.roles['test-writer'] = {
+      sessions: extra.testWriter.map((turns) => ({ turns, result: RESULT(cost) })),
+    };
+  }
   fs.writeFileSync(path.join(dir, 'mutation-test.yaml'), stringify(scenario));
   return dir;
 };
@@ -187,6 +198,13 @@ export interface SetupOptions {
   readonly noMutator?: boolean;
   /** 자동 시작 배선을 끈다 (보강 실행을 시험이 직접 만들 때) */
   readonly noAutoStart?: boolean;
+  /**
+   * 유형 C 실행의 테스트 작성 세션 대본. 주면 유형 C 실행은 제품 테스트 작성 · Green 확인 · 병합 실행기로 돈다(판정 · 설치만 주입,
+   * 유형 A 실행은 그대로 시험용 실행기)
+   */
+  readonly testWriter?: readonly Turn[][];
+  /** 실행기를 마지막에 바꾼다 (시험이 대조를 지나친 변경을 넣을 때) */
+  readonly executors?: (current: StepExecutors) => StepExecutors;
 }
 
 export const listTree = (root: string): string[] => {
@@ -239,7 +257,7 @@ export const setup = (options: SetupOptions): Harness => {
       normState: 'approved',
       createdAt: at,
     });
-    return options.rules.map((seed, index) =>
+    const created = options.rules.map((seed, index) =>
       store.rules.create({
         id: newId(),
         title: `규칙 ${String(index + 1)}`,
@@ -256,6 +274,12 @@ export const setup = (options: SetupOptions): Harness => {
         createdAt: at,
       }),
     );
+    // 제품 병합 실행기(유형 C)는 블록 선언이 있으면 내장 구조 규칙을 본다: 선언 저장과 같이 만든다(대상 규칙 뒤라 표시 ID가 뒤에 붙는다)
+    if (options.testWriter !== undefined) {
+      const record = store.blockDeclarations.current();
+      if (record !== null) ensureBuiltinStructureRules(store, { declaration: record, at, newId });
+    }
+    return created;
   });
   const scripted = new ScriptedAdapter({
     scenario: loadScenario(
@@ -263,6 +287,7 @@ export const setup = (options: SetupOptions): Harness => {
       writeScenario(options.sessions, options.cost, {
         ...(options.subtypes === undefined ? {} : { subtypes: options.subtypes }),
         ...(options.noMutator === undefined ? {} : { noMutator: options.noMutator }),
+        ...(options.testWriter === undefined ? {} : { testWriter: options.testWriter }),
       }),
     ),
     biveHome,
@@ -289,25 +314,34 @@ export const setup = (options: SetupOptions): Harness => {
   const logs: string[] = [];
   // 자동 시작 배선 (오케스트레이터와 같이 엔진 저장 이벤트를 넘긴다, M3-54): 병합된 유형 A 실행의 변이 생존 → 보강 실행
   const starter: { current: AutoStarter | null } = { current: null };
+  const judging = {
+    judge: injectedJudge(judgeCalls, options.decide ?? killedWhenMutated),
+    installDependencies: fakeInstall,
+  };
+  // 유형 C만 제품 실행기로 (유형 A는 그대로 시험용 실행기)
+  const forTypeC =
+    (product: StepExecutor, other: StepExecutor): StepExecutor =>
+    (context) =>
+      context.run.type === 'C' ? product(context) : other(context);
+  const product = options.testWriter !== undefined;
+  const executors: StepExecutors = {
+    test_writing: product
+      ? forTypeC(createTestWritingExecutor(), reinforcingTestWriting)
+      : reinforcingTestWriting,
+    red_check: redFromWorktree,
+    green_check: product ? createGreenCheckExecutor(judging) : redFromWorktree,
+    implementation: implementOutsideBlocks,
+    check: scriptedPass(),
+    mutation: createMutationExecutor({ ...judging, ...options.judging }),
+    merge: product ? forTypeC(createMergeExecutor(judging), mergeStep) : mergeStep,
+  };
   const engine = new PipelineEngine({
     biveHome,
     agent: adapter,
     onEvent: (event) => {
       if (options.noAutoStart !== true) starter.current?.observe(event);
     },
-    executors: {
-      test_writing: reinforcingTestWriting,
-      red_check: redFromWorktree,
-      green_check: redFromWorktree,
-      implementation: implementOutsideBlocks,
-      check: scriptedPass(),
-      mutation: createMutationExecutor({
-        judge: injectedJudge(judgeCalls, options.decide ?? killedWhenMutated),
-        installDependencies: fakeInstall,
-        ...options.judging,
-      }),
-      merge: mergeStep,
-    },
+    executors: options.executors?.(executors) ?? executors,
   });
   engines.push(engine);
   starter.current = new AutoStarter({ biveHome, engine, log: (line) => logs.push(line) });

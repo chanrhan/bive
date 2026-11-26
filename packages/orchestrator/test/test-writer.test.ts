@@ -649,6 +649,63 @@ describe('세션 작업 디렉터리 · 쓰기 범위 (수용 기준 1, ADR-024)
     expect(fs.readdirSync(path.join(outside, 'RULE-001'))).toEqual(['victim.acc.ts']);
     expect(fs.readFileSync(path.join(outside, 'RULE-001', 'victim.acc.ts'), 'utf8')).toBe('victim');
   });
+
+  it('(다) 보강 실행의 결과 반영: 결과에 없는 기존 파일(기준 커밋)은 지우지 않고 앞 시도의 파일만 지우며, 기존 파일 덮어쓰기는 거부한다. 보강이 아니면 예전처럼 통째로 바꾼다 (ADR-143 ⑮)', () => {
+    const make = () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tw-keep.'));
+      temps.push(root);
+      const worktree = path.join(root, 'worktree');
+      const sessionDir = path.join(root, 'session');
+      const dir = path.join(worktree, 'bive-acceptance', 'RULE-001');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'existing.acc.ts'), 'existing');
+      fs.writeFileSync(path.join(dir, 'previous-attempt.acc.ts'), 'previous');
+      fs.mkdirSync(path.join(sessionDir, 'bive-acceptance', 'RULE-001'), { recursive: true });
+      fs.writeFileSync(path.join(sessionDir, 'bive-acceptance', 'RULE-001', 'new.acc.ts'), 'new');
+      return { worktree, sessionDir, dir };
+    };
+    const existing = 'bive-acceptance/RULE-001/existing.acc.ts';
+    const added = 'bive-acceptance/RULE-001/new.acc.ts';
+    const kept = make();
+    const applied = applyTestWriterOutputs({
+      worktree: kept.worktree,
+      sessionDir: kept.sessionDir,
+      ruleIds: ['RULE-001'],
+      files: [added],
+      preserved: new Set([existing]),
+    });
+    expect(applied.removed).toEqual(['bive-acceptance/RULE-001/previous-attempt.acc.ts']);
+    expect(fs.readdirSync(kept.dir).sort()).toEqual(['existing.acc.ts', 'new.acc.ts']);
+    expect(fs.readFileSync(path.join(kept.dir, 'existing.acc.ts'), 'utf8')).toBe('existing');
+    // 기존 파일 경로를 옮기려 하면(호출자가 거르지 않음) 아무것도 바꾸지 않고 거부
+    const refused = make();
+    fs.writeFileSync(path.join(refused.sessionDir, existing), 'overwritten');
+    expect(() =>
+      applyTestWriterOutputs({
+        worktree: refused.worktree,
+        sessionDir: refused.sessionDir,
+        ruleIds: ['RULE-001'],
+        files: [existing, added],
+        preserved: new Set([existing]),
+      }),
+    ).toThrow(/기존 인수 테스트 파일을 덮어쓰려 합니다/u);
+    expect(fs.readFileSync(path.join(refused.dir, 'existing.acc.ts'), 'utf8')).toBe('existing');
+    expect(fs.readdirSync(refused.dir).sort()).toEqual([
+      'existing.acc.ts',
+      'previous-attempt.acc.ts',
+    ]);
+    // 보강이 아닌 실행: 결과에 없는 기존 파일은 지운다 (이 변경 전과 같은 동작)
+    const replaced = make();
+    expect(
+      applyTestWriterOutputs({
+        worktree: replaced.worktree,
+        sessionDir: replaced.sessionDir,
+        ruleIds: ['RULE-001'],
+        files: [added],
+      }).removed,
+    ).toEqual([existing, 'bive-acceptance/RULE-001/previous-attempt.acc.ts']);
+    expect(fs.readdirSync(replaced.dir)).toEqual(['new.acc.ts']);
+  });
 });
 
 // ── M3-50 (#295): 구현 산출 입력의 방어 (라우트 목록 · 데이터 스키마 사본, ADR-131) ─────────
@@ -2427,6 +2484,23 @@ describe('보강 실행의 테스트 작성 작업 지시: 살아남은 변이 �
     expect(prompt).toContain(`    ${'a'.repeat(MUTANT_MATERIAL_LIMIT)}\n`);
     expect(prompt).not.toContain('a'.repeat(MUTANT_MATERIAL_LIMIT + 1));
     expect(prompt).toContain('  바꾼 글:\n    b\n');
+  });
+
+  it('상한 자리가 서로게이트 쌍 가운데면 그 쌍 앞에서 자른다 (짝 없는 반쪽을 남기지 않는다)', () => {
+    const prompt = testWriterTaskPrompt({
+      runDisplayId: 'EXE-002',
+      rules: [rule],
+      norms,
+      feedback: null,
+      mutant: {
+        path: 'src/a.ts',
+        search: `${'a'.repeat(MUTANT_MATERIAL_LIMIT - 1)}\u{1F600}끝`,
+        replace: 'b',
+      },
+    });
+    expect(prompt).toContain(`    ${'a'.repeat(MUTANT_MATERIAL_LIMIT - 1)}\n  바꾼 글:`);
+    expect(prompt).not.toMatch(/\\ud83d/iu);
+    expect(prompt).not.toContain('\u{1F600}');
   });
 
   it('보강이 아닌 작업 지시에는 변이 자료가 한 글자도 없다 (변이 칸 생략 = 이 변경 전과 같은 글)', () => {

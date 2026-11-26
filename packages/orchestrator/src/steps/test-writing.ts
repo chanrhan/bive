@@ -11,6 +11,9 @@
 // 세션 디렉터리는 단계가 끝나면(통과 · 미충족 · 예외 모두) 지운다.
 // 실행 유형 C(코드 유지 · 테스트만, M3-06 #51 · ADR-136)는 Red 확인 대신 Green 확인이다: 시스템 프롬프트의 작성 조건이 "지금 전부
 // 통과"이고, 앞 시도가 Green 확인이면 그 결과(통과하지 않은 케이스 · 수집 오류)도 Red 확인과 같은 대조를 지난 것만 싣는다.
+// 보강 실행(유형 C + 변이 보강 연결, M3-54 #311 · ADR-143 ⑮)은 대상 규칙 폴더에 더하기만 한다: 기준 커밋의 그 폴더 파일을 읽기 전용
+// 사본으로 주고, 같은 경로의 결과는 받지 않으며(바이트까지 같으면 빼고, 다르면 미충족 `existing_modified`), 기존 파일을 지우지 않는다.
+// 지나친 변경은 Green 확인 · 병합 직전의 git 대조가 막는다(`run-type.ts` `existingTestViolations`).
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -34,6 +37,7 @@ import {
 } from '../norms/case-names.js';
 import { collectNormInput, normInputRecord } from '../norms/norm-input.js';
 import { NO_CASES_MESSAGE } from './red-check.js';
+import { isReinforcementRun, ruleFolderFilesAt } from './run-type.js';
 import {
   applyTestWriterOutputs,
   collectTestWriterOutputs,
@@ -51,7 +55,11 @@ export interface TestWritingOptions {
 }
 
 /** 테스트 작성 단계 미충족 사유 (`exitDetail.reason`). */
-export type TestWritingUnmetReason = 'session_error' | 'missing_tests' | 'lint';
+export type TestWritingUnmetReason =
+  'session_error' | 'missing_tests' | 'lint' | typeof EXISTING_MODIFIED_REASON;
+
+/** 보강 실행의 세션이 대상 규칙 폴더의 기존 인수 테스트 파일을 고쳐 낸 미충족 사유 (ADR-143 ⑮). */
+export const EXISTING_MODIFIED_REASON = 'existing_modified';
 
 export interface AcceptanceLintFinding {
   /** 워크트리 기준 경로 */
@@ -204,6 +212,8 @@ export const describeUnmet = (exitDetail: unknown, written: WrittenAcceptance): 
       return `허용되지 않은 import · 모듈 로드\n${listed(items('problems'))}`;
     case 'missing_tests':
       return `인수 테스트 파일(*.acc.ts)이 없는 규칙\n${listed(items('missing'))}`;
+    case EXISTING_MODIFIED_REASON:
+      return `기존 인수 테스트 파일은 고칠 수 없다 (새 파일만 더한다). 고친 기존 파일\n${listed(items('modified'))}`;
     case 'session_error':
       return `세션이 정상 종료되지 않았다: ${String(exitDetail.detail ?? exitDetail.endReason ?? '')}`;
     default:
@@ -246,15 +256,36 @@ export const previousFeedback = async (
   return text.length <= MAX_FEEDBACK_CHARS ? text : `${text.slice(0, MAX_FEEDBACK_CHARS)}…`;
 };
 
-/** 대상 규칙 폴더의 결과를 검사한다. 문제가 없으면 `null`과 옮길 파일. */
+/** 워크트리의 일반 파일(링크를 따라가지 않음) 내용과 세션 결과 파일 내용이 바이트까지 같은지. */
+const sameAsWorktree = (worktree: string, sessionDir: string, rel: string): boolean => {
+  const target = path.join(worktree, rel);
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(target);
+  } catch {
+    return false;
+  }
+  return (
+    stat.isFile() && fs.readFileSync(target).equals(fs.readFileSync(path.join(sessionDir, rel)))
+  );
+};
+
+/**
+ * 대상 규칙 폴더의 결과를 검사한다. 문제가 없으면 `null`과 옮길 파일.
+ * 보강 실행(`preserved` = 기준 커밋의 대상 규칙 폴더 파일)은 기존 파일과 같은 경로의 결과를 받지 않는다: 바이트까지 같으면(받은 사본
+ * 그대로) 옮길 파일에서 빼고, 다르면 미충족이다(ADR-143 ⑮). import 검사는 옮길 파일만 본다.
+ */
 const checkOutputs = (
   sessionDir: string,
   rules: readonly TestWriterRule[],
+  preserved: { readonly worktree: string; readonly files: ReadonlySet<string> } | null,
 ): { unmet: StepOutcome | null; files: string[]; ignored: string[] } => {
   const ruleIds = rules.map((rule) => rule.displayId);
   const outputs = collectTestWriterOutputs(sessionDir, ruleIds);
-  const files = ruleIds.flatMap((id) => outputs.byRule[id] ?? []);
+  const collected = ruleIds.flatMap((id) => outputs.byRule[id] ?? []);
   const missing = ruleIds.filter((id) => (outputs.byRule[id] ?? []).length === 0);
+  const files =
+    preserved === null ? collected : collected.filter((file) => !preserved.files.has(file));
   if (missing.length > 0) {
     return {
       unmet: {
@@ -264,6 +295,25 @@ const checkOutputs = (
       files,
       ignored: outputs.ignored,
     };
+  }
+  if (preserved !== null) {
+    const modified = collected.filter(
+      (file) => preserved.files.has(file) && !sameAsWorktree(preserved.worktree, sessionDir, file),
+    );
+    if (modified.length > 0) {
+      return {
+        unmet: {
+          status: 'unmet',
+          exitDetail: {
+            reason: EXISTING_MODIFIED_REASON,
+            modified: modified.slice(0, MAX_LISTED),
+            files,
+          },
+        },
+        files,
+        ignored: outputs.ignored,
+      };
+    }
   }
   const problems: AcceptanceLintFinding[] = files.flatMap((file) =>
     lintAcceptanceSource(fs.readFileSync(path.join(sessionDir, file), 'utf8')).map((problem) => ({
@@ -307,7 +357,7 @@ const ignoredForCommit = async (
 
 /** 보강 실행이면 원인 변이 기록의 변이 (`{ mutant }`), 아니면 빈 객체. */
 const reinforcedMutant = (context: StepContext): { mutant?: MutantPatch } => {
-  if (context.run.type !== 'C') return {};
+  if (!isReinforcementRun(context)) return {};
   const mutant = context.read((store) => {
     const link = store.mutations.reinforcementOfRun(context.run.id);
     return link === null ? null : (store.mutations.get(link.mutationResultId)?.mutant ?? null);
@@ -330,6 +380,10 @@ export const createTestWritingExecutor =
       };
     }
     const ruleIds = rules.map((rule) => rule.displayId);
+    // 보강 실행: 기준 커밋의 대상 규칙 폴더 파일은 바뀌지 않는다(새 파일만 더한다, ADR-143 ⑮). 기존 인수 테스트는 읽기 전용 사본으로 준다
+    const preserved = isReinforcementRun(context)
+      ? new Set(await ruleFolderFilesAt(git, context.git.repoPath, context.git.baseCommit, ruleIds))
+      : null;
     const sessionDir = path.join(context.biveHome, 'work', context.project.id, 'sessions', newId());
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
     try {
@@ -340,6 +394,7 @@ export const createTestWritingExecutor =
         sessionDir,
         rules,
         blocks: blocks?.declaration ?? null,
+        ...(preserved === null ? {} : { existingTargetTests: [...preserved] }),
       });
       // 효력 있는 규범은 작업 지시의 글로만 준다 (파일로 복사하지 않는다, ADR-100 A14). 케이스 이름은 최근 판정 커밋의 인수
       // 테스트 파일에 적힌 것만 싣는다 (M3-37, ADR-121)
@@ -386,7 +441,11 @@ export const createTestWritingExecutor =
           },
         };
       }
-      const checked = checkOutputs(sessionDir, rules);
+      const checked = checkOutputs(
+        sessionDir,
+        rules,
+        preserved === null ? null : { worktree: context.git.worktreePath, files: preserved },
+      );
       if (checked.unmet !== null) {
         const detail = checked.unmet.exitDetail as Record<string, unknown>;
         return { status: 'unmet', exitDetail: { ...detail, sessionId: session.sessionId } };
@@ -396,6 +455,7 @@ export const createTestWritingExecutor =
         sessionDir,
         ruleIds,
         files: checked.files,
+        ...(preserved === null ? {} : { preserved }),
       });
       const ignoredByRules = await ignoredForCommit(git, context.git.worktreePath, applied.written);
       if (ignoredByRules.length > 0) {
@@ -421,6 +481,7 @@ export const createTestWritingExecutor =
           files: applied.written,
           removedFiles: applied.removed,
           ignoredFiles: checked.ignored,
+          ...(preserved === null ? {} : { preservedFiles: [...preserved].slice(0, MAX_LISTED) }),
         },
       };
     } finally {
