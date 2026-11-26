@@ -352,11 +352,16 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
         ...(type === undefined ? {} : { type }),
       });
     /** 거부되면 실행 · run_start가 하나도 남지 않는다 (-32009) */
-    const expectRejected = async (ruleIds: string[], type?: RunType): Promise<void> => {
+    const expectRejected = async (
+      ruleIds: string[],
+      type?: RunType,
+      message?: RegExp,
+    ): Promise<void> => {
       const runsBefore = runCount();
       const logBefore = runStartCount();
       const error = await rpcError(createTyped(ruleIds, type));
       expect(error.code, `${String(type)} ${ruleIds.join(',')}`).toBe(ErrorCode.StateConflict);
+      if (message !== undefined) expect(error.message).toMatch(message);
       expect(runCount()).toBe(runsBefore);
       expect(runStartCount()).toBe(logBefore);
     };
@@ -410,7 +415,7 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
         [openapi.id, rule.id],
         [direction.id, openapi.id, rule.id],
       ]) {
-        await expectRejected(ids);
+        await expectRejected(ids, undefined, /함께 받지 않습니다/);
       }
       expect((await createTyped([rule.id])).run.type).toBe('A');
       expect((await createTyped([direction.id])).run.type).toBe('B');
