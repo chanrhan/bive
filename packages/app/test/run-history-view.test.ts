@@ -11,16 +11,21 @@ import {
   AutoStartSkipReason,
   type JudgmentResult,
   RUN_FAILURE_REASON_LABELS,
+  RUN_OVERLAP_FILES_LIMIT,
   RUN_STATUS_LABELS,
   type Run,
+  type RunFailureNote,
   RunFailureReason,
+  RunListResult,
   type RuleJudgmentEntry,
 } from '@bive/shared';
 import { describe, expect, it } from 'vitest';
 
+import { NOTES, noteRunList, overlapNoteOf } from '../e2e/checklists/scr-06.js';
 import {
   RUN_FAILURE_REASON_TEXT,
   runFailureReasonText,
+  runHistoryNote,
   runHistoryRows,
   runStatusText,
   UNKNOWN_FAILURE_REASON_TEXT,
@@ -259,5 +264,77 @@ describe('실행 이력 줄 (실행 하나가 한 줄)', () => {
     expect(rows.map((r) => [r.runDisplayId, r.at, r.status])).toEqual([
       ['EXE-005', '2026-11-24T01:00:00.000Z', '진행 중'],
     ]);
+  });
+});
+
+describe('실행 이력 줄의 종료 사유 보조 표시 (M3-51 #296, ADR-144)', () => {
+  const overlap = run('EXE-007', { status: 'failed', failureReason: 'block_declaration_overlap' });
+  const missing = run('EXE-008', { status: 'failed', failureReason: 'state_inconsistent' });
+  const other = run('EXE-009', { status: 'failed', failureReason: 'judge_runner_error' });
+  const files: RunFailureNote & { kind: 'block_declaration_overlap' } = {
+    kind: 'block_declaration_overlap',
+    runId: overlap.id,
+    files: [{ file: 'src/a/\u202eb.ts', blocks: ['auth', 'health', 'app'] }],
+    total: 4,
+  };
+
+  it('e2e 가짜 응답(e2e/checklists/scr-06.ts)은 shared 스키마를 지난다 (옛 응답 · 겹침 상한 안 포함)', () => {
+    expect(RunListResult.parse(noteRunList(NOTES))).toEqual(noteRunList(NOTES));
+    expect(RunListResult.parse(noteRunList())).toEqual(noteRunList());
+    expect(RunListResult.parse(noteRunList([overlapNoteOf(3)]))).toEqual(
+      noteRunList([overlapNoteOf(3)]),
+    );
+    expect(RUN_OVERLAP_FILES_LIMIT).toBe(20);
+  });
+
+  it('겹친 파일: 경로는 visibleDisplayText(숨은 글자 표기, 역슬래시는 그대로), 블록 이름은 " · "로, 목록 밖 수', () => {
+    const rows = runHistoryRows(RULE, [], [overlap], [files]);
+    expect(rows.map((r) => r.note)).toEqual([
+      {
+        kind: 'overlap',
+        files: [{ file: 'src/a/\\u202eb.ts', blocks: 'auth · health · app' }],
+        more: 3,
+      },
+    ]);
+    expect(runHistoryNote({ ...files, total: 1 })).toMatchObject({ more: 0 });
+    // 이미 표시 값인 역슬래시 표기는 두 번 바뀌지 않는다
+    expect(
+      runHistoryNote({ ...files, files: [{ file: 'src/a/\\u202eb.ts', blocks: ['a', 'b'] }] }),
+    ).toMatchObject({ files: [{ file: 'src/a/\\u202eb.ts' }] });
+  });
+
+  it('보조 표시는 그 실행의 상태 · 종료 사유가 맞을 때만: 겹침은 블록 선언 겹침, 안내는 실행 상태 불일치. 칸이 없는 옛 응답 · 다른 실행에는 없다', () => {
+    const notes: RunFailureNote[] = [
+      files,
+      { kind: 'builtin_rules_missing', runId: missing.id },
+      { ...files, runId: other.id },
+      { kind: 'builtin_rules_missing', runId: overlap.id },
+    ];
+    const rows = runHistoryRows(RULE, [], [overlap, missing, other], notes);
+    expect(rows.map((r) => [r.runDisplayId, r.note?.kind ?? null])).toEqual([
+      ['EXE-009', null],
+      ['EXE-008', 'builtin_rules_missing'],
+      ['EXE-007', 'overlap'],
+    ]);
+    expect(rows[1]?.note).toEqual({
+      kind: 'builtin_rules_missing',
+      text: '내장 구조 규칙 없음 · 블록 선언 다시 저장 필요',
+    });
+    // 같은 종료 사유여도 실패로 끝나지 않은 실행에는 없다
+    const interrupted = { ...overlap, status: 'interrupted' as const };
+    expect(runHistoryRows(RULE, [], [interrupted], [files])[0]?.note).toBeNull();
+    expect(runHistoryRows(RULE, [], [overlap, missing, other]).map((r) => r.note)).toEqual([
+      null,
+      null,
+      null,
+    ]);
+    // 판정 기록으로 생긴 줄(실행 목록에 있음)에도 같은 기준으로 붙는다
+    const judged = runHistoryRows(
+      RULE,
+      [entry('01JD0000000000000000000001', '2026-11-21T10:00:00.000Z', 'fail', 'EXE-007')],
+      [overlap],
+      [files],
+    );
+    expect(judged[0]?.note?.kind).toBe('overlap');
   });
 });

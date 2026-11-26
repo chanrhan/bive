@@ -12,6 +12,8 @@
 // - 중단 신호 · 시간 제한은 파서 호출에 잇는다. 중단이면 판정하지 않고 신호의 사유로 던진다(엔진이 중단으로 다룬다)
 // - 판정 기록의 케이스: 첫 케이스는 요약(선언 판 · 위반 수), 그 뒤 위반 한 건씩(상한). 위반의 파일 경로는 구현 역할이 정할 수 있는
 //   글이라 표시 값으로 바꾸고 길이를 자른다. 파서 오류는 종류(`code`)만 싣는다(메시지에는 실행기 출력이 실릴 수 있다)
+// - 겹침으로 끝나면 단계 결과에 겹친 파일(같은 표시 값 · 같은 상한)과 그 파일에 맞은 블록 이름 · 전체 수를 남긴다(M3-51 #296, ADR-144:
+//   `run.list`의 종료 사유 보조 표시가 이것을 읽는다, `runs/failure-notes.ts`)
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -151,6 +153,17 @@ export const readStructurePlan = (
   };
 };
 
+/**
+ * 규칙 가운데 내장 구조 규칙의 표시 ID (M3-51 #296, ADR-144): 구현 세션의 앞 시도 사유가 구조 위반을 인수 테스트 실패와 다른 머리
+ * 문장 아래에 싣는 기준. 내장 규칙은 폐기 · 대체되지 않는다(ADR-127 ③).
+ */
+export const structureRuleDisplayIds = (rules: readonly Rule[]): Set<string> =>
+  new Set(
+    rules
+      .filter((rule) => BUILTIN_STRUCTURE_RULES.some((key) => isBuiltinStructureRule(rule, key)))
+      .map((rule) => rule.displayId),
+  );
+
 /** 구조 검사 계획의 내장 규칙 ID. */
 export const structureRuleIds = (plan: StructurePlan | null): string[] =>
   plan === null ? [] : BUILTIN_STRUCTURE_RULES.map((key) => plan.rules[key].id);
@@ -179,7 +192,7 @@ export interface StructureVerdict {
   readonly cases: JudgmentCase[];
 }
 
-/** 구조 검사 결과의 요약 (단계 `exitDetail.structure`). 경로 글은 싣지 않는다. */
+/** 구조 검사 결과의 요약 (단계 `exitDetail.structure`). 경로 글은 겹친 파일(표시 값)만 싣는다. */
 export interface StructureSummary {
   readonly declarationVersion: number;
   readonly status: 'checked' | 'incomplete' | 'overlap' | 'tracked_install' | 'error';
@@ -187,6 +200,14 @@ export interface StructureSummary {
   readonly unanalyzed?: number;
   readonly trackedInstallDirs?: number;
   readonly code?: string;
+  /**
+   * 겹침(`overlap`)일 때만: 겹친 파일 앞 {@link MAX_STRUCTURE_CASES}개(경로는 판정 기록 케이스와 같은 표시 값, 블록 이름은 선언 순서)
+   * 와 전체 수 (M3-51 #296, ADR-144). 사람이 선언을 고칠 자리를 알 수 있게 남긴다
+   */
+  readonly overlaps?: {
+    readonly items: readonly { readonly file: string; readonly blocks: readonly string[] }[];
+    readonly total: number;
+  };
 }
 
 export type StructureRun =
@@ -337,7 +358,16 @@ export const runStructureCheck = async (
     return {
       kind: 'halt',
       reason: BLOCK_DECLARATION_OVERLAP_REASON,
-      summary: { declarationVersion: version, status: 'overlap' },
+      summary: {
+        declarationVersion: version,
+        status: 'overlap',
+        overlaps: {
+          items: outcome.overlaps.items
+            .slice(0, MAX_STRUCTURE_CASES)
+            .map((item) => ({ file: shown(item.file), blocks: [...item.blocks] })),
+          total: outcome.overlaps.total,
+        },
+      },
       message: `블록 선언에서 한 파일이 두 블록 이상에 맞아(${String(outcome.overlaps.total)}개) 구조 위반을 판별하지 않았습니다`,
     };
   }
