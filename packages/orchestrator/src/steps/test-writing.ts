@@ -9,6 +9,8 @@
 //    무시 규칙(`.gitignore` 등)에 걸려 커밋에서 빠지면 `failed`(`acceptance_ignored`): 커밋 · 판정 · 병합에 테스트가
 //    없게 되고, 테스트를 다시 써도 무시 규칙은 그대로라 재시도하지 않는다
 // 세션 디렉터리는 단계가 끝나면(통과 · 미충족 · 예외 모두) 지운다.
+// 실행 유형 C(코드 유지 · 테스트만, M3-06 #51 · ADR-136)는 Red 확인 대신 Green 확인이다: 시스템 프롬프트의 작성 조건이 "지금 전부
+// 통과"이고, 앞 시도가 Green 확인이면 그 결과(통과하지 않은 케이스 · 수집 오류)도 Red 확인과 같은 대조를 지난 것만 싣는다.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -38,7 +40,7 @@ import {
   prepareTestWriterInputs,
   type TestWriterRule,
 } from '../test-writer/inputs.js';
-import { TEST_WRITER_SYSTEM_PROMPT, testWriterTaskPrompt } from '../test-writer/prompts.js';
+import { testWriterSystemPrompt, testWriterTaskPrompt } from '../test-writer/prompts.js';
 
 /** 옮긴 인수 테스트 · 선언 파일이 무시 규칙에 걸려 커밋되지 않을 때의 실행 실패 사유 (`Run.failureReason`). */
 export const ACCEPTANCE_IGNORED_REASON = 'acceptance_ignored';
@@ -194,6 +196,10 @@ export const describeUnmet = (exitDetail: unknown, written: WrittenAcceptance): 
       return `Red 확인: 구현 전에 실패하지 않은 케이스가 있다 (모든 케이스가 실패해야 한다)\n${listed(redCaseLines(exitDetail.notFailedCases, written))}`;
     case 'collect_error':
       return `Red 확인: 테스트 파일을 불러오거나 수집하지 못했다\n${listed(redProblemLines(exitDetail.problems, written))}`;
+    case 'not_green':
+      return `Green 확인: 지금 코드에서 통과하지 않은 케이스가 있다 (모든 케이스가 통과해야 한다)\n${listed(redCaseLines(exitDetail.failingCases, written))}`;
+    case 'green_collect_error':
+      return `Green 확인: 테스트 파일을 불러오거나 수집하지 못했다\n${listed(redProblemLines(exitDetail.problems, written))}`;
     case 'lint':
       return `허용되지 않은 import · 모듈 로드\n${listed(items('problems'))}`;
     case 'missing_tests':
@@ -211,7 +217,9 @@ export const lastUnmetAttempt = (steps: readonly Step[], current: Step): Step | 
     .filter(
       (step) =>
         step.id !== current.id &&
-        (step.kind === 'test_writing' || step.kind === 'red_check') &&
+        (step.kind === 'test_writing' ||
+          step.kind === 'red_check' ||
+          step.kind === 'green_check') &&
         step.status === 'failed' &&
         step.endedAt !== null &&
         !(isRecord(step.exitDetail) && step.exitDetail.interrupted === true),
@@ -230,7 +238,7 @@ export const previousFeedback = async (
 ): Promise<string | null> => {
   if (last === undefined) return null;
   const written =
-    last.kind === 'red_check' && isRecord(last.exitDetail)
+    (last.kind === 'red_check' || last.kind === 'green_check') && isRecord(last.exitDetail)
       ? await writtenAcceptanceOf(repoPath, last.exitDetail.commit, ruleDisplayIds)
       : NO_WRITTEN_ACCEPTANCE;
   const text = describeUnmet(last.exitDetail, written);
@@ -335,7 +343,7 @@ export const createTestWritingExecutor =
       );
       const session = await context.runSession({
         workDir: sessionDir,
-        systemPrompt: TEST_WRITER_SYSTEM_PROMPT,
+        systemPrompt: testWriterSystemPrompt(context.run.type),
         prompt: testWriterTaskPrompt({
           runDisplayId: context.run.displayId,
           rules,

@@ -13,6 +13,8 @@ import {
   RUN_STATUS_TRANSITIONS,
   RUN_STEP_PLANS,
   type RunStatus,
+  type RunType,
+  STEP_ROLES,
   type SettingsPatch,
   type Step,
   type StepKind,
@@ -80,6 +82,10 @@ interface SetupOptions {
   settings?: SettingsPatch;
   wrap?: (adapter: AgentAdapter) => AgentAdapter;
   normState?: 'approved' | 'provisional';
+  /** 실행 유형 (M3-06, 생략하면 대상 규칙으로 정한다: 지금까지의 시험은 유형 A) */
+  runType?: RunType;
+  /** 대상을 내장 구조 규칙(정적 검사 규칙) 하나로 (유형 B) */
+  staticTarget?: boolean;
 }
 
 const setup = (options: SetupOptions = {}): Harness => {
@@ -107,10 +113,18 @@ const setup = (options: SetupOptions = {}): Harness => {
     engines.push(engine);
     return engine;
   };
+  const target =
+    options.staticTarget === true
+      ? withProject(biveHome, seeded.project.id, (store) => seedStructureRule(store).id)
+      : seeded.rule.id;
   const runId = withProject(biveHome, seeded.project.id, (store) =>
     createRun(
       store,
-      { ruleIds: [seeded.rule.id], author: human },
+      {
+        ruleIds: [target],
+        author: human,
+        ...(options.runType === undefined ? {} : { type: options.runType }),
+      },
       { clientId: null },
       {
         now: Date.now,
@@ -130,6 +144,25 @@ const setup = (options: SetupOptions = {}): Harness => {
     newEngine,
   };
 };
+
+/** 내장 구조 규칙 하나 (정적 검사 규칙: 유형 B의 대상). 엔진 시험은 구조 검사를 돌리지 않는다(검사는 시험용 실행기). */
+const seedStructureRule = (store: ProjectStore) =>
+  store.rules.create({
+    id: newId(),
+    title: 'structure.declared-direction',
+    statement:
+      'WHEN 블록의 파일이 다른 블록을 가져오면 THE SYSTEM SHALL 선언한 방향의 의존만 허용한다',
+    kind: 'architecture',
+    checkKinds: ['structure'],
+    parentRequirementId: null,
+    builtin: true,
+    targetBlockIds: [],
+    risk: null,
+    contractId: null,
+    author: human,
+    normState: 'approved',
+    createdAt: new Date().toISOString(),
+  });
 
 const detailOf = (h: Harness): RunDetail =>
   withProject(h.biveHome, h.project.id, (store) => {
@@ -2058,4 +2091,248 @@ describe('실행의 종료 상태는 한 곳(runEnding)에서 정한다: #halt�
     });
     expect(mainTip(h)).toBe(base);
   }, 60_000);
+});
+
+describe('실행 유형 B · C · D 단계 계획 · 상태 기계 (M3-06 #51 수용 기준 1, RUN-07, ADR-020 · ADR-136)', () => {
+  const EXPECTED: Record<Exclude<RunType, 'A'>, string[]> = {
+    B: [
+      'approval#1:passed',
+      'test_writing#1:skipped',
+      'red_check#1:skipped',
+      'implementation#1:passed',
+      'check#1:passed',
+      'mutation#1:skipped',
+      'merge#1:passed',
+      'screen_update#1:passed',
+    ],
+    C: [
+      'approval#1:passed',
+      'test_writing#1:passed',
+      'green_check#1:passed',
+      'implementation#1:skipped',
+      'check#1:passed',
+      'mutation#1:skipped',
+      'merge#1:passed',
+      'screen_update#1:passed',
+    ],
+    D: [
+      'approval#1:passed',
+      'test_writing#1:skipped',
+      'red_check#1:skipped',
+      'green_check#1:passed',
+      'implementation#1:passed',
+      'check#1:passed',
+      'merge#1:passed',
+      'screen_update#1:passed',
+    ],
+  };
+  const SKIPPED: Record<Exclude<RunType, 'A'>, StepKind[]> = {
+    B: ['test_writing', 'red_check'],
+    C: ['implementation'],
+    D: ['test_writing', 'red_check'],
+  };
+  const ROLES: Record<Exclude<RunType, 'A'>, AgentRole[]> = {
+    B: ['implementer'],
+    C: ['test-writer'],
+    D: ['implementer'],
+  };
+
+  /** 유형별 시험 실행기: Green 확인은 통과, 유형 C의 검사는 통과(구현이 없어 라우트가 그대로다). */
+  const typeExecutors = (type: RunType, overrides: StepExecutors = {}): StepExecutors => ({
+    green_check: scripted(['passed']),
+    ...(type === 'C' ? { check: scripted(['passed']) } : {}),
+    ...overrides,
+  });
+  const setupType = (type: Exclude<RunType, 'A'>, overrides: StepExecutors = {}): Harness =>
+    setup({
+      runType: type,
+      staticTarget: type === 'B',
+      executors: typeExecutors(type, overrides),
+    });
+
+  /** 첫 호출은 중단될 때까지 멈춰 있고(재기동 흉내), 그 뒤 호출은 `next`. */
+  const blockOnce = (next: StepExecutor): StepExecutor => {
+    let calls = 0;
+    return (context) => {
+      calls += 1;
+      if (calls > 1) return next(context);
+      return new Promise((_resolve, reject) => {
+        context.signal.addEventListener('abort', () => reject(context.signal.reason as Error), {
+          once: true,
+        });
+      });
+    };
+  };
+
+  it.each(['B', 'C', 'D'] as const)(
+    '유형 %s: 계획 순서대로 가고 생략 단계는 실행기 없이 skipped, 예산 · 모델 스냅샷은 그 유형이 쓰는 역할만',
+    async (type) => {
+      const h = setupType(type);
+      const base = mainTip(h);
+      const done = await runToEnd(h);
+      expect(done.run.type).toBe(type);
+      expect(done.steps.map((s) => s.kind)).toEqual([...RUN_STEP_PLANS[type]]);
+      expect(attempts(done)).toEqual(EXPECTED[type]);
+      for (const kind of SKIPPED[type]) {
+        expect(stepOf(done, kind)).toMatchObject({
+          status: 'skipped',
+          exitDetail: { reason: 'run_type', runType: type },
+          commit: null,
+          role: STEP_ROLES[kind],
+        });
+      }
+      expect(done.run).toMatchObject({ status: 'merged', regressionCount: 0, failureReason: null });
+      expect(Object.keys(done.run.budgetSnapshot.roles)).toEqual(ROLES[type]);
+      expect(Object.keys(done.run.modelSnapshot)).toEqual(ROLES[type]);
+      expect(sessionsOf(h).map((s) => s.role)).toEqual(ROLES[type]);
+      // 판정 · 병합할 커밋은 C만 테스트 작성 커밋, 나머지는 구현 커밋
+      const head = stepOf(done, type === 'C' ? 'test_writing' : 'implementation').commit;
+      expect(done.run.headCommit).toBe(head);
+      expect(
+        userGit(h.repo, 'rev-list', '--parents', '-n', '1', String(done.run.mergeCommit)).split(
+          ' ',
+        ),
+      ).toEqual([String(done.run.mergeCommit), base, String(head)]);
+    },
+    60_000,
+  );
+
+  it.each(['B', 'C', 'D'] as const)(
+    '유형 %s: 검사 실패의 회귀는 상한 2회를 넘으면 failed (regression_limit), 병합 없음',
+    async (type) => {
+      const h = setupType(type, { check: scripted(['unmet']) });
+      const before = mainTip(h);
+      const done = await runToEnd(h);
+      expect(done.run).toMatchObject({
+        status: 'failed',
+        failureReason: 'regression_limit',
+        regressionCount: 2,
+        currentStep: 'check',
+        mergeCommit: null,
+      });
+      expect(attempts(done, 'check')).toEqual([
+        'check#1:failed',
+        'check#2:failed',
+        'check#3:failed',
+      ]);
+      if (type === 'C') {
+        // 구현이 없다: 검사 실패는 테스트 작성으로 돌아가고 생략 단계는 매번 다시 생략된다
+        expect(
+          done.steps
+            .filter((s) => ['test_writing', 'green_check', 'implementation'].includes(s.kind))
+            .map((s) => `${s.kind}#${String(s.attempt)}:${s.status}`),
+        ).toEqual([
+          'test_writing#1:passed',
+          'test_writing#2:passed',
+          'test_writing#3:passed',
+          'green_check#1:passed',
+          'green_check#2:passed',
+          'green_check#3:passed',
+          'implementation#1:skipped',
+          'implementation#2:skipped',
+          'implementation#3:skipped',
+        ]);
+        expect(sessionsOf(h, 'test-writer')).toHaveLength(3);
+      } else {
+        // 회귀는 구현까지만: 앞의 생략 · 기준 검사 단계는 다시 하지 않는다
+        expect(attempts(done, 'implementation')).toEqual([
+          'implementation#1:passed',
+          'implementation#2:passed',
+          'implementation#3:passed',
+        ]);
+        expect([...attempts(done, 'test_writing'), ...attempts(done, 'red_check')]).toEqual([
+          'test_writing#1:skipped',
+          'red_check#1:skipped',
+        ]);
+        if (type === 'D') expect(attempts(done, 'green_check')).toEqual(['green_check#1:passed']);
+        expect(sessionsOf(h, 'implementer')).toHaveLength(3);
+      }
+      expect(stepOf(done, 'check', 3).exitDetail).toMatchObject({ reason: 'regression_limit' });
+      expect(mainTip(h)).toBe(before);
+    },
+    90_000,
+  );
+
+  it('유형 C: Green 확인 미충족은 테스트 작성으로 돌아가고 재시도 2회를 넘으면 failed (test_retry_limit)', async () => {
+    const h = setupType('C', { green_check: scripted(['unmet']) });
+    const done = await runToEnd(h);
+    expect([...attempts(done, 'test_writing'), ...attempts(done, 'green_check')]).toEqual([
+      'test_writing#1:passed',
+      'test_writing#2:passed',
+      'test_writing#3:passed',
+      'green_check#1:failed',
+      'green_check#2:failed',
+      'green_check#3:failed',
+    ]);
+    expect(attempts(done, 'implementation')).toEqual(['implementation#1:pending']);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'test_retry_limit',
+      currentStep: 'green_check',
+      regressionCount: 0,
+    });
+  }, 90_000);
+
+  it('유형 D: 기준 검사(Green 확인) 미충족은 회귀 없이 failed (step_unmet): 구현 세션 0 · 커밋 0 · 병합 0', async () => {
+    const h = setupType('D', { green_check: scripted(['unmet']) });
+    const before = mainTip(h);
+    const done = await runToEnd(h);
+    expect(attempts(done)).toEqual([
+      'approval#1:passed',
+      'test_writing#1:skipped',
+      'red_check#1:skipped',
+      'green_check#1:failed',
+      'implementation#1:pending',
+      'check#1:pending',
+      'merge#1:pending',
+      'screen_update#1:pending',
+    ]);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'step_unmet',
+      currentStep: 'green_check',
+      headCommit: null,
+      mergeCommit: null,
+    });
+    expect(sessionsOf(h)).toEqual([]);
+    expect(mainTip(h)).toBe(before);
+    // 실행 브랜치는 기준 커밋 그대로이고 작업 트리에 변경이 없다
+    expect(userGit(h.repo, 'rev-parse', 'refs/heads/bive/run-EXE-001')).toBe(before);
+    expect(userGit(String(done.run.worktreePath), 'status', '--porcelain')).toBe('');
+  }, 60_000);
+
+  it.each([
+    ['B', 'check'],
+    ['C', 'green_check'],
+    ['D', 'implementation'],
+  ] as const)(
+    '유형 %s: %s 도중 재기동 → interrupted → 재개는 그 유형의 계획대로 이어간다',
+    async (type, kind) => {
+      const next = testExecutors(typeExecutors(type))[kind];
+      if (next === undefined) throw new Error('실행기 없음');
+      const h = setupType(type, { [kind]: blockOnce(next) });
+      expect(h.engine.evaluateApproval(h.project.id, h.runId)).toBe(true);
+      await waitFor(
+        () => detailOf(h).steps.some((s) => s.kind === kind && s.status === 'running'),
+        30_000,
+        `${kind} 진행 대기`,
+      );
+      await h.engine.stop();
+      const engine = h.newEngine();
+      expect(engine.recoverInterruptedRuns()).toHaveLength(1);
+      expect(detailOf(h).run).toMatchObject({ status: 'interrupted', currentStep: kind });
+      await engine.resume(h.project.id, h.runId, human);
+      await engine.settled();
+      const done = detailOf(h);
+      expect(done.run).toMatchObject({ status: 'merged', type });
+      // 중단된 시도 하나가 더해졌을 뿐 단계 구성은 그 유형의 계획 그대로다
+      const expected = EXPECTED[type].flatMap((entry) =>
+        entry === `${kind}#1:passed` ? [`${kind}#1:failed`, `${kind}#2:passed`] : [entry],
+      );
+      expect(attempts(done)).toEqual(expected);
+      expect(stepOf(done, kind, 1).exitDetail).toEqual(INTERRUPTED_EXIT_DETAIL);
+      expect([...new Set(done.steps.map((s) => s.kind))]).toEqual([...RUN_STEP_PLANS[type]]);
+    },
+    90_000,
+  );
 });

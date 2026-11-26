@@ -41,6 +41,8 @@ import type { JudgingOptions } from '../src/steps/judging.js';
 import { JudgeRunner } from '../src/judge/runner.js';
 import { readContractSource, registerHumanContract } from '../src/norms/contract.js';
 import { createCheckExecutor } from '../src/steps/check.js';
+import { createGreenCheckExecutor } from '../src/steps/green-check.js';
+import { createRun } from '../src/runs/run-service.js';
 import { createMergeExecutor } from '../src/steps/merge.js';
 import {
   disposeContracts,
@@ -52,6 +54,7 @@ import {
 import { verificationSummary } from '../src/verification/summary.js';
 import { human, userGit, withProject } from './helpers/engine-harness.js';
 import {
+  attempts,
   exitOf,
   fakeInstall,
   injectedJudge,
@@ -59,6 +62,7 @@ import {
   type PipelineHarness,
   runToEnd,
   setupPipeline,
+  stepOf,
 } from './helpers/pipeline-harness.js';
 import { cleanup, REPO_ROOT } from './helpers/process.js';
 
@@ -726,9 +730,13 @@ const trafficJudge = (
     readonly mismatchIn?: 'check' | 'merge';
     readonly traffic?: (baseUrl: string) => Promise<void>;
     readonly proxied?: boolean[];
+    /** 이 단계에서만 요청을 보낸다 (다른 단계는 요청 0건, 기본 모든 단계) */
+    readonly trafficIn?: 'check' | 'merge';
+    /** 인수 테스트 판정 계획 (기본 `contentJudge`) */
+    readonly decide?: Parameters<typeof injectedJudge>[1];
   } = {},
 ): NonNullable<JudgingOptions['judge']> => {
-  const base = injectedJudge(calls);
+  const base = injectedJudge(calls, options.decide);
   return async (input, context) => {
     options.proxied?.push(Object.hasOwn(input, 'serverProxy'));
     if (input.serverProxy !== undefined) {
@@ -737,6 +745,9 @@ const trafficJudge = (
       const proxy = await input.serverProxy.start({ upstreamBaseUrl: api.url });
       try {
         await (
+          (options.trafficIn !== undefined && options.trafficIn !== context.step.kind
+            ? () => Promise.resolve()
+            : undefined) ??
           options.traffic ??
           (async (url) => {
             await fetch(`${url}/api/health`).then((res) => res.text());
@@ -1125,6 +1136,254 @@ const EVASIONS: readonly [string, HealthResponder][] = [
     },
   ],
 ];
+
+// ── M3-06 #51: 실행 유형 B(계약 검사 규칙 [실행]) · D(기준 검사의 계약 실패) ─────────────────────
+
+describe('계약 검사 규칙의 실행 유형 B · 기준 검사의 계약 (M3-06 #51 수용 기준 3 · 4, ADR-136)', () => {
+  const RULE1_ACCEPTANCE = 'bive-acceptance/RULE-001/health.acc.ts';
+  /** 등록한 OpenAPI 계약 + 기존 인수 테스트(RULE-001)가 있는 파이프라인. 기준 검사 · 검사 판정에 같은 판정 주입을 쓴다 */
+  const typedPipeline = async (
+    judge: (calls: JudgeCall[]) => NonNullable<JudgingOptions['judge']>,
+    options: {
+      readonly runType?: 'D';
+      /** 등록할 계약 파일 (기본 픽스처 openapi.yaml). `text`를 주면 그 내용으로 커밋한다 */
+      readonly contract?: { readonly file: string; readonly text?: string };
+      /** 병합 단계도 같은 판정 주입으로 바꾸고, 병합 전에 기준 브랜치를 바꿔 재검사가 돌게 한다 */
+      readonly mergeRecheck?: boolean;
+      readonly scenario?: { scenario: string; scenariosDir: string };
+    } = {},
+  ): Promise<{ h: PipelineHarness; rule: Rule; calls: JudgeCall[] }> => {
+    const calls: JudgeCall[] = [];
+    const contractFile = options.contract?.file ?? 'openapi.yaml';
+    const h = setupPipeline({
+      temps: temps2,
+      engines,
+      ...(options.runType === undefined ? {} : { runType: options.runType }),
+      ...options.scenario,
+      prepareRepo: (repo) => {
+        if (options.contract?.text !== undefined) {
+          fs.writeFileSync(path.join(repo, contractFile), options.contract.text);
+        }
+        fs.mkdirSync(path.join(repo, 'bive-acceptance', 'RULE-001'), { recursive: true });
+        fs.writeFileSync(
+          path.join(repo, RULE1_ACCEPTANCE),
+          "import { it } from 'vitest';\nit('기존 동작', () => undefined);\n",
+        );
+        // 기존 인수 테스트(RULE-001)가 기준 커밋에서 통과하는 라우트 (주입 판정은 서버 시각이 있으면 RULE-001 통과)
+        fs.writeFileSync(
+          path.join(repo, 'src/app/api/health/route.ts'),
+          "export const dynamic = 'force-dynamic';\n\nexport function GET(): Response {\n  return Response.json({ ok: true, time: new Date().toISOString() });\n}\n",
+        );
+      },
+      executors: (defaults) => ({
+        ...defaults,
+        green_check: createGreenCheckExecutor({
+          judge: judge(calls),
+          installDependencies: fakeInstall,
+        }),
+        check: createCheckExecutor({ judge: judge(calls), installDependencies: fakeInstall }),
+        ...(options.mergeRecheck === true
+          ? {
+              merge: async (context) => {
+                fs.writeFileSync(path.join(context.git.repoPath, 'USER-NOTE.md'), '사용자\n');
+                userGit(context.git.repoPath, 'add', 'USER-NOTE.md');
+                userGit(context.git.repoPath, 'commit', '-q', '-m', '사용자 커밋');
+                return createMergeExecutor({
+                  judge: judge(calls),
+                  installDependencies: fakeInstall,
+                  checkTimeoutMs: 90_000,
+                })(context);
+              },
+            }
+          : {}),
+      }),
+    });
+    const source = await readContractSource(h.repo, 'main', contractFile);
+    if (!source.ok) throw new Error(source.code);
+    const { rule } = withProject(h.biveHome, h.project.id, (store) =>
+      registerHumanContract(store, {
+        file: contractFile,
+        kind: 'openapi',
+        source,
+        requirementId: null,
+        at: new Date().toISOString(),
+        newId,
+        by: human,
+        clientId: null,
+      }),
+    );
+    return { h, rule, calls };
+  };
+  /** 사람의 [실행](유형을 주지 않음) */
+  const humanRun = (h: PipelineHarness, ruleIds: string[]): string =>
+    withProject(h.biveHome, h.project.id, (store) =>
+      createRun(store, { ruleIds, author: human }, { clientId: null }, { now: Date.now, newId }),
+    ).run.id;
+
+  it('계약 검사 규칙 [실행]은 유형 B: 구현 뒤 검사 단계가 계약을 판정해 통과(pass 기록)하면 병합한다', async () => {
+    const { h, rule, calls } = await typedPipeline((list) => trafficJudge(list));
+    const runId = humanRun(h, [rule.id]);
+    const detail = await runToEnd({ ...h, runId });
+    expect(detail.run).toMatchObject({ type: 'B', status: 'merged', targetRuleIds: [rule.id] });
+    expect(attempts(detail, 'test_writing', 'red_check', 'implementation', 'check')).toEqual([
+      'test_writing#1:skipped',
+      'red_check#1:skipped',
+      'implementation#1:passed',
+      'check#1:passed',
+    ]);
+    expect(calls.map((call) => [call.kind, call.input.ruleIds])).toEqual([['check', ['RULE-001']]]);
+    const judged = withProject(h.biveHome, h.project.id, (store) =>
+      store.judgments.listByRun(runId).filter((judgment) => judgment.ruleId === rule.id),
+    );
+    expect(judged.map((judgment) => [judgment.status, judgment.runner])).toEqual([
+      ['pass', 'redocly-prism'],
+    ]);
+  }, 120_000);
+
+  it('대상 계약 검사 규칙이 판정 없음(계약 안 요청 0건)이면 통과로 세지 않고 병합하지 않는다 (failed step_unmet, 회귀 없음)', async () => {
+    const { h, rule } = await typedPipeline((list) =>
+      trafficJudge(list, { traffic: () => Promise.resolve() }),
+    );
+    const runId = humanRun(h, [rule.id]);
+    const detail = await runToEnd({ ...h, runId });
+    expect(detail.run).toMatchObject({
+      type: 'B',
+      status: 'failed',
+      failureReason: 'step_unmet',
+      currentStep: 'check',
+      mergeCommit: null,
+    });
+    expect(attempts(detail, 'implementation', 'check')).toEqual([
+      'implementation#1:passed',
+      'check#1:failed',
+    ]);
+    expect(stepOf(detail, 'check').exitDetail).toMatchObject({
+      reason: 'step_unmet',
+      detail: {
+        reason: 'target_unjudged',
+        ruleIds: [rule.displayId],
+        contracts: [{ ruleId: rule.displayId, outcome: 'unjudged', reason: 'no_traffic' }],
+      },
+    });
+    expect(Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
+  }, 120_000);
+
+  it('유형 D: 기준 커밋에서 계약과 다른 응답이면 시작을 거부한다 (구현 세션 0, failed step_unmet)', async () => {
+    const { h, rule, calls } = await typedPipeline(
+      (list) => trafficJudge(list, { mismatch: true }),
+      { runType: 'D' },
+    );
+    const detail = await runToEnd(h);
+    expect(detail.run).toMatchObject({
+      type: 'D',
+      status: 'failed',
+      failureReason: 'step_unmet',
+      currentStep: 'green_check',
+    });
+    expect(stepOf(detail, 'green_check').exitDetail).toMatchObject({
+      detail: {
+        reason: 'not_green',
+        judgments: [
+          { ruleId: 'RULE-001', status: 'pass' },
+          { ruleId: rule.displayId, status: 'fail' },
+        ],
+      },
+    });
+    expect(calls.map((call) => call.kind)).toEqual(['green_check']);
+    expect(h.sessions).toEqual([]);
+    expect(judgmentsOfRule(h, rule.id)).toEqual([]);
+  }, 120_000);
+
+  it('대상 계약 검사 규칙이 막지 않는 실패(등록 문서의 형식 오류)면 구현이 고칠 수 없어 회귀 없이 failed (step_unmet), 병합 없음', async () => {
+    const invalid = 'openapi: 3.1.0\ninfo:\n  title: t\npaths:\n  /a:\n    get: {}\n';
+    const { h, rule } = await typedPipeline((list) => trafficJudge(list), {
+      contract: { file: 'invalid.yaml', text: invalid },
+    });
+    const runId = humanRun(h, [rule.id]);
+    const detail = await runToEnd({ ...h, runId });
+    expect(detail.run).toMatchObject({
+      type: 'B',
+      status: 'failed',
+      failureReason: 'step_unmet',
+      currentStep: 'check',
+      mergeCommit: null,
+    });
+    expect(attempts(detail, 'implementation', 'check')).toEqual([
+      'implementation#1:passed',
+      'check#1:failed',
+    ]);
+    expect(stepOf(detail, 'check').exitDetail).toMatchObject({
+      reason: 'step_unmet',
+      detail: {
+        reason: 'target_unjudged',
+        ruleIds: [rule.displayId],
+        contracts: [
+          {
+            ruleId: rule.displayId,
+            outcome: 'fail',
+            reason: 'document_invalid',
+            blocking: false,
+          },
+        ],
+      },
+    });
+    expect(Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
+  }, 120_000);
+
+  it('대상 밖 인수 테스트 규칙이 검사에서 실패하면 유형 B도 막는다: 판단 없이 구현 회귀 → 상한 뒤 failed (regression_limit), 병합 없음', async () => {
+    const { h, rule } = await typedPipeline((list) =>
+      trafficJudge(list, {
+        decide: (call) =>
+          Object.fromEntries((call.input.ruleIds ?? []).map((id) => [id, ['failed'] as const])),
+      }),
+    );
+    const runId = humanRun(h, [rule.id]);
+    const detail = await runToEnd({ ...h, runId });
+    expect(detail.run).toMatchObject({
+      type: 'B',
+      status: 'failed',
+      failureReason: 'regression_limit',
+      regressionCount: 2,
+    });
+    expect(attempts(detail, 'check')).toEqual([
+      'check#1:failed',
+      'check#2:failed',
+      'check#3:failed',
+    ]);
+    expect(exitOf(detail, 'check', 1)).toMatchObject({
+      reason: 'check_failed',
+      judgments: [
+        { ruleId: 'RULE-001', status: 'fail' },
+        { ruleId: rule.displayId, status: 'pass' },
+      ],
+    });
+    expect(exitOf(detail, 'check', 1)).not.toHaveProperty('existingRuleJudgment');
+    withProject(h.biveHome, h.project.id, (store) =>
+      expect(store.normChanges.list().some((entry) => entry.kind === 'judgment')).toBe(false),
+    );
+    expect(h.sessions.some((spec) => spec.role === 'rule-writer')).toBe(false);
+    expect(Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
+  }, 120_000);
+
+  it('병합 재검사에서도 유형 B의 대상은 판정이 통과여야 한다: 병합 커밋에서 판정 없음이면 재검사 실패로 병합하지 않는다', async () => {
+    const { h, rule } = await typedPipeline((list) => trafficJudge(list, { trafficIn: 'check' }), {
+      mergeRecheck: true,
+    });
+    const runId = humanRun(h, [rule.id]);
+    const detail = await runToEnd({ ...h, runId });
+    expect(attempts(detail, 'check', 'merge')).toEqual(['check#1:passed', 'merge#1:failed']);
+    expect(detail.run).toMatchObject({
+      type: 'B',
+      status: 'failed',
+      failureReason: 'check_failed',
+      mergeCommit: null,
+    });
+    expect(JSON.stringify(stepOf(detail, 'merge').exitDetail)).toContain(
+      `"unjudgedTargets":["${rule.id}"]`,
+    );
+    expect(Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
+  }, 120_000);
+});
 
 describe('검증하지 못한 요청은 닫힌 쪽이다: 실패(구현 회귀)이고 판정 없음이 아니다 (검토 1회차 B1)', () => {
   it('trafficVerdict: 검증하지 못한 교환(prism이 다루지 못함 · 넘기지 않음 · 기록 불완전)과 기록 건수 상한 초과는 막는 fail, 계약 밖뿐이면 판정 없음', () => {

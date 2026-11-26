@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { Rule, StepKind, TestCaseStatus } from '@bive/shared';
+import type { Rule, RunType, StepKind, TestCaseStatus } from '@bive/shared';
 import type { RunDetail } from '@bive/store';
 
 import type { AgentAdapter, SessionEvent, SessionSpec } from '../../src/agent/adapter.js';
@@ -25,6 +25,7 @@ import type { WorktreeManager } from '../../src/git/worktree-manager.js';
 import type { JudgeRunInput, JudgeRunResult, JudgeRunStatus } from '../../src/judge/runner.js';
 import { createRun } from '../../src/runs/run-service.js';
 import { createCheckExecutor } from '../../src/steps/check.js';
+import { createGreenCheckExecutor } from '../../src/steps/green-check.js';
 import { createImplementationExecutor } from '../../src/steps/implementation.js';
 import type { JudgingOptions } from '../../src/steps/judging.js';
 import { createMergeExecutor, type MergeStepOptions } from '../../src/steps/merge.js';
@@ -247,7 +248,10 @@ export interface PipelineSetupOptions {
   /** 실행기 바꿔 끼우기 (기본 제품 실행기를 받아 감싼다) */
   executors?: (
     defaults: Required<
-      Pick<StepExecutors, 'test_writing' | 'red_check' | 'implementation' | 'check' | 'merge'>
+      Pick<
+        StepExecutors,
+        'test_writing' | 'red_check' | 'green_check' | 'implementation' | 'check' | 'merge'
+      >
     >,
   ) => StepExecutors;
   /** 워크트리 관리자 (기본 엔진 기본값). 같은 하네스의 엔진들이 같은 관리자를 쓴다 */
@@ -274,6 +278,8 @@ export interface PipelineSetupOptions {
   }) => NormJudgeLauncher;
   temps: string[];
   engines: PipelineEngine[];
+  /** 처음 만드는 실행(대상 RULE-001)의 유형 (M3-06, 생략하면 대상으로 정한다 = A) */
+  runType?: RunType;
 }
 
 /** 프로젝트 · 실행을 만들고 제품 실행기(판정 · 설치 주입)로 엔진을 준비한다. */
@@ -341,6 +347,7 @@ export const setupPipeline = (options: PipelineSetupOptions): PipelineHarness =>
   const defaults = {
     test_writing: createTestWritingExecutor(),
     red_check: createRedCheckExecutor(judging),
+    green_check: createGreenCheckExecutor(judging),
     implementation: createImplementationExecutor(judging),
     check: createCheckExecutor(judging),
     merge: createMergeExecutor({ ...judging, ...options.merge }),
@@ -374,7 +381,11 @@ export const setupPipeline = (options: PipelineSetupOptions): PipelineHarness =>
   const runId = withProject(biveHome, seeded.project.id, (store) =>
     createRun(
       store,
-      { ruleIds: [seeded.rule.id], author: human },
+      {
+        ruleIds: [seeded.rule.id],
+        author: human,
+        ...(options.runType === undefined ? {} : { type: options.runType }),
+      },
       { clientId: null },
       { now: Date.now, newId },
     ),

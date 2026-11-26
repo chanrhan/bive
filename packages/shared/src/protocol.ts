@@ -57,6 +57,7 @@ import {
   RuleWriterSkipReason,
   RuleWriterState,
   RunStatus,
+  RunType,
   SessionEndReason,
   StepKind,
   StepStatus,
@@ -871,11 +872,15 @@ export const RunTargetRuleIds = z
   .min(1)
   .refine((ids) => new Set(ids).size === ids.length, '대상 규칙이 중복됐습니다');
 
-/** `run.create`: 실행 시작 확인 (RUN-01, RUN-02). 유형은 M1에서 A뿐이라 받지 않는다. */
+/**
+ * `run.create`: 실행 시작 확인 (RUN-01, RUN-02, RUN-07). `type`을 주지 않으면 대상 규칙으로 정한다(인수 테스트 검사 규칙만이면 A,
+ * 정적 검사 규칙(구조 · 계약)만이면 B, 섞이면 거부). C · D는 줄 때만 만든다 (ADR-136).
+ */
 export const RunCreateParams = z.strictObject({
   projectId: Ulid,
   ruleIds: RunTargetRuleIds,
   author: Author,
+  type: RunType.optional(),
 });
 export type RunCreateParams = z.infer<typeof RunCreateParams>;
 

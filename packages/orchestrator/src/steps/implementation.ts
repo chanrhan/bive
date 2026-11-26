@@ -17,6 +17,9 @@
 // 회귀와 같은 상한(`regressionCount`, 2회)을 쓴다. 다음 구현 세션은 판단의 근거를 앞 시도의 사유로 받는다. 판단 세션을 열지 못한
 // 사유가 예산(하루 한도 · 실행 예산)이면 `budget_exceeded`, 규칙 작성 역할 설정 미비면 `failed`(`settings_missing`)로 끝낸다.
 // 재기동으로 이의의 마무리가 끊겼으면 다음 시도의 시작에서 판단 없이 유지로 마무리하고 같은 규칙으로 진행한다
+// 실행 유형 (M3-06 #51, ADR-136): 인수 테스트 보호의 기준은 A = Red 확인, D = Green 확인(기준 검사)의 해시다. 유형 B의 대상 규칙은
+// 정적 검사 규칙(구조 · 계약)이라 인수 테스트가 없다: 구현 단계는 세션 · 커밋까지만 하고 판정은 검사 단계(효력 있는 규칙 전부 · 구조 ·
+// 계약 검사)에 맡긴다. 검사 실패는 구현으로 회귀한다(같은 상한)
 import type { JudgmentCase, NormChangeEntry, Rule, Step } from '@bive/shared';
 
 import {
@@ -54,8 +57,8 @@ import {
   MAX_LISTED,
   normHalt,
   recordJudgments,
-  redAcceptanceHashes,
 } from './judging.js';
+import { acceptanceBaselineOf, missingBaselineMessage } from './run-type.js';
 
 /** 실행 워크트리 의존성 설치가 실패했을 때의 실행 실패 사유 (`Run.failureReason`). */
 export const DEPENDENCY_INSTALL_FAILED_REASON = 'dependency_install_failed';
@@ -344,12 +347,12 @@ export const createImplementationExecutor =
       return halt('target_rule_unavailable', { ruleIds: context.run.targetRuleIds });
     }
     const ruleIds = rules.map((rule) => rule.displayId);
-    const expectedHashes = redAcceptanceHashes(context.steps);
-    if (expectedHashes === null) {
-      return halt('state_inconsistent', {
-        message: 'Red 확인 통과 기록(인수 테스트 해시)이 없습니다',
-      });
+    const baseline = acceptanceBaselineOf(context.run, context.steps);
+    if (baseline === null) {
+      return halt('state_inconsistent', { message: missingBaselineMessage(context.run.type) });
     }
+    // 유형 B는 판정하지 않으므로 대조할 해시가 없다 (검사 단계가 기준 커밋과 대조한다)
+    const expectedHashes = baseline.kind === 'hashes' ? baseline.hashes : null;
     // 재기동으로 마무리가 끊긴 이의가 있으면 판단 없이 유지로 마무리한다 (판단 세션은 이의마다 한 번, ADR-115)
     const settledSeqs = context.steps.flatMap((step) => {
       const seq = objectionSeqOf(step.exitDetail);
@@ -384,7 +387,7 @@ export const createImplementationExecutor =
     if (beforeSession.length > 0) return normHalt('before_session', beforeSession);
 
     // 2. implementer 세션
-    const acceptanceFiles = Object.keys(expectedHashes).filter((file) =>
+    const acceptanceFiles = Object.keys(expectedHashes ?? {}).filter((file) =>
       ruleIds.some((id) => file.startsWith(`bive-acceptance/${id}/`)),
     );
     const installAllowlist = context.read((store) => store.settings.get().installAllowlist);
@@ -411,6 +414,7 @@ export const createImplementationExecutor =
           acceptanceFiles,
           norms: normInput,
           feedback: implementationFeedback(context),
+          runType: context.run.type,
         }),
         normInput: normInputRecord(normInput),
         vars: {
@@ -493,6 +497,13 @@ export const createImplementationExecutor =
       context.git,
       stepCommitMessage(context.run, context.step),
     );
+    // 유형 B: 대상 규칙의 인수 테스트가 없다. 판정은 검사 단계가 한다 (판정 없이 병합되는 길은 없다: 검사 · 병합 재검사가 판정한다)
+    if (expectedHashes === null) {
+      return {
+        status: 'passed',
+        exitDetail: { sessionId: session.sessionId, commit, judgedBy: 'check' },
+      };
+    }
     const judged = await judgeCommit(
       context,
       {
@@ -519,7 +530,9 @@ export const createImplementationExecutor =
           ...(judged.moment === undefined ? {} : { moment: judged.moment }),
           message:
             judged.stage === 'acceptance_hash'
-              ? 'Red 확인 뒤 인수 테스트가 바뀌었습니다'
+              ? baseline.kind === 'hashes' && baseline.from === 'green'
+                ? 'Green 확인 뒤 인수 테스트가 바뀌었습니다'
+                : 'Red 확인 뒤 인수 테스트가 바뀌었습니다'
               : '판정 중 인수 테스트 · 테스트 실행기 · 판정 설정이 바뀌었습니다',
           changed: judged.changed.slice(0, MAX_LISTED),
         });

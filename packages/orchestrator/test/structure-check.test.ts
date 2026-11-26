@@ -25,7 +25,7 @@ import { stringify } from 'yaml';
 import { loadScenario, ScenarioSchema } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
-import type { StepExecutor } from '../src/engine/types.js';
+import type { NormJudgeRequest, StepExecutor } from '../src/engine/types.js';
 import type { PipeServer } from '../src/ipc/server.js';
 import {
   BUILTIN_RULE_CREATED_REASON,
@@ -289,7 +289,7 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
     expect(h.read((store) => store.rules.list()).map((rule) => rule.builtin)).toEqual([true, true]);
   });
 
-  it('사람의 [실행]은 내장 규칙을 대상으로 받지 않고(-32009, 아무것도 남지 않음), 사람 편집도 받지 않는다 (builtin_rule)', async () => {
+  it('사람의 [실행]은 내장 규칙으로 유형 B 실행을 만들고(유형 A로 주거나 일반 규칙과 섞으면 -32009, 아무것도 남지 않음), 사람 편집은 받지 않는다 (builtin_rule, M3-06 #51)', async () => {
     const h = await startProjectHarness({ servers, clients });
     await h.client.call('blocks.set', {
       projectId: h.project.id,
@@ -309,11 +309,12 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
         },
         { by: human, at: iso(T0) },
       );
+      // 유형 A(테스트 작성 · Red 확인)로는 받지 않는다 (M3-06: 정적 검사 규칙은 유형 B의 대상)
       for (const rule of rules) {
         expect(() =>
           createRun(
             store,
-            { ruleIds: [rule.id], author: human },
+            { ruleIds: [rule.id], author: human, type: 'A' },
             { clientId: null },
             { now: () => T0, newId },
           ),
@@ -324,12 +325,18 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
     });
     const rule = rules[0];
     if (rule === undefined) throw new Error('규칙 없음');
-    // 파이프의 run.create도 같은 거부다 (-32009)
-    const rejected = await rpcError(
-      h.client.call('run.create', { projectId: h.project.id, ruleIds: [rule.id], author: human }),
-    );
-    expect(rejected.code).toBe(-32009);
-    expect(h.read((store) => store.runs.list())).toEqual([]);
+    // 파이프의 run.create(화면의 [실행]: 유형을 주지 않는다)는 유형 B 실행과 승인 기록 run_start를 만든다 (M3-06 #51)
+    const created = await h.client.call('run.create', {
+      projectId: h.project.id,
+      ruleIds: [rule.id],
+      author: human,
+    });
+    expect(created.run).toMatchObject({ type: 'B', targetRuleIds: [rule.id] });
+    expect(created.approvalLog).toMatchObject({
+      action: 'run_start',
+      detail: { ruleIds: [rule.id] },
+    });
+    expect(h.read((store) => store.runs.list())).toHaveLength(1);
     // 대상이 여럿이면 어느 자리에 있든 거부한다 (일반 규칙 + 내장 규칙, 순서를 바꿔도)
     const plain = h.read((store) =>
       seedNormRule(store, {
@@ -352,8 +359,8 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
       }
     }
     h.read((store) => {
-      expect(store.runs.list()).toEqual([]);
-      expect(store.approvalLog.list()).toEqual([]);
+      expect(store.runs.list()).toEqual([created.run]);
+      expect(store.approvalLog.list()).toEqual([created.approvalLog]);
       expect(store.normChanges.list()).toEqual(changesBefore);
     });
     // 대조군: 일반 규칙만이면 만들어진다 (거부가 다른 이유가 아니다)
@@ -362,7 +369,7 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
       ruleIds: [plain.id],
       author: human,
     });
-    expect(h.read((store) => store.runs.list())).toHaveLength(1);
+    expect(h.read((store) => store.runs.list())).toHaveLength(2);
     const edited = await rpcError(
       h.client.call('rule.update', {
         projectId: h.project.id,
@@ -771,6 +778,297 @@ describe('검사 단계의 구조 검사: undeclared-import 변형에서 방향 
     expect(done.run.status).toBe('merged');
     expect(exitOf(done, 'check')).not.toHaveProperty('structure');
     expect(judgmentsIn(plain).map((judgment) => judgment.runner)).toEqual(['vitest', 'vitest']);
+  }, 120_000);
+});
+
+// ── M3-06 #51: 실행 유형 B(정적 검사) · D(기준 검사)의 구조 검사 ─────────────────────
+
+/** 기존 인수 테스트 (RULE-001). 유형 B · D의 검사 단계가 판정할 인수 테스트가 있어야 한다. */
+const RULE1_ACCEPTANCE = 'bive-acceptance/RULE-001/health.acc.ts';
+const withRule1Acceptance = (repo: string): void => {
+  fs.mkdirSync(path.join(repo, 'bive-acceptance', 'RULE-001'), { recursive: true });
+  fs.writeFileSync(
+    path.join(repo, RULE1_ACCEPTANCE),
+    "import { it } from 'vitest';\nit('기존 동작', () => undefined);\n",
+  );
+};
+
+/** 판정한 규칙을 모두 통과로 (구조 검사 결과만 실행을 가른다). */
+const allPassing: NonNullable<PipelineSetupOptions['decide']> = (call) =>
+  Object.fromEntries((call.input.ruleIds ?? []).map((id) => [id, ['passed'] as const]));
+
+/** 구현 세션이 변형 파일의 선언 밖 가져오기를 지우는 시나리오 (happy-path의 구현 세션을 바꾼다). */
+const fixScenario = (): { scenario: string; scenariosDir: string } => {
+  const scenario = structuredClone(loadScenario('happy-path'));
+  scenario.name = 'structure-fix';
+  const session = scenario.roles.implementer?.sessions[0];
+  if (session === undefined) throw new Error('구현 세션 없음');
+  session.turns = [
+    { tool: 'read_file', args: { path: VARIANT_FILE } },
+    {
+      tool: 'write_file',
+      args: {
+        path: VARIANT_FILE,
+        content:
+          '/** 선언하지 않은 블록을 가져오지 않는다. */\nexport function probeSession(): Response {\n  return Response.json({ authenticated: false }, { status: 401 });\n}\n',
+      },
+    },
+    { message: '선언 밖 가져오기를 지웠습니다.' },
+  ];
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'structure-fix.yaml'), stringify(scenario));
+  return { scenario: 'structure-fix', scenariosDir: dir };
+};
+
+/** 사람의 [실행](유형을 주지 않음)으로 실행을 만든다. */
+const humanRun = (h: PipelineHarness, ruleIds: string[]): string =>
+  withProject(h.biveHome, h.project.id, (store) =>
+    createRun(store, { ruleIds, author: human }, { clientId: null }, { now: Date.now, newId }),
+  ).run.id;
+
+describe('유형 B: 내장 구조 규칙 [실행] (M3-06 #51 수용 기준 4 · 5, RUN-07, ADR-136)', () => {
+  it('구조 위반 변형에서 방향 규칙 [실행] → 유형 B → 구현 세션이 고침 → 검사(구조 검사 통과) → 병합. 구현 단계는 판정하지 않는다', async () => {
+    const h = setup({
+      ...fixScenario(),
+      prepareRepo: (repo) => {
+        undeclaredImport(repo);
+        withRule1Acceptance(repo);
+      },
+      decide: allPassing,
+    });
+    const builtin = declare(h);
+    const direction = builtin['structure.declared-direction'];
+    const base = userGit(h.repo, 'rev-parse', 'main');
+    const runId = humanRun(h, [direction.id]);
+    const detail = await runToEnd({ ...h, runId });
+    expect(detail.run).toMatchObject({
+      type: 'B',
+      status: 'merged',
+      targetRuleIds: [direction.id],
+    });
+    expect(attempts(detail)).toEqual([
+      'approval#1:passed',
+      'test_writing#1:skipped',
+      'red_check#1:skipped',
+      'implementation#1:passed',
+      'check#1:passed',
+      'mutation#1:skipped',
+      'merge#1:passed',
+      'screen_update#1:passed',
+    ]);
+    // 구현 단계는 판정하지 않고(대상 규칙의 인수 테스트가 없다) 검사 단계가 구조 검사 · 기존 인수 테스트로 판정한다
+    expect(exitOf(detail, 'implementation')).toMatchObject({ judgedBy: 'check' });
+    expect(h.judgeCalls.map((call) => [call.kind, call.input.ruleIds])).toEqual([
+      ['check', ['RULE-001']],
+    ]);
+    expect(
+      BUILTIN_STRUCTURE_RULES.map((key) =>
+        structureJudgments(h, builtin[key].id, runId).map((judgment) => judgment.status),
+      ),
+    ).toEqual([['pass'], ['pass']]);
+    expect(h.sessions.map((spec) => spec.role)).toEqual(['implementer']);
+    const prompt = h.sessions[0]?.prompt ?? '';
+    expect(prompt).toContain('대상 규칙은 정적 검사 규칙(구조 검사 · 계약 검사)이다.');
+    expect(prompt).toContain(`- ${direction.displayId} ${direction.title}`);
+    expect(
+      userGit(h.repo, 'diff', '--name-only', base, String(detail.run.mergeCommit)).split('\n'),
+    ).toEqual([VARIANT_FILE]);
+  }, 120_000);
+
+  it('위반을 고치지 못하면 검사 → 구현 회귀를 상한까지 하고 failed (regression_limit). 다음 구현 세션은 위반을 사유로 받는다', async () => {
+    const h = setup({
+      ...retryScenario(),
+      prepareRepo: (repo) => {
+        undeclaredImport(repo);
+        withRule1Acceptance(repo);
+      },
+      decide: allPassing,
+    });
+    const direction = declare(h)['structure.declared-direction'];
+    const runId = humanRun(h, [direction.id]);
+    const detail = await runToEnd({ ...h, runId });
+    expect(detail.run).toMatchObject({
+      type: 'B',
+      status: 'failed',
+      failureReason: 'regression_limit',
+      mergeCommit: null,
+    });
+    expect(attempts(detail, 'implementation', 'check')).toEqual([
+      'implementation#1:passed',
+      'implementation#2:passed',
+      'implementation#3:passed',
+      'check#1:failed',
+      'check#2:failed',
+      'check#3:failed',
+    ]);
+    expect(h.judgeCalls.map((call) => call.kind)).toEqual(['check', 'check', 'check']);
+    const second = h.sessions.filter((spec) => spec.role === 'implementer')[1];
+    expect(second?.prompt).toContain(
+      `    - ${VARIANT_FILE} 선언하지 않은 방향의 가져오기 · health → auth (가져온 파일: src/app/api/auth/session/route.ts)`,
+    );
+    expect(h.sessions.some((spec) => spec.role === 'rule-writer')).toBe(false);
+  }, 120_000);
+
+  it('구현 커밋이 기존 인수 테스트를 바꾸면 기준 커밋과 달라 검사가 판정하지 않고 failed (guard_violation), 병합 없음', async () => {
+    const h = setup({
+      ...fixScenario(),
+      prepareRepo: (repo) => {
+        undeclaredImport(repo);
+        withRule1Acceptance(repo);
+      },
+      decide: allPassing,
+      executors: (defaults) => ({
+        ...defaults,
+        implementation: before(defaults.implementation, (context) => {
+          // 경로 가드를 지나친 변경을 흉내 낸다 (구현 세션은 bive-acceptance/를 쓸 수 없다)
+          fs.appendFileSync(
+            path.join(context.git.worktreePath, RULE1_ACCEPTANCE),
+            "it('바꿈', () => undefined);\n",
+          );
+        }),
+      }),
+    });
+    const direction = declare(h)['structure.declared-direction'];
+    const runId = humanRun(h, [direction.id]);
+    const detail = await runToEnd({ ...h, runId });
+    expect(detail.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'guard_violation',
+      currentStep: 'check',
+    });
+    expect(stepOf(detail, 'check').exitDetail).toMatchObject({
+      detail: {
+        stage: 'acceptance_hash',
+        message: '기준 커밋 뒤 인수 테스트가 바뀌었습니다',
+        changed: [RULE1_ACCEPTANCE],
+      },
+    });
+    expect(h.judgeCalls).toEqual([]);
+    expect(Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
+  }, 120_000);
+
+  it.each([
+    [
+      '새 파일 추가',
+      'bive-acceptance/RULE-001/added.acc.ts',
+      (worktree: string) =>
+        fs.writeFileSync(
+          path.join(worktree, 'bive-acceptance', 'RULE-001', 'added.acc.ts'),
+          "import { it } from 'vitest';\nit('더함', () => undefined);\n",
+        ),
+    ],
+    [
+      '파일 삭제',
+      RULE1_ACCEPTANCE,
+      (worktree: string) => fs.rmSync(path.join(worktree, RULE1_ACCEPTANCE)),
+    ],
+  ] as const)(
+    '구현 커밋의 인수 테스트 %s도 기준 커밋과 달라 검사가 판정하지 않고 failed (guard_violation)',
+    async (_name, changed, change) => {
+      const h = setup({
+        ...fixScenario(),
+        prepareRepo: (repo) => {
+          undeclaredImport(repo);
+          withRule1Acceptance(repo);
+        },
+        decide: allPassing,
+        executors: (defaults) => ({
+          ...defaults,
+          // 경로 가드를 지나친 변경을 흉내 낸다 (구현 세션은 bive-acceptance/를 쓸 수 없다)
+          implementation: before(defaults.implementation, (context) =>
+            change(context.git.worktreePath),
+          ),
+        }),
+      });
+      const direction = declare(h)['structure.declared-direction'];
+      const runId = humanRun(h, [direction.id]);
+      const detail = await runToEnd({ ...h, runId });
+      expect(detail.run).toMatchObject({ status: 'failed', failureReason: 'guard_violation' });
+      expect(stepOf(detail, 'check').exitDetail).toMatchObject({
+        detail: { stage: 'acceptance_hash', changed: [changed] },
+      });
+      expect(h.judgeCalls).toEqual([]);
+    },
+    120_000,
+  );
+
+  it('대상 밖 인수 테스트 규칙이 검사에서 실패하면 유형 B도 막는다: 판단 세션 없이 구현 회귀 → 상한 뒤 failed (regression_limit), 병합 없음', async () => {
+    const requests: NormJudgeRequest[] = [];
+    const h = setup({
+      ...retryScenario(),
+      prepareRepo: withRule1Acceptance,
+      // 구조 검사는 통과(변형 없음), 기존 인수 테스트 RULE-001만 계속 실패
+      decide: (call) =>
+        Object.fromEntries((call.input.ruleIds ?? []).map((id) => [id, ['failed'] as const])),
+      judgeNorms: () => (request) => {
+        requests.push(request);
+        return Promise.resolve({ status: 'not_opened', reason: 'not_configured', detail: '시험' });
+      },
+    });
+    const builtin = declare(h);
+    const direction = builtin['structure.declared-direction'];
+    const runId = humanRun(h, [direction.id]);
+    const detail = await runToEnd({ ...h, runId });
+    expect(detail.run).toMatchObject({
+      type: 'B',
+      status: 'failed',
+      failureReason: 'regression_limit',
+      regressionCount: 2,
+      mergeCommit: null,
+    });
+    expect(attempts(detail, 'check')).toEqual([
+      'check#1:failed',
+      'check#2:failed',
+      'check#3:failed',
+    ]);
+    expect(exitOf(detail, 'check', 1)).toMatchObject({
+      reason: 'check_failed',
+      judgments: [
+        { ruleId: 'RULE-001', status: 'fail' },
+        { ruleId: builtin['structure.public-api-only'].displayId, status: 'pass' },
+        { ruleId: direction.displayId, status: 'pass' },
+      ],
+    });
+    expect(exitOf(detail, 'check', 1)).not.toHaveProperty('existingRuleJudgment');
+    expect(requests).toEqual([]);
+    expect(Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
+  }, 120_000);
+});
+
+describe('유형 D: 기준 커밋의 구조 검사 실패는 시작 거부 (M3-06 #51 수용 기준 3)', () => {
+  it('기준 커밋에서 내장 구조 규칙이 실패하면 구현 세션 없이 failed (step_unmet), 커밋 · 병합 · 판정 기록 없음', async () => {
+    const h = setup({
+      runType: 'D',
+      prepareRepo: (repo) => {
+        undeclaredImport(repo);
+        withRule1Acceptance(repo);
+      },
+      decide: allPassing,
+    });
+    const builtin = declare(h);
+    const detail = await runToEnd(h);
+    expect(detail.run).toMatchObject({
+      type: 'D',
+      status: 'failed',
+      failureReason: 'step_unmet',
+      currentStep: 'green_check',
+      headCommit: null,
+    });
+    expect(stepOf(detail, 'green_check').exitDetail).toMatchObject({
+      reason: 'step_unmet',
+      detail: {
+        reason: 'not_green',
+        baseline: true,
+        judgments: [
+          { ruleId: 'RULE-001', status: 'pass' },
+          { ruleId: builtin['structure.public-api-only'].displayId, status: 'pass' },
+          { ruleId: builtin['structure.declared-direction'].displayId, status: 'fail' },
+        ],
+      },
+    });
+    expect(h.sessions).toEqual([]);
+    expect(judgmentsIn(h)).toEqual([]);
+    expect(Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
   }, 120_000);
 });
 

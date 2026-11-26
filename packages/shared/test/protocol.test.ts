@@ -676,9 +676,9 @@ describe('run.* (M1-12, ADR-061)', () => {
     ['중복 규칙', 'run.create', { projectId: PROJECT, ruleIds: [RULE_A, RULE_A], author: human }],
     ['주체 누락', 'run.create', { projectId: PROJECT, ruleIds: [RULE_A] }],
     [
-      '유형 지정 (M1은 A만)',
+      '모르는 유형 (A · B · C · D만, M3-06 ADR-136)',
       'run.create',
-      { projectId: PROJECT, ruleIds: [RULE_A], author: human, type: 'B' },
+      { projectId: PROJECT, ruleIds: [RULE_A], author: human, type: 'E' },
     ],
     ['projectId 누락', 'run.list', {}],
     ['다른 접두 표시 ID', 'run.get', { projectId: PROJECT, id: 'REQ-001' }],
