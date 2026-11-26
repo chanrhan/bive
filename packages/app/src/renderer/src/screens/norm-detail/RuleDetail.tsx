@@ -1,7 +1,8 @@
 // 규칙 상세 (screens.md SCR-03 상세 · SCR-06 규범 상세, 1.4 상세 접힘, ADR-035 · ADR-073).
 // 규칙 목록 + 상세 2단의 상세 영역에 들어간다(별도 화면 아님). 요구사항 상세(#38)가 자식 규칙을 펼칠 때 다시 쓴다.
 // - 순서: 제목 · ID · 판정 → 진술 · 종류 · 검사 · 부모 요구사항 · 생성 주체 → 테스트 실행 결과 → 테스트 출력(접힘) → 실행 이력
-// - 실행 이력은 실행 하나가 한 줄이다(판정 · 실행 ID · 실행 상태와 종료 사유 · 커밋, runHistoryView.ts, ADR-123)
+// - 실행 이력은 실행 하나가 한 줄이다(판정 · 실행 ID · 실행 상태와 종료 사유 · 커밋, runHistoryView.ts, ADR-123). 블록 선언
+//   겹침 · 내장 구조 규칙 없음으로 끝난 실행은 그 줄 아래에 겹친 파일 · 고정 안내(ADR-144)
 // - 테스트 출력은 기본 접힘, 최신 판정이 실패면 자동 펼침. 안에 실패 원인(케이스 이름 · `file:line` · 메시지) · 전체 케이스
 // - 실패 원인의 `file:line`(판정 기록의 케이스 위치)에 코드 열기 링크(CodeLink)를 붙인다. 출발 화면은 놓는 화면이 정하고
 //   항목은 이 규칙이다 (MET-01, ADR-084). 줄이 없거나 상대 경로가 아니면 글자만 보인다
@@ -45,6 +46,7 @@ import { CodeLink } from '../../components/CodeLink/CodeLink.js';
 import { linkableLine } from '../../components/CodeLink/codeLinkView.js';
 import { CollapsibleDetail } from '../../components/CollapsibleDetail/CollapsibleDetail.js';
 import { StatusBadge } from '../../components/StatusBadge/StatusBadge.js';
+import { hideHover, isClipped, showTooltip } from '../../components/Tooltip/tooltipStore.js';
 import { visibleLines, visibleText } from '../../components/VisibleText/visibleText.js';
 import { type BlockDeclarationLoad, BLOCK_TEXT, blockListView } from '../rules/blockView.js';
 import { riskText } from '../rules/rulesView.js';
@@ -79,7 +81,12 @@ import {
   ruleEditErrorText,
   ruleEditParams,
 } from './ruleEditView.js';
-import { type RunHistoryRow, runHistoryRows } from './runHistoryView.js';
+import {
+  RUN_FAILURE_NOTE_TEXT as NOTE_TEXT,
+  type RunHistoryNote,
+  type RunHistoryRow,
+  runHistoryRows,
+} from './runHistoryView.js';
 import {
   type RuleHistoryLoad,
   type RuleLatestRunLoad,
@@ -773,7 +780,7 @@ const History = ({
       </p>
     );
   }
-  const rows = runHistoryRows(ruleId, load.entries, runs.runs);
+  const rows = runHistoryRows(ruleId, load.entries, runs.runs, runs.notes);
   return (
     <>
       {runs.runs === null && (
@@ -819,5 +826,46 @@ const HistoryRow = ({ row }: { row: RunHistoryRow }): React.JSX.Element => (
         {row.status}
       </span>
     )}
+    {row.note !== null && <HistoryNote note={row.note} />}
   </li>
 );
+
+/**
+ * 실행 이력 줄의 종료 사유 보조 표시 (M3-51 #296, ADR-144): 줄의 칸들 아래 한 줄을 다 쓴다. 겹친 파일은 경로(긴 경로는 말줄임,
+ * 잘렸을 때만 공통 툴팁) · 블록 이름, 목록 밖 수는 "외 N개".
+ */
+const HistoryNote = ({ note }: { note: RunHistoryNote }): React.JSX.Element =>
+  note.kind === 'builtin_rules_missing' ? (
+    <p className="rule-history-note" data-testid="history-run-note">
+      {note.text}
+    </p>
+  ) : (
+    <div className="rule-history-note" data-testid="history-run-note">
+      <span className="rule-history-note-label">{NOTE_TEXT.overlapFiles}</span>
+      <ul className="rule-history-overlaps">
+        {note.files.map(({ file, blocks }, index) => (
+          <li key={index} className="rule-history-overlap" data-testid="overlap-file">
+            <span
+              className="rule-history-overlap-path rule-mono"
+              data-testid="overlap-file-path"
+              onMouseEnter={(event) => {
+                if (isClipped(event.currentTarget))
+                  showTooltip(event.currentTarget, [file], 'hover');
+              }}
+              onMouseLeave={(event) => hideHover(event.currentTarget)}
+            >
+              {file}
+            </span>
+            <span className="rule-history-overlap-blocks" data-testid="overlap-file-blocks">
+              {blocks}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {note.more > 0 && (
+        <span className="rule-history-note-more" data-testid="overlap-more">
+          {NOTE_TEXT.more(note.more)}
+        </span>
+      )}
+    </div>
+  );
