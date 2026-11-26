@@ -21,7 +21,13 @@ import os from 'node:os';
 import path from 'node:path';
 import tls from 'node:tls';
 
-import { AgentRole, createUlidGenerator, METHOD_NAMES, type RoleSettings } from '@bive/shared';
+import {
+  AgentRole,
+  createUlidGenerator,
+  METHOD_NAMES,
+  type RoleSettings,
+  RunStatus,
+} from '@bive/shared';
 import { bivePaths, openProjectStore } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -78,6 +84,26 @@ import {
 } from './helpers/pipeline-harness.js';
 import { cleanup } from './helpers/process.js';
 import { type ProjectHarness, startProjectHarness } from './helpers/project-harness.js';
+import {
+  computedModuleRefs,
+  filesReferencing,
+  importedNamesOf,
+  importersOf,
+  memberDeclarations,
+  moduleRefs,
+  moduleUsers,
+  productSource,
+  referencesTo,
+  repositoryMethodsUsedIn,
+  repositoryMethodUsers,
+  sampleSource,
+  type SourceSet,
+  sqlWrites,
+  sqlWritesInFiles,
+  storeMemberUsers,
+  terminalStatusWrites,
+  topLevelDeclaration,
+} from './helpers/source-structure.js';
 
 const SCENARIO = 'agent-approve';
 const APPROVE_METHOD = 'proposal.approve';
@@ -1827,6 +1853,825 @@ describe('테스트 작성 · 구현 역할의 규범 입력: 도구 목록 불�
       ['test-writer', ROLE_TOOLS_BEFORE['test-writer']],
       ['implementer', ROLE_TOOLS_BEFORE.implementer],
     ]);
+  }, 60_000);
+});
+
+// ── 구조 시험의 구문 트리 · 타입 대조 (M3-31 #259, ADR-142) ─────
+//
+// 위의 구조 시험들은 소스 글자를 정규식으로 대조한다. 여기서는 같은 성질을 TypeScript 컴파일러 API(test/helpers/source-structure.ts)로
+// 다시 본다: 모듈 참조는 모든 가져오기 형태를 src 기준 파일로 풀고, 저장소 · 서비스의 속성 · 메서드는 타입 검사기가 푼 선언으로
+// 찾는다. 허용 목록은 위 시험의 것 하나다: 여기서는 "구문 트리가 찾은 파일 = 위 시험의 글자 대조가 찾은 파일"을 단언하므로,
+// 글자 대조가 놓치는 형태로 쓴 새 자리가 생기면 이 시험이 빨강이 된다(목록을 늘리려면 위 시험의 목록과 글자 형태를 고친다).
+
+/** 표본 파일 (src 기준 경로 → 소스). 위반 표본은 허용 목록 밖 폴더, 정상 표본은 허용된 파일 자리에 끼운다 */
+const STRUCTURE_SAMPLES: Readonly<Record<string, string>> = {
+  // ── 저장소 속성 · 메서드 (위반: 단계 실행기 폴더) ──
+  'steps/__sample-alias.ts': `import type { ProjectStore } from '@bive/store';
+export const write = (store: ProjectStore): void => {
+  const nc = store.normChanges;
+  nc.append({} as never);
+  const r = store.rules;
+  r.create({} as never);
+};
+`,
+  'steps/__sample-destructure.ts': `import type { ProjectStore } from '@bive/store';
+export const write = (store: ProjectStore): void => {
+  const { normChanges, rules: ruleRepo, ruleRetirements } = store;
+  normChanges.append({} as never);
+  ruleRepo.create({} as never);
+  ruleRetirements.record({} as never);
+};
+`,
+  'steps/__sample-nested-destructure.ts': `import type { ProjectStore } from '@bive/store';
+export const write = (store: ProjectStore): void => {
+  const {
+    normChanges: { append },
+  } = store;
+  append({} as never);
+};
+`,
+  'steps/__sample-bracket.ts': `import type { ProjectStore } from '@bive/store';
+export const write = (store: ProjectStore): void => {
+  store['normChanges'].append({} as never);
+  store['rules']['create']({} as never);
+  store['confirmations'].confirm({} as never, {} as never);
+};
+`,
+  'steps/__sample-optional.ts': `import type { ProjectStore } from '@bive/store';
+export const write = (store: ProjectStore | undefined): void => {
+  store?.normChanges?.append({} as never);
+  store?.ruleRetirements?.record({} as never);
+};
+`,
+  'steps/__sample-reflect.ts': `import type { ProjectStore } from '@bive/store';
+export const write = (store: ProjectStore): void => {
+  const repo = Reflect.get(store, 'normChanges') as { append(input: never): void };
+  repo.append({} as never);
+  Reflect.get(store, 'ruleRetirements');
+  Reflect.get(store, 'confirmations');
+};
+`,
+  'steps/__sample-bound.ts': `import type { ProjectStore } from '@bive/store';
+export const write = (store: ProjectStore): void => {
+  const append = store.normChanges.append.bind(store.normChanges);
+  append({} as never);
+};
+`,
+  'steps/__sample-param.ts': `import type { ProjectStore } from '@bive/store';
+const append = (repo: ProjectStore['normChanges']) => repo.append({} as never);
+const create = (repo: Pick<ProjectStore, 'rules'>['rules']) => repo.create({} as never);
+export const write = (store: ProjectStore): void => {
+  append(store.normChanges);
+  create(store.rules);
+};
+`,
+  // ── 규칙 작성 서비스의 세션 메서드 (위반: 단계 실행기 폴더) ──
+  'steps/__sample-judge.ts': `import type { RuleWriterLauncher, RuleWriterService } from '../rule-writer/rule-writer-service.js';
+export const call = (service: RuleWriterService, launcher: RuleWriterLauncher): void => {
+  const { judge } = service;
+  void judge;
+  void service['judge']({} as never);
+  const run = service.judge.bind(service);
+  void run;
+  launcher.start({} as never, {} as never);
+  launcher.retry({} as never, {} as never);
+};
+`,
+  // ── 모듈 참조 (위반: 단계 실행기 폴더 · 확인 상태 폴더의 같은 폴더 가져오기) ──
+  'steps/__sample-dynamic.ts': `export const load = async (): Promise<unknown> => [
+  await import('../confirmations/confirmation-service.js'),
+  await import('../norms/norm-input.js'),
+  await import('../rule-writer/rule-writer-service.js'),
+];
+`,
+  'steps/__sample-double-quote.ts': `import { confirmByHuman } from "../confirmations/confirmation-service.js";
+import { collectNormInput } from "../norms/norm-input.js";
+import type { RuleWriterService } from "../rule-writer/rule-writer-service.js";
+export const names = [confirmByHuman, collectNormInput] as const;
+export type Service = RuleWriterService;
+`,
+  'steps/__sample-export-from.ts': `export { confirmByHuman } from '../confirmations/confirmation-service.js';
+export * from '../norms/norm-input.js';
+export * as service from '../rule-writer/rule-writer-service.js';
+`,
+  'steps/__sample-namespace.ts': `import * as confirmations from '../confirmations/confirmation-service.js';
+export const all = confirmations;
+`,
+  'steps/__sample-require.ts': `import { createRequire } from 'node:module';
+export const loaded: unknown = createRequire(import.meta.url)('../norms/norm-input.js');
+`,
+  'steps/__sample-require-alias.ts': `import { createRequire as make } from 'node:module';
+const load = make(import.meta.url);
+export const loaded: unknown = load('../norms/norm-input.js');
+`,
+  'steps/__sample-type-import.ts': `export type Input = import('../norms/norm-input.js').NormInput;
+export type Service = import('../rule-writer/rule-writer-service.js').RuleWriterService;
+`,
+  'steps/__sample-computed.ts': `export const load = async (name: string): Promise<unknown> => import(name);
+`,
+  'confirmations/__sample-same-dir.ts': `import { confirmByHuman } from './confirmation-service.js';
+export const name = confirmByHuman;
+`,
+  // ── 정상 표본: 허용된 파일(규칙 바로 반영 모듈) 자리의 같은 형태, 다른 저장소 · 다른 메서드 ──
+  'norms/agent-rule.ts': `import type { ProjectStore } from '@bive/store';
+import { releaseConfirmation } from '../confirmations/confirmation-service.js';
+export const write = (store: ProjectStore): void => {
+  const nc = store.normChanges;
+  nc.append({} as never);
+  const { rules } = store;
+  rules.create({} as never);
+  store['ruleRetirements'].record({} as never);
+  void releaseConfirmation;
+};
+export { releaseConfirmation as release };
+`,
+  // 허용된 파일이 다시 내보낸 이름을 허용 밖 파일이 가져온다 (모듈 이름이 글에 없다)
+  'steps/__sample-reexport-chain.ts': `import { release } from '../norms/agent-rule.js';
+export const name = release;
+`,
+  // 타입을 지운 값의 구조 분해
+  'verification/__sample-untyped-destructure.ts': `import type { ProjectStore } from '@bive/store';
+export const write = (store: ProjectStore): void => {
+  const loose: any = store;
+  const { normChanges: log, ruleRetirements: r, confirmations: c } = loose;
+  log.append({});
+  void r;
+  void c;
+};
+`,
+  // 허용 파일이 다시 내보낸 이름을 네임스페이스 · 동적 import · 구조 분해로 가져온다
+  'verification/__sample-reexport-namespace.ts': `import * as h from '../norms/agent-rule.js';
+export const name = h.release;
+`,
+  'verification/__sample-reexport-dynamic.ts': `export const load = async (): Promise<unknown> => {
+  const m = await import('../norms/agent-rule.js');
+  const { release } = await import('../norms/agent-rule.js');
+  return [m.release, release, (await import('../norms/agent-rule.js'))['release']];
+};
+`,
+  // 타입을 지운 값의 속성 접근
+  'steps/__sample-untyped.ts': `import type { ProjectStore } from '@bive/store';
+export const write = (store: ProjectStore): void => {
+  const loose: any = store;
+  const repo = loose.normChanges;
+  repo.append({});
+};
+`,
+  'steps/__sample-other.ts': `import type { ProjectStore } from '@bive/store';
+export const read = (store: ProjectStore): unknown => {
+  const { requirements } = store;
+  requirements.create({} as never);
+  store.judgments.listByRun('x');
+  const rulesDir = 'rules';
+  const stage = { stage: 'judge', kind: 'create' };
+  return [rulesDir, stage, store.rules.list(), store.ruleRetirements.list()];
+};
+`,
+};
+
+let structureSamples: SourceSet | undefined;
+/** 표본 프로그램: 아래 세 묶음(가져오기 · 호출, 날 SQL, 종료 상태)을 함께 담아 한 번만 만든다 (제품 프로그램을 재사용) */
+const samples = (): SourceSet =>
+  (structureSamples ??= sampleSource({
+    ...STRUCTURE_SAMPLES,
+    ...SQL_SAMPLES,
+    ...TERMINAL_SAMPLES,
+  }));
+
+describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 · 구조 분해 · 대괄호 접근 · 동적 import · 큰따옴표 · export from · ?. 없는 호출 (M3-31 #259 수용 기준 1, ADR-142)', () => {
+  const files = () =>
+    sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+  const using = (pattern: RegExp) =>
+    files()
+      .filter((f) => pattern.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+
+  /** 잡는 함수: 표본 · 제품 소스에 똑같이 돈다 */
+  const CATCHERS = {
+    confirmationServiceImporters: (set: SourceSet) =>
+      importersOf(set, 'confirmations/confirmation-service.ts'),
+    normInputImporters: (set: SourceSet) => importersOf(set, 'norms/norm-input.ts'),
+    confirmationServiceUsers: (set: SourceSet) =>
+      moduleUsers(set, 'confirmations/confirmation-service.ts'),
+    ruleWriterServiceImporters: (set: SourceSet) =>
+      importersOf(set, 'rule-writer/rule-writer-service.ts'),
+    normChanges: (set: SourceSet) => storeMemberUsers(set, 'normChanges'),
+    normChangesAppend: (set: SourceSet) =>
+      repositoryMethodUsers(set, 'NormChangeRepository', 'append', 'norm-change-repository.ts'),
+    rulesCreate: (set: SourceSet) =>
+      repositoryMethodUsers(set, 'RuleRepository', 'create', 'rule-repository.ts'),
+    ruleRetirements: (set: SourceSet) => storeMemberUsers(set, 'ruleRetirements'),
+    ruleRetirementsRecord: (set: SourceSet) =>
+      repositoryMethodUsers(
+        set,
+        'RuleRetirementRepository',
+        'record',
+        'rule-retirement-repository.ts',
+      ),
+    confirmations: (set: SourceSet) => storeMemberUsers(set, 'confirmations'),
+    confirmationsConfirm: (set: SourceSet) =>
+      repositoryMethodUsers(set, 'ConfirmationRepository', 'confirm', 'confirmation-repository.ts'),
+    ruleWriterJudge: (set: SourceSet) =>
+      filesReferencing(
+        set,
+        memberDeclarations(
+          set,
+          'RuleWriterService',
+          'judge',
+          'orchestrator/src/rule-writer/rule-writer-service.ts',
+        ),
+      ),
+    ruleWriterStartRetry: (set: SourceSet) =>
+      filesReferencing(
+        set,
+        ['start', 'retry'].flatMap((method) => [
+          ...memberDeclarations(
+            set,
+            'RuleWriterService',
+            method,
+            'orchestrator/src/rule-writer/rule-writer-service.ts',
+          ),
+          ...memberDeclarations(
+            set,
+            'RuleWriterLauncher',
+            method,
+            'orchestrator/src/rule-writer/rule-writer-service.ts',
+          ),
+        ]),
+      ),
+  } as const satisfies Record<string, (set: SourceSet) => string[]>;
+
+  /** 위 구조 시험들의 글자 대조 (그 시험의 정규식 그대로). 구문 트리가 찾은 파일과 견준다 */
+  const TEXT_PATTERNS: Readonly<Record<keyof typeof CATCHERS, RegExp | null>> = {
+    confirmationServiceImporters: /from '[./]+\/?confirmations\/confirmation-service\.js'/,
+    normInputImporters: /from '[./]*(?:norms\/)?norm-input\.js'/,
+    confirmationServiceUsers: /from '[./]+\/?confirmations\/confirmation-service\.js'/,
+    // 규칙 작성 서비스는 가져오는 파일 목록이 아니라 "엔진 · 단계 · 실행 · 판정 · 도구 · 에이전트는 가져오지 않는다"를 본다
+    ruleWriterServiceImporters: null,
+    normChanges: /\.normChanges\./,
+    normChangesAppend: /\.normChanges\.append\(/,
+    rulesCreate: /\.rules\.create\(/,
+    ruleRetirements: /\.ruleRetirements\b/,
+    ruleRetirementsRecord: /\.ruleRetirements\.record\(/,
+    confirmations: /\.confirmations\b/,
+    confirmationsConfirm: /\.confirmations\.confirm\(/,
+    ruleWriterJudge: /\bruleWriter\??\.judge\(|\.judge\(request\)/,
+    ruleWriterStartRetry: /\bruleWriter\?\.(start|retry)\(/,
+  };
+
+  type CatcherName = keyof typeof CATCHERS;
+  /**
+   * 형태별 위반 표본: [표본, 잡아야 하는 잡는 함수, 그 가운데 위 시험의 글자 대조가 놓치는 것]. 글자 대조가 잡는 형태
+   * (`?.ruleRetirements` · `export … from` · 네임스페이스 가져오기의 파일 목록)는 구문 트리도 잡음을 보이려고 함께 둔다
+   */
+  const VIOLATIONS: readonly (readonly [string, readonly CatcherName[], readonly CatcherName[]])[] =
+    [
+      [
+        'steps/__sample-alias.ts',
+        ['normChanges', 'normChangesAppend', 'rulesCreate'],
+        ['normChanges', 'normChangesAppend', 'rulesCreate'],
+      ],
+      [
+        'steps/__sample-destructure.ts',
+        [
+          'normChanges',
+          'normChangesAppend',
+          'rulesCreate',
+          'ruleRetirements',
+          'ruleRetirementsRecord',
+        ],
+        [
+          'normChanges',
+          'normChangesAppend',
+          'rulesCreate',
+          'ruleRetirements',
+          'ruleRetirementsRecord',
+        ],
+      ],
+      [
+        'steps/__sample-nested-destructure.ts',
+        ['normChanges', 'normChangesAppend'],
+        ['normChanges', 'normChangesAppend'],
+      ],
+      [
+        'steps/__sample-bracket.ts',
+        [
+          'normChanges',
+          'normChangesAppend',
+          'rulesCreate',
+          'confirmations',
+          'confirmationsConfirm',
+        ],
+        [
+          'normChanges',
+          'normChangesAppend',
+          'rulesCreate',
+          'confirmations',
+          'confirmationsConfirm',
+        ],
+      ],
+      [
+        'steps/__sample-optional.ts',
+        ['normChanges', 'normChangesAppend', 'ruleRetirements', 'ruleRetirementsRecord'],
+        ['normChanges', 'normChangesAppend', 'ruleRetirementsRecord'],
+      ],
+      [
+        'steps/__sample-reflect.ts',
+        ['normChanges', 'ruleRetirements', 'confirmations'],
+        ['normChanges', 'ruleRetirements', 'confirmations'],
+      ],
+      ['steps/__sample-bound.ts', ['normChanges', 'normChangesAppend'], ['normChangesAppend']],
+      [
+        'steps/__sample-param.ts',
+        ['normChanges', 'normChangesAppend', 'rulesCreate'],
+        ['normChanges', 'normChangesAppend', 'rulesCreate'],
+      ],
+      [
+        'steps/__sample-judge.ts',
+        ['ruleWriterServiceImporters', 'ruleWriterJudge', 'ruleWriterStartRetry'],
+        ['ruleWriterJudge', 'ruleWriterStartRetry'],
+      ],
+      [
+        'steps/__sample-dynamic.ts',
+        [
+          'confirmationServiceImporters',
+          'confirmationServiceUsers',
+          'normInputImporters',
+          'ruleWriterServiceImporters',
+        ],
+        ['confirmationServiceImporters', 'confirmationServiceUsers', 'normInputImporters'],
+      ],
+      [
+        'steps/__sample-double-quote.ts',
+        [
+          'confirmationServiceImporters',
+          'confirmationServiceUsers',
+          'normInputImporters',
+          'ruleWriterServiceImporters',
+        ],
+        ['confirmationServiceImporters', 'confirmationServiceUsers', 'normInputImporters'],
+      ],
+      [
+        'steps/__sample-export-from.ts',
+        [
+          'confirmationServiceImporters',
+          'confirmationServiceUsers',
+          'normInputImporters',
+          'ruleWriterServiceImporters',
+        ],
+        [],
+      ],
+      [
+        'steps/__sample-namespace.ts',
+        ['confirmationServiceImporters', 'confirmationServiceUsers'],
+        [],
+      ],
+      ['steps/__sample-require.ts', ['normInputImporters'], ['normInputImporters']],
+      ['steps/__sample-require-alias.ts', ['normInputImporters'], ['normInputImporters']],
+      [
+        'steps/__sample-type-import.ts',
+        ['normInputImporters', 'ruleWriterServiceImporters'],
+        ['normInputImporters'],
+      ],
+      [
+        'confirmations/__sample-same-dir.ts',
+        ['confirmationServiceImporters', 'confirmationServiceUsers'],
+        ['confirmationServiceImporters', 'confirmationServiceUsers'],
+      ],
+      [
+        'steps/__sample-reexport-chain.ts',
+        ['confirmationServiceUsers'],
+        ['confirmationServiceUsers'],
+      ],
+      ['steps/__sample-untyped.ts', ['normChanges'], ['normChanges']],
+      [
+        'verification/__sample-untyped-destructure.ts',
+        ['normChanges', 'ruleRetirements', 'confirmations'],
+        ['normChanges', 'ruleRetirements', 'confirmations'],
+      ],
+      [
+        'verification/__sample-reexport-namespace.ts',
+        ['confirmationServiceUsers'],
+        ['confirmationServiceUsers'],
+      ],
+      [
+        'verification/__sample-reexport-dynamic.ts',
+        ['confirmationServiceUsers'],
+        ['confirmationServiceUsers'],
+      ],
+    ];
+
+  it('잡는 함수 자체: 형태별 위반 표본은 잡히고(위 시험의 글자 대조는 놓친다), 허용된 파일 자리의 같은 형태는 허용 목록 안이며, 다른 저장소 · 다른 메서드 · 같은 낱말의 글은 잡히지 않는다', () => {
+    const set = samples();
+    const caught = Object.fromEntries(
+      Object.entries(CATCHERS).map(([name, catcher]) => [name, catcher(set)]),
+    ) as Record<keyof typeof CATCHERS, string[]>;
+    for (const [rel, expected, missedByText] of VIOLATIONS) {
+      const text = STRUCTURE_SAMPLES[rel] ?? '';
+      const hits = (Object.keys(CATCHERS) as CatcherName[]).filter((name) =>
+        caught[name].includes(rel),
+      );
+      expect([...hits].sort(), rel).toEqual([...expected].sort());
+      // 위 시험의 글자 대조가 놓치는 것 (이 표본이 보강의 근거다)
+      expect(
+        expected
+          .filter((name) => {
+            const pattern = TEXT_PATTERNS[name];
+            return pattern !== null && !pattern.test(text);
+          })
+          .sort(),
+        rel,
+      ).toEqual([...missedByText].sort());
+    }
+    // 규칙 작성 서비스: 위 시험은 정해진 폴더에서 `rule-writer/rule-writer-service.js'` 글자만 본다 (큰따옴표 · 동적 · 다시 내보내기는
+    // 위 표본의 글자와 견준다)
+    for (const rel of [
+      'steps/__sample-dynamic.ts',
+      'steps/__sample-double-quote.ts',
+      'steps/__sample-type-import.ts',
+    ]) {
+      expect(/rule-writer\/rule-writer-service\.js'/.test(STRUCTURE_SAMPLES[rel] ?? ''), rel).toBe(
+        rel === 'steps/__sample-dynamic.ts' || rel === 'steps/__sample-type-import.ts',
+      );
+    }
+    // 이름이 리터럴이 아닌 동적 import는 어느 모듈인지 모르므로 따로 잡는다
+    expect(computedModuleRefs(set).filter((rel) => rel.includes('__sample'))).toEqual([
+      'steps/__sample-computed.ts',
+    ]);
+    // 정상 표본: 허용된 파일(규칙 바로 반영 모듈) 자리의 같은 형태는 잡히되 제품의 허용 목록 안이다
+    const productLists = {
+      normChangesAppend: using(/\.normChanges\.append\(/),
+      rulesCreate: using(/\.rules\.create\(/),
+      ruleRetirementsRecord: using(/\.ruleRetirements\.record\(/),
+      confirmationServiceImporters: using(/from '[./]+\/?confirmations\/confirmation-service\.js'/),
+    } as const;
+    for (const [name, allowed] of Object.entries(productLists)) {
+      const found = caught[name as keyof typeof productLists];
+      expect(found, name).toContain('norms/agent-rule.ts');
+      expect(allowed, name).toContain('norms/agent-rule.ts');
+      expect(
+        found.filter((rel) => !allowed.includes(rel) && !rel.includes('__sample')),
+        name,
+      ).toEqual([]);
+    }
+    expect(importedNamesOf(set, 'confirmations/confirmation-service.ts')).toMatchObject({
+      'norms/agent-rule.ts': ['releaseConfirmation'],
+      'steps/__sample-namespace.ts': ['*'],
+      'steps/__sample-dynamic.ts': ['*'],
+      'steps/__sample-export-from.ts': ['confirmByHuman'],
+      'confirmations/__sample-same-dir.ts': ['confirmByHuman'],
+    });
+    // 다른 저장소의 같은 이름 메서드(요구사항 생성), 읽기 메서드, 같은 낱말의 글('rules' · 'judge' · 'create')은 잡지 않는다
+    const other = 'steps/__sample-other.ts';
+    for (const name of [
+      'normChangesAppend',
+      'rulesCreate',
+      'ruleRetirementsRecord',
+      'confirmations',
+      'confirmationsConfirm',
+      'ruleWriterJudge',
+      'ruleWriterStartRetry',
+      'normChanges',
+      'confirmationServiceImporters',
+      'confirmationServiceUsers',
+      'normInputImporters',
+      'ruleWriterServiceImporters',
+    ] as const) {
+      expect(caught[name], name).not.toContain(other);
+    }
+    expect(caught.ruleRetirements).toContain(other);
+    // 잡은 자리의 형태 (구조 분해 · 문자열 · 기호)
+    const forms = (rel: string, declarations: Parameters<typeof referencesTo>[1]) =>
+      [
+        ...new Set(
+          referencesTo(set, declarations, 'any')
+            .filter((ref) => ref.rel === rel)
+            .map((ref) => ref.form),
+        ),
+      ].sort();
+    const normChanges = memberDeclarations(
+      set,
+      'ProjectStore',
+      'normChanges',
+      'store/src/project-store.ts',
+    );
+    expect(forms('steps/__sample-destructure.ts', normChanges)).toEqual(['binding']);
+    expect(forms('steps/__sample-reflect.ts', normChanges)).toEqual(['string']);
+    expect(forms('steps/__sample-bracket.ts', normChanges)).toEqual(['symbol']);
+  }, 60_000);
+
+  it('제품 소스: 확인 서비스 · 규범 입력 · 규칙 작성 서비스 모듈을 어떤 형태로든 참조하는 파일과 가져오는 이름이 글자 대조 시험과 같고, 이름이 리터럴이 아닌 모듈 참조가 없다', () => {
+    const set = productSource();
+    expect(set.files.length).toBeGreaterThan(20);
+    // 확인 서비스: 가져오는 파일 · 이름 (위 M7-01 · M7-13 시험의 목록과 이름 표)
+    expect(CATCHERS.confirmationServiceImporters(set)).toEqual(
+      using(TEXT_PATTERNS.confirmationServiceImporters as RegExp),
+    );
+    expect(importedNamesOf(set, 'confirmations/confirmation-service.ts')).toEqual(
+      Object.fromEntries(
+        files()
+          .map((f) => [f.rel, confirmationServiceImports(f.text)] as const)
+          .filter(([, names]) => names.length > 0),
+      ),
+    );
+    // 다시 내보내기 · 별칭을 거쳐 확인 서비스의 이름을 쓰는 파일도 같다
+    expect(CATCHERS.confirmationServiceUsers(set)).toEqual(
+      using(TEXT_PATTERNS.confirmationServiceImporters as RegExp),
+    );
+    // 규범 입력 모듈: 가져오는 파일 · 이름을 쓰는 파일 (위 M7-07 · M7-08 시험의 목록)
+    expect(CATCHERS.normInputImporters(set)).toEqual(normInputImporters());
+    expect(moduleUsers(set, 'norms/norm-input.ts')).toEqual(normInputImporters());
+    // 규칙 작성 서비스: 엔진 · 단계 · 실행 · 판정 · 도구 · 에이전트는 어떤 형태로도 참조하지 않고(위 M7-05 시험), 서비스를
+    // 만드는 곳은 오케스트레이터 배선뿐이다 (클래스를 값 · 타입 어느 자리로든 쓰는 파일)
+    expect(
+      [
+        ...CATCHERS.ruleWriterServiceImporters(set),
+        ...moduleUsers(set, 'rule-writer/rule-writer-service.ts'),
+      ].filter((rel) => /^(engine|steps|runs|judge|tools|agent)\//.test(rel)),
+    ).toEqual([]);
+    expect(
+      filesReferencing(
+        set,
+        topLevelDeclaration(
+          set,
+          'RuleWriterService',
+          'orchestrator/src/rule-writer/rule-writer-service.ts',
+        ),
+      ),
+    ).toEqual(using(/new RuleWriterService\(/));
+    // 모듈 이름을 식으로 고르는 참조가 없다 (어느 모듈을 가져오는지 구조 시험이 알 수 있다)
+    expect(computedModuleRefs(set)).toEqual([]);
+  }, 60_000);
+
+  it('제품 소스: 규범 변경 기록 · 규칙 생성 · 폐기 기록 · 확인 상태 저장소와 규칙 작성 서비스의 세션 메서드를 어떤 형태로든 참조하는 파일이 글자 대조 시험과 같다', () => {
+    const set = productSource();
+    for (const name of Object.keys(CATCHERS) as (keyof typeof CATCHERS)[]) {
+      const pattern = TEXT_PATTERNS[name];
+      if (
+        pattern === null ||
+        name === 'confirmationServiceImporters' ||
+        name === 'confirmationServiceUsers' ||
+        name === 'normInputImporters'
+      ) {
+        continue;
+      }
+      expect(CATCHERS[name](set), name).toEqual(using(pattern));
+    }
+    // 위 시험 밖의 두 메서드도 같다: 확인 풀기 · 재판단 창구
+    expect(
+      repositoryMethodUsers(set, 'ConfirmationRepository', 'release', 'confirmation-repository.ts'),
+    ).toEqual(using(/\.confirmations\.release\(/));
+    expect(
+      filesReferencing(set, [
+        ...memberDeclarations(
+          set,
+          'RuleWriterService',
+          'rejudge',
+          'orchestrator/src/rule-writer/rule-writer-service.ts',
+        ),
+        ...memberDeclarations(
+          set,
+          'RuleWriterLauncher',
+          'rejudge',
+          'orchestrator/src/rule-writer/rule-writer-service.ts',
+        ),
+      ]),
+    ).toEqual(using(/\.rejudge\(/));
+    // 저장소 접근 모듈의 규범 변경 기록 접근은 마지막 순번 읽기뿐 (위 M7-14 시험, 메서드 이름 단위)
+    expect(
+      repositoryMethodsUsedIn(
+        set,
+        'ipc/project-store-access.ts',
+        'NormChangeRepository',
+        ['append', 'lastSeq', 'list', 'verify'],
+        'norm-change-repository.ts',
+      ),
+    ).toEqual(['lastSeq']);
+  }, 60_000);
+});
+
+// ── 날 SQL (M3-31 #259 수용 기준 2, ADR-142) ─────────────────
+
+/** 무결성을 지키는 규범 표: 확인 상태 · 규칙 · 규범 변경 기록 · 폐기 기록 */
+const NORM_TABLES = ['confirmations', 'rules', 'norm_changes', 'rule_retirements'] as const;
+
+const SQL_SAMPLES: Readonly<Record<string, string>> = {
+  'steps/__sql-violation.ts': `const title = 'x';
+export const statements = [
+  \`
+    INSERT INTO
+      rules (id, title)
+    VALUES (?, ?)\`,
+  'insert into norm_changes (seq) values (1)',
+  'UPDATE "confirmations" SET state = ?',
+  'DELETE FROM main.rule_retirements WHERE rule_id = ?',
+  'INSERT OR REPLACE INTO [rules] (id) VALUES (?)',
+  'REPLACE INTO \`norm_changes\` (seq) VALUES (?)',
+  'INSERT INTO ' + 'rules VALUES (?)',
+  \`UPDATE rules SET title = \${title} WHERE id = ?\`,
+  'update or ignore "main"."confirmations" set state = ?',
+  'INSERT /* 주석 */ INTO rules (id) VALUES (?)',
+  "INSERT INTO 'norm_changes' (seq) VALUES ('x')",
+  'UPDATE confirmations INDEXED BY idx SET state = ?',
+  'DELETE FROM rule_retirements NOT INDEXED WHERE rule_id = ?',
+  \`UPDATE -- 줄 주석
+    rules SET title = ?\`,
+];
+`,
+  'steps/__sql-pass.ts': `export const statements = [
+  'SELECT * FROM rules WHERE id = ?',
+  'select seq from norm_changes',
+  'INSERT INTO judgments (id) VALUES (?)',
+  'UPDATE rules_cache SET x = 1',
+  'DELETE FROM norm_changes_view',
+  'INSERT INTO runs (id) VALUES (?)',
+  '규칙을 update rules 화면에서 고친다',
+  'SELECT * FROM judgments /* UPDATE rules SET x = 1 */',
+  'SELECT id FROM judgments -- DELETE FROM rules WHERE 1',
+  "UPDATE judgments SET note = 'update rules set x' WHERE id = ?",
+  "INSERT INTO judgments (note) VALUES ('INSERT INTO rules (id) VALUES (1)')",
+];
+`,
+};
+
+describe('규범 표에 쓰는 날 SQL은 저장소 패키지 밖에 없다 (M3-31 #259 수용 기준 2, NFR-01 · NFR-02, ADR-142)', () => {
+  it('잡는 함수 자체: 여러 줄 템플릿 · 소문자 · 따옴표(작은따옴표 포함) · 스키마 접두 · 이은 문자열 · SQL 주석 · 색인 지정은 잡고, 읽기 · 다른 표 · 이름이 비슷한 표 · 주석이나 문자열 값 안의 낱말은 잡지 않는다', () => {
+    const set = samples();
+    const found = sqlWrites(set, NORM_TABLES).filter((write) => write.rel.includes('__sql'));
+    expect(found.map((write) => [write.rel, write.text])).toEqual([
+      ['steps/__sql-violation.ts', 'INSERT INTO rules (id, title) VALUES (?, ?)'],
+      ['steps/__sql-violation.ts', 'insert into norm_changes (seq) values (1)'],
+      ['steps/__sql-violation.ts', 'UPDATE "confirmations" SET state = ?'],
+      ['steps/__sql-violation.ts', 'DELETE FROM main.rule_retirements WHERE rule_id = ?'],
+      ['steps/__sql-violation.ts', 'INSERT OR REPLACE INTO [rules] (id) VALUES (?)'],
+      ['steps/__sql-violation.ts', 'REPLACE INTO `norm_changes` (seq) VALUES (?)'],
+      ['steps/__sql-violation.ts', 'INSERT INTO rules VALUES (?)'],
+      ['steps/__sql-violation.ts', 'UPDATE rules SET title = ? WHERE id = ?'],
+      ['steps/__sql-violation.ts', 'update or ignore "main"."confirmations" set state = ?'],
+      ['steps/__sql-violation.ts', 'INSERT /* 주석 */ INTO rules (id) VALUES (?)'],
+      ['steps/__sql-violation.ts', "INSERT INTO 'norm_changes' (seq) VALUES ('x')"],
+      ['steps/__sql-violation.ts', 'UPDATE confirmations INDEXED BY idx SET state = ?'],
+      ['steps/__sql-violation.ts', 'DELETE FROM rule_retirements NOT INDEXED WHERE rule_id = ?'],
+      ['steps/__sql-violation.ts', 'UPDATE -- 줄 주석 rules SET title = ?'],
+    ]);
+    // 위 M7-09 시험의 글자 대조(`\brule_retirements\b` 파일 목록)는 주석과 쓰기를 가르지 못하고 다른 표를 보지 않는다
+    expect(/\bINSERT INTO rules\b/.test(SQL_SAMPLES['steps/__sql-violation.ts'] ?? '')).toBe(false);
+  }, 60_000);
+
+  it('제품 소스: 오케스트레이터와 저장소 밖 패키지(app · shared · parser)의 src 전체에 규범 표에 쓰는 SQL 문장이 없고, 오케스트레이터는 저장소의 DB 손잡이 · SQLite 모듈을 쓰지 않는다', () => {
+    const set = productSource();
+    expect(sqlWrites(set, NORM_TABLES)).toEqual([]);
+    const others = ['app', 'shared', 'parser'].flatMap((name) => {
+      const dir = path.resolve(SRC_DIR, `../../${name}/src`);
+      return fs
+        .readdirSync(dir, { recursive: true, encoding: 'utf8' })
+        .filter((rel) => /\.tsx?$/.test(rel) && !rel.endsWith('.d.ts'))
+        .map((rel) => path.join(dir, rel));
+    });
+    expect(others.length).toBeGreaterThan(20);
+    expect(sqlWritesInFiles(others, NORM_TABLES)).toEqual([]);
+    // DB 손잡이(`store.db`)와 SQLite 모듈을 쓰는 곳이 없다: 저장소의 저장소 클래스를 거치지 않는 SQL을 낼 길이 없다
+    expect(storeMemberUsers(set, 'db')).toEqual([]);
+    expect(
+      set.files.filter((rel) =>
+        moduleRefs(set, rel).some((ref) =>
+          ['better-sqlite3', 'node:sqlite', 'sqlite'].includes(ref.target ?? ''),
+        ),
+      ),
+    ).toEqual([]);
+  }, 60_000);
+});
+
+// ── 실행 종료 상태 리터럴 (M3-31 #259 수용 기준 3, ADR-091 · ADR-094 · ADR-105, ADR-142) ─────
+
+/** 실패 쪽 종료 상태 (`runEnding` 한 곳에서 정한다) */
+const HALT_STATUSES = ['failed', 'budget_exceeded'] as const;
+
+const TERMINAL_SAMPLES: Readonly<Record<string, string>> = {
+  'steps/__terminal-violation.ts': `import type { Run } from '@bive/shared';
+import type { ProjectStore } from '@bive/store';
+import type { HaltStatus } from '../engine/types.js';
+export const end = (store: ProjectStore, run: Run, cond: boolean, halt: { runStatus: HaltStatus }): void => {
+  store.runs.transition(run.id, { run: { status: cond ? 'failed' : 'merged' } });
+  const next = 'budget_exceeded' as const;
+  store.runs.transition(run.id, { run: { status: next } });
+  const status = 'failed' as const;
+  store.runs.transition(run.id, { run: { status } });
+  const terminal = { status: 'failed' as const, failureReason: 'x' };
+  store.runs.transition(run.id, { run: { ...run, ...terminal } });
+  store.runs.transition(run.id, { run: { ...(cond ? { status: 'budget_exceeded' as const } : {}) } });
+  store.runs.transition(run.id, { run: { status: halt.runStatus } });
+  const patch = { status: 'failed' as const };
+  store.runs.transition(run.id, { run: patch });
+  store.runs.transition(run.id, { ['run']: { status: 'failed' } });
+  store.runs.transition(run.id, { 'run': { status: 'budget_exceeded' } });
+};
+`,
+  // 다른 폴더의 같은 이름 파일 (경로 끝 일치로 고르면 허용 함수로 잘못 본다)
+  'norms/engine/run-ending.ts': `import type { Run } from '@bive/shared';
+export const runEnding = (run: Pick<Run, 'mergeCommit'>) => ({ merged: false, run: { status: 'failed' as const, failureReason: String(run.mergeCommit) } });
+`,
+  'steps/__terminal-fake-ending.ts': `import type { Run } from '@bive/shared';
+import type { ProjectStore } from '@bive/store';
+import { runEnding as end } from '../norms/engine/run-ending.js';
+export const finish = (store: ProjectStore, run: Run): void => {
+  store.runs.transition(run.id, { run: end(run).run });
+};
+`,
+  // 다른 파일의 이름만 같은 함수
+  'steps/__terminal-namesake.ts': `import type { Run } from '@bive/shared';
+import type { ProjectStore } from '@bive/store';
+const make = () => ({ status: 'failed' as const });
+const runEnding = () => ({ merged: false, patch: make() });
+const blockedEnding = () => ({ patch: { status: 'budget_exceeded' as const } });
+export const finish = (store: ProjectStore, run: Run): void => {
+  store.runs.transition(run.id, { run: runEnding().patch });
+  store.runs.transition(run.id, { run: { ...blockedEnding().patch } });
+};
+`,
+  // 단계 · 엔진 · 실행 밖 폴더 (대상은 src 전체)
+  'ipc/__terminal-outside.ts': `import type { Run } from '@bive/shared';
+import type { ProjectStore } from '@bive/store';
+export const finish = (store: ProjectStore, run: Run): void => {
+  store.runs.transition(run.id, { run: { status: 'failed' } });
+};
+`,
+  'steps/__terminal-pass.ts': `import type { Run } from '@bive/shared';
+import type { ProjectStore } from '@bive/store';
+import { runEnding } from '../engine/run-ending.js';
+const blocked = (run: Run) => runEnding(run, 'budget_exceeded', 'x');
+export const end = (store: ProjectStore, run: Run, last: boolean, at: string): void => {
+  const ending = runEnding(run, 'failed', 'x');
+  store.runs.transition(run.id, { run: { ...ending.run, endedAt: at } });
+  store.runs.transition(run.id, { run: { ...blocked(run).run, endedAt: at } });
+  store.runs.transition(run.id, { run: { status: 'interrupted' } });
+  store.runs.transition(run.id, { run: { ...(last ? { status: 'merged', endedAt: at } : {}) } });
+  store.runs.transition(run.id, { run: { ...run }, steps: [{ id: 'x', status: 'failed' }] });
+};
+`,
+};
+
+describe('실행의 실패 쪽 종료 상태는 runEnding 한 곳에서 정한다: 오케스트레이터 src 전체의 실행 패치 (M3-31 #259 수용 기준 3, ADR-105 · ADR-142)', () => {
+  // 대상: 오케스트레이터 src 전체에서 종료 상태를 정하는 모듈 하나만 뺀다 (engine.test.ts의 같은 성질 시험은 두 파일만 본다)
+  const terminalTargets = (set: SourceSet) =>
+    set.files.filter((rel) => rel !== 'engine/run-ending.ts');
+  const writes = (set: SourceSet) =>
+    terminalStatusWrites(
+      set,
+      terminalTargets(set),
+      HALT_STATUSES,
+      topLevelDeclaration(set, 'runEnding', 'orchestrator/src/engine/run-ending.ts'),
+      RunStatus.options,
+    );
+
+  it('잡는 함수 자체: 삼항 · 변수 · 단축 속성 · 스프레드(변수 · 삼항) · 좁은 상태 타입 · 패치 변수는 잡고, runEnding(을 그대로 돌려주는 함수)의 결과 · 다른 상태 · 단계 시도의 상태 · 저장된 실행 옮기기는 잡지 않는다', () => {
+    const set = samples();
+    const found = writes(set).filter((write) => write.rel.includes('__terminal-violation'));
+    expect(found.map((write) => [write.rel, write.line, write.status, write.via])).toEqual([
+      ['steps/__terminal-violation.ts', 5, 'failed', 'run>삼항'],
+      ['steps/__terminal-violation.ts', 7, 'budget_exceeded', 'run>변수'],
+      ['steps/__terminal-violation.ts', 9, 'failed', 'run>단축>변수'],
+      ['steps/__terminal-violation.ts', 11, 'failed', 'run>스프레드>변수'],
+      ['steps/__terminal-violation.ts', 12, 'budget_exceeded', 'run>스프레드>삼항'],
+      ['steps/__terminal-violation.ts', 13, 'failed', 'run>타입'],
+      ['steps/__terminal-violation.ts', 13, 'budget_exceeded', 'run>타입'],
+      ['steps/__terminal-violation.ts', 15, 'failed', 'run>변수'],
+      ['steps/__terminal-violation.ts', 16, 'failed', 'run'],
+      ['steps/__terminal-violation.ts', 17, 'budget_exceeded', 'run'],
+    ]);
+    // 다른 폴더의 같은 이름 파일 · 이름만 같은 함수 · 대상 폴더 밖 (허용 함수는 선언 기준: 경로 · 이름이 같아도 그 선언이 아니면 잡는다)
+    expect(
+      writes(set)
+        .filter((write) => /__terminal-(fake|namesake|outside)|norms\/engine\//.test(write.rel))
+        .map((write) => [write.rel, write.line, write.status]),
+    ).toEqual([
+      ['ipc/__terminal-outside.ts', 4, 'failed'],
+      ['norms/engine/run-ending.ts', 2, 'failed'],
+      ['steps/__terminal-fake-ending.ts', 5, 'failed'],
+      ['steps/__terminal-namesake.ts', 7, 'failed'],
+      ['steps/__terminal-namesake.ts', 8, 'budget_exceeded'],
+    ]);
+    // 기존 시험(engine.test.ts)의 글자 대조는 이 표본을 모두 놓친다
+    expect(
+      (TERMINAL_SAMPLES['steps/__terminal-violation.ts'] ?? '').match(
+        /run:\s*\{[^{}]*status:\s*'(failed|budget_exceeded)'/g,
+      ) ?? [],
+    ).toEqual([]);
+  }, 60_000);
+
+  it('제품 소스: 오케스트레이터 src 전체(runEnding 모듈 밖, 엔진 · 실행 · 단계 실행기 포함)의 실행 패치에 실패 쪽 종료 상태를 직접 쓰는 자리가 없다', () => {
+    const set = productSource();
+    const targets = terminalTargets(set);
+    // 대상에 단계 실행기 폴더가 들었다 (수용 기준 3)
+    expect(targets.filter((rel) => rel.startsWith('steps/')).length).toBeGreaterThan(5);
+    expect(targets).toContain('engine/pipeline-engine.ts');
+    expect(targets).toContain('runs/run-service.ts');
+    expect(targets.filter((rel) => rel.startsWith('ipc/')).length).toBeGreaterThan(5);
+    expect(writes(set)).toEqual([]);
   }, 60_000);
 });
 
