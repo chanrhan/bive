@@ -228,6 +228,110 @@ export const restartAfterContradiction = (
     return { status: 'started', runs };
   });
 
+/** 변이 보강 항목의 사유 (기록을 읽는 사람을 위한 고정 글). */
+export const MUTATION_REINFORCEMENT_REASON = '변이 생존 규칙의 테스트 보강 실행 자동 시작';
+
+/** 보강 실행이 아직 끝나지 않은 상태 (같은 규칙에 또 만들지 않는다). */
+const OPEN_RUN_STATUSES: readonly string[] = [
+  'waiting_approval',
+  'queued',
+  'running',
+  'interrupted',
+];
+
+export type MutationReinforcementOutcome =
+  /** 생존 규칙마다 보강 실행을 만들었다 (변이 기록 순) */
+  | { readonly status: 'started'; readonly runs: readonly AutoStartedRun[] }
+  /** 하루 한도 · 설정 문에 걸려 만들지 않았다 (기록 없음, 로그만) */
+  | { readonly status: 'skipped'; readonly reason: AutoStartSkipReason }
+  /** 만들 것이 없다: 생존 기록 없음 · 이미 만듦(끝난 것 포함) · 같은 규칙의 보강 실행이 진행 · 대기 중 · 효력 없는 규칙 */
+  | { readonly status: 'none' }
+  /** 병합으로 끝난 유형 A 실행이 아니다 (보강 실행의 재주입 결과는 원인이 아니다) */
+  | { readonly status: 'not_applicable' };
+
+/**
+ * 병합으로 끝난 유형 A 실행 `runId`의 '변이 생존' 기록마다(그 규칙의 최신 변이 기록일 때) 유형 C 테스트 보강 실행 1개를 사람 확인 없이
+ * 만든다 (쓰기 트랜잭션 1개, ADR-100 B④ · ADR-141 ② · ③ · ⑦ · ADR-143). 문은 기존 자동 시작과 같다: 하루 한도 · 설정(`autoStartBlock`),
+ * 효력 있는 규칙만, 저장 모양은 `saveNewRun`(유형 C · 승인 단계 진행 중)이고 생성 뒤 엔진의 `onRunCreated`가 효력 확인 · 실행 1개
+ * (대기)를 맡으며, 엔진의 시작 근거 대조가 원인을 다시 본다. 원인은 변이 보강 연결(실행 ↔ 변이 기록, 실행마다 · 기록마다 하나)이다.
+ * 만들지 않는 경우: 유형 A가 아님(보강 실행의 재주입은 원인이 아니다) · 이미 그 기록으로 만든 적이 있음(실패로 끝났어도) · 같은 규칙에 끝나지
+ * 않은 보강 실행이 있음 · 그 뒤 다른 실행이 같은 규칙의 변이 기록을 남김.
+ */
+export const reinforceSurvivedMutants = (
+  store: ProjectStore,
+  input: { readonly runId: Ulid },
+  clock: AutoStartClock,
+): MutationReinforcementOutcome =>
+  store.transaction(() => {
+    const ended = store.runs.get(input.runId);
+    if (ended === null || ended.status !== 'merged' || ended.type !== 'A') {
+      return { status: 'not_applicable' };
+    }
+    const retired = retiredRuleSet(store);
+    const openReinforcedRules = new Set(
+      store.runs
+        .list()
+        .filter(
+          (run) =>
+            OPEN_RUN_STATUSES.includes(run.status) &&
+            store.mutations.reinforcementOfRun(run.id) !== null,
+        )
+        .flatMap((run) => run.targetRuleIds),
+    );
+    const causes = store.mutations.listByRun(ended.id).filter((result) => {
+      if (result.status !== 'survived') return false;
+      if (store.mutations.latestByRule(result.ruleId)?.id !== result.id) return false;
+      if (store.mutations.reinforcementOfResult(result.id) !== null) return false;
+      if (openReinforcedRules.has(result.ruleId)) return false;
+      const rule = store.rules.get(result.ruleId);
+      return rule !== null && isEffectiveRule(rule, retired);
+    });
+    if (causes.length === 0) return { status: 'none' };
+    const now = clock.now();
+    const settings = store.settings.get();
+    const block = autoStartBlock(store, settings, now);
+    if (block !== null) return { status: 'skipped', reason: block.reason };
+    const at = new Date(now).toISOString();
+    const runs = causes.map((cause): AutoStartedRun => {
+      const runId = clock.newId();
+      const seq = store.mutations.nextReinforcementSeq();
+      const detail = saveNewRun(
+        store,
+        settings,
+        {
+          runId,
+          ruleIds: [cause.ruleId],
+          type: 'C',
+          startedBy: {
+            kind: 'orchestrator',
+            causeSeqs: [seq],
+            causeLog: 'mutation_reinforcements',
+          },
+        },
+        at,
+        clock.newId,
+      );
+      store.mutations.linkReinforcement({
+        seq,
+        runId,
+        mutationResultId: cause.id,
+        createdAt: at,
+      });
+      const normChange = store.normChanges.append({
+        at,
+        kind: 'auto_start',
+        actor: { kind: 'orchestrator' },
+        targetRef: { entity: 'Run', id: runId },
+        sessionId: null,
+        runId,
+        reason: MUTATION_REINFORCEMENT_REASON,
+        detail: { mutationResultIds: [cause.id], ruleIds: [cause.ruleId] },
+      });
+      return { detail, normChange };
+    });
+    return { status: 'started', runs };
+  });
+
 /** 실행 생성 뒤 엔진이 할 일 (`PipelineEngine.onRunCreated`: 승인 단계 판정 → 실행 · 실행 대기). */
 export interface AutoStartEngine {
   onRunCreated(projectId: string, runId: string): void;
@@ -254,6 +358,8 @@ export class AutoStarter {
   readonly #log: (line: string) => void;
   /** 이 프로세스에서 다시 시작을 본 실행 (저장소의 멱등이 한 번 더 막는다) */
   readonly #restarted = new Set<string>();
+  /** 이 프로세스에서 변이 보강을 본 실행 (저장소의 연결 유일 제약이 한 번 더 막는다) */
+  readonly #reinforced = new Set<string>();
   readonly #pending = new Set<Promise<void>>();
 
   constructor({ biveHome, engine, now = Date.now, log }: AutoStarterOptions) {
@@ -302,6 +408,17 @@ export class AutoStarter {
   observe(event: EngineEvent): void {
     if (event.type !== 'run.saved') return;
     const { run } = event.detail;
+    // 병합으로 끝난 유형 A 실행: 변이 생존 규칙의 테스트 보강 (M3-54 #311, ADR-143). 다음 차례에 하고 기다리지 않는다
+    if (run.status === 'merged' && run.type === 'A') {
+      if (this.#reinforced.has(run.id)) return;
+      this.#reinforced.add(run.id);
+      const task = Promise.resolve().then(() => {
+        this.afterMerge(event.projectId, run.id);
+      });
+      this.#pending.add(task);
+      void task.finally(() => this.#pending.delete(task));
+      return;
+    }
     if (run.status !== 'failed' || !RESTART_FAILURE_REASONS.includes(String(run.failureReason))) {
       return;
     }
@@ -337,7 +454,28 @@ export class AutoStarter {
     return outcome;
   }
 
-  #announce(projectId: string, outcome: AutoStartOutcome | ContradictionRestartOutcome): void {
+  /** 병합으로 끝난 유형 A 실행의 변이 생존 규칙마다 보강 실행을 만든다. 예외는 로그만 남기고 `null`. */
+  afterMerge(projectId: string, runId: Ulid): MutationReinforcementOutcome | null {
+    let outcome: MutationReinforcementOutcome;
+    try {
+      outcome = withRegisteredProjectStore(this.#biveHome, projectId, (store) =>
+        reinforceSurvivedMutants(store, { runId }, this.#clock),
+      );
+    } catch (error) {
+      this.#log(`변이 보강 실행 자동 시작 실패 (실행 ${runId}): ${errorMessage(error)}`);
+      return null;
+    }
+    if (outcome.status === 'skipped') {
+      this.#log(`변이 보강 실행 자동 시작 생략 (실행 ${runId}, ${outcome.reason})`);
+    }
+    this.#announce(projectId, outcome);
+    return outcome;
+  }
+
+  #announce(
+    projectId: string,
+    outcome: AutoStartOutcome | ContradictionRestartOutcome | MutationReinforcementOutcome,
+  ): void {
     switch (outcome.status) {
       case 'started':
         // 만든 순서대로 알린다: 엔진의 생성 뒤 처리는 부른 순서로 판정하므로 첫 실행이 자리를 잡고 나머지는 실행 대기다

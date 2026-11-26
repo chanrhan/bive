@@ -6,380 +6,40 @@
 // 앞 단계(테스트 작성 · Red 확인 · 구현 · 검사)는 시험용 실행기다: 기준 커밋에 미리 둔 인수 테스트를 그대로 쓰고 Red 확인은 그 해시만
 // 남긴다. 변이 주입 실행기는 아직 기본 실행기 목록에 없다(③은 뒤 작업, ADR-139): 여기서 주입한다.
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-
-import {
-  type BlockDeclaration,
-  type Risk,
-  type Rule,
-  RUN_REQUIRED_ROLES,
-  type SettingsPatch,
-  type TestCaseStatus,
-} from '@bive/shared';
-import { registerProject } from '@bive/store';
+import { type Risk, type Rule, RUN_REQUIRED_ROLES, type SettingsPatch } from '@bive/shared';
 import { afterEach, describe, expect, it } from 'vitest';
-import { stringify } from 'yaml';
-
-import type { AgentAdapter, SessionSpec } from '../src/agent/adapter.js';
-import { loadScenario } from '../src/agent/scenario.js';
-import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
-import { PipelineEngine } from '../src/engine/pipeline-engine.js';
-import type { StepExecutor } from '../src/engine/types.js';
 import type { GitRunner } from '../src/git/git-exec.js';
 import { createGitRunner } from '../src/git/git-exec.js';
-import { hashAcceptanceFiles, JudgeCheckoutError } from '../src/judge/checkout.js';
+import { JudgeCheckoutError } from '../src/judge/checkout.js';
 import { mutantPathProblem } from '../src/mutation/mutant.js';
 import { MUTATOR_SYSTEM_PROMPT } from '../src/mutation/prompts.js';
-import { createRun } from '../src/runs/run-service.js';
 import { validateSettingsForRun } from '../src/settings/settings-service.js';
-import {
-  compareMutationOrder,
-  createMutationExecutor,
-  type MutationStepOptions,
-  selectMutationTargets,
-} from '../src/steps/mutation.js';
+import { compareMutationOrder, selectMutationTargets } from '../src/steps/mutation.js';
 import { roleToolNames } from '../src/tools/definitions.js';
+import { COMPLETE_SETTINGS, human, newId, userGit, withProject } from './helpers/engine-harness.js';
+import { reinforceSurvivedMutants } from '../src/runs/auto-start.js';
+import { createRun } from '../src/runs/run-service.js';
+import type { JudgeCall, JudgeDecision } from './helpers/pipeline-harness.js';
 import {
-  COMPLETE_SETTINGS,
-  copyFixture,
-  human,
-  mergeStep,
-  newId,
-  scripted,
-  T0,
-  userGit,
-  withProject,
-} from './helpers/engine-harness.js';
-import {
-  fakeInstall,
-  injectedJudge,
-  type JudgeCall,
-  type JudgeDecision,
-} from './helpers/pipeline-harness.js';
-import { cleanup, makeBiveHome } from './helpers/process.js';
+  AUTH,
+  DECLARATION,
+  HEALTH,
+  LIB,
+  allPass,
+  cleanupMutationHarness,
+  mainTip,
+  mutationsOf,
+  runToEnd,
+  setup,
+  statusOf,
+  stepExit,
+  toolCallsOf,
+  runsOf,
+  settleAll,
+} from './helpers/mutation-harness.js';
 
-const temps: string[] = [];
-const engines: PipelineEngine[] = [];
-
-afterEach(async () => {
-  for (const engine of engines.splice(0)) await engine.stop();
-  await cleanup();
-  for (const dir of temps.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
-}, 60_000);
-
-const HEALTH = 'src/app/api/health/route.ts';
-const AUTH = 'src/app/api/auth/session/route.ts';
-const LIB = 'src/lib/db.ts';
-
-/** 픽스처 블록 선언 예제와 같은 블록 (auth high · health medium · lib low). */
-const DECLARATION: BlockDeclaration = {
-  blocks: [
-    {
-      name: 'auth',
-      kind: 'domain',
-      include: ['src/app/api/auth/**'],
-      public: [],
-      dependsOn: ['lib'],
-      risk: 'high',
-    },
-    {
-      name: 'health',
-      kind: 'domain',
-      include: ['src/app/api/health/**'],
-      public: [],
-      dependsOn: ['lib'],
-      risk: 'medium',
-    },
-    {
-      name: 'lib',
-      kind: 'shared',
-      include: ['src/lib/**'],
-      public: ['src/lib/db.ts'],
-      dependsOn: [],
-      risk: 'low',
-    },
-  ],
-};
-
-interface RuleSeed {
-  readonly blocks: readonly string[];
-  readonly risk: Risk | null;
-  /** 기준 커밋에 인수 테스트 파일을 둔다 (기본 참) */
-  readonly acceptance?: boolean;
-}
-
-const RESULT = (cost: number) => ({
-  subtype: 'success' as const,
-  total_cost_usd: cost,
-  num_turns: 2,
-  modelUsage: {
-    'test-model': {
-      inputTokens: 100,
-      outputTokens: 50,
-      cacheReadInputTokens: 0,
-      cacheCreationInputTokens: 0,
-      costUSD: cost,
-    },
-  },
-});
-
-type Turn = { tool: string; args: Record<string, unknown> } | { message: string };
-
-/** 규칙마다(`when.ruleId`) 변이 주입 세션 대본. 대본이 없는 규칙은 변이를 내지 않는 세션이다. */
-const writeScenario = (
-  sessions: Record<string, Turn[]>,
-  cost = 0.01,
-  extra: {
-    readonly subtypes?: Record<string, 'error_during_execution'>;
-    readonly noMutator?: boolean;
-  } = {},
-): string => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bive-mutation-'));
-  temps.push(dir);
-  const scenario = structuredClone(loadScenario('happy-path'));
-  scenario.name = 'mutation-test';
-  // 변이 주입 대본이 없는 시나리오 (가짜 어댑터의 기본 세션: 변이 없이 정상 종료, M3-54)
-  scenario.roles =
-    extra.noMutator === true
-      ? {}
-      : {
-          mutator: {
-            sessions: [
-              ...Object.entries(sessions).map(([ruleId, turns]) => ({
-                when: { ruleId },
-                turns,
-                result: {
-                  ...RESULT(cost),
-                  subtype: (extra.subtypes?.[ruleId] ?? 'success') as
-                    'success' | 'error_during_execution',
-                },
-              })),
-              { turns: [{ message: '낼 변이가 없다.' }], result: RESULT(cost) },
-            ],
-          },
-        };
-  fs.writeFileSync(path.join(dir, 'mutation-test.yaml'), stringify(scenario));
-  return dir;
-};
-
-/** 시험용 Red 확인: 워크트리(= 기준 커밋)의 인수 테스트 해시만 남긴다. */
-const redFromWorktree: StepExecutor = (context) =>
-  Promise.resolve({
-    status: 'passed',
-    exitDetail: { acceptanceHashes: hashAcceptanceFiles(context.git.worktreePath) },
-  });
-
-interface Harness {
-  biveHome: string;
-  repo: string;
-  projectId: string;
-  runId: string;
-  rules: Rule[];
-  engine: PipelineEngine;
-  judgeCalls: JudgeCall[];
-  sessions: SessionSpec[];
-  /** 세션이 열릴 때 본 세션 폴더의 파일 (세션 폴더 기준 경로, 정렬) */
-  sessionFiles: string[][];
-  /** 세션이 열릴 때 본 세션 폴더의 파일 내용 */
-  sessionTexts: Record<string, string>[];
-}
-
-interface SetupOptions {
-  readonly rules: readonly RuleSeed[];
-  readonly sessions: Record<string, Turn[]>;
-  readonly decide?: (call: JudgeCall) => JudgeDecision;
-  readonly settings?: SettingsPatch;
-  readonly cost?: number;
-  readonly judging?: Partial<MutationStepOptions>;
-  /** 블록 선언 (기본 `DECLARATION`) */
-  readonly declaration?: BlockDeclaration;
-  /** 기준 커밋에 더 둘 파일 (경로 → 내용) */
-  readonly extraFiles?: Record<string, string>;
-  readonly subtypes?: Record<string, 'error_during_execution'>;
-  readonly noMutator?: boolean;
-}
-
-const listTree = (root: string): string[] => {
-  const out: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else out.push(path.relative(root, full).split(path.sep).join('/'));
-    }
-  };
-  walk(root);
-  return out.sort();
-};
-
-const setup = (options: SetupOptions): Harness => {
-  const biveHome = makeBiveHome();
-  const repo = copyFixture(temps);
-  options.rules.forEach((seed, index) => {
-    if (seed.acceptance === false) return;
-    const id = `RULE-${String(index + 1).padStart(3, '0')}`;
-    const file = path.join(repo, 'bive-acceptance', id, 'mutation.acc.ts');
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `import { it } from 'vitest';\nit('${id} 동작', () => undefined);\n`);
-  });
-  for (const [rel, text] of Object.entries(options.extraFiles ?? {})) {
-    fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
-    fs.writeFileSync(path.join(repo, rel), text);
-  }
-  userGit(repo, 'add', '--all');
-  userGit(repo, 'commit', '-q', '-m', 'fixture: 인수 테스트');
-  const project = registerProject(
-    {
-      id: newId(),
-      name: '샘플 앱',
-      rootPath: repo,
-      baseBranch: 'main',
-      createdAt: new Date(T0).toISOString(),
-    },
-    { home: biveHome },
-  );
-  const at = new Date(T0).toISOString();
-  const rules = withProject(biveHome, project.id, (store) => {
-    store.settings.update(options.settings ?? COMPLETE_SETTINGS, { by: human, at });
-    store.blockDeclarations.set(options.declaration ?? DECLARATION, { at, by: human });
-    const requirement = store.requirements.create({
-      id: newId(),
-      text: '변이 시험 요구사항',
-      author: human,
-      normState: 'approved',
-      createdAt: at,
-    });
-    return options.rules.map((seed, index) =>
-      store.rules.create({
-        id: newId(),
-        title: `규칙 ${String(index + 1)}`,
-        statement: `WHEN 클라이언트가 요청 ${String(index + 1)}을 보내면 THE SYSTEM SHALL 정해진 응답을 돌려준다`,
-        kind: 'business',
-        checkKinds: ['test'],
-        parentRequirementId: requirement.id,
-        builtin: false,
-        targetBlockIds: [...seed.blocks],
-        risk: seed.risk,
-        contractId: null,
-        author: { kind: 'agent', role: 'rule-writer' },
-        normState: 'approved',
-        createdAt: at,
-      }),
-    );
-  });
-  const scripted = new ScriptedAdapter({
-    scenario: loadScenario(
-      'mutation-test',
-      writeScenario(options.sessions, options.cost, {
-        ...(options.subtypes === undefined ? {} : { subtypes: options.subtypes }),
-        ...(options.noMutator === undefined ? {} : { noMutator: options.noMutator }),
-      }),
-    ),
-    biveHome,
-    pollIntervalMs: 20,
-  });
-  const sessions: SessionSpec[] = [];
-  const sessionFiles: string[][] = [];
-  const sessionTexts: Record<string, string>[] = [];
-  const adapter: AgentAdapter = {
-    kind: scripted.kind,
-    startSession: (spec) => {
-      sessions.push(spec);
-      const listed = listTree(spec.workDir);
-      sessionFiles.push(listed);
-      sessionTexts.push(
-        Object.fromEntries(
-          listed.map((rel) => [rel, fs.readFileSync(path.join(spec.workDir, rel), 'utf8')]),
-        ),
-      );
-      return scripted.startSession(spec);
-    },
-  };
-  const judgeCalls: JudgeCall[] = [];
-  const engine = new PipelineEngine({
-    biveHome,
-    agent: adapter,
-    executors: {
-      test_writing: scripted_(),
-      red_check: redFromWorktree,
-      implementation: implementOutsideBlocks,
-      check: scripted_(),
-      mutation: createMutationExecutor({
-        judge: injectedJudge(judgeCalls, options.decide ?? killedWhenMutated),
-        installDependencies: fakeInstall,
-        ...options.judging,
-      }),
-      merge: mergeStep,
-    },
-  });
-  engines.push(engine);
-  const runId = withProject(biveHome, project.id, (store) =>
-    createRun(
-      store,
-      { ruleIds: rules.map((rule) => rule.id), author: human },
-      { clientId: null },
-      { now: Date.now, newId },
-    ),
-  ).run.id;
-  return {
-    biveHome,
-    repo,
-    projectId: project.id,
-    runId,
-    rules,
-    engine,
-    judgeCalls,
-    sessions,
-    sessionFiles,
-    sessionTexts,
-  };
-};
-
-const scripted_ = (): StepExecutor => scripted(['passed']);
-
-/** 시험용 구현: 블록 밖 파일 하나를 더한다 (병합할 커밋이 생기게, 변이 대상 · 세션 사본과 무관). */
-const implementOutsideBlocks: StepExecutor = (context) => {
-  fs.mkdirSync(path.join(context.git.worktreePath, 'notes'), { recursive: true });
-  fs.writeFileSync(path.join(context.git.worktreePath, 'notes', 'impl.md'), '구현\n');
-  return Promise.resolve({ status: 'passed' });
-};
-
-/** 기본 판정: 체크아웃의 파일이 바뀌었으면(변이가 적용됨) 판정한 규칙의 케이스 하나가 실패, 아니면 모두 통과. */
-const killedWhenMutated = (call: JudgeCall): JudgeDecision =>
-  Object.fromEntries(
-    (call.input.ruleIds ?? []).map((id) => [
-      id,
-      call.status.includes('M src/')
-        ? (['failed', 'passed'] as const)
-        : (['passed', 'passed'] as const),
-    ]),
-  );
-
-const allPass = (call: JudgeCall): JudgeDecision =>
-  Object.fromEntries(
-    (call.input.ruleIds ?? []).map((id) => [id, ['passed', 'passed'] as readonly TestCaseStatus[]]),
-  );
-
-const runToEnd = async (h: Harness) => {
-  if (!h.engine.evaluateApproval(h.projectId, h.runId)) throw new Error('승인 단계 미충족');
-  await h.engine.settled();
-  return withProject(h.biveHome, h.projectId, (store) => {
-    const detail = store.runs.getDetail(h.runId);
-    if (detail === null) throw new Error('실행 없음');
-    return detail;
-  });
-};
-
-const mutationsOf = (h: Harness) =>
-  withProject(h.biveHome, h.projectId, (store) => store.mutations.listByRun(h.runId));
-const statusOf = (h: Harness, rule: Rule) =>
-  withProject(h.biveHome, h.projectId, (store) => store.mutations.statusOf(rule.id));
-const toolCallsOf = (h: Harness) =>
-  withProject(h.biveHome, h.projectId, (store) => store.sessions.toolCalls(h.runId));
-const mainTip = (h: Harness) => userGit(h.repo, 'rev-parse', 'refs/heads/main');
-const stepExit = (detail: Awaited<ReturnType<typeof runToEnd>>) =>
-  detail.steps.find((step) => step.kind === 'mutation')?.exitDetail as Record<string, unknown>;
+afterEach(cleanupMutationHarness, 60_000);
 
 const VALID_MUTANT = { path: HEALTH, search: 'ok: true', replace: 'ok: false' };
 
@@ -889,4 +549,235 @@ describe('단계 켜기 · 세션 처리 · 세션 폴더 (M3-54 #311 수용 기
       '프로젝트의 문서 (BIVE 규칙 글이 아님)\n',
     );
   }, 60_000);
+});
+
+/** 자동 시작이 가능한 설정 (하루 한도 채움). */
+const AUTO_SETTINGS = { ...COMPLETE_SETTINGS, dailyBudgetUsd: 10 };
+
+/** 재주입에서 보강 테스트(`reinforce-*.acc.ts`)가 있으면 변이를 잡는다(케이스 하나 실패), 첫 주입은 늘 생존. */
+const killedByReinforcement = (call: JudgeCall): JudgeDecision =>
+  Object.fromEntries(
+    (call.input.ruleIds ?? []).map((id) => [
+      id,
+      call.acceptance.some((file) => file.includes('/reinforce-'))
+        ? (['failed', 'passed'] as const)
+        : (['passed', 'passed'] as const),
+    ]),
+  );
+
+describe('변이 생존의 자동 테스트 보강 · 재주입 (M3-54 #311 수용 기준 1 · 3, ADR-100 B④ · ADR-141 · ADR-143)', () => {
+  it('유형 A에서 변이가 살아남으면 사람 확인 없이 그 규칙의 유형 C 보강 실행이 생기고, 새 변이 세션 없이 같은 변이를 재주입해 검출되면 변이 검증됨 · 병합', async () => {
+    const h = setup({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: { 'RULE-001': [{ tool: 'propose_mutant', args: VALID_MUTANT }] },
+      decide: killedByReinforcement,
+      settings: AUTO_SETTINGS,
+    });
+    const base = mainTip(h);
+    const first = await runToEnd(h);
+    expect(first.run).toMatchObject({ type: 'A', status: 'merged' });
+    await settleAll(h);
+    const runs = runsOf(h);
+    expect(
+      runs.map((detail) => [detail.run.displayId, detail.run.type, detail.run.status]),
+    ).toEqual([
+      ['EXE-001', 'A', 'merged'],
+      ['EXE-002', 'C', 'merged'],
+    ]);
+    const reinforcing = runs[1]!;
+    const firstResult = withProject(h.biveHome, h.projectId, (store) =>
+      store.mutations.listByRun(h.runId),
+    )[0]!;
+    expect(firstResult).toMatchObject({ status: 'survived', mutant: VALID_MUTANT });
+    // 시작 근거: 오케스트레이터 주체, 원인 = 변이 보강 연결, 자동 시작 항목의 원인 = 그 생존 기록
+    const link = withProject(h.biveHome, h.projectId, (store) =>
+      store.mutations.reinforcementOfRun(reinforcing.run.id),
+    );
+    expect(link?.mutationResultId).toBe(firstResult.id);
+    expect(reinforcing.run.startedBy).toEqual({
+      kind: 'orchestrator',
+      causeSeqs: [link?.seq],
+      causeLog: 'mutation_reinforcements',
+    });
+    expect(reinforcing.run.targetRuleIds).toEqual([h.rules[0]?.id]);
+    const autoStarts = withProject(h.biveHome, h.projectId, (store) =>
+      store.normChanges.list().filter((entry) => entry.kind === 'auto_start'),
+    );
+    expect(autoStarts.map((entry) => [entry.targetRef.id, entry.detail])).toEqual([
+      [reinforcing.run.id, { mutationResultIds: [firstResult.id], ruleIds: [h.rules[0]?.id] }],
+    ]);
+    // 보강 실행: 구현 생략, Green 확인, 검사, 변이 주입 = 재주입(생략 아님), 병합
+    expect(
+      reinforcing.steps.map((step) => `${step.kind}#${String(step.attempt)}:${step.status}`),
+    ).toEqual([
+      'approval#1:passed',
+      'test_writing#1:passed',
+      'green_check#1:passed',
+      'implementation#1:skipped',
+      'check#1:passed',
+      'mutation#1:passed',
+      'merge#1:passed',
+      'screen_update#1:passed',
+    ]);
+    // 새 변이 세션은 첫 실행의 하나뿐이고, 재주입 판정은 같은 변이를 보강 커밋의 격리 체크아웃에 적용했다
+    expect(h.sessions.map((spec) => spec.role)).toEqual(['mutator']);
+    expect(h.judgeCalls).toHaveLength(2);
+    const reinjection = h.judgeCalls[1]!;
+    expect(reinjection.input.runId).toBe(reinforcing.run.id);
+    expect(reinjection.head).toBe(reinforcing.run.headCommit);
+    expect(reinjection.status.split('\n').filter((line) => !line.startsWith('!!'))).toEqual([
+      `M ${HEALTH}`,
+    ]);
+    // 변이 기록: 첫 주입 생존 → 재주입 검출, 규칙의 상태는 변이 검증됨
+    const results = withProject(h.biveHome, h.projectId, (store) =>
+      store.mutations.listByRun(reinforcing.run.id),
+    );
+    expect(results.map((item) => [item.status, item.outcome, item.sessionId, item.mutant])).toEqual(
+      [['verified', 'killed', null, VALID_MUTANT]],
+    );
+    expect(statusOf(h, h.rules[0] as Rule)).toBe('verified');
+    // 변이는 어떤 ref · 작업 트리에도 없고, main에는 보강 테스트만 들어왔다
+    expect(userGit(h.repo, 'log', '--all', '-S', 'ok: false', '--format=%H')).toBe('');
+    expect(userGit(h.repo, 'show', `main:${HEALTH}`)).toContain('ok: true');
+    expect(userGit(h.repo, 'diff', '--name-only', base, 'main').split('\n')).toContain(
+      'bive-acceptance/RULE-001/reinforce-1.acc.ts',
+    );
+    // 고리 없음: 보강 실행의 재주입 결과로 새 실행이 생기지 않는다
+    await settleAll(h);
+    expect(runsOf(h)).toHaveLength(2);
+  }, 90_000);
+
+  it('재주입에서도 살아남으면 테스트 작성으로 회귀하고 상한 뒤 실패(regression_limit), 규칙은 변이 생존 그대로이며 같은 변이로 다시 만들지 않는다', async () => {
+    const h = setup({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: { 'RULE-001': [{ tool: 'propose_mutant', args: VALID_MUTANT }] },
+      decide: allPass,
+      settings: AUTO_SETTINGS,
+    });
+    await runToEnd(h);
+    await settleAll(h);
+    const runs = runsOf(h);
+    expect(runs).toHaveLength(2);
+    const reinforcing = runs[1]!;
+    expect(reinforcing.run).toMatchObject({
+      type: 'C',
+      status: 'failed',
+      failureReason: 'regression_limit',
+      regressionCount: 2,
+    });
+    expect(
+      reinforcing.steps
+        .filter((step) => step.kind === 'mutation' || step.kind === 'test_writing')
+        .map((step) => `${step.kind}#${String(step.attempt)}:${step.status}`),
+    ).toEqual([
+      'test_writing#1:passed',
+      'test_writing#2:passed',
+      'test_writing#3:passed',
+      'mutation#1:failed',
+      'mutation#2:failed',
+      'mutation#3:failed',
+    ]);
+    expect(statusOf(h, h.rules[0] as Rule)).toBe('survived');
+    expect(h.sessions.map((spec) => spec.role)).toEqual(['mutator']);
+    // 실패로 끝난 뒤에도 같은 변이 기록으로 다시 만들지 않는다 (재주입 생존 기록도 원인이 아니다)
+    const again = withProject(h.biveHome, h.projectId, (store) =>
+      reinforceSurvivedMutants(store, { runId: h.runId }, { now: Date.now, newId }),
+    );
+    expect(again).toEqual({ status: 'none' });
+    const reinjected = withProject(h.biveHome, h.projectId, (store) =>
+      reinforceSurvivedMutants(store, { runId: reinforcing.run.id }, { now: Date.now, newId }),
+    );
+    expect(reinjected).toEqual({ status: 'not_applicable' });
+    expect(runsOf(h)).toHaveLength(2);
+  }, 90_000);
+
+  it('재주입이 판정할 수 없으면(러너 오류) 검증됨으로 세지 않고 기록 없이 실행을 끝낸다 (규칙은 변이 생존 그대로)', async () => {
+    let calls = 0;
+    const h = setup({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: { 'RULE-001': [{ tool: 'propose_mutant', args: VALID_MUTANT }] },
+      decide: (call) => {
+        calls += 1;
+        return calls === 1 ? allPass(call) : 'runner_error';
+      },
+      settings: AUTO_SETTINGS,
+    });
+    await runToEnd(h);
+    await settleAll(h);
+    const reinforcing = runsOf(h)[1]!;
+    expect(reinforcing.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'judge_runner_error',
+    });
+    expect(reinforcing.steps.find((step) => step.kind === 'mutation')?.exitDetail).toMatchObject({
+      detail: { stage: 'reinject', outcome: 'runner_error' },
+    });
+    expect(
+      withProject(h.biveHome, h.projectId, (store) =>
+        store.mutations.listByRun(reinforcing.run.id),
+      ),
+    ).toEqual([]);
+    expect(statusOf(h, h.rules[0] as Rule)).toBe('survived');
+  }, 90_000);
+
+  it('검증됨 · 미검증 · 변이 없음은 보강 실행을 만들지 않고, 같은 변이 기록 · 같은 규칙에 끝나지 않은 보강 실행이 있으면 또 만들지 않는다', async () => {
+    const h = setup({
+      rules: [
+        { blocks: ['health'], risk: 'medium' },
+        { blocks: ['auth'], risk: 'high' },
+        { blocks: ['lib'], risk: 'low' },
+      ],
+      sessions: {
+        'RULE-001': [{ tool: 'propose_mutant', args: VALID_MUTANT }],
+        'RULE-002': [
+          {
+            tool: 'propose_mutant',
+            args: { path: AUTH, search: 'status: 401', replace: 'status: 200' },
+          },
+        ],
+      },
+      // RULE-001 검출 · RULE-002 생존 · RULE-003 변이 없음(미검증)
+      decide: (call) =>
+        Object.fromEntries(
+          (call.input.ruleIds ?? []).map((id) => [
+            id,
+            id === 'RULE-001' ? (['failed'] as const) : (['passed'] as const),
+          ]),
+        ),
+      settings: AUTO_SETTINGS,
+      noAutoStart: true,
+    });
+    const done = await runToEnd(h);
+    expect(done.run.status).toBe('merged');
+    const clock = { now: Date.now, newId };
+    const made = withProject(h.biveHome, h.projectId, (store) =>
+      reinforceSurvivedMutants(store, { runId: h.runId }, clock),
+    );
+    expect(made.status).toBe('started');
+    const created = made.status === 'started' ? made.runs : [];
+    expect(
+      created.map(({ detail }) => [detail.run.type, detail.run.status, detail.run.targetRuleIds]),
+    ).toEqual([['C', 'waiting_approval', [h.rules[1]?.id]]]);
+    // 같은 변이 기록으로 두 번 만들지 않는다
+    expect(
+      withProject(h.biveHome, h.projectId, (store) =>
+        reinforceSurvivedMutants(store, { runId: h.runId }, clock),
+      ),
+    ).toEqual({ status: 'none' });
+    // 같은 규칙의 다른 실행이 새 생존 기록을 남겨도, 끝나지 않은 보강 실행이 있으면 만들지 않는다
+    const second = withProject(h.biveHome, h.projectId, (store) =>
+      createRun(store, { ruleIds: [h.rules[1]!.id], author: human }, { clientId: null }, clock),
+    ).run.id;
+    expect(h.engine.evaluateApproval(h.projectId, second)).toBe(true);
+    await h.engine.settled();
+    const secondResults = withProject(h.biveHome, h.projectId, (store) =>
+      store.mutations.listByRun(second),
+    );
+    expect(secondResults.map((item) => item.status)).toEqual(['survived']);
+    expect(
+      withProject(h.biveHome, h.projectId, (store) =>
+        reinforceSurvivedMutants(store, { runId: second }, clock),
+      ),
+    ).toEqual({ status: 'none' });
+  }, 90_000);
 });

@@ -1310,6 +1310,15 @@ export const NormChangeDetail = z.strictObject({
   causeSeqs: NormChangeSeqList.optional(),
   /** 원인 승인 기록(사람의 규칙 진술 편집 `rule_edit`)의 순번 (종류 `auto_start`에만, M7-03) */
   ruleEditSeqs: NormChangeSeqList.optional(),
+  /**
+   * 원인 변이 판정 기록(병합된 유형 A 실행의 '변이 생존' 기록)의 ID (종류 `auto_start`에만, 변이 생존의 자동 테스트 보강, M3-54 #311 ·
+   * ADR-141 ② · ADR-143)
+   */
+  mutationResultIds: z
+    .array(Ulid)
+    .min(1)
+    .refine((ids) => new Set(ids).size === ids.length, '원인 변이 기록이 중복됐습니다')
+    .optional(),
   ruleIds: z
     .array(Ulid)
     .min(1)
@@ -1398,14 +1407,16 @@ export const NormChangeEntry = z
           path: ['targetRef'],
         });
       }
-      const { causeSeqs, ruleEditSeqs, ruleIds } = entry.detail;
-      // 원인은 신규 기록 순번 또는 규칙 편집 승인 기록 순번 가운데 하나만 (M7-03, ADR-109)
-      const causes = causeSeqs ?? ruleEditSeqs;
-      if (causeSeqs !== undefined && ruleEditSeqs !== undefined) {
+      const { causeSeqs, ruleEditSeqs, mutationResultIds, ruleIds } = entry.detail;
+      // 원인은 신규 기록 순번 · 규칙 편집 승인 기록 순번 · 변이 판정 기록 ID 가운데 하나만 (M7-03 · ADR-109, M3-54 · ADR-143)
+      const kinds = [causeSeqs, ruleEditSeqs, mutationResultIds].filter((c) => c !== undefined);
+      const causes = causeSeqs ?? ruleEditSeqs ?? mutationResultIds;
+      if (kinds.length > 1) {
         ctx.addIssue({
           code: 'custom',
-          message: '자동 시작의 원인은 신규 기록 순번과 규칙 편집 순번 가운데 하나만 둡니다',
-          path: ['detail', 'ruleEditSeqs'],
+          message:
+            '자동 시작의 원인은 신규 기록 순번 · 규칙 편집 순번 · 변이 기록 가운데 하나만 둡니다',
+          path: ['detail', ruleEditSeqs === undefined ? 'mutationResultIds' : 'ruleEditSeqs'],
         });
       } else if (
         causes === undefined ||
@@ -1423,6 +1434,12 @@ export const NormChangeEntry = z
         code: 'custom',
         message: '규칙 편집 순번은 자동 시작에만 있습니다',
         path: ['detail', 'ruleEditSeqs'],
+      });
+    } else if (entry.detail.mutationResultIds !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '원인 변이 기록은 자동 시작에만 있습니다',
+        path: ['detail', 'mutationResultIds'],
       });
     }
     // 판단 상세는 판단 기록에만, 판단 기록에는 판단 상세만 (M7-07)
@@ -1753,16 +1770,18 @@ export type ToolManifestEntry = z.infer<typeof ToolManifestEntry>;
  * - `causeLog` 없음: 원인은 규범 변경 기록(대상 규칙을 만든 신규 기록)의 순번
  * - `causeLog: 'approval_log'`: 원인은 승인 기록(사람의 규칙 진술 편집 `rule_edit`)의 순번 1개 (M7-03 #215, ADR-109).
  *   `runs.started_by`의 DB CHECK(0016)가 `causeSeqs`를 요구하므로 표를 다시 만들지 않고 어느 기록의 순번인지만 더했다
- * 엔진은 시작마다 이 순번이 규범 변경 기록의 자동 시작 항목 1건(`causeSeqs` 또는 `ruleEditSeqs`)과 같은지 본다.
+ * - `causeLog: 'mutation_reinforcements'`: 원인은 변이 보강 연결(`mutation_reinforcements`, 실행 ↔ 원인 변이 기록)의 순번 1개
+ *   (M3-54 #311, ADR-143). 자동 시작 항목의 원인은 그 연결이 가리키는 변이 기록 ID(`mutationResultIds`)다
+ * 엔진은 시작마다 이 순번이 규범 변경 기록의 자동 시작 항목 1건(`causeSeqs` · `ruleEditSeqs` · `mutationResultIds`)과 맞는지 본다.
  */
 export const AutoStartRunStarter = z
   .strictObject({
     kind: z.literal('orchestrator'),
     causeSeqs: NormChangeSeqList,
-    causeLog: z.literal('approval_log').optional(),
+    causeLog: z.enum(['approval_log', 'mutation_reinforcements']).optional(),
   })
   .refine((starter) => starter.causeLog === undefined || starter.causeSeqs.length === 1, {
-    message: '규칙 편집으로 시작한 실행의 원인은 승인 기록 1건입니다',
+    message: '규칙 편집 · 변이 보강으로 시작한 실행의 원인은 기록 1건입니다',
     path: ['causeSeqs'],
   });
 export type AutoStartRunStarter = z.infer<typeof AutoStartRunStarter>;
@@ -2045,6 +2064,19 @@ export const MutationResult = z
     }
   });
 export type MutationResult = z.infer<typeof MutationResult>;
+
+/**
+ * 변이 보강 연결 (M3-54 #311, ADR-141 ③ · ADR-143): 변이 생존의 자동 테스트 보강 실행(유형 C)과 그 원인 변이 기록 1건. 실행마다
+ * 하나 · 변이 기록마다 하나(같은 변이로 보강 실행이 둘 생기지 않고, 끝난 뒤 다시 만들지 않는다). `seq`는 그 실행 시작 주체의 원인 순번이다.
+ * 이 연결이 있는 유형 C 실행이 "보강"이고 변이 주입 단계는 그 변이의 재주입이다.
+ */
+export const MutationReinforcement = z.strictObject({
+  seq: z.int().positive(),
+  runId: Ulid,
+  mutationResultId: Ulid,
+  createdAt: Timestamp,
+});
+export type MutationReinforcement = z.infer<typeof MutationReinforcement>;
 
 // ── 코드 열람 기록 (MET-01, M2-01, ADR-084) ─────────────────
 

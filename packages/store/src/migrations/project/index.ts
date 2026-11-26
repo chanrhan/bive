@@ -28,6 +28,7 @@ import { migration as m0023 } from './0023_structure_judge_runner.js';
 import { migration as m0024 } from './0024_contracts.js';
 import { migration as m0025 } from './0025_contract_judge_runner.js';
 import { migration as m0026 } from './0026_mutation_results.js';
+import { migration as m0027 } from './0027_mutation_reinforcements.js';
 
 export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0001,
@@ -56,4 +57,5 @@ export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0024,
   m0025,
   m0026,
+  m0027,
 ];

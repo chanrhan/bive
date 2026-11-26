@@ -70,7 +70,7 @@ export type UnmetPolicy = Partial<
  * - A: `UNMET_POLICY` 그대로
  * - B · D: 구현 미충족 → 구현 재시도, 검사 미충족 → 구현 회귀. D의 기준 검사(Green 확인) 미충족은 회귀 없이 실패(시작 거부)
  * - C: 테스트 작성 미충족 → 재시도, Green 확인 미충족 → 테스트 작성으로 회귀(테스트 재시도 수, Red 확인과 같은 길), 검사 미충족 →
- *   구현이 없으므로 테스트 작성으로 회귀(`regressionCount`)
+ *   구현이 없으므로 테스트 작성으로 회귀(`regressionCount`), 보강 실행의 재주입 생존 → 테스트 작성으로 회귀(`regressionCount`, ADR-143)
  */
 export const UNMET_POLICY_BY_TYPE: Readonly<Record<RunType, UnmetPolicy>> = {
   A: UNMET_POLICY,
@@ -82,6 +82,8 @@ export const UNMET_POLICY_BY_TYPE: Readonly<Record<RunType, UnmetPolicy>> = {
     test_writing: { to: 'test_writing', counter: 'test_retry' },
     green_check: { to: 'test_writing', counter: 'test_retry' },
     check: { to: 'test_writing', counter: 'regression' },
+    // 보강 실행의 재주입에서 변이가 살아남음 → 테스트 작성으로 회귀 (검사 회귀와 같은 `regressionCount`, M3-54 #311 · ADR-143)
+    mutation: { to: 'test_writing', counter: 'regression' },
   },
   D: {
     implementation: { to: 'implementation', counter: 'regression' },

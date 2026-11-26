@@ -141,11 +141,66 @@ export const checkRunStartBasis = (store: ProjectStore, run: Run): StartBasisChe
   }
   const [autoStart] = autoStarts;
   if (autoStart === undefined) return result('no_entry');
+  const causeLog = run.startedBy.kind === 'orchestrator' ? run.startedBy.causeLog : undefined;
   return result(
-    run.startedBy.kind === 'orchestrator' && run.startedBy.causeLog === 'approval_log'
+    causeLog === 'approval_log'
       ? ruleEditMismatch(store, run, autoStart, changes)
-      : autoStartMismatch(store, run, autoStart, changes),
+      : causeLog === 'mutation_reinforcements'
+        ? reinforcementMismatch(store, run, autoStart, changes)
+        : autoStartMismatch(store, run, autoStart, changes),
   );
+};
+
+/**
+ * 변이 생존의 자동 테스트 보강 실행의 자동 시작 항목이 맞는지 (`null`이면 맞음, M3-54 #311 · ADR-143). 유형 C · 대상 규칙 1개 · 원인 1개이고,
+ * 시작 주체의 순번이 이 실행의 변이 보강 연결이며 그 연결의 변이 기록이 항목의 원인(`mutationResultIds`)과 같고, 그 기록이 대상 규칙의
+ * '변이 생존'이며 병합으로 끝난 유형 A 실행의 것이고(보강 실행의 재주입 기록은 원인이 아니다), 다른 자동 시작 항목이 같은 기록을 쓰지 않는다.
+ */
+const reinforcementMismatch = (
+  store: ProjectStore,
+  run: Run,
+  entry: NormChangeEntry,
+  all: readonly NormChangeEntry[],
+): StartBasisMismatch | null => {
+  if (run.startedBy.kind !== 'orchestrator' || entry.actor.kind !== 'orchestrator') {
+    return 'starter_mismatch';
+  }
+  const [ruleId] = run.targetRuleIds;
+  if (
+    ruleId === undefined ||
+    run.targetRuleIds.length !== 1 ||
+    run.startedBy.causeSeqs.length !== 1
+  ) {
+    return 'not_single_rule';
+  }
+  if (!sameList(entry.detail.ruleIds, run.targetRuleIds)) return 'rules_mismatch';
+  const resultIds = entry.detail.mutationResultIds ?? [];
+  const [resultId] = resultIds;
+  if (resultId === undefined || resultIds.length !== 1 || run.type !== 'C') return 'cause_mismatch';
+  const [seq] = run.startedBy.causeSeqs;
+  const link = seq === undefined ? null : store.mutations.reinforcementBySeq(seq);
+  if (link === null || link.runId !== run.id || link.mutationResultId !== resultId) {
+    return 'cause_mismatch';
+  }
+  const cause = store.mutations.get(resultId);
+  const origin = cause === null ? null : store.runs.get(cause.runId);
+  if (
+    cause === null ||
+    cause.status !== 'survived' ||
+    cause.ruleId !== ruleId ||
+    origin === null ||
+    origin.type !== 'A' ||
+    origin.status !== 'merged'
+  ) {
+    return 'cause_mismatch';
+  }
+  const reused = all.some(
+    (other) =>
+      other.kind === 'auto_start' &&
+      other.seq !== entry.seq &&
+      (other.detail.mutationResultIds ?? []).includes(resultId),
+  );
+  return reused ? 'cause_reused' : null;
 };
 
 /**

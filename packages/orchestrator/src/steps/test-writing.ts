@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { createUlidGenerator, type Step } from '@bive/shared';
+import { createUlidGenerator, type MutantPatch, type Step } from '@bive/shared';
 
 import type { StepContext, StepExecutor, StepOutcome } from '../engine/types.js';
 import { createGitRunner, type GitRunner } from '../git/git-exec.js';
@@ -305,6 +305,16 @@ const ignoredForCommit = async (
     .sort();
 };
 
+/** 보강 실행이면 원인 변이 기록의 변이 (`{ mutant }`), 아니면 빈 객체. */
+const reinforcedMutant = (context: StepContext): { mutant?: MutantPatch } => {
+  if (context.run.type !== 'C') return {};
+  const mutant = context.read((store) => {
+    const link = store.mutations.reinforcementOfRun(context.run.id);
+    return link === null ? null : (store.mutations.get(link.mutationResultId)?.mutant ?? null);
+  });
+  return mutant === null ? {} : { mutant };
+};
+
 /** 테스트 작성 단계 실행기를 만든다 (기본 실행기 목록에 등록된다). */
 export const createTestWritingExecutor =
   (options: TestWritingOptions = {}): StepExecutor =>
@@ -354,6 +364,8 @@ export const createTestWritingExecutor =
             context.git.repoPath,
             ruleIds,
           ),
+          // 보강 실행(유형 C + 변이 보강 연결)만 살아남은 변이를 받는다 (M3-54 #311, ADR-141 ④ · ADR-143)
+          ...reinforcedMutant(context),
         }),
         normInput: normInputRecord(norms),
         vars: {
