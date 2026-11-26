@@ -20,6 +20,11 @@ const ts = createRequire(import.meta.url)('typescript6') as typeof TS;
 
 export const ORCHESTRATOR_SRC = fileURLToPath(new URL('../../src/', import.meta.url));
 const ORCHESTRATOR_DIR = path.resolve(ORCHESTRATOR_SRC, '..');
+const PACKAGES_DIR = path.resolve(ORCHESTRATOR_DIR, '..');
+
+/** 선언 파일이 `file`(packages 기준 정확한 경로, 예: `store/src/project-store.ts`)인지. 경로 끝 일치가 아니다 */
+const isFile = (sourceFile: TS.SourceFile, file: string): boolean =>
+  path.resolve(sourceFile.fileName) === path.resolve(PACKAGES_DIR, file);
 
 export interface SourceSet {
   readonly ts: typeof TS;
@@ -97,6 +102,24 @@ export const sampleSource = (samples: Readonly<Record<string, string>>): SourceS
   };
   const fileExists = host.fileExists.bind(host);
   host.fileExists = (fileName) => overrides.has(path.resolve(fileName)) || fileExists(fileName);
+  // 표본만 있는 새 폴더(`norms/engine/`)도 모듈 해석이 찾게 한다
+  const directories = new Set(
+    [...overrides.keys()].flatMap((file) => {
+      const found: string[] = [];
+      for (
+        let dir = path.dirname(file);
+        dir.startsWith(ORCHESTRATOR_SRC);
+        dir = path.dirname(dir)
+      ) {
+        found.push(dir);
+      }
+      return found;
+    }),
+  );
+  const directoryExists = host.directoryExists?.bind(host);
+  host.directoryExists = (name) =>
+    directories.has(path.resolve(name)) ||
+    (directoryExists?.(name) ?? ts.sys.directoryExists(name));
   const readFile = host.readFile.bind(host);
   host.readFile = (fileName) => overrides.get(path.resolve(fileName)) ?? readFile(fileName);
   const files = [...new Set([...productFiles(), ...overrides.keys()])];
@@ -265,7 +288,65 @@ export const moduleUsers = (set: SourceSet, target: string): string[] => {
     }
     return found;
   });
-  return [...new Set([...importersOf(set, target), ...viaAlias])]
+  // 다른 모듈을 통째로 가져와(네임스페이스 가져오기 · 동적 import) 그 모듈이 다시 내보낸 이름을 속성 · 구조 분해로 쓰는 파일
+  const reaches = (symbol: TS.Symbol | undefined): boolean =>
+    symbol !== undefined && declarationsOf(checker, symbol).some((d) => exported.has(d));
+  const viaNamespace = set.files.filter((rel) => {
+    if (!moduleRefs(set, rel).some((ref) => ref.names.includes('*'))) return false;
+    const sourceFile = set.sourceOf(rel);
+    const namespaces = new Set<string>();
+    const isImportCall = (node: TS.Expression): boolean => {
+      let current = node;
+      while (ts.isParenthesizedExpression(current) || ts.isAwaitExpression(current)) {
+        current = current.expression;
+      }
+      return (
+        ts.isCallExpression(current) && current.expression.kind === ts.SyntaxKind.ImportKeyword
+      );
+    };
+    const collect = (node: TS.Node): void => {
+      if (ts.isNamespaceImport(node)) namespaces.add(node.name.text);
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.initializer !== undefined &&
+        isImportCall(node.initializer)
+      ) {
+        namespaces.add(node.name.text);
+      }
+      ts.forEachChild(node, collect);
+    };
+    collect(sourceFile);
+    const isNamespace = (node: TS.Expression): boolean =>
+      (ts.isIdentifier(node) && namespaces.has(node.text)) || isImportCall(node);
+    let found = false;
+    const visit = (node: TS.Node): void => {
+      if (found) return;
+      if (ts.isPropertyAccessExpression(node) && isNamespace(node.expression)) {
+        found = reaches(checker.getSymbolAtLocation(node.name));
+      } else if (ts.isElementAccessExpression(node) && isNamespace(node.expression)) {
+        const key = literalText(node.argumentExpression);
+        found =
+          key === null ||
+          reaches(checker.getPropertyOfType(checker.getTypeAtLocation(node.expression), key));
+      } else if (
+        ts.isVariableDeclaration(node) &&
+        ts.isObjectBindingPattern(node.name) &&
+        node.initializer !== undefined &&
+        isNamespace(node.initializer)
+      ) {
+        const type = checker.getTypeAtLocation(node.initializer);
+        found = node.name.elements.some((element) => {
+          const key = element.propertyName ?? element.name;
+          return ts.isIdentifier(key) && reaches(checker.getPropertyOfType(type, key.text));
+        });
+      }
+      if (!found) ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    return found;
+  });
+  return [...new Set([...importersOf(set, target), ...viaAlias, ...viaNamespace])]
     .filter((rel) => rel !== target)
     .sort();
 };
@@ -277,18 +358,18 @@ export const computedModuleRefs = (set: SourceSet): string[] =>
 // ── 선언 참조 ─────────────────────────────────────────────
 
 /**
- * 프로그램 안에서 `owner`(클래스 · 인터페이스 이름)의 멤버 `member` 선언. 같은 이름의 클래스 · 인터페이스가 여럿이면
- * `fileSuffix`(선언 파일 경로의 끝)로 고른다.
+ * 프로그램 안에서 `owner`(클래스 · 인터페이스 이름)의 멤버 `member` 선언. 선언 파일은 `file`(packages 기준 정확한 경로)로
+ * 고른다 (다른 폴더의 같은 이름 파일은 고르지 않는다).
  */
 export const memberDeclarations = (
   set: SourceSet,
   owner: string,
   member: string,
-  fileSuffix: string,
+  file: string,
 ): TS.Declaration[] => {
   const found: TS.Declaration[] = [];
   for (const sourceFile of set.program.getSourceFiles()) {
-    if (!sourceFile.fileName.endsWith(fileSuffix)) continue;
+    if (!isFile(sourceFile, file)) continue;
     const visit = (node: TS.Node): void => {
       if (
         (ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)) &&
@@ -317,19 +398,19 @@ export const memberDeclarations = (
     };
     visit(sourceFile);
   }
-  if (found.length === 0) throw new Error(`선언 없음: ${owner}.${member} (${fileSuffix})`);
+  if (found.length === 0) throw new Error(`선언 없음: ${owner}.${member} (${file})`);
   return found;
 };
 
-/** 최상위 선언(클래스 · 함수 · 변수) */
+/** 최상위 선언(클래스 · 함수 · 변수). `file`은 packages 기준 정확한 경로 */
 export const topLevelDeclaration = (
   set: SourceSet,
   name: string,
-  fileSuffix: string,
+  file: string,
 ): TS.Declaration[] => {
   const found: TS.Declaration[] = [];
   for (const sourceFile of set.program.getSourceFiles()) {
-    if (!sourceFile.fileName.endsWith(fileSuffix)) continue;
+    if (!isFile(sourceFile, file)) continue;
     for (const statement of sourceFile.statements) {
       if (
         (ts.isClassDeclaration(statement) || ts.isFunctionDeclaration(statement)) &&
@@ -346,7 +427,7 @@ export const topLevelDeclaration = (
       }
     }
   }
-  if (found.length === 0) throw new Error(`선언 없음: ${name} (${fileSuffix})`);
+  if (found.length === 0) throw new Error(`선언 없음: ${name} (${file})`);
   return found;
 };
 
@@ -436,7 +517,10 @@ export const referencesTo = (
       ) {
         // 구조 분해: 속성 이름의 선언은 분해하는 값의 타입에서 찾는다
         const type = checker.getTypeAtLocation(parent.parent);
-        if (hits(checker.getPropertyOfType(type, name))) push('binding');
+        const property = checker.getPropertyOfType(type, name);
+        if (hits(property)) push('binding');
+        // 타입을 지운 값의 구조 분해 (`const { normChanges: log } = loose`): 흔치 않은 이름만 보수적으로 센다
+        else if (strings === 'any' && property === undefined) push('untyped');
       } else if (hits(checker.getSymbolAtLocation(node))) {
         push('symbol');
       } else if (
@@ -591,18 +675,32 @@ const stringTexts = (sourceFile: TS.SourceFile): { text: string; line: number }[
   return out;
 };
 
-const quotedName = (name: string) => `(?:"${name}"|\`${name}\`|\\[${name}\\]|${name})`;
+const quotedName = (name: string) => `(?:"${name}"|'${name}'|\`${name}\`|\\[${name}\\]|${name})`;
 const qualifiedName = (name: string) =>
-  `(?:${quotedName('\\w+')}\\s*\\.\\s*)?${quotedName(name)}(?![\\w"\`\\]])`;
+  `(?:${quotedName('\\w+')}\\s*\\.\\s*)?${quotedName(name)}(?![\\w"'\`\\]])`;
 
 /**
- * `tables` 가운데 하나에 쓰는 SQL 문장 (INSERT · REPLACE · UPDATE · DELETE, 대소문자 · 줄 나눔 무관, 표 이름의 따옴표 ·
- * 스키마 접두 포함)의 정규식.
+ * SQL 글을 판정 전에 고른다: 주석(`/* … *\/` · `-- …`)은 빈칸으로, 문자열 값(`'…'`)은 빈 문자열로 바꾼다. 다만 표 이름
+ * 자리(`INTO` · `UPDATE` · `FROM` 바로 뒤, 스키마 접두 뒤)의 작은따옴표는 SQLite가 이름으로 받으므로 그대로 둔다.
+ */
+export const sqlStatementText = (text: string): string =>
+  text
+    .replace(/\/\*[\s\S]*?(?:\*\/|$)/g, ' ')
+    .replace(/--[^\n]*/g, ' ')
+    .replace(
+      /(\b(?:INTO|UPDATE(?:\s+OR\s+\w+)?|FROM)\s+(?:["`\[]?\w+["`\]]?\s*\.\s*)?)?'(?:[^']|'')*'/gi,
+      (match: string, keyword: string | undefined) => (keyword === undefined ? "''" : match),
+    );
+
+/**
+ * `tables` 가운데 하나에 쓰는 SQL 문장 (INSERT · REPLACE · UPDATE · DELETE, 대소문자 · 줄 나눔 무관, 표 이름의 네 가지
+ * 따옴표 · 스키마 접두 · 색인 지정 포함)의 정규식. 판정할 글은 `sqlStatementText`로 고른 것이다.
  */
 export const sqlWritePattern = (tables: readonly string[]): RegExp => {
   const table = qualifiedName(`(?:${tables.join('|')})`);
   // 표 이름 뒤는 그 문장의 다음 낱말까지 본다 (`update rules 화면` 같은 글을 SQL로 보지 않는다)
-  const alias = '(?:\\s+(?:AS\\s+)?\\w+)?';
+  // 별칭 뒤의 색인 지정(`INDEXED BY <이름>` · `NOT INDEXED`)은 건너뛴다
+  const alias = '(?:\\s+(?:AS\\s+)?\\w+)?(?:\\s+INDEXED\\s+BY\\s+\\w+|\\s+NOT\\s+INDEXED)?';
   return new RegExp(
     [
       `\\b(?:INSERT|REPLACE)(?:\\s+OR\\s+\\w+)?\\s+INTO\\s+${table}${alias}\\s*(?:\\(|VALUES\\b|SELECT\\b|DEFAULT\\b|WITH\\b)`,
@@ -624,7 +722,7 @@ export const sqlWrites = (set: SourceSet, tables: readonly string[]): SqlWrite[]
   const pattern = sqlWritePattern(tables);
   return set.files.flatMap((rel) =>
     stringTexts(set.sourceOf(rel))
-      .filter(({ text }) => pattern.test(text))
+      .filter(({ text }) => pattern.test(sqlStatementText(text)))
       .map(({ text, line }) => ({ rel, line, text: text.replace(/\s+/g, ' ').trim() })),
   );
 };
@@ -644,12 +742,24 @@ export const sqlWritesInFiles = (
       file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
     );
     return stringTexts(sourceFile)
-      .filter(({ text }) => pattern.test(text))
+      .filter(({ text }) => pattern.test(sqlStatementText(text)))
       .map(({ text, line }) => ({ rel: file, line, text: text.replace(/\s+/g, ' ').trim() }));
   });
 };
 
 // ── 실행 종료 상태 ────────────────────────────────────────
+
+/** 객체 리터럴 속성 이름의 글: 식별자 · 문자열 · 숫자 · 리터럴 식의 계산 키(`['run']` · `[\`run\`]`). 그 밖의 계산 키는 `null` */
+const propertyKey = (name: TS.PropertyName): string | null => {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name))
+    return name.text;
+  if (ts.isComputedPropertyName(name)) {
+    let expression = name.expression;
+    while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
+    return literalText(expression);
+  }
+  return null;
+};
 
 export interface TerminalWrite {
   readonly rel: string;
@@ -798,13 +908,7 @@ export const terminalStatusWrites = (
       seen.add(current);
       if (ts.isObjectLiteralExpression(current)) {
         for (const property of current.properties) {
-          if (ts.isPropertyAssignment(property) && property.name.getText(sourceFile) === 'status') {
-            statusOf(property.initializer, via, seen);
-          } else if (
-            ts.isPropertyAssignment(property) &&
-            ts.isStringLiteral(property.name) &&
-            property.name.text === 'status'
-          ) {
+          if (ts.isPropertyAssignment(property) && propertyKey(property.name) === 'status') {
             statusOf(property.initializer, via, seen);
           } else if (
             ts.isShorthandPropertyAssignment(property) &&
@@ -840,7 +944,7 @@ export const terminalStatusWrites = (
       }
     };
     const visit = (node: TS.Node): void => {
-      if (ts.isPropertyAssignment(node) && node.name.getText(sourceFile) === 'run') {
+      if (ts.isPropertyAssignment(node) && propertyKey(node.name) === 'run') {
         patchLine = lineOf(node);
         objectOf(node.initializer, 'run', new Set());
       } else if (ts.isShorthandPropertyAssignment(node) && node.name.text === 'run') {

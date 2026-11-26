@@ -1982,6 +1982,26 @@ export { releaseConfirmation as release };
   'steps/__sample-reexport-chain.ts': `import { release } from '../norms/agent-rule.js';
 export const name = release;
 `,
+  // 타입을 지운 값의 구조 분해
+  'verification/__sample-untyped-destructure.ts': `import type { ProjectStore } from '@bive/store';
+export const write = (store: ProjectStore): void => {
+  const loose: any = store;
+  const { normChanges: log, ruleRetirements: r, confirmations: c } = loose;
+  log.append({});
+  void r;
+  void c;
+};
+`,
+  // 허용 파일이 다시 내보낸 이름을 네임스페이스 · 동적 import · 구조 분해로 가져온다
+  'verification/__sample-reexport-namespace.ts': `import * as h from '../norms/agent-rule.js';
+export const name = h.release;
+`,
+  'verification/__sample-reexport-dynamic.ts': `export const load = async (): Promise<unknown> => {
+  const m = await import('../norms/agent-rule.js');
+  const { release } = await import('../norms/agent-rule.js');
+  return [m.release, release, (await import('../norms/agent-rule.js'))['release']];
+};
+`,
   // 타입을 지운 값의 속성 접근
   'steps/__sample-untyped.ts': `import type { ProjectStore } from '@bive/store';
 export const write = (store: ProjectStore): void => {
@@ -2051,7 +2071,12 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
     ruleWriterJudge: (set: SourceSet) =>
       filesReferencing(
         set,
-        memberDeclarations(set, 'RuleWriterService', 'judge', 'rule-writer/rule-writer-service.ts'),
+        memberDeclarations(
+          set,
+          'RuleWriterService',
+          'judge',
+          'orchestrator/src/rule-writer/rule-writer-service.ts',
+        ),
       ),
     ruleWriterStartRetry: (set: SourceSet) =>
       filesReferencing(
@@ -2061,13 +2086,13 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
             set,
             'RuleWriterService',
             method,
-            'rule-writer/rule-writer-service.ts',
+            'orchestrator/src/rule-writer/rule-writer-service.ts',
           ),
           ...memberDeclarations(
             set,
             'RuleWriterLauncher',
             method,
-            'rule-writer/rule-writer-service.ts',
+            'orchestrator/src/rule-writer/rule-writer-service.ts',
           ),
         ]),
       ),
@@ -2216,6 +2241,21 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
         ['confirmationServiceUsers'],
       ],
       ['steps/__sample-untyped.ts', ['normChanges'], ['normChanges']],
+      [
+        'verification/__sample-untyped-destructure.ts',
+        ['normChanges', 'ruleRetirements', 'confirmations'],
+        ['normChanges', 'ruleRetirements', 'confirmations'],
+      ],
+      [
+        'verification/__sample-reexport-namespace.ts',
+        ['confirmationServiceUsers'],
+        ['confirmationServiceUsers'],
+      ],
+      [
+        'verification/__sample-reexport-dynamic.ts',
+        ['confirmationServiceUsers'],
+        ['confirmationServiceUsers'],
+      ],
     ];
 
   it('잡는 함수 자체: 형태별 위반 표본은 잡히고(위 시험의 글자 대조는 놓친다), 허용된 파일 자리의 같은 형태는 허용 목록 안이며, 다른 저장소 · 다른 메서드 · 같은 낱말의 글은 잡히지 않는다', () => {
@@ -2349,7 +2389,11 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
     expect(
       filesReferencing(
         set,
-        topLevelDeclaration(set, 'RuleWriterService', 'rule-writer/rule-writer-service.ts'),
+        topLevelDeclaration(
+          set,
+          'RuleWriterService',
+          'orchestrator/src/rule-writer/rule-writer-service.ts',
+        ),
       ),
     ).toEqual(using(/new RuleWriterService\(/));
     // 모듈 이름을 식으로 고르는 참조가 없다 (어느 모듈을 가져오는지 구조 시험이 알 수 있다)
@@ -2380,13 +2424,13 @@ describe('가져오기 · 호출 위치 구조 시험의 형태 보강: 별칭 �
           set,
           'RuleWriterService',
           'rejudge',
-          'rule-writer/rule-writer-service.ts',
+          'orchestrator/src/rule-writer/rule-writer-service.ts',
         ),
         ...memberDeclarations(
           set,
           'RuleWriterLauncher',
           'rejudge',
-          'rule-writer/rule-writer-service.ts',
+          'orchestrator/src/rule-writer/rule-writer-service.ts',
         ),
       ]),
     ).toEqual(using(/\.rejudge\(/));
@@ -2423,6 +2467,12 @@ export const statements = [
   'INSERT INTO ' + 'rules VALUES (?)',
   \`UPDATE rules SET title = \${title} WHERE id = ?\`,
   'update or ignore "main"."confirmations" set state = ?',
+  'INSERT /* 주석 */ INTO rules (id) VALUES (?)',
+  "INSERT INTO 'norm_changes' (seq) VALUES ('x')",
+  'UPDATE confirmations INDEXED BY idx SET state = ?',
+  'DELETE FROM rule_retirements NOT INDEXED WHERE rule_id = ?',
+  \`UPDATE -- 줄 주석
+    rules SET title = ?\`,
 ];
 `,
   'steps/__sql-pass.ts': `export const statements = [
@@ -2433,12 +2483,16 @@ export const statements = [
   'DELETE FROM norm_changes_view',
   'INSERT INTO runs (id) VALUES (?)',
   '규칙을 update rules 화면에서 고친다',
+  'SELECT * FROM judgments /* UPDATE rules SET x = 1 */',
+  'SELECT id FROM judgments -- DELETE FROM rules WHERE 1',
+  "UPDATE judgments SET note = 'update rules set x' WHERE id = ?",
+  "INSERT INTO judgments (note) VALUES ('INSERT INTO rules (id) VALUES (1)')",
 ];
 `,
 };
 
 describe('규범 표에 쓰는 날 SQL은 저장소 패키지 밖에 없다 (M3-31 #259 수용 기준 2, NFR-01 · NFR-02, ADR-142)', () => {
-  it('잡는 함수 자체: 여러 줄 템플릿 · 소문자 · 따옴표 · 스키마 접두 · 이은 문자열은 잡고, 읽기 · 다른 표 · 이름이 비슷한 표는 잡지 않는다', () => {
+  it('잡는 함수 자체: 여러 줄 템플릿 · 소문자 · 따옴표(작은따옴표 포함) · 스키마 접두 · 이은 문자열 · SQL 주석 · 색인 지정은 잡고, 읽기 · 다른 표 · 이름이 비슷한 표 · 주석이나 문자열 값 안의 낱말은 잡지 않는다', () => {
     const set = samples();
     const found = sqlWrites(set, NORM_TABLES).filter((write) => write.rel.includes('__sql'));
     expect(found.map((write) => [write.rel, write.text])).toEqual([
@@ -2451,6 +2505,11 @@ describe('규범 표에 쓰는 날 SQL은 저장소 패키지 밖에 없다 (M3-
       ['steps/__sql-violation.ts', 'INSERT INTO rules VALUES (?)'],
       ['steps/__sql-violation.ts', 'UPDATE rules SET title = ? WHERE id = ?'],
       ['steps/__sql-violation.ts', 'update or ignore "main"."confirmations" set state = ?'],
+      ['steps/__sql-violation.ts', 'INSERT /* 주석 */ INTO rules (id) VALUES (?)'],
+      ['steps/__sql-violation.ts', "INSERT INTO 'norm_changes' (seq) VALUES ('x')"],
+      ['steps/__sql-violation.ts', 'UPDATE confirmations INDEXED BY idx SET state = ?'],
+      ['steps/__sql-violation.ts', 'DELETE FROM rule_retirements NOT INDEXED WHERE rule_id = ?'],
+      ['steps/__sql-violation.ts', 'UPDATE -- 줄 주석 rules SET title = ?'],
     ]);
     // 위 M7-09 시험의 글자 대조(`\brule_retirements\b` 파일 목록)는 주석과 쓰기를 가르지 못하고 다른 표를 보지 않는다
     expect(/\bINSERT INTO rules\b/.test(SQL_SAMPLES['steps/__sql-violation.ts'] ?? '')).toBe(false);
@@ -2501,6 +2560,37 @@ export const end = (store: ProjectStore, run: Run, cond: boolean, halt: { runSta
   store.runs.transition(run.id, { run: { status: halt.runStatus } });
   const patch = { status: 'failed' as const };
   store.runs.transition(run.id, { run: patch });
+  store.runs.transition(run.id, { ['run']: { status: 'failed' } });
+  store.runs.transition(run.id, { 'run': { status: 'budget_exceeded' } });
+};
+`,
+  // 다른 폴더의 같은 이름 파일 (경로 끝 일치로 고르면 허용 함수로 잘못 본다)
+  'norms/engine/run-ending.ts': `import type { Run } from '@bive/shared';
+export const runEnding = (run: Pick<Run, 'mergeCommit'>) => ({ merged: false, run: { status: 'failed' as const, failureReason: String(run.mergeCommit) } });
+`,
+  'steps/__terminal-fake-ending.ts': `import type { Run } from '@bive/shared';
+import type { ProjectStore } from '@bive/store';
+import { runEnding as end } from '../norms/engine/run-ending.js';
+export const finish = (store: ProjectStore, run: Run): void => {
+  store.runs.transition(run.id, { run: end(run).run });
+};
+`,
+  // 다른 파일의 이름만 같은 함수
+  'steps/__terminal-namesake.ts': `import type { Run } from '@bive/shared';
+import type { ProjectStore } from '@bive/store';
+const make = () => ({ status: 'failed' as const });
+const runEnding = () => ({ merged: false, patch: make() });
+const blockedEnding = () => ({ patch: { status: 'budget_exceeded' as const } });
+export const finish = (store: ProjectStore, run: Run): void => {
+  store.runs.transition(run.id, { run: runEnding().patch });
+  store.runs.transition(run.id, { run: { ...blockedEnding().patch } });
+};
+`,
+  // 단계 · 엔진 · 실행 밖 폴더 (대상은 src 전체)
+  'ipc/__terminal-outside.ts': `import type { Run } from '@bive/shared';
+import type { ProjectStore } from '@bive/store';
+export const finish = (store: ProjectStore, run: Run): void => {
+  store.runs.transition(run.id, { run: { status: 'failed' } });
 };
 `,
   'steps/__terminal-pass.ts': `import type { Run } from '@bive/shared';
@@ -2518,21 +2608,22 @@ export const end = (store: ProjectStore, run: Run, last: boolean, at: string): v
 `,
 };
 
-describe('실행의 실패 쪽 종료 상태는 runEnding 한 곳에서 정한다: 엔진 · 실행 · 단계 코드의 실행 패치 (M3-31 #259 수용 기준 3, ADR-105 · ADR-142)', () => {
+describe('실행의 실패 쪽 종료 상태는 runEnding 한 곳에서 정한다: 오케스트레이터 src 전체의 실행 패치 (M3-31 #259 수용 기준 3, ADR-105 · ADR-142)', () => {
+  // 대상: 오케스트레이터 src 전체에서 종료 상태를 정하는 모듈 하나만 뺀다 (engine.test.ts의 같은 성질 시험은 두 파일만 본다)
   const terminalTargets = (set: SourceSet) =>
-    set.files.filter((rel) => /^(engine|runs|steps)\//.test(rel) && rel !== 'engine/run-ending.ts');
+    set.files.filter((rel) => rel !== 'engine/run-ending.ts');
   const writes = (set: SourceSet) =>
     terminalStatusWrites(
       set,
       terminalTargets(set),
       HALT_STATUSES,
-      topLevelDeclaration(set, 'runEnding', 'engine/run-ending.ts'),
+      topLevelDeclaration(set, 'runEnding', 'orchestrator/src/engine/run-ending.ts'),
       RunStatus.options,
     );
 
   it('잡는 함수 자체: 삼항 · 변수 · 단축 속성 · 스프레드(변수 · 삼항) · 좁은 상태 타입 · 패치 변수는 잡고, runEnding(을 그대로 돌려주는 함수)의 결과 · 다른 상태 · 단계 시도의 상태 · 저장된 실행 옮기기는 잡지 않는다', () => {
     const set = samples();
-    const found = writes(set).filter((write) => write.rel.includes('__terminal'));
+    const found = writes(set).filter((write) => write.rel.includes('__terminal-violation'));
     expect(found.map((write) => [write.rel, write.line, write.status, write.via])).toEqual([
       ['steps/__terminal-violation.ts', 5, 'failed', 'run>삼항'],
       ['steps/__terminal-violation.ts', 7, 'budget_exceeded', 'run>변수'],
@@ -2542,6 +2633,20 @@ describe('실행의 실패 쪽 종료 상태는 runEnding 한 곳에서 정한�
       ['steps/__terminal-violation.ts', 13, 'failed', 'run>타입'],
       ['steps/__terminal-violation.ts', 13, 'budget_exceeded', 'run>타입'],
       ['steps/__terminal-violation.ts', 15, 'failed', 'run>변수'],
+      ['steps/__terminal-violation.ts', 16, 'failed', 'run'],
+      ['steps/__terminal-violation.ts', 17, 'budget_exceeded', 'run'],
+    ]);
+    // 다른 폴더의 같은 이름 파일 · 이름만 같은 함수 · 대상 폴더 밖 (허용 함수는 선언 기준: 경로 · 이름이 같아도 그 선언이 아니면 잡는다)
+    expect(
+      writes(set)
+        .filter((write) => /__terminal-(fake|namesake|outside)|norms\/engine\//.test(write.rel))
+        .map((write) => [write.rel, write.line, write.status]),
+    ).toEqual([
+      ['ipc/__terminal-outside.ts', 4, 'failed'],
+      ['norms/engine/run-ending.ts', 2, 'failed'],
+      ['steps/__terminal-fake-ending.ts', 5, 'failed'],
+      ['steps/__terminal-namesake.ts', 7, 'failed'],
+      ['steps/__terminal-namesake.ts', 8, 'budget_exceeded'],
     ]);
     // 기존 시험(engine.test.ts)의 글자 대조는 이 표본을 모두 놓친다
     expect(
@@ -2551,13 +2656,14 @@ describe('실행의 실패 쪽 종료 상태는 runEnding 한 곳에서 정한�
     ).toEqual([]);
   }, 60_000);
 
-  it('제품 소스: 엔진(runEnding 모듈 밖) · 실행 · 단계 실행기의 실행 패치에 실패 쪽 종료 상태를 직접 쓰는 자리가 없다', () => {
+  it('제품 소스: 오케스트레이터 src 전체(runEnding 모듈 밖, 엔진 · 실행 · 단계 실행기 포함)의 실행 패치에 실패 쪽 종료 상태를 직접 쓰는 자리가 없다', () => {
     const set = productSource();
     const targets = terminalTargets(set);
     // 대상에 단계 실행기 폴더가 들었다 (수용 기준 3)
     expect(targets.filter((rel) => rel.startsWith('steps/')).length).toBeGreaterThan(5);
     expect(targets).toContain('engine/pipeline-engine.ts');
     expect(targets).toContain('runs/run-service.ts');
+    expect(targets.filter((rel) => rel.startsWith('ipc/')).length).toBeGreaterThan(5);
     expect(writes(set)).toEqual([]);
   }, 60_000);
 });
