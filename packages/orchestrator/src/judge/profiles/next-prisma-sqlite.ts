@@ -134,7 +134,9 @@ export const nextPrismaSqliteProfile: StackProfile = {
       await Promise.race([waitForHttp(baseUrl, server, ctx.deadline, ctx.signal), spawnFailed]);
       ctx.onStep('start', Date.now() - startedAt);
 
-      return { baseUrl, pid: server.pid ?? null, databasePath, stop };
+      const child = server;
+      const exited = (): boolean => child.exitCode !== null || child.signalCode !== null;
+      return { baseUrl, pid: server.pid ?? null, databasePath, stop, exited };
     } catch (err) {
       await stop();
       throw err;

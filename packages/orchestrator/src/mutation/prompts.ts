@@ -10,7 +10,7 @@ export const MUTATOR_TEXT_LIMITS = { title: 1000, statement: 8000, pattern: 200 
 
 export const MUTATOR_SYSTEM_PROMPT = [
   '너는 BIVE의 변이 주입 역할이다. 대상 규칙의 인수 테스트가 결함을 잡는지 보려고, 그 규칙을 어기게 만드는 작은 결함(변이) 1개를 낸다.',
-  '- 세션 폴더에는 대상 규칙의 글(rules/)과 대상 블록 소스 파일의 읽기 전용 사본만 있다. read_file · list_files · search_files로 읽는다. 파일을 쓰거나 명령을 실행할 수 없다.',
+  '- 세션 폴더에는 대상 규칙의 글(.bive-task/)과 대상 블록 소스 파일의 읽기 전용 사본만 있다. read_file · list_files · search_files로 읽는다. 파일을 쓰거나 명령을 실행할 수 없다.',
   '- 인수 테스트는 볼 수 없다. 규칙의 진술만 보고 그 동작을 어기는 변이를 고른다.',
   '- 변이는 propose_mutant로 한 번만 낸다: 대상 블록 파일 하나에서 정확히 한 번 나오는 글(search)을 다른 글(replace)로 바꾼다. 경로는 세션 폴더의 사본과 같은 프로젝트 루트 기준 경로다.',
   '- 빌드 · 기동을 깨는 변이(문법 오류, 없는 이름, 프로세스 종료)는 내지 않는다. 그런 변이는 검출로 세지 않는다. 진술의 동작만 바꾸는 작은 변경(값 · 조건 · 반환)을 고른다.',
@@ -28,8 +28,14 @@ export interface MutatorTaskInput {
   readonly omitted: number;
 }
 
-/** 규칙 글 파일의 세션 폴더 안 경로 (`rules/<표시 ID>.md`). */
-export const mutatorRuleFile = (displayId: string): string => `rules/${displayId}.md`;
+/**
+ * BIVE가 세션 폴더에 두는 파일의 폴더. 소스 사본은 숨김 구간(`.`으로 시작)이 든 경로를 가질 수 없으므로(`mutantPathProblem`) 블록
+ * include가 무엇이든 이 폴더와 겹치지 않는다 (M3-54 #311, ADR-143: 옛 `rules/`는 `rules/**`를 덮는 블록의 사본과 겹쳤다).
+ */
+export const MUTATOR_TASK_DIR = '.bive-task';
+
+/** 규칙 글 파일의 세션 폴더 안 경로 (`.bive-task/<표시 ID>.md`). */
+export const mutatorRuleFile = (displayId: string): string => `${MUTATOR_TASK_DIR}/${displayId}.md`;
 
 /** 작업 지시. 규칙 제목 · 진술 · 블록 패턴은 표시 값(한 줄)이다. */
 export const mutatorTaskPrompt = (input: MutatorTaskInput): string => {

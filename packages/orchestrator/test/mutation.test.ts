@@ -127,23 +127,38 @@ const RESULT = (cost: number) => ({
 type Turn = { tool: string; args: Record<string, unknown> } | { message: string };
 
 /** 규칙마다(`when.ruleId`) 변이 주입 세션 대본. 대본이 없는 규칙은 변이를 내지 않는 세션이다. */
-const writeScenario = (sessions: Record<string, Turn[]>, cost = 0.01): string => {
+const writeScenario = (
+  sessions: Record<string, Turn[]>,
+  cost = 0.01,
+  extra: {
+    readonly subtypes?: Record<string, 'error_during_execution'>;
+    readonly noMutator?: boolean;
+  } = {},
+): string => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bive-mutation-'));
   temps.push(dir);
   const scenario = structuredClone(loadScenario('happy-path'));
   scenario.name = 'mutation-test';
-  scenario.roles = {
-    mutator: {
-      sessions: [
-        ...Object.entries(sessions).map(([ruleId, turns]) => ({
-          when: { ruleId },
-          turns,
-          result: RESULT(cost),
-        })),
-        { turns: [{ message: '낼 변이가 없다.' }], result: RESULT(cost) },
-      ],
-    },
-  };
+  // 변이 주입 대본이 없는 시나리오 (가짜 어댑터의 기본 세션: 변이 없이 정상 종료, M3-54)
+  scenario.roles =
+    extra.noMutator === true
+      ? {}
+      : {
+          mutator: {
+            sessions: [
+              ...Object.entries(sessions).map(([ruleId, turns]) => ({
+                when: { ruleId },
+                turns,
+                result: {
+                  ...RESULT(cost),
+                  subtype: (extra.subtypes?.[ruleId] ?? 'success') as
+                    'success' | 'error_during_execution',
+                },
+              })),
+              { turns: [{ message: '낼 변이가 없다.' }], result: RESULT(cost) },
+            ],
+          },
+        };
   fs.writeFileSync(path.join(dir, 'mutation-test.yaml'), stringify(scenario));
   return dir;
 };
@@ -166,6 +181,8 @@ interface Harness {
   sessions: SessionSpec[];
   /** 세션이 열릴 때 본 세션 폴더의 파일 (세션 폴더 기준 경로, 정렬) */
   sessionFiles: string[][];
+  /** 세션이 열릴 때 본 세션 폴더의 파일 내용 */
+  sessionTexts: Record<string, string>[];
 }
 
 interface SetupOptions {
@@ -175,6 +192,12 @@ interface SetupOptions {
   readonly settings?: SettingsPatch;
   readonly cost?: number;
   readonly judging?: Partial<MutationStepOptions>;
+  /** 블록 선언 (기본 `DECLARATION`) */
+  readonly declaration?: BlockDeclaration;
+  /** 기준 커밋에 더 둘 파일 (경로 → 내용) */
+  readonly extraFiles?: Record<string, string>;
+  readonly subtypes?: Record<string, 'error_during_execution'>;
+  readonly noMutator?: boolean;
 }
 
 const listTree = (root: string): string[] => {
@@ -200,6 +223,10 @@ const setup = (options: SetupOptions): Harness => {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, `import { it } from 'vitest';\nit('${id} 동작', () => undefined);\n`);
   });
+  for (const [rel, text] of Object.entries(options.extraFiles ?? {})) {
+    fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+    fs.writeFileSync(path.join(repo, rel), text);
+  }
   userGit(repo, 'add', '--all');
   userGit(repo, 'commit', '-q', '-m', 'fixture: 인수 테스트');
   const project = registerProject(
@@ -215,7 +242,7 @@ const setup = (options: SetupOptions): Harness => {
   const at = new Date(T0).toISOString();
   const rules = withProject(biveHome, project.id, (store) => {
     store.settings.update(options.settings ?? COMPLETE_SETTINGS, { by: human, at });
-    store.blockDeclarations.set(DECLARATION, { at, by: human });
+    store.blockDeclarations.set(options.declaration ?? DECLARATION, { at, by: human });
     const requirement = store.requirements.create({
       id: newId(),
       text: '변이 시험 요구사항',
@@ -242,17 +269,30 @@ const setup = (options: SetupOptions): Harness => {
     );
   });
   const scripted = new ScriptedAdapter({
-    scenario: loadScenario('mutation-test', writeScenario(options.sessions, options.cost)),
+    scenario: loadScenario(
+      'mutation-test',
+      writeScenario(options.sessions, options.cost, {
+        ...(options.subtypes === undefined ? {} : { subtypes: options.subtypes }),
+        ...(options.noMutator === undefined ? {} : { noMutator: options.noMutator }),
+      }),
+    ),
     biveHome,
     pollIntervalMs: 20,
   });
   const sessions: SessionSpec[] = [];
   const sessionFiles: string[][] = [];
+  const sessionTexts: Record<string, string>[] = [];
   const adapter: AgentAdapter = {
     kind: scripted.kind,
     startSession: (spec) => {
       sessions.push(spec);
-      sessionFiles.push(listTree(spec.workDir));
+      const listed = listTree(spec.workDir);
+      sessionFiles.push(listed);
+      sessionTexts.push(
+        Object.fromEntries(
+          listed.map((rel) => [rel, fs.readFileSync(path.join(spec.workDir, rel), 'utf8')]),
+        ),
+      );
       return scripted.startSession(spec);
     },
   };
@@ -292,6 +332,7 @@ const setup = (options: SetupOptions): Harness => {
     judgeCalls,
     sessions,
     sessionFiles,
+    sessionTexts,
   };
 };
 
@@ -408,7 +449,7 @@ describe('변이 주입 세션 · propose_mutant · 판정 (수용 기준 1)', (
       rules: [{ blocks: ['health'], risk: 'medium' }],
       sessions: {
         'RULE-001': [
-          { tool: 'read_file', args: { path: 'rules/RULE-001.md' } },
+          { tool: 'read_file', args: { path: '.bive-task/RULE-001.md' } },
           { tool: 'read_file', args: { path: 'bive-acceptance/RULE-001/mutation.acc.ts' } },
           { tool: 'list_files', args: { path: 'bive-acceptance' } },
           { tool: 'write_file', args: { path: HEALTH, content: 'x' } },
@@ -427,7 +468,7 @@ describe('변이 주입 세션 · propose_mutant · 판정 (수용 기준 1)', (
       'search_files',
       'propose_mutant',
     ]);
-    expect(h.sessionFiles[0]).toEqual(['rules/RULE-001.md', HEALTH]);
+    expect(h.sessionFiles[0]).toEqual(['.bive-task/RULE-001.md', HEALTH]);
     // 작업 지시에 인수 테스트 · 케이스 이름 · 다른 규범이 없다
     expect(h.sessions[0]?.prompt).not.toContain('bive-acceptance');
     expect(h.sessions[0]?.prompt).toContain('대상 규칙 RULE-001');
@@ -490,7 +531,7 @@ describe('변이 주입 세션 · propose_mutant · 판정 (수용 기준 1)', (
           { tool: 'propose_mutant', args: VALID_MUTANT },
           { tool: 'propose_mutant', args: { path: HEALTH, search: 'getDb', replace: 'x' } },
           // 받아들인 뒤에는 읽기 도구도 닫힌 세션으로 거부한다 (실행기가 닫힘)
-          { tool: 'read_file', args: { path: 'rules/RULE-001.md' } },
+          { tool: 'read_file', args: { path: '.bive-task/RULE-001.md' } },
         ],
       },
     });
@@ -672,8 +713,8 @@ describe('대상 순서와 예산 (수용 기준 2)', () => {
       'RULE-004',
     ]);
     // 세션 폴더의 사본은 그 규칙의 대상 블록 파일뿐이다
-    expect(h.sessionFiles[0]).toEqual(['rules/RULE-002.md', AUTH]);
-    expect(h.sessionFiles[3]).toEqual(['rules/RULE-003.md', LIB]);
+    expect(h.sessionFiles[0]).toEqual(['.bive-task/RULE-002.md', AUTH]);
+    expect(h.sessionFiles[3]).toEqual(['.bive-task/RULE-003.md', LIB]);
     expect(stepExit(done).excluded).toEqual([
       { ruleId: 'RULE-006', reason: 'no_target_blocks' },
       { ruleId: 'RULE-007', reason: 'no_acceptance' },
@@ -750,4 +791,102 @@ describe('설정: 변이 주입 역할 (수용 기준 4의 서버 쪽)', () => {
       }),
     ).toEqual({ ok: true });
   });
+});
+
+describe('단계 켜기 · 세션 처리 · 세션 폴더 (M3-54 #311 수용 기준 1, ADR-143)', () => {
+  it('세션이 정상 종료하지 않고 변이도 내지 않으면 변이 없음으로 삼키지 않고 단계 미충족: 실행은 step_unmet으로 끝나고 병합 · 기록 없음', async () => {
+    const h = setup({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: { 'RULE-001': [{ message: '오류' }] },
+      subtypes: { 'RULE-001': 'error_during_execution' },
+    });
+    const base = mainTip(h);
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({ status: 'failed', failureReason: 'step_unmet' });
+    expect(stepExit(done)).toMatchObject({
+      reason: 'step_unmet',
+      detail: { reason: 'session_error', ruleId: 'RULE-001', endReason: 'error_during_execution' },
+    });
+    expect(mutationsOf(h)).toEqual([]);
+    expect(h.judgeCalls).toEqual([]);
+    expect(mainTip(h)).toBe(base);
+  }, 60_000);
+
+  it('변이 주입 대본이 없는 시나리오: 가짜 어댑터가 변이 없이 정상 종료하는 세션을 재생해 변이 미검증 · 단계 통과 · 판정 없음', async () => {
+    const h = setup({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: {},
+      noMutator: true,
+    });
+    const done = await runToEnd(h);
+    expect(done.run.status).toBe('merged');
+    expect(h.sessions.map((spec) => spec.role)).toEqual(['mutator']);
+    expect(h.judgeCalls).toEqual([]);
+    expect(mutationsOf(h).map((item) => [item.status, item.outcome])).toEqual([
+      ['unverified', 'no_mutant'],
+    ]);
+  }, 60_000);
+
+  it('변이를 받은 뒤에도 도구를 계속 부르는 세션은 거부 3번 뒤 끝나고, 받은 변이는 판정된다 (한도로 실행이 끝나지 않는다)', async () => {
+    const h = setup({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: {
+        'RULE-001': [
+          { tool: 'propose_mutant', args: VALID_MUTANT },
+          ...Array.from({ length: 6 }, () => ({
+            tool: 'read_file',
+            args: { path: '.bive-task/RULE-001.md' },
+          })),
+        ],
+      },
+    });
+    const done = await runToEnd(h);
+    expect(done.run.status).toBe('merged');
+    expect(toolCallsOf(h).map((call) => call.reason ?? call.status)).toEqual([
+      'ok',
+      'session_closed',
+      'session_closed',
+      'session_closed',
+    ]);
+    const [session] = withProject(h.biveHome, h.projectId, (store) =>
+      store.sessions.listByRun(h.runId),
+    );
+    expect(session?.endReason).toBe('aborted');
+    expect(mutationsOf(h).map((item) => [item.status, item.outcome])).toEqual([
+      ['verified', 'killed'],
+    ]);
+  }, 60_000);
+
+  it('세션 폴더: 블록 include가 rules/**를 덮어도 규칙 글(.bive-task/)과 소스 사본이 겹치지 않고, include가 **여도 인수 테스트 사본은 없다', async () => {
+    const h = setup({
+      rules: [{ blocks: ['all'], risk: 'high' }],
+      sessions: {},
+      declaration: {
+        blocks: [
+          { name: 'all', kind: 'domain', include: ['**'], public: [], dependsOn: [], risk: 'high' },
+        ],
+      },
+      extraFiles: { 'rules/RULE-001.md': '프로젝트의 문서 (BIVE 규칙 글이 아님)\n' },
+    });
+    const done = await runToEnd(h);
+    expect(done.run.status).toBe('merged');
+    const files = h.sessionFiles[0] ?? [];
+    expect(files).toContain('.bive-task/RULE-001.md');
+    expect(files).toContain('rules/RULE-001.md');
+    expect(files).toContain(HEALTH);
+    expect(files.filter((file) => file.startsWith('bive-acceptance/'))).toEqual([]);
+    // BIVE 폴더 밖의 숨김 경로 사본도 없다
+    expect(
+      files.filter(
+        (file) =>
+          file.split('/').some((part) => part.startsWith('.')) && !file.startsWith('.bive-task/'),
+      ),
+    ).toEqual([]);
+    expect(h.sessionTexts[0]?.['.bive-task/RULE-001.md']).toContain(
+      'WHEN 클라이언트가 요청 1을 보내면',
+    );
+    expect(h.sessionTexts[0]?.['rules/RULE-001.md']).toBe(
+      '프로젝트의 문서 (BIVE 규칙 글이 아님)\n',
+    );
+  }, 60_000);
 });

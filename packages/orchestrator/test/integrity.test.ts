@@ -1930,3 +1930,24 @@ describe('네트워크 감시 도구 자체 (수용 기준 4의 대조군, 실�
     expect(records).toHaveLength(count);
   });
 });
+
+describe('변이 판정 기록을 쓰는 곳은 변이 주입 단계 실행기 하나 (M3-54 #311, JDG-04, ADR-139 · ADR-143, 코드 구조)', () => {
+  it('저장소의 변이 기록 쓰기(`.mutations.record(`)는 steps/mutation.ts 하나이고, 에이전트 도구 · 세션 코드는 변이 기록 표를 모른다', () => {
+    const files = sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+    const using = (pattern: RegExp) =>
+      files
+        .filter((f) => pattern.test(f.text))
+        .map((f) => f.rel)
+        .sort();
+    expect(using(/\.mutations\.record\(/)).toEqual(['steps/mutation.ts']);
+    expect(using(/\bmutation_results\b/)).toEqual([]);
+    for (const { rel, text } of files) {
+      if (/^(tools|agent|mutation)\//.test(rel)) {
+        expect(/\.mutations\./.test(text), rel).toBe(false);
+      }
+    }
+  });
+});

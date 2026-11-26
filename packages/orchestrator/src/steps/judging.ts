@@ -357,6 +357,8 @@ export const judgeCommit = async (
       // 설치 전 체크아웃 그대로의 인수 테스트 해시. 러너가 시작 · vitest 앞뒤로 지문을 대조한다 (ADR-069)
       acceptanceHashes,
       ...(recorder === undefined ? {} : { serverProxy: recorder }),
+      // 변이 판정만 서버가 끝까지 살아 있어야 한다 (M3-54, ADR-143)
+      ...(input.applyMutant === undefined ? {} : { requireServerAlive: true }),
     };
     const result = await (options.judge === undefined
       ? new JudgeRunner({ biveHome: context.biveHome }).run(judgeInput)

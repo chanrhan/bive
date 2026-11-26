@@ -127,6 +127,12 @@ const applyLimits = (
   };
 };
 
+/** 변이 주입 대본이 없을 때 재생하는 세션: 도구를 부르지 않고 성공으로 끝난다(비용 0, 가짜 어댑터에만 있다). */
+export const NO_MUTANT_SESSION: ScenarioSession = {
+  turns: [{ message: '이 시나리오에는 변이 주입 대본이 없다: 변이를 내지 않는다.' }],
+  result: { subtype: 'success', total_cost_usd: 0, num_turns: 1, modelUsage: {} },
+};
+
 export class ScriptedAdapter implements AgentAdapter {
   readonly kind = 'scripted' as const;
   readonly scenario: Scenario;
@@ -159,6 +165,9 @@ export class ScriptedAdapter implements AgentAdapter {
     const counted = this.opened.get(key) ?? 0;
     this.opened.set(key, counted + 1);
     const script = this.scenario.roles[spec.role];
+    // 변이 주입 역할의 대본이 없는 시나리오: 변이를 내지 않고 정상 종료하는 세션으로 재생한다 (M3-54 #311, ADR-143). 변이 주입
+    // 단계는 거의 모든 유형 A 실행에 끼므로 기존 시나리오마다 같은 빈 대본을 적지 않는다. 다른 역할은 그대로 대본 없음 오류다
+    if (script === undefined && spec.role === 'mutator') return NO_MUTANT_SESSION;
     if (script === undefined) {
       throw new ScenarioError(`시나리오 ${this.scenario.name}에 역할 ${spec.role}의 세션 없음`);
     }

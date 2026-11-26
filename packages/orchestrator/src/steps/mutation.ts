@@ -9,7 +9,7 @@
 //      케이스 없음 · 체크아웃 · 설치 · 수집 · 러너 오류)은 판정 불가(미검증, 검출로 세지 않는다)
 // 변이 생존 · 판정 불가는 실행을 실패로 만들지 않는다(단계 통과). 세션을 열 예산이 없으면 엔진이 실행을 예산 초과로 끝내고(병합 전), 남은
 // 규칙은 기록 없이 '변이 미검증'으로 남는다. 인수 테스트 변조 · 규범 저장소 불일치는 판정을 믿을 수 없어 실행을 끝낸다(검사 단계와 같다).
-// 기본 실행기 목록에는 아직 넣지 않았다(M3-07 ③: 단계를 켜기 · 자동 보강 · 재주입은 뒤 작업, ADR-139).
+// 기본 실행기 목록의 변이 주입 단계다(M3-54 #311, ADR-143). 유형 A만 새 변이를 내고 그 밖의 유형은 생략으로 기록한다.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -182,11 +182,42 @@ const writeMutant = (checkoutDir: string, mutant: CheckedMutant): void => {
   fs.writeFileSync(target, mutant.mutated);
 };
 
+/** 변이 대상이 하나도 없어 생략한 변이 주입 단계의 사유 (`exitDetail.reason`). */
+export const NO_MUTATION_TARGETS = 'no_mutation_targets';
+
 /** 변이 주입 단계 실행기를 만든다. */
 export const createMutationExecutor =
   (options: MutationStepOptions = {}): StepExecutor =>
   async (context): Promise<StepOutcome> => {
     const git = options.git ?? createGitRunner();
+    // 유형 A만 새 변이를 낸다 (ADR-020: 변이 주입은 A · C(보강)만, 유형 B는 계획에서 생략, D는 계획에 없음)
+    if (context.run.type !== 'A') {
+      return { status: 'skipped', exitDetail: { reason: 'run_type', runType: context.run.type } };
+    }
+    const { rules, declaration, contractFiles } = context.read((store) => ({
+      rules: context.run.targetRuleIds
+        .map((id) => store.rules.get(id))
+        .filter((rule): rule is Rule => rule !== null && rule.deletedAt === null),
+      declaration: store.blockDeclarations.current()?.declaration.blocks ?? null,
+      contractFiles: effectiveContracts(store).map((contract) => contract.sourceFile),
+    }));
+    // 블록 선언 · 대상 블록으로 대상이 하나도 없으면 커밋 · 해시를 보기 전에 세션 · 판정 없이 끝난다: 이 실행에서 한 일이 없으므로
+    // 생략으로 기록한다 (사유 `no_mutation_targets`, ADR-143)
+    const early = selectMutationTargets(
+      rules,
+      declaration,
+      rules.map((rule) => rule.displayId),
+    );
+    if (early.targets.length === 0) {
+      return {
+        status: 'skipped',
+        exitDetail: {
+          reason: NO_MUTATION_TARGETS,
+          commit: context.run.headCommit,
+          excluded: early.excluded.map(({ rule, reason }) => ({ ruleId: rule.displayId, reason })),
+        },
+      };
+    }
     // 판정할 커밋 = 마지막 완료 단계 커밋 (검사 단계가 판정한 커밋)
     const commit = context.run.headCommit;
     const headKind = headStepKindOf(context.run.type);
@@ -200,13 +231,6 @@ export const createMutationExecutor =
     if (baseline === null || baseline.kind !== 'hashes') {
       return halt('state_inconsistent', { message: missingBaselineMessage(context.run.type) });
     }
-    const { rules, declaration, contractFiles } = context.read((store) => ({
-      rules: context.run.targetRuleIds
-        .map((id) => store.rules.get(id))
-        .filter((rule): rule is Rule => rule !== null && rule.deletedAt === null),
-      declaration: store.blockDeclarations.current()?.declaration.blocks ?? null,
-      contractFiles: effectiveContracts(store).map((contract) => contract.sourceFile),
-    }));
     const acceptanceDirs = [
       ...new Set(
         Object.keys(baseline.hashes)
@@ -216,7 +240,6 @@ export const createMutationExecutor =
     ];
     const { targets, excluded } = selectMutationTargets(rules, declaration, acceptanceDirs);
     const excludedDetail = excluded.map(({ rule, reason }) => ({ ruleId: rule.displayId, reason }));
-    // 변이 대상이 없으면 세션 · 판정(설치 · 빌드) 없이 끝난다
     if (targets.length === 0) {
       return { status: 'passed', exitDetail: { commit, results: [], excluded: excludedDetail } };
     }
@@ -237,6 +260,7 @@ export const createMutationExecutor =
       // 세션 콜백이 채운다 (닫힘 안의 대입은 흐름 분석이 보지 못해 칸으로 둔다)
       const proposed: { mutant: CheckedMutant | null } = { mutant: null };
       let sessionId: string;
+      let sessionEnd: string;
       try {
         const inputs = await prepareSession(
           context,
@@ -276,10 +300,26 @@ export const createMutationExecutor =
           },
         });
         sessionId = session.sessionId;
+        sessionEnd = session.endReason;
       } finally {
         fs.rmSync(sessionDir, { recursive: true, force: true });
       }
       const { mutant } = proposed;
+      // 세션이 정상 종료하지 않았고 변이도 받지 못했으면 '변이 없음'으로 삼키지 않는다: 다른 역할의 세션 오류처럼 단계 미충족
+      // (변이 주입 단계에는 회귀 규칙이 없어 실행이 `step_unmet`으로 끝난다, ADR-143). 변이를 받았으면 세션 끝이 어떻든 판정한다
+      if (mutant === null && sessionEnd !== 'success') {
+        return {
+          status: 'unmet',
+          exitDetail: {
+            reason: 'session_error',
+            ruleId: rule.displayId,
+            sessionId,
+            endReason: sessionEnd,
+            commit,
+            results,
+          },
+        };
+      }
       let outcome: MutationOutcome;
       if (mutant === null) {
         outcome = 'no_mutant';

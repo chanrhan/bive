@@ -95,6 +95,12 @@ export interface JudgeRunInput {
    * URL을 넘긴다. 판정이 끝나면(실패 · 중단 · 시간 초과 포함) 서버보다 먼저 `stop`을 부른다. 주지 않으면 판정 동작이 그대로다
    */
   serverProxy?: JudgeServerProxy;
+  /**
+   * 판정 서버가 vitest가 끝날 때까지 살아 있어야 한다 (변이 판정만, M3-54 #311 · ADR-143). 참이면 vitest가 끝난 시점에 서버 프로세스가
+   * 이미 끝나 있던 판정을 케이스 결과로 쓰지 않고 `runner_error`로 끝낸다(서버를 죽이는 변이를 "테스트가 잡음"으로 세지 않게).
+   * 생략하면 기존 동작(검사 · Red · Green 확인 · 구현 판정)
+   */
+  requireServerAlive?: boolean;
 }
 
 /** 판정 서버 앞에 끼우는 프록시 (계약 검사의 기록 프록시 등). */
@@ -190,6 +196,10 @@ export interface JudgeRunnerOptions {
    */
   tempDir?: string;
 }
+
+/** 변이 판정 중 서버 프로세스가 스스로 끝났을 때의 러너 오류 글 (BIVE 고정 문구, M3-54 · ADR-143). */
+export const SERVER_DIED_MESSAGE =
+  '판정 중 서버 프로세스가 끝났습니다 (서버를 끝내는 변이는 검출로 세지 않음)';
 
 /** 대상 규칙 폴더에 인수 테스트 파일이 하나도 없을 때의 문제 글 (BIVE 고정 문구). */
 export const NO_ACCEPTANCE_FILES_MESSAGE = '인수 테스트 파일 없음';
@@ -524,12 +534,15 @@ export class JudgeRunner {
       });
       timings.vitest = exit.durationMs;
       exitCode = exit.code;
+      // 멈추기 전에 본다: 서버가 스스로 끝났는지 (stop 뒤에는 늘 끝나 있다)
+      const serverDied = input.requireServerAlive === true && server.exited();
       // vitest가 끝나면 서버(프로젝트 코드)를 먼저 멈춘 뒤 대조하고 결과를 읽는다 (대조 뒤 서버가 바꾸지 못하게). 프록시가 있으면 그 앞에서 멈춘다
       await stopProxy();
       await server.stop();
       // vitest가 끝난 직후 (실행 중 서버 코드가 바꿨는지)
       const afterVitest = changedSinceBaseline();
       if (afterVitest.length > 0) return await tamper('after_vitest', afterVitest);
+      if (serverDied) return await runnerError(SERVER_DIED_MESSAGE);
       if (exit.aborted) return await runnerError(new JudgeAbortedError('vitest').message);
       if (exit.timedOut) return await runnerError(new JudgeTimeoutError('vitest').message);
       if (exit.error !== null || exit.signal !== null) {
