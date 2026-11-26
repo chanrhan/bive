@@ -15,6 +15,7 @@ import {
   type FileToolName,
   type FixedToolName,
   ListFilesInput,
+  ProposeMutantInput,
   ProposeRuleInput,
   RaiseObjectionInput,
   ReadFileInput,
@@ -95,14 +96,24 @@ export interface RoleToolsHooks {
     input: RaiseObjectionInput,
     context: ProposalContext,
   ) => Promise<string | ToolResult> | string | ToolResult;
-  /** 실행기가 닫힐 때 한 번 (이의 제기 · 판단 완료). 세션을 여는 쪽이 이것으로 세션을 끝낸다 */
+  /**
+   * `propose_mutant`(변이 제안, M3-07 #52, ADR-139): 주입한 콜백이 판정 커밋에서 변이를 검증하고 받아 둔다(작업 트리 · 저장소를 바꾸지
+   * 않는다). 결과가 `ok`이면 실행기가 닫히고(`close('mutant_proposed')`, 세션마다 변이 1개) 그 뒤 호출은 모두 `denied`
+   * (`session_closed`)다. 결과 본문 끝에 {@link MUTANT_ACCEPTED_TEXT}를 붙인다. 거부면 닫지 않는다(사유를 읽고 고쳐 다시 낼 수 있다).
+   * 주입하지 않으면 호출이 `error`(`not_configured`)로 끝난다.
+   */
+  proposeMutant?: (
+    input: ProposeMutantInput,
+    context: ProposalContext,
+  ) => Promise<string | ToolResult> | string | ToolResult;
+  /** 실행기가 닫힐 때 한 번 (이의 제기 · 판단 완료 · 변이 제안). 세션을 여는 쪽이 이것으로 세션을 끝낸다 */
   onClose?: (reason: ToolExecutorCloseReason) => void;
   /** 도구 호출이 끝날 때마다 (거부 · 오류 포함) */
   onToolCall?: (record: ToolCallRecord) => void;
 }
 
-/** 실행기를 닫은 이유: 구현 역할의 이의 제기 · 이의 판단 세션의 판단 완료 (M7-11). */
-export type ToolExecutorCloseReason = 'objection_raised' | 'judgment_complete';
+/** 실행기를 닫은 이유: 구현 역할의 이의 제기 · 이의 판단 세션의 판단 완료 (M7-11) · 변이 주입 역할의 변이 제안 (M3-07). */
+export type ToolExecutorCloseReason = 'objection_raised' | 'judgment_complete' | 'mutant_proposed';
 
 /**
  * 이의 제기가 받아들여졌을 때 도구 결과 끝에 붙이는 고정 문장 (M7-11, ADR-115 검토 1회차). 세션을 중단하지 않고 모델이 스스로
@@ -110,6 +121,17 @@ export type ToolExecutorCloseReason = 'objection_raised' | 'judgment_complete';
  */
 export const OBJECTION_ACCEPTED_TEXT =
   '이의가 접수됐다. 더 할 일이 없다. 도구를 더 부르지 말고 세션을 끝내라.';
+
+/** 변이가 받아들여졌을 때 도구 결과 끝에 붙이는 고정 문장 (M3-07, ADR-139). 모델이 스스로 세션을 끝내게 한다. */
+export const MUTANT_ACCEPTED_TEXT =
+  '변이가 접수됐다. 판정은 오케스트레이터가 한다. 도구를 더 부르지 말고 세션을 끝내라.';
+
+/** 닫힌 실행기의 거부 문장. */
+const CLOSED_TEXT: Record<ToolExecutorCloseReason, string> = {
+  objection_raised: '이의를 제기해 이 세션은 끝났다. 더 이상 도구를 부르지 않는다',
+  judgment_complete: '판단을 모두 남겨 이 세션은 끝났다. 더 이상 도구를 부르지 않는다',
+  mutant_proposed: '변이를 내서 이 세션은 끝났다. 더 이상 도구를 부르지 않는다',
+};
 
 export interface CreateRoleToolsOptions {
   role: AgentRole;
@@ -255,12 +277,7 @@ export class FixedToolExecutor implements ToolExecutor {
     // 닫힌 실행기는 이름 · 인자와 무관하게 아무것도 하지 않는다 (이의를 부른 뒤 구현 코드를 더 쓰지 못한다, ADR-115)
     if (this.closedBy !== null) {
       return {
-        result: denied(
-          'session_closed',
-          this.closedBy === 'objection_raised'
-            ? '이의를 제기해 이 세션은 끝났다. 더 이상 도구를 부르지 않는다'
-            : '판단을 모두 남겨 이 세션은 끝났다. 더 이상 도구를 부르지 않는다',
-        ),
+        result: denied('session_closed', CLOSED_TEXT[this.closedBy]),
         summary: summaryOf(name, args),
       };
     }
@@ -281,6 +298,9 @@ export class FixedToolExecutor implements ToolExecutor {
       return { result: await this.uphold(args), summary: summarizeArgs(args) };
     if (tool === 'raise_objection')
       return { result: await this.objection(args), summary: summarizeArgs(args) };
+    // 변이 글은 기록에 싣지 않는다: 대상 경로만 (파일 도구와 같은 요약)
+    if (tool === 'propose_mutant')
+      return { result: await this.mutant(args), summary: summaryOf('read_file', args) };
     return { result: await this.fileTool(tool, args), summary: summaryOf(tool, args) };
   }
 
@@ -384,6 +404,27 @@ export class FixedToolExecutor implements ToolExecutor {
     if (result.status !== 'ok') return result;
     this.close('objection_raised');
     return { ...result, content: `${result.content}\n${OBJECTION_ACCEPTED_TEXT}` };
+  }
+
+  /**
+   * 변이 제안 (M3-07, ADR-139): 인자 검증 뒤 주입된 콜백(판정 커밋에서 검증 · 받아 두기)에 넘긴다. 콜백이 `ok`를 돌려주면 실행기를
+   * 닫는다(세션마다 변이 1개). 거부 · 오류면 닫지 않는다.
+   */
+  private async mutant(args: Record<string, unknown>): Promise<ToolResult> {
+    const parsed = ProposeMutantInput.safeParse(args);
+    if (!parsed.success) return invalidArgs('propose_mutant', parsed.error);
+    const propose = this.hooks.proposeMutant;
+    if (propose === undefined) return failed('not_configured', '변이 판정 경로가 연결되지 않음');
+    let result: ToolResult;
+    try {
+      const outcome = await propose(parsed.data, { role: this.role, sessionId: this.sessionId });
+      result = typeof outcome === 'string' ? ok(outcome) : outcome;
+    } catch (error) {
+      return failed('tool_failed', error instanceof Error ? error.message : String(error));
+    }
+    if (result.status !== 'ok') return result;
+    this.close('mutant_proposed');
+    return { ...result, content: `${result.content}\n${MUTANT_ACCEPTED_TEXT}` };
   }
 }
 

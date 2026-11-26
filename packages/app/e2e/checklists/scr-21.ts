@@ -1,6 +1,6 @@
 // SCR-21 설정 (screens.md 7장 X-02, ADR-010 · ADR-035 · ADR-057): 사이드바 하단 톱니 → 모달(820 × 600).
 // 예산 · 모델 섹션: 실행 전체 한도(USD · 턴) + 프로젝트 하루 한도(USD, 비움 허용, M7-04 · ADR-104)
-// + 역할별(rule-writer · test-writer · implementer) 모델 · 한도.
+// + 역할별(rule-writer · test-writer · implementer · 변이 주입) 모델 · 한도.
 // 섹션 목록에는 IDE(코드 열기, ADR-018 · ADR-087)가 하나 더 있다. 기본 상태는 예산 · 모델이 골라져 있다.
 // 나머지 섹션(잠정 승인 · 자동 모드 · 대기열 · 작성 규칙)과 planner · 채팅 역할 행은 DOM에 없다.
 // 상태: 기본 = 모달 열림 · 저장된 설정(검증 통과), 빈 = 미설정(한 번도 저장하지 않음, 화면 정의서에 정의 없음 · ADR-029).
@@ -30,14 +30,23 @@ export const IDE_TEXT = {
   pathHint: '{path}: 맨 앞 / 뺀 절대 경로 · {line}: 줄 번호',
 } as const;
 
-/** 보이는 역할 행 (화면 정의서 명칭). */
-export const ROLE_ROWS = ['rule-writer', 'test-writer', 'implementer'] as const;
+/** 보이는 역할 행 (화면 정의서 명칭) → 행 이름. 변이 주입 행은 M3-07 (#52, ADR-139). */
+export const ROLE_ROWS = ['rule-writer', 'test-writer', 'implementer', 'mutator'] as const;
+export const ROLE_ROW_NAMES = {
+  'rule-writer': 'rule-writer',
+  'test-writer': 'test-writer',
+  implementer: 'implementer',
+  mutator: '변이 주입',
+} as const satisfies Record<(typeof ROLE_ROWS)[number], string>;
 
 /** 입력 칸의 접근 가능한 이름 (행 + 열). */
 export const FIELD_NAMES = [
   '실행 전체 한도 USD',
   '실행 전체 턴',
-  ...ROLE_ROWS.flatMap((role) => [`${role} 모델`, `${role} 한도 USD`, `${role} 턴`]),
+  ...ROLE_ROWS.flatMap((role) => {
+    const name = ROLE_ROW_NAMES[role];
+    return [`${name} 모델`, `${name} 한도 USD`, `${name} 턴`];
+  }),
 ] as const;
 
 /** 프로젝트 하루 한도 입력 칸의 접근 가능한 이름 (필수 칸이 아니라 `FIELD_NAMES`와 따로 둔다, ADR-104). */

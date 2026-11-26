@@ -44,6 +44,7 @@ const settingsWith = (overrides: Partial<Settings> = {}): Settings => ({
     planner: EMPTY_ROLE,
     'test-writer': EMPTY_ROLE,
     implementer: EMPTY_ROLE,
+    mutator: EMPTY_ROLE,
     chat: EMPTY_ROLE,
   },
   dailyBudgetUsd: null,
@@ -66,6 +67,7 @@ const FILLED = settingsWith({
     'rule-writer': { model: 'test-model', maxBudgetUsd: 1, maxTurns: 20 },
     'test-writer': FULL_ROLE,
     implementer: FULL_ROLE,
+    mutator: { model: 'test-model', maxBudgetUsd: 1, maxTurns: 50 },
   },
   dailyBudgetUsd: 10,
   updatedAt: '2026-10-16T09:00:00.000Z',
@@ -84,7 +86,7 @@ const INCOMPLETE = (missing: string[]): SettingsValidateResult =>
 const ALL_MISSING = [
   'run.maxBudgetUsd',
   'run.maxTurns',
-  ...['rule-writer', 'test-writer', 'implementer'].flatMap((role) => [
+  ...['rule-writer', 'test-writer', 'implementer', 'mutator'].flatMap((role) => [
     `roles.${role}.model`,
     `roles.${role}.maxBudgetUsd`,
     `roles.${role}.maxTurns`,
@@ -291,7 +293,10 @@ test.describe('저장', () => {
       updatedBy: { kind: 'human' },
     });
     const stillMissing = ALL_MISSING.filter(
-      (path) => path.startsWith('roles.test-writer') || path.startsWith('roles.implementer'),
+      (path) =>
+        path.startsWith('roles.test-writer') ||
+        path.startsWith('roles.implementer') ||
+        path.startsWith('roles.mutator'),
     );
     await bive.setResponse('settings.update', { result: { settings: saved } });
     await bive.setResponse('settings.validateForRun', { result: INCOMPLETE(stillMissing) });
@@ -313,6 +318,7 @@ test.describe('저장', () => {
               'rule-writer': { model: 'test-model', maxBudgetUsd: 1, maxTurns: 20 },
               'test-writer': EMPTY_ROLE,
               implementer: EMPTY_ROLE,
+              mutator: EMPTY_ROLE,
             },
           },
           author: { kind: 'human' },
@@ -329,7 +335,7 @@ test.describe('저장', () => {
     // 나머지 역할을 채워 저장하면 "설정 완료"
     await bive.setResponse('settings.update', { result: { settings: FILLED } });
     await bive.setResponse('settings.validateForRun', { result: OK });
-    for (const role of ['test-writer', 'implementer']) {
+    for (const role of ['test-writer', 'implementer', '변이 주입']) {
       await field(page, `${role} 모델`).fill('test-model');
       await field(page, `${role} 한도 USD`).fill('2');
       await field(page, `${role} 턴`).fill('100');

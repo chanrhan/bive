@@ -72,6 +72,7 @@ describe('변환', () => {
           'rule-writer': { model: 'test-model', maxBudgetUsd: 0.01, maxTurns: 20 },
           'test-writer': { model: null, maxBudgetUsd: null, maxTurns: null },
           implementer: { model: null, maxBudgetUsd: null, maxTurns: null },
+          mutator: { model: null, maxBudgetUsd: null, maxTurns: null },
         },
       },
     });

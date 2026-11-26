@@ -14,6 +14,9 @@ import {
   ContractKind,
   JudgeRunner,
   JudgmentStatus,
+  MutationOutcome,
+  mutationStatusOf,
+  MutationStatus,
   NormChangeKind,
   NormState,
   ProposalKind,
@@ -65,7 +68,6 @@ export type EntityName = z.infer<typeof EntityName>;
 export const RESERVED_ENTITY_NAMES = [
   'Adr',
   'CodeChange',
-  'MutationResult',
   'ReviewItem',
   'ChatThread',
   'ChatMessage',
@@ -403,12 +405,14 @@ export const defaultSettings = (projectId: Ulid): Settings => ({
 
 /**
  * 실행 전에 반드시 채워야 하는 역할 (M1, ADR-057). planner · chat 등은 그 역할을 쓰는 이슈가
- * `settings.validateForRun`의 `roles`로 넘겨 검사한다 (M4-01 · M5-01).
+ * `settings.validateForRun`의 `roles`로 넘겨 검사한다 (M4-01 · M5-01). 변이 주입 역할(`mutator`)은 M3-07(#52, ADR-139)이 더했다:
+ * 기본값이 없어 옛 설정은 그 칸이 비어 있고 채우기 전까지 실행을 만들지 못한다(NFR-07).
  */
 export const RUN_REQUIRED_ROLES = [
   'rule-writer',
   'test-writer',
   'implementer',
+  'mutator',
 ] as const satisfies readonly AgentRole[];
 
 /** 비어 있는 설정 항목의 경로: `run.<필드>` 또는 `roles.<역할>.<필드>`. */
@@ -1664,12 +1668,13 @@ export const RUN_STEP_PLANS = {
 } as const satisfies Record<RunType, readonly StepKind[]>;
 
 /**
- * 유형이 생략하는 단계 (RUN-07, ADR-020 · ADR-136): 엔진이 실행기를 부르지 않고 `skipped`로 기록한다. 변이 주입은 유형과 무관하게
- * 변이 주입 실행기가 `skipped`로 기록한다(P1).
+ * 유형이 생략하는 단계 (RUN-07, ADR-020 · ADR-136): 엔진이 실행기를 부르지 않고 `skipped`로 기록한다. 변이 주입은 유형 A · C(보강)만
+ * 하므로(ADR-020) 유형 B도 생략한다(M3-07 #52, ADR-139: 그 유형의 예산 · 모델 스냅샷에 변이 주입 역할이 들지 않는다). 유형 A · C의
+ * 변이 주입 단계를 실제로 돌릴지는 변이 주입 실행기가 정한다.
  */
 export const RUN_TYPE_SKIPPED_STEPS = {
   A: [],
-  B: ['test_writing', 'red_check'],
+  B: ['test_writing', 'red_check', 'mutation'],
   C: ['implementation'],
   D: ['test_writing', 'red_check'],
 } as const satisfies Record<RunType, readonly StepKind[]>;
@@ -1693,7 +1698,7 @@ export const STEP_ROLES = {
   green_check: null,
   implementation: 'implementer',
   check: null,
-  mutation: null,
+  mutation: 'mutator',
   merge: null,
   screen_update: null,
 } as const satisfies Record<StepKind, AgentRole | null>;
@@ -1986,6 +1991,60 @@ export const JudgmentResult = z
     }
   });
 export type JudgmentResult = z.infer<typeof JudgmentResult>;
+
+// ── 변이 결과 (JDG-04, M3-07 #52, ADR-033 · ADR-139) ──────────
+
+/** 변이 패치의 상한 (ADR-139): 바꿀 글 · 바꾼 글 각각 코드 단위 수, 대상 파일 경로 길이. */
+export const MUTANT_LIMITS = { search: 2000, replace: 2000, path: 1024 } as const;
+
+/**
+ * 변이 주입 역할이 낸 변이 1개 (`propose_mutant`, ADR-033): 대상 블록 파일 하나(`path`) 안에서 정확히 한 군데 나오는 글
+ * (`search`)을 다른 글(`replace`)로 바꾼다. 에이전트가 쓴 글이라 저장은 원문, 화면 · 세션 입력에는 표시 값으로만 싣는다.
+ */
+export const MutantPatch = z
+  .strictObject({
+    path: z.string().min(1).max(MUTANT_LIMITS.path),
+    search: z.string().min(1).max(MUTANT_LIMITS.search),
+    replace: z.string().max(MUTANT_LIMITS.replace),
+  })
+  .refine((patch) => patch.search !== patch.replace, '바꾼 글이 바꿀 글과 같습니다');
+export type MutantPatch = z.infer<typeof MutantPatch>;
+
+/**
+ * 규칙 하나의 변이 판정 기록 (JDG-04, ADR-139). 실행의 변이 주입 단계가 규칙마다 남긴다(추가 전용). 규칙의 변이 상태는 가장 최근
+ * 기록의 `status`이고, 기록이 없으면 '변이 미검증'이다. `status`는 `outcome`에서만 정해진다(`mutationStatusOf`).
+ * `commit`은 변이를 적용한 판정 커밋(실행의 마지막 완료 단계 커밋), `mutant`는 세션이 낸 변이(내지 않았으면 `null`).
+ */
+export const MutationResult = z
+  .strictObject({
+    id: Ulid,
+    ruleId: Ulid,
+    runId: Ulid,
+    stepId: Ulid,
+    sessionId: Ulid.nullable(),
+    commit: CommitSha,
+    status: MutationStatus,
+    outcome: MutationOutcome,
+    mutant: MutantPatch.nullable(),
+    recordedAt: Timestamp,
+  })
+  .superRefine((result, ctx) => {
+    if (result.status !== mutationStatusOf(result.outcome)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '변이 상태가 판정 결과와 맞지 않습니다',
+        path: ['status'],
+      });
+    }
+    if ((result.outcome === 'no_mutant') !== (result.mutant === null)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '변이를 내지 않은 기록만 변이가 비어 있습니다',
+        path: ['mutant'],
+      });
+    }
+  });
+export type MutationResult = z.infer<typeof MutationResult>;
 
 // ── 코드 열람 기록 (MET-01, M2-01, ADR-084) ─────────────────
 
