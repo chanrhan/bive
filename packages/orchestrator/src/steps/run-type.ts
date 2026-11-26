@@ -3,8 +3,10 @@
 // - 인수 테스트 보호의 기준: A = Red 확인 때의 해시, C · D = Green 확인 때의 해시(C: 새 테스트, D: 기준 커밋), B = 기준 커밋의
 //   git 트리(그 실행에서 인수 테스트를 쓰는 단계가 없다: 기준 커밋과 판정 커밋 사이에 `bive-acceptance/` 변경이 없어야 한다)
 // - 유형 C의 소스 파일 쓰기 거부: 기준 커밋과 판정 커밋 사이의 변경이 대상 규칙 폴더와 BIVE 선언 파일뿐이어야 한다
+// - 보강 실행(유형 C + 변이 보강 연결)은 더해 대상 규칙 폴더의 기존 파일(기준 커밋)도 바뀌면 안 된다(새 파일만 더한다, ADR-143)
 import type { JudgmentResult, Run, RunType, Step, StepKind } from '@bive/shared';
 
+import type { StepContext } from '../engine/types.js';
 import type { GitRunner } from '../git/git-exec.js';
 import { ACCEPTANCE_DECLARATION_FILES } from '../judge/acceptance-env.js';
 import { ACCEPTANCE_DIR } from '../judge/config.js';
@@ -122,6 +124,61 @@ export const testOnlyViolations = async (
   (await changedPathsBetween(git, repoPath, baseCommit, commit)).filter(
     (file) => !isTestOnlyPath(file, ruleDisplayIds),
   );
+
+/** 보강 실행(유형 C + 변이 보강 연결)인지 (M3-54 #311, ADR-143). */
+export const isReinforcementRun = (context: Pick<StepContext, 'run' | 'read'>): boolean =>
+  context.run.type === 'C' &&
+  context.read((store) => store.mutations.reinforcementOfRun(context.run.id) !== null);
+
+/**
+ * 커밋의 대상 규칙 폴더(`bive-acceptance/<표시 ID>/`) 안 파일 (git 트리, 작업 트리와 무관, 정렬).
+ * @throws git이 실패하면 (커밋이 없음 등)
+ */
+export const ruleFolderFilesAt = async (
+  git: GitRunner,
+  repoPath: string,
+  commit: string,
+  ruleDisplayIds: readonly string[],
+): Promise<string[]> => {
+  if (ruleDisplayIds.length === 0) return [];
+  const result = await git(
+    [
+      '--no-replace-objects',
+      '--literal-pathspecs',
+      'ls-tree',
+      '-r',
+      '-z',
+      '--name-only',
+      commit,
+      '--',
+      ...ruleDisplayIds.map((id) => `${ACCEPTANCE_DIR}/${id}/`),
+    ],
+    { cwd: repoPath },
+  );
+  return result.stdout
+    .split('\0')
+    .filter((file) => file !== '')
+    .sort();
+};
+
+/**
+ * 보강 실행의 기존 인수 테스트 보호 (M3-54 #311, ADR-143 ⑮): 기준 커밋의 대상 규칙 폴더 파일 가운데 기준 커밋과 판정 커밋 사이에
+ * 바뀐(지움 포함) 경로들(정렬). 보강은 새 파일을 더하기만 한다. 없으면 빈 목록. 유형 C의 소스 파일 쓰기 거부
+ * ({@link testOnlyViolations})와 같은 자리에서 같은 방식(git 객체 비교)으로 본다.
+ */
+export const existingTestViolations = async (
+  git: GitRunner,
+  repoPath: string,
+  baseCommit: string,
+  commit: string,
+  ruleDisplayIds: readonly string[],
+): Promise<string[]> => {
+  const existing = new Set(await ruleFolderFilesAt(git, repoPath, baseCommit, ruleDisplayIds));
+  if (existing.size === 0) return [];
+  return (await changedPathsBetween(git, repoPath, baseCommit, commit, ACCEPTANCE_DIR)).filter(
+    (file) => existing.has(file),
+  );
+};
 
 /**
  * 유형 B의 대상 정적 검사 규칙 가운데 판정이 병합으로 갈 수 없는 것 (ADR-136 ⑫): 판정 기록이 없음(판정 없음) · 막지 않는 실패(등록

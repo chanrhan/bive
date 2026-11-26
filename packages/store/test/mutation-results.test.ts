@@ -181,3 +181,123 @@ describe('mutation_results', () => {
     });
   });
 });
+
+/** 같은 저장소에 유형 C · A 실행 하나 (대상 = `ruleId`). */
+const runOf = (store: ProjectStore, ruleId: string, type: 'A' | 'C') => {
+  const plan = RUN_STEP_PLANS[type];
+  const detail = store.runs.create({
+    id: newId(),
+    type,
+    targetRuleIds: [ruleId],
+    currentStep: 'approval',
+    baseBranch: 'main',
+    budgetSnapshot: { run: { maxBudgetUsd: 5, maxTurns: 200 }, roles: {} },
+    modelSnapshot: {},
+    startedBy: human,
+    createdAt: T0,
+    steps: plan.map((kind) => ({
+      id: newId(),
+      kind,
+      attempt: 1,
+      status: 'pending' as const,
+      role: STEP_ROLES[kind],
+      startedAt: null,
+    })),
+  });
+  const step = detail.steps.find((item) => item.kind === 'mutation');
+  if (step === undefined) throw new Error('변이 주입 단계 없음');
+  return { run: detail.run, step };
+};
+
+describe('mutation_reinforcements (M3-54 #311, ADR-141 ③ · ADR-143)', () => {
+  it('보강 실행(유형 C)과 원인 생존 기록을 잇고 순번 · 실행 · 기록으로 읽는다. 실행 · 기록마다 하나', () => {
+    withStore((store) => {
+      const base = seed(store);
+      const survived = store.mutations.record(result(base));
+      const reinforcing = runOf(store, base.rule.id, 'C');
+      expect(store.mutations.nextReinforcementSeq()).toBe(1);
+      const link = store.mutations.linkReinforcement({
+        seq: 1,
+        runId: reinforcing.run.id,
+        mutationResultId: survived.id,
+        createdAt: T2,
+      });
+      expect(store.mutations.reinforcementBySeq(1)).toEqual(link);
+      expect(store.mutations.reinforcementOfRun(reinforcing.run.id)).toEqual(link);
+      expect(store.mutations.reinforcementOfResult(survived.id)).toEqual(link);
+      expect(store.mutations.reinforcementOfRun(base.run.id)).toBeNull();
+      expect(store.mutations.nextReinforcementSeq()).toBe(2);
+      expect(store.mutations.get(survived.id)).toEqual(survived);
+      // 같은 변이 기록으로 또 잇지 못한다 (다른 보강 실행이어도: 실패 뒤 다시 만들지 않는다)
+      const another = runOf(store, base.rule.id, 'C');
+      expect(() =>
+        store.mutations.linkReinforcement({
+          seq: 2,
+          runId: another.run.id,
+          mutationResultId: survived.id,
+          createdAt: T2,
+        }),
+      ).toThrow(/UNIQUE/);
+      // 같은 실행에 둘째 원인도 없다
+      const second = store.mutations.record(result(base, { recordedAt: T2 }));
+      expect(() =>
+        store.mutations.linkReinforcement({
+          seq: 2,
+          runId: reinforcing.run.id,
+          mutationResultId: second.id,
+          createdAt: T2,
+        }),
+      ).toThrow(/UNIQUE/);
+    });
+  });
+
+  it('원인은 유형 A 실행의 생존 기록만, 잇는 실행은 그 규칙을 대상으로 한 유형 C만 (트리거, 직접 쓰기 포함)', () => {
+    withStore((store) => {
+      const base = seed(store);
+      const reinforcing = runOf(store, base.rule.id, 'C');
+      const link =
+        (mutationResultId: string, runId = reinforcing.run.id, seq = 1) =>
+        () =>
+          store.mutations.linkReinforcement({ seq, runId, mutationResultId, createdAt: T2 });
+      // 검증됨 · 미검증은 원인이 아니다
+      const killed = store.mutations.record(
+        result(base, { status: 'verified', outcome: 'killed' }),
+      );
+      expect(link(killed.id)).toThrow(/변이 생존 기록/);
+      const unverified = store.mutations.record(
+        result(base, { status: 'unverified', outcome: 'runner_error' }),
+      );
+      expect(link(unverified.id)).toThrow(/변이 생존 기록/);
+      // 보강 실행(유형 C)의 재주입 생존 기록은 원인이 아니다 (고리 방지)
+      const reinjected = store.mutations.record(
+        result(base, { runId: reinforcing.run.id, stepId: reinforcing.step.id }),
+      );
+      expect(link(reinjected.id, runOf(store, base.rule.id, 'C').run.id)).toThrow(/변이 생존 기록/);
+      // 보강 실행은 유형 C여야 하고 원인 규칙을 대상으로 해야 한다
+      const survived = store.mutations.record(result(base));
+      expect(link(survived.id, runOf(store, base.rule.id, 'A').run.id)).toThrow(/유형 C/);
+      const otherRule = store.rules.create({
+        ...store.rules.get(base.rule.id)!,
+        id: newId(),
+        title: '다른 규칙',
+        createdAt: T0,
+      } as never);
+      expect(link(survived.id, runOf(store, otherRule.id, 'C').run.id)).toThrow(/유형 C/);
+      // 직접 쓰기도 같은 트리거 · 외래 키를 지난다
+      expect(() =>
+        store.db
+          .prepare(
+            'INSERT INTO mutation_reinforcements (seq, run_id, mutation_result_id, created_at) VALUES (9, ?, ?, ?)',
+          )
+          .run(reinforcing.run.id, killed.id, T2),
+      ).toThrow(/변이 생존 기록/);
+      expect(link(survived.id)).not.toThrow();
+      expect(() => store.db.prepare('UPDATE mutation_reinforcements SET seq = 5').run()).toThrow(
+        /바꿀 수 없습니다/,
+      );
+      expect(() => store.db.prepare('DELETE FROM mutation_reinforcements').run()).toThrow(
+        /지울 수 없습니다/,
+      );
+    });
+  });
+});

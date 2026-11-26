@@ -86,6 +86,15 @@ test('역할별 표에 변이 주입 행이 implementer 다음에 있고 모델 
   await expect(rows.nth(3)).toHaveAttribute('data-testid', 'settings-role-mutator');
   await expect(rows.nth(3).getByRole('rowheader')).toHaveText('변이 주입');
   for (const name of MUTATOR_FIELDS) await expect(field(page, name)).toBeVisible();
+  // 한국어 표시명 행 머리만 본문 글꼴이고, 영어 역할 이름 행은 고정폭 그대로다 (M3-54 #311)
+  const fontOf = (row: number) =>
+    rows
+      .nth(row)
+      .getByRole('rowheader')
+      .evaluate((el) => getComputedStyle(el).fontFamily);
+  expect(await fontOf(3)).toContain('Pretendard');
+  expect(await fontOf(3)).not.toContain('JetBrains Mono');
+  expect(await fontOf(2)).toContain('JetBrains Mono');
 });
 
 test('변이 주입 칸이 비면 검증이 SETTINGS_INCOMPLETE라 "예산 · 모델 미설정"이고 그 세 칸만 빈 칸 표시다', async ({

@@ -279,7 +279,12 @@ describe('유형 A 단계 순서 · 전이 (수용 기준 1)', () => {
       userGit(h.repo, 'rev-list', '--parents', '-n', '1', String(run.mergeCommit)).split(' '),
     ).toEqual([String(run.mergeCommit), initialMain, String(implCommit)]);
     expect(userGit(h.repo, 'show', `main:${ROUTE}`)).toContain('toISOString()');
-    expect(stepOf(done, 'mutation').exitDetail).toEqual({ reason: 'not_in_scope', scope: 'P1' });
+    // 변이 주입 단계는 기본 실행기가 돈다(M3-54 #311): 블록 선언이 없어 대상 규칙이 변이 대상이 아니면 세션 · 판정 없이 생략
+    expect(stepOf(done, 'mutation').exitDetail).toEqual({
+      reason: 'no_mutation_targets',
+      commit: implCommit,
+      excluded: [{ ruleId: 'RULE-001', reason: 'no_block_declaration' }],
+    });
 
     // 세션 · 도구 호출 · 도구 목록 기록 (세션당 init 1회, 도구 호출은 거부 포함 전부)
     const sessions = sessionsOf(h);

@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react';
 import {
   type FieldKey,
   type FormValues,
+  ROLE_ROW_LABEL_KINDS,
   ROLE_ROW_LABELS,
   SETTINGS_ROLE_ROWS,
   toFormValues,
@@ -252,7 +253,11 @@ export const BudgetModelSection = ({ projectId }: { projectId: string }): React.
               const name = ROLE_ROW_LABELS[role];
               return (
                 <tr key={role} data-testid={`settings-role-${role}`}>
-                  <th scope="row" className="settings-role-name">
+                  <th
+                    scope="row"
+                    className="settings-role-name"
+                    data-label-kind={ROLE_ROW_LABEL_KINDS[role]}
+                  >
                     {name}
                   </th>
                   <td>{field(`roles.${role}.model`, `${name} ${SECTION_TEXT.model}`, 'text')}</td>

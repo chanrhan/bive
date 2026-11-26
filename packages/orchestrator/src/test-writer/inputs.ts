@@ -360,6 +360,11 @@ export const prepareTestWriterInputs = (input: {
   rules: readonly TestWriterRule[];
   /** 지금 블록 선언 (없으면 `null` 또는 생략: 사본을 두지 않는다) */
   blocks?: BlockDeclaration | null;
+  /**
+   * 보강 실행만: 대상 규칙 폴더의 기존 인수 테스트(워크트리 기준 경로, 기준 커밋의 파일). 같은 경로에 읽기 전용 사본을 둔다
+   * (사본을 고쳐도 결과에 반영되지 않는다: 테스트 작성 실행기가 바뀐 사본을 받지 않는다, ADR-143 ⑮)
+   */
+  existingTargetTests?: readonly string[];
 }): PreparedInputs => {
   const { worktree, sessionDir } = input;
   if (fs.readdirSync(sessionDir).length > 0) {
@@ -383,10 +388,12 @@ export const prepareTestWriterInputs = (input: {
     put(TEST_WRITER_INPUTS.blocks, renderBlocks(input.blocks));
   }
   // 대상 규칙 폴더의 기존 테스트는 넣지 않는다: 대상 규칙 폴더는 이번 시도의 결과로 통째로 정해진다
-  // (Red 미충족 뒤 되돌린 워크트리에는 앞 시도의 테스트가 남아 있고, 세션에는 지우기 도구가 없다)
+  // (Red 미충족 뒤 되돌린 워크트리에는 앞 시도의 테스트가 남아 있고, 세션에는 지우기 도구가 없다).
+  // 보강 실행만 기준 커밋의 기존 파일을 사본으로 둔다(앞 시도의 파일은 넣지 않는다)
   const targets = new Set(input.rules.map((rule) => rule.displayId));
+  const existing = new Set(input.existingTargetTests ?? []);
   for (const rel of listAcceptanceTests(worktree)) {
-    if (targets.has(rel.split('/')[1] ?? '')) continue;
+    if (targets.has(rel.split('/')[1] ?? '') && !existing.has(rel)) continue;
     put(rel, fs.readFileSync(path.join(worktree, rel)));
   }
   return { files: files.sort(), routes };
@@ -499,16 +506,24 @@ export interface AppliedOutputs {
 /**
  * 세션 결과와 BIVE 선언 파일을 실행 워크트리에 옮긴다. 대상 규칙 폴더의 `*.acc.ts`는 이번 결과로 통째로 바꾼다
  * (결과에 없는 기존 파일은 지운다). 커밋은 엔진이 한다.
+ * 보강 실행은 `preserved`(기준 커밋의 대상 규칙 폴더 파일)를 지우지도 덮어쓰지도 않고 새 파일만 더한다(ADR-143 ⑮).
+ * @throws `files`에 `preserved`의 경로가 있을 때 (호출자가 먼저 걸러야 한다)
  */
 export const applyTestWriterOutputs = (input: {
   worktree: string;
   sessionDir: string;
   ruleIds: readonly string[];
   files: readonly string[];
+  preserved?: ReadonlySet<string>;
 }): AppliedOutputs => {
+  const preserved = input.preserved ?? new Set<string>();
+  const overwrite = input.files.filter((rel) => preserved.has(rel));
+  if (overwrite.length > 0) {
+    throw new Error(`보강 실행이 기존 인수 테스트 파일을 덮어쓰려 합니다: ${overwrite.join(', ')}`);
+  }
   const keep = new Set(input.files);
   const removed = existingTargetTests(input.worktree, input.ruleIds).filter(
-    (rel) => !keep.has(rel),
+    (rel) => !keep.has(rel) && !preserved.has(rel),
   );
   for (const rel of removed) fs.rmSync(path.join(input.worktree, rel));
   const written: string[] = [];

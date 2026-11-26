@@ -49,7 +49,7 @@ import {
 } from '../src/judge/fingerprint.js';
 import { ExchangeRecorder } from '../src/contract-check/recorder.js';
 import { JudgeRunner, type JudgeRunResult } from '../src/judge/index.js';
-import type { JudgeServerProxy } from '../src/judge/runner.js';
+import { type JudgeServerProxy, SERVER_DIED_MESSAGE } from '../src/judge/runner.js';
 
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const RESET_FIXTURE = path.join(REPO_ROOT, 'scripts', 'reset-fixture.sh');
@@ -332,6 +332,57 @@ describe('훅', () => {
     BUILD_TEST_TIMEOUT_MS,
   );
 
+  it(
+    '변이 판정(서버 생존 필수): 판정 중 서버 프로세스가 스스로 끝나면 케이스 실패를 쓰지 않고 runner_error (M3-54 #311, ADR-143)',
+    async () => {
+      // 요청을 받으면 응답한 뒤 서버를 끝내는 라우트 (서버를 죽이는 변이와 같은 모양)
+      write(
+        'src/app/api/die/route.ts',
+        `export const dynamic = 'force-dynamic';
+export function GET(): Response {
+  setTimeout(() => process.exit(1), 10);
+  return Response.json({ ok: true });
+}
+`,
+      );
+      write(
+        'bive-acceptance/RULE-008/die.acc.ts',
+        `import { expect, inject, it } from 'vitest';
+
+it('서버를 끝내는 요청 뒤 헬스 체크', async () => {
+  await fetch(new URL('/api/die', inject('baseUrl')));
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const res = await fetch(new URL('/api/health', inject('baseUrl')));
+  expect(res.status).toBe(200);
+});
+`,
+      );
+      const dbDirsBefore = tempDbDirs();
+      let result: JudgeRunResult;
+      try {
+        result = await runner.run({
+          projectId,
+          runId,
+          worktreeDir: fixtureDir,
+          profile: 'next-prisma-sqlite',
+          ruleIds: ['RULE-008'],
+          timeoutMs: JUDGE_TIMEOUT_MS,
+          requireServerAlive: true,
+        });
+      } finally {
+        rmSync(path.join(fixtureDir, 'bive-acceptance', 'RULE-008'), {
+          recursive: true,
+          force: true,
+        });
+        rmSync(path.join(fixtureDir, 'src', 'app', 'api', 'die'), { recursive: true, force: true });
+      }
+      expect(result.status).toBe('runner_error');
+      expect(result.message).toBe(SERVER_DIED_MESSAGE);
+      await expectNoLeftovers(result, dbDirsBefore);
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
+
   it('문법 오류 · import 실패 · 테스트 0개 · .only 파일은 서버를 띄우기 전에 collect_error', async () => {
     write(
       'bive-acceptance/RULE-003/broken.acc.ts',
@@ -413,7 +464,8 @@ describe('훅', () => {
     expect(all.exitCode).toBeNull();
     // 같은 실행의 판정마다 폴더가 따로 생겨 이전 원본을 덮어쓰지 않는다
     expect(all.judgeId).not.toBe(forRule.judgeId);
-    expect(readdirSync(path.join(biveHome, 'projects', projectId, 'judge', runId))).toHaveLength(5);
+    // 앞의 판정 4회(서버 생존 필수 판정 포함, M3-54 #311) + 이 시험의 2회
+    expect(readdirSync(path.join(biveHome, 'projects', projectId, 'judge', runId))).toHaveLength(6);
     write('bive-acceptance/RULE-001/health.acc.ts', HEALTH_ACC);
   });
 

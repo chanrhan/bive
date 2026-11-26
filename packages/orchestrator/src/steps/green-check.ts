@@ -38,7 +38,7 @@ import {
   normHalt,
 } from './judging.js';
 import { JUDGE_RUNNER_ERROR_REASON, NO_CASES_MESSAGE } from './red-check.js';
-import { testOnlyViolations } from './run-type.js';
+import { existingTestViolations, isReinforcementRun, testOnlyViolations } from './run-type.js';
 import {
   BLOCK_DECLARATION_OVERLAP_REASON,
   missingStructureJudgments,
@@ -55,6 +55,10 @@ export const GREEN_COLLECT_ERROR = 'green_collect_error';
 
 /** 유형 C의 소스 파일 쓰기 거부 단계 값 (`exitDetail.stage`). */
 export const TEST_ONLY_STAGE = 'test_only';
+
+/** 보강 실행에서 대상 규칙의 기존 인수 테스트 파일이 바뀌었을 때의 문장 (단계 값은 {@link TEST_ONLY_STAGE}, ADR-143 ⑮). */
+export const EXISTING_TEST_CHANGED_MESSAGE =
+  '변이 보강 실행에서 대상 규칙의 기존 인수 테스트 파일이 바뀌었습니다 (보강은 새 파일만 더한다)';
 
 const halt = (reason: string, exitDetail: Record<string, unknown>): StepOutcome => ({
   status: 'halt',
@@ -160,6 +164,24 @@ const greenNewTests = async (
       message: '코드 유지 · 테스트만 실행에서 인수 테스트 폴더 밖의 파일이 바뀌었습니다',
       changed: outside.slice(0, MAX_LISTED),
     });
+  }
+  // 보강 실행: 대상 규칙 폴더의 기존 파일(기준 커밋)도 바뀌면 안 된다. 보강은 새 파일을 더하기만 한다 (M3-54 #311, ADR-143 ⑮)
+  if (isReinforcementRun(context)) {
+    const existing = await existingTestViolations(
+      options.git ?? createGitRunner(),
+      context.git.repoPath,
+      context.git.baseCommit,
+      commit,
+      targets,
+    );
+    if (existing.length > 0) {
+      return halt('guard_violation', {
+        commit,
+        stage: TEST_ONLY_STAGE,
+        message: EXISTING_TEST_CHANGED_MESSAGE,
+        changed: existing.slice(0, MAX_LISTED),
+      });
+    }
   }
   const norms = createNormGuard(context);
   const judged = await judgeCommit(

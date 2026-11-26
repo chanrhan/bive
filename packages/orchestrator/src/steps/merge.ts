@@ -43,8 +43,14 @@ import {
   TARGET_RULE_RETIRED,
 } from '../norms/effective.js';
 import { approvedRules } from './check.js';
-import { TEST_ONLY_STAGE } from './green-check.js';
-import { headStepKindOf, testOnlyViolations, unjudgedStaticTargets } from './run-type.js';
+import { EXISTING_TEST_CHANGED_MESSAGE, TEST_ONLY_STAGE } from './green-check.js';
+import {
+  existingTestViolations,
+  headStepKindOf,
+  isReinforcementRun,
+  testOnlyViolations,
+  unjudgedStaticTargets,
+} from './run-type.js';
 import {
   CONTRACT_STAGE,
   contractJudgmentsFrom,
@@ -280,6 +286,24 @@ export const createMergeExecutor =
           changed: outside.slice(0, 50),
           headCommit,
         });
+      }
+      // 보강 실행: 대상 규칙 폴더의 기존 파일(기준 커밋)이 병합되는 변경에 없어야 한다 (Green 확인과 같은 대조, ADR-143 ⑮)
+      if (isReinforcementRun(context)) {
+        const existing = await existingTestViolations(
+          git,
+          context.git.repoPath,
+          context.git.baseCommit,
+          headCommit,
+          targets,
+        );
+        if (existing.length > 0) {
+          return halt('guard_violation', {
+            stage: TEST_ONLY_STAGE,
+            message: EXISTING_TEST_CHANGED_MESSAGE,
+            changed: existing.slice(0, 50),
+            headCommit,
+          });
+        }
       }
     }
     const tip = await git(

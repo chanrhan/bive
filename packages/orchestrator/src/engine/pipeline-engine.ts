@@ -75,6 +75,7 @@ import { createCheckExecutor } from '../steps/check.js';
 import { createGreenCheckExecutor } from '../steps/green-check.js';
 import { createImplementationExecutor } from '../steps/implementation.js';
 import { createMergeExecutor } from '../steps/merge.js';
+import { createMutationExecutor } from '../steps/mutation.js';
 import { createRedCheckExecutor } from '../steps/red-check.js';
 import { createTestWritingExecutor } from '../steps/test-writing.js';
 import { dailyBudgetReached, projectDailyBudget } from '../settings/project-budget.js';
@@ -165,7 +166,10 @@ export interface PipelineEngineOptions {
  */
 export const OBJECTION_CLOSED_CALL_LIMIT = 3;
 
-/** M1 변이 주입: P1(JDG-04)이라 `skipped`로 기록한다 (RUN-02 P0 범위, roadmap M1-14). */
+/**
+ * 변이 주입을 하지 않는 실행기 (M1 · M3-07까지의 기본값, RUN-02 P0 범위). M3-54(#311, ADR-143)부터 기본 실행기는
+ * `createMutationExecutor`이고 이것은 시험이 변이 주입을 빼고 싶을 때만 쓴다.
+ */
 export const skipMutationStep: StepExecutor = () =>
   Promise.resolve({ status: 'skipped', exitDetail: { reason: 'not_in_scope', scope: 'P1' } });
 
@@ -193,7 +197,7 @@ export const DEFAULT_STEP_EXECUTORS: StepExecutors = {
   green_check: createGreenCheckExecutor(),
   implementation: createImplementationExecutor(),
   check: createCheckExecutor(),
-  mutation: skipMutationStep,
+  mutation: createMutationExecutor(),
   merge: createMergeExecutor(),
   screen_update: screenUpdateStep,
 };
@@ -1353,6 +1357,14 @@ export class PipelineEngine {
             closedCalls += 1;
             if (closedCalls >= OBJECTION_CLOSED_CALL_LIMIT) {
               controller.abort(new SessionEndRequest('objection_raised'));
+            }
+          }
+          // 변이를 받아 닫힌 변이 주입 세션도 같은 수의 거부 뒤 끝낸다 (M3-54 #311, ADR-143): 받은 변이는 판정한다(단계 실행기가 쥐고
+          // 있다). 종료 사유는 `aborted`이고 비용을 모르면 기존 추정(ADR-067)으로 센다
+          if (record.reason === 'session_closed' && tools.closed === 'mutant_proposed') {
+            closedCalls += 1;
+            if (closedCalls >= OBJECTION_CLOSED_CALL_LIMIT) {
+              controller.abort(new Error('변이를 받은 뒤에도 세션이 도구를 계속 부름'));
             }
           }
         },
