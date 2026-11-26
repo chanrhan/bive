@@ -52,6 +52,7 @@ const settingsWithIde = (ide: IdeSetting | null): { settings: Settings } => ({
       planner: EMPTY_ROLE,
       'test-writer': EMPTY_ROLE,
       implementer: EMPTY_ROLE,
+      mutator: EMPTY_ROLE,
       chat: EMPTY_ROLE,
     },
     dailyBudgetUsd: null,

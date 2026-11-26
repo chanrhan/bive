@@ -54,6 +54,7 @@ const COMPLETE: SettingsPatch = {
     ...RULE_WRITER_ONLY.roles,
     'test-writer': { model: 'test-model', maxBudgetUsd: 2, maxTurns: 100 },
     implementer: { model: 'impl-model', maxBudgetUsd: 3, maxTurns: 150 },
+    mutator: { model: 'mutator-model', maxBudgetUsd: 1, maxTurns: 50 },
   },
 };
 
@@ -180,7 +181,7 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
         startedAt: null,
         endedAt: null,
       });
-      // 단계 목록: 유형 A 순서, 승인만 진행 중(생성 시각에 시작), 나머지 대기. 역할은 테스트 작성 · 구현만
+      // 단계 목록: 유형 A 순서, 승인만 진행 중(생성 시각에 시작), 나머지 대기. 역할은 테스트 작성 · 구현 · 변이 주입(M3-07)
       expect(created.steps.map((s) => s.kind)).toEqual([...RUN_STEP_PLANS.A]);
       expect(created.steps.map((s) => [s.kind, s.status, s.role, s.attempt])).toEqual([
         ['approval', 'running', null, 1],
@@ -188,23 +189,25 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
         ['red_check', 'pending', null, 1],
         ['implementation', 'pending', 'implementer', 1],
         ['check', 'pending', null, 1],
-        ['mutation', 'pending', null, 1],
+        ['mutation', 'pending', 'mutator', 1],
         ['merge', 'pending', null, 1],
         ['screen_update', 'pending', null, 1],
       ]);
       expect(stepOf(created.steps, 'approval').startedAt).toBe(iso(T0 + 60_000));
       expect(created.steps.every((s) => s.runId === created.run.id)).toBe(true);
-      // 예산 · 모델 스냅샷 = 시작 시 설정의 실행 전체 한도 + 실행이 쓰는 역할(test-writer · implementer)
+      // 예산 · 모델 스냅샷 = 시작 시 설정의 실행 전체 한도 + 실행이 쓰는 역할(test-writer · implementer · mutator)
       expect(created.run.budgetSnapshot).toEqual({
         run: { maxBudgetUsd: 5, maxTurns: 200 },
         roles: {
           'test-writer': { maxBudgetUsd: 2, maxTurns: 100 },
           implementer: { maxBudgetUsd: 3, maxTurns: 150 },
+          mutator: { maxBudgetUsd: 1, maxTurns: 50 },
         },
       });
       expect(created.run.modelSnapshot).toEqual({
         'test-writer': 'test-model',
         implementer: 'impl-model',
+        mutator: 'mutator-model',
       });
 
       // 승인 기록: 규칙 승인 기록 뒤에 run_start 1건, 주체 사람 · 대상 실행 · 대상 규칙 · 연결 번호
@@ -371,9 +374,10 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
       const structure = h.read((store) => structureRule(store, 'structure.declared-direction'));
       await saveSettings(COMPLETE);
       const roles = {
-        A: ['test-writer', 'implementer'],
+        // 변이 주입 역할은 변이 주입 단계를 하는 A · C에만 (M3-07 #52, ADR-139)
+        A: ['test-writer', 'implementer', 'mutator'],
         B: ['implementer'],
-        C: ['test-writer'],
+        C: ['test-writer', 'mutator'],
         D: ['implementer'],
       } as const;
       for (const type of ['A', 'B', 'C', 'D'] as const) {
@@ -788,6 +792,9 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
           'roles.implementer.model',
           'roles.implementer.maxBudgetUsd',
           'roles.implementer.maxTurns',
+          'roles.mutator.model',
+          'roles.mutator.maxBudgetUsd',
+          'roles.mutator.maxTurns',
         ],
       });
       expect(runCount()).toBe(0);

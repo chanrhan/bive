@@ -15,6 +15,7 @@ import { ConfirmationRepository } from './repositories/confirmation-repository.j
 import { ContractRepository } from './repositories/contract-repository.js';
 import { DisplayIdSequences } from './repositories/display-id-sequences.js';
 import { JudgmentRepository } from './repositories/judgment-repository.js';
+import { MutationResultRepository } from './repositories/mutation-result-repository.js';
 import { NormChangeRepository } from './repositories/norm-change-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { ProposalRepository } from './repositories/proposal-repository.js';
@@ -83,6 +84,11 @@ export class ProjectStore {
    * 계약 모듈만 한다(사람의 등록 RPC · 에이전트 반영).
    */
   readonly contracts: ContractRepository;
+  /**
+   * 변이 판정 기록 (JDG-04, M3-07 #52, ADR-139). 추가 전용. 쓰기는 오케스트레이터의 변이 주입 단계 실행기만 한다. 규칙의 변이 상태는
+   * 가장 최근 기록의 상태(기록이 없으면 '변이 미검증')다.
+   */
+  readonly mutations: MutationResultRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -108,6 +114,7 @@ export class ProjectStore {
     this.ruleRetirements = new RuleRetirementRepository(db);
     this.blockDeclarations = new BlockDeclarationRepository(db, projectId);
     this.contracts = new ContractRepository(db, this.sequences);
+    this.mutations = new MutationResultRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

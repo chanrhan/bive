@@ -5,21 +5,26 @@
 import type { AgentRole, MissingSetting, Settings, SettingsPatch } from '@bive/shared';
 
 /**
- * M1에 보이는 역할 행 (shared `RUN_REQUIRED_ROLES`와 같음, test/settings-form.test.ts가 대조).
- * planner · 변이 주입 · 채팅 행은 그 역할을 여는 이슈가 더한다 (ADR-035 · ADR-057).
+ * 보이는 역할 행 (shared `RUN_REQUIRED_ROLES`와 같음, test/settings-form.test.ts가 대조). 변이 주입 행은 M3-07(#52, ADR-139)이
+ * 더했다. planner · 채팅 행은 그 역할을 여는 이슈가 더한다 (ADR-035 · ADR-057).
  */
 export const SETTINGS_ROLE_ROWS = [
   'rule-writer',
   'test-writer',
   'implementer',
+  'mutator',
 ] as const satisfies readonly AgentRole[];
 export type SettingsRoleRow = (typeof SETTINGS_ROLE_ROWS)[number];
 
-/** 역할 행 이름: 화면 정의서의 역할 명칭 그대로 (ADR-009 · ADR-057). */
+/**
+ * 역할 행 이름: 화면 정의서의 역할 명칭 그대로 (ADR-009 · ADR-057). 변이 주입 역할은 작성 규칙 역할 목록에 이름이 없어(ADR-009)
+ * 화면 정의서 · PRD의 낱말 '변이 주입'을 쓴다 (ADR-139).
+ */
 export const ROLE_ROW_LABELS = {
   'rule-writer': 'rule-writer',
   'test-writer': 'test-writer',
   implementer: 'implementer',
+  mutator: '변이 주입',
 } as const satisfies Record<SettingsRoleRow, string>;
 
 /**

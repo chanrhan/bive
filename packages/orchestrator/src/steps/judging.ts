@@ -222,6 +222,11 @@ export interface CommitJudgeInput {
   readonly structure?: StructurePlan;
   /** 계약 검사 계획 (단계를 열 때 읽은 계약 검사 규칙 · 계약). 있으면 계약 검사를 한다 */
   readonly contracts?: ContractPlan;
+  /**
+   * 변이 적용 (변이 주입 단계, M3-07 #52 · ADR-139): 해시 대조 뒤 · 설치 전에 이 체크아웃(격리된 detached 체크아웃, 판정 뒤 지운다)의
+   * 파일을 바꾼다. 커밋하지 않으므로 실행 브랜치 · 기준 브랜치에 남지 않는다. 던지면 판정하지 않고 `checkout_error`다
+   */
+  readonly applyMutant?: (checkoutDir: string) => void;
 }
 
 /** 인수 테스트 파일 하나에서 읽는 상한 (넘는 부분은 대조에 쓰지 않는다: 그 뒤의 이름은 모르는 이름이 된다). */
@@ -272,6 +277,16 @@ export const judgeCommit = async (
     }
     const ruleIds = input.selectRules(ruleDirsOf(acceptanceHashes));
     if (ruleIds.length === 0) return { kind: 'no_rules', ruleDirs: ruleDirsOf(acceptanceHashes) };
+    if (input.applyMutant !== undefined) {
+      try {
+        input.applyMutant(checkout.dir);
+      } catch (error) {
+        return {
+          kind: 'checkout_error',
+          message: `변이를 적용하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
     const acceptanceTexts =
       input.readAcceptanceTexts === true
         ? readAcceptanceTexts(checkout.dir, acceptanceHashes)

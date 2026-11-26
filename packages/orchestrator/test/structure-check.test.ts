@@ -305,6 +305,7 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
             'rule-writer': { model: 'm', maxBudgetUsd: 1, maxTurns: 20 },
             'test-writer': { model: 'm', maxBudgetUsd: 1, maxTurns: 20 },
             implementer: { model: 'm', maxBudgetUsd: 1, maxTurns: 20 },
+            mutator: { model: 'm', maxBudgetUsd: 1, maxTurns: 20 },
           },
         },
         { by: human, at: iso(T0) },

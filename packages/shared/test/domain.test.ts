@@ -31,6 +31,11 @@ import {
   JudgmentResult,
   M1_RUN_TYPE,
   MissingSettingPath,
+  MUTANT_LIMITS,
+  MutantPatch,
+  MutationOutcome,
+  MutationResult,
+  mutationStatusOf,
   NORM_CHANGE_GENESIS_HASH,
   NORM_JUDGMENT_SUBJECT_LABELS,
   NORM_OBJECTION_RULES_MAX,
@@ -47,6 +52,7 @@ import {
   ruleStatementEditOf,
   Run,
   RUN_STEP_PLANS,
+  runTypeRoles,
   ScreenId,
   Session,
   SessionNormInput,
@@ -243,6 +249,7 @@ const settings = {
     planner: emptyRole,
     'test-writer': emptyRole,
     implementer: emptyRole,
+    mutator: emptyRole,
     chat: emptyRole,
   },
   dailyBudgetUsd: null,
@@ -371,13 +378,27 @@ describe('프로젝트 · 설정', () => {
       'roles.implementer.model',
       'roles.implementer.maxBudgetUsd',
       'roles.implementer.maxTurns',
+      // 변이 주입 역할도 실행 전 필수다 (M3-07 #52, ADR-139)
+      'roles.mutator.model',
+      'roles.mutator.maxBudgetUsd',
+      'roles.mutator.maxTurns',
     ]);
     const full = { model: 'model-a', maxBudgetUsd: 1, maxTurns: 10 };
     const ready = {
       run: { maxBudgetUsd: 5, maxTurns: 200 },
-      roles: { ...settings.roles, 'rule-writer': full, 'test-writer': full, implementer: full },
+      roles: {
+        ...settings.roles,
+        'rule-writer': full,
+        'test-writer': full,
+        implementer: full,
+        mutator: full,
+      },
     };
     expect(findMissingSettings(ready)).toEqual([]);
+    // 변이 주입 칸만 비면 그 세 칸만 빈 항목이다
+    expect(
+      findMissingSettings({ ...ready, roles: { ...ready.roles, mutator: emptyRole } }),
+    ).toEqual(['roles.mutator.model', 'roles.mutator.maxBudgetUsd', 'roles.mutator.maxTurns']);
     expect(findMissingSettings(ready, ['chat'])).toEqual([
       'roles.chat.model',
       'roles.chat.maxBudgetUsd',
@@ -880,7 +901,8 @@ describe('실행', () => {
       'screen_update',
     ]);
     expect(M1_RUN_TYPE).toBe('A');
-    expect(stepRoles(RUN_STEP_PLANS.A)).toEqual(['test-writer', 'implementer']);
+    // 변이 주입 단계의 역할은 변이 주입 역할이다 (M3-07 #52, ADR-139)
+    expect(stepRoles(RUN_STEP_PLANS.A)).toEqual(['test-writer', 'implementer', 'mutator']);
     const steps = [
       { kind: 'check', attempt: 2 },
       { kind: 'implementation', attempt: 2 },
@@ -1743,5 +1765,89 @@ describe('계약 (M3-04 #49, NRM-03 · ADR-019, ADR-129)', () => {
     ] as const) {
       expect(SessionNormInput.safeParse(value).success, label).toBe(false);
     }
+  });
+});
+
+describe('변이 결과 (JDG-04, M3-07 #52, ADR-139)', () => {
+  const mutant = { path: 'src/app/api/auth/session/route.ts', search: '401', replace: '200' };
+  const result = {
+    id: ID.judgment,
+    ruleId: ID.rule,
+    runId: ID.run,
+    stepId: ID.step,
+    sessionId: ID.session,
+    commit: SHA,
+    status: 'verified',
+    outcome: 'killed',
+    mutant,
+    recordedAt: AT,
+  } as const;
+
+  it('판정 결과 → 변이 상태: 검출만 검증됨, 생존만 생존, 나머지(판정 불가 · 변이 없음)는 미검증', () => {
+    expect(
+      Object.fromEntries(
+        MutationOutcome.options.map((outcome) => [outcome, mutationStatusOf(outcome)]),
+      ),
+    ).toEqual({
+      killed: 'verified',
+      survived: 'survived',
+      no_mutant: 'unverified',
+      no_cases: 'unverified',
+      checkout_error: 'unverified',
+      install_error: 'unverified',
+      collect_error: 'unverified',
+      runner_error: 'unverified',
+    });
+  });
+
+  it('기록의 상태는 판정 결과와 맞아야 하고, 변이가 비는 것은 변이를 내지 않은 기록뿐이다', () => {
+    expect(MutationResult.parse(result)).toEqual(result);
+    expect(MutationResult.safeParse({ ...result, status: 'survived' }).success).toBe(false);
+    expect(
+      MutationResult.safeParse({ ...result, outcome: 'runner_error', status: 'verified' }).success,
+    ).toBe(false);
+    expect(
+      MutationResult.safeParse({ ...result, outcome: 'runner_error', status: 'unverified' })
+        .success,
+    ).toBe(true);
+    expect(MutationResult.safeParse({ ...result, mutant: null }).success).toBe(false);
+    expect(
+      MutationResult.safeParse({
+        ...result,
+        outcome: 'no_mutant',
+        status: 'unverified',
+        mutant: null,
+        sessionId: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      MutationResult.safeParse({ ...result, outcome: 'no_mutant', status: 'unverified' }).success,
+    ).toBe(false);
+  });
+
+  it('변이 패치: 바꿀 글은 1자 이상, 두 글이 같으면 거부, 상한', () => {
+    expect(MutantPatch.safeParse(mutant).success).toBe(true);
+    expect(MutantPatch.safeParse({ ...mutant, replace: '' }).success).toBe(true);
+    expect(MutantPatch.safeParse({ ...mutant, search: '' }).success).toBe(false);
+    expect(MutantPatch.safeParse({ ...mutant, replace: '401' }).success).toBe(false);
+    expect(
+      MutantPatch.safeParse({ ...mutant, search: 'x'.repeat(MUTANT_LIMITS.search + 1) }).success,
+    ).toBe(false);
+    expect(
+      MutantPatch.safeParse({ ...mutant, replace: 'x'.repeat(MUTANT_LIMITS.replace + 1) }).success,
+    ).toBe(false);
+    expect(MutantPatch.safeParse({ ...mutant, extra: 1 }).success).toBe(false);
+  });
+
+  it('유형별 역할: 변이 주입 역할은 유형 A · C에만 든다 (B · D는 변이 주입 단계를 하지 않는다, ADR-020)', () => {
+    expect(runTypeRoles('A')).toEqual(['test-writer', 'implementer', 'mutator']);
+    expect(runTypeRoles('B')).toEqual(['implementer']);
+    expect(runTypeRoles('C')).toEqual(['test-writer', 'mutator']);
+    expect(runTypeRoles('D')).toEqual(['implementer']);
+  });
+
+  it('MutationResult는 예약 이름이 아니다 (스키마가 생겼다)', () => {
+    expect(RESERVED_ENTITY_NAMES).not.toContain('MutationResult');
+    expect(EntityName.options).toContain('MutationResult');
   });
 });
