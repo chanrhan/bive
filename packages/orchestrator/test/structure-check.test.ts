@@ -289,7 +289,7 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
     expect(h.read((store) => store.rules.list()).map((rule) => rule.builtin)).toEqual([true, true]);
   });
 
-  it('사람의 [실행]은 내장 규칙을 대상으로 받지 않고(-32009, 아무것도 남지 않음), 사람 편집도 받지 않는다 (builtin_rule)', async () => {
+  it('사람의 [실행]은 내장 규칙으로 유형 B 실행을 만들고(유형 A로 주거나 일반 규칙과 섞으면 -32009, 아무것도 남지 않음), 사람 편집은 받지 않는다 (builtin_rule, M3-06 #51)', async () => {
     const h = await startProjectHarness({ servers, clients });
     await h.client.call('blocks.set', {
       projectId: h.project.id,
@@ -309,11 +309,12 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
         },
         { by: human, at: iso(T0) },
       );
+      // 유형 A(테스트 작성 · Red 확인)로는 받지 않는다 (M3-06: 정적 검사 규칙은 유형 B의 대상)
       for (const rule of rules) {
         expect(() =>
           createRun(
             store,
-            { ruleIds: [rule.id], author: human },
+            { ruleIds: [rule.id], author: human, type: 'A' },
             { clientId: null },
             { now: () => T0, newId },
           ),
@@ -324,12 +325,18 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
     });
     const rule = rules[0];
     if (rule === undefined) throw new Error('규칙 없음');
-    // 파이프의 run.create도 같은 거부다 (-32009)
-    const rejected = await rpcError(
-      h.client.call('run.create', { projectId: h.project.id, ruleIds: [rule.id], author: human }),
-    );
-    expect(rejected.code).toBe(-32009);
-    expect(h.read((store) => store.runs.list())).toEqual([]);
+    // 파이프의 run.create(화면의 [실행]: 유형을 주지 않는다)는 유형 B 실행과 승인 기록 run_start를 만든다 (M3-06 #51)
+    const created = await h.client.call('run.create', {
+      projectId: h.project.id,
+      ruleIds: [rule.id],
+      author: human,
+    });
+    expect(created.run).toMatchObject({ type: 'B', targetRuleIds: [rule.id] });
+    expect(created.approvalLog).toMatchObject({
+      action: 'run_start',
+      detail: { ruleIds: [rule.id] },
+    });
+    expect(h.read((store) => store.runs.list())).toHaveLength(1);
     // 대상이 여럿이면 어느 자리에 있든 거부한다 (일반 규칙 + 내장 규칙, 순서를 바꿔도)
     const plain = h.read((store) =>
       seedNormRule(store, {
@@ -352,8 +359,8 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
       }
     }
     h.read((store) => {
-      expect(store.runs.list()).toEqual([]);
-      expect(store.approvalLog.list()).toEqual([]);
+      expect(store.runs.list()).toEqual([created.run]);
+      expect(store.approvalLog.list()).toEqual([created.approvalLog]);
       expect(store.normChanges.list()).toEqual(changesBefore);
     });
     // 대조군: 일반 규칙만이면 만들어진다 (거부가 다른 이유가 아니다)
@@ -362,7 +369,7 @@ describe('블록 선언 저장 때 내장 구조 규칙이 부모 없이 생기�
       ruleIds: [plain.id],
       author: human,
     });
-    expect(h.read((store) => store.runs.list())).toHaveLength(1);
+    expect(h.read((store) => store.runs.list())).toHaveLength(2);
     const edited = await rpcError(
       h.client.call('rule.update', {
         projectId: h.project.id,

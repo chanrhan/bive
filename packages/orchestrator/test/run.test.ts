@@ -8,8 +8,11 @@ import {
   createUlidGenerator,
   ErrorCode,
   type Project,
+  type ContractKind,
   RUN_STEP_PLANS,
   type Rule,
+  type RunType,
+  STEP_ROLES,
   type SettingsPatch,
   SETTINGS_INCOMPLETE_MESSAGE,
   SETTINGS_INCOMPLETE_REASON,
@@ -291,6 +294,194 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
         status: 'waiting_approval',
       });
       expect(waiting.runs.map((r) => r.displayId)).toEqual(['EXE-002']);
+    });
+  });
+
+  describe('run.create: 실행 유형의 기록과 유형별 대상 규칙 (M3-06 #51 수용 기준 4, RUN-07, ADR-136)', () => {
+    /** 내장 구조 규칙 (정적 검사 규칙). 블록 선언 저장이 만드는 행과 같은 모양 */
+    const structureRule = (store: ProjectStore, title: string): Rule =>
+      store.rules.create({
+        id: newId(),
+        title,
+        statement:
+          'WHEN 블록의 파일이 다른 블록을 가져오면 THE SYSTEM SHALL 선언한 방향만 허용한다',
+        kind: 'architecture',
+        checkKinds: ['structure'],
+        parentRequirementId: null,
+        builtin: true,
+        targetBlockIds: [],
+        risk: null,
+        contractId: null,
+        author: human,
+        normState: 'approved',
+        createdAt: iso(T0),
+      });
+    /** 계약 하나와 그 계약 검사 규칙 (정적 검사 규칙). 계약 등록이 만드는 행과 같은 모양 */
+    const contractRule = (store: ProjectStore, kind: ContractKind): Rule => {
+      const contract = store.contracts.create({
+        id: newId(),
+        kind,
+        sourceFile: `contracts/${kind}.txt`,
+        contentHash: 'a'.repeat(64),
+        sourceCommit: SHA,
+        parentRequirementId: null,
+        author: human,
+        createdAt: iso(T0),
+      });
+      return store.rules.create({
+        id: newId(),
+        title: `계약 일치: ${contract.displayId}`,
+        statement: 'WHEN 요청이 오면 THE SYSTEM SHALL 계약대로 응답한다',
+        kind: 'tech-constraint',
+        checkKinds: ['contract'],
+        parentRequirementId: null,
+        builtin: true,
+        targetBlockIds: [],
+        risk: null,
+        contractId: contract.id,
+        author: human,
+        normState: 'approved',
+        createdAt: iso(T0),
+      });
+    };
+    const createTyped = (ruleIds: string[], type?: RunType) =>
+      h.client.call('run.create', {
+        projectId: h.project.id,
+        ruleIds,
+        author: human,
+        ...(type === undefined ? {} : { type }),
+      });
+    /** 거부되면 실행 · run_start가 하나도 남지 않는다 (-32009) */
+    const expectRejected = async (ruleIds: string[], type?: RunType): Promise<void> => {
+      const runsBefore = runCount();
+      const logBefore = runStartCount();
+      const error = await rpcError(createTyped(ruleIds, type));
+      expect(error.code, `${String(type)} ${ruleIds.join(',')}`).toBe(ErrorCode.StateConflict);
+      expect(runCount()).toBe(runsBefore);
+      expect(runStartCount()).toBe(logBefore);
+    };
+
+    it('유형을 주면 그대로 기록하고, 단계 목록 · 예산 · 모델 스냅샷은 그 유형의 계획 · 실제로 쓰는 역할을 따른다', async () => {
+      const rule = await approvedRule();
+      const structure = h.read((store) => structureRule(store, 'structure.declared-direction'));
+      await saveSettings(COMPLETE);
+      const roles = {
+        A: ['test-writer', 'implementer'],
+        B: ['implementer'],
+        C: ['test-writer'],
+        D: ['implementer'],
+      } as const;
+      for (const type of ['A', 'B', 'C', 'D'] as const) {
+        const created = await createTyped([type === 'B' ? structure.id : rule.id], type);
+        expect(created.run.type).toBe(type);
+        expect(created.steps.map((s) => s.kind)).toEqual([...RUN_STEP_PLANS[type]]);
+        expect(created.steps.map((s) => [s.kind, s.status, s.role])).toEqual(
+          RUN_STEP_PLANS[type].map((kind, index) => [
+            kind,
+            index === 0 ? 'running' : 'pending',
+            STEP_ROLES[kind],
+          ]),
+        );
+        expect(Object.keys(created.run.budgetSnapshot.roles)).toEqual(roles[type]);
+        expect(Object.keys(created.run.modelSnapshot)).toEqual(roles[type]);
+        expect(created.approvalLog).toMatchObject({
+          action: 'run_start',
+          detail: { ruleIds: created.run.targetRuleIds },
+        });
+        // 저장된 값 = 돌려준 값
+        expect(h.read((store) => store.runs.get(created.run.id))).toEqual(created.run);
+      }
+      expect(
+        (await h.client.call('run.list', { projectId: h.project.id })).runs.map((r) => r.type),
+      ).toEqual(['A', 'B', 'C', 'D']);
+    });
+
+    it('유형을 주지 않으면 대상으로 정한다: 인수 테스트 검사 규칙만 A, 정적 검사 규칙(구조 · OpenAPI 계약)만 B, 섞이면 순서와 무관하게 -32009', async () => {
+      const rule = await approvedRule();
+      const [direction, publicApi, openapi] = h.read((store) => [
+        structureRule(store, 'structure.declared-direction'),
+        structureRule(store, 'structure.public-api-only'),
+        contractRule(store, 'openapi'),
+      ]);
+      await saveSettings(COMPLETE);
+      for (const ids of [
+        [rule.id, direction.id],
+        [direction.id, rule.id],
+        [openapi.id, rule.id],
+        [direction.id, openapi.id, rule.id],
+      ]) {
+        await expectRejected(ids);
+      }
+      expect((await createTyped([rule.id])).run.type).toBe('A');
+      expect((await createTyped([direction.id])).run.type).toBe('B');
+      expect((await createTyped([openapi.id])).run.type).toBe('B');
+      const both = await createTyped([publicApi.id, direction.id, openapi.id]);
+      expect(both.run).toMatchObject({
+        type: 'B',
+        targetRuleIds: [publicApi.id, direction.id, openapi.id],
+      });
+      // 거부가 표시 ID 순번을 쓰지 않았다
+      expect(
+        (await h.client.call('run.list', { projectId: h.project.id })).runs.map((r) => r.displayId),
+      ).toEqual(['EXE-001', 'EXE-002', 'EXE-003', 'EXE-004']);
+    });
+
+    it('유형 B는 정적 검사 규칙만, 유형 A · C · D는 인수 테스트 검사 규칙만 받는다 (-32009, 아무것도 남지 않음)', async () => {
+      const rule = await approvedRule();
+      const [direction, openapi] = h.read((store) => [
+        structureRule(store, 'structure.declared-direction'),
+        contractRule(store, 'openapi'),
+      ]);
+      await saveSettings(COMPLETE);
+      await expectRejected([rule.id], 'B');
+      await expectRejected([direction.id, rule.id], 'B');
+      for (const type of ['A', 'C', 'D'] as const) {
+        await expectRejected([direction.id], type);
+        await expectRejected([openapi.id], type);
+        await expectRejected([rule.id, openapi.id], type);
+      }
+      // 대조군: 맞는 대상이면 만들어진다
+      expect((await createTyped([direction.id, openapi.id], 'B')).run.type).toBe('B');
+      expect((await createTyped([rule.id], 'C')).run.type).toBe('C');
+    });
+
+    it('검사 실행기가 없는 계약 종류의 계약 검사 규칙은 유형 B의 대상으로도 받지 않는다 (판정 없음, -32009)', async () => {
+      const kinds = ['db-schema', 'asyncapi', 'external-api', 'cache', 'json-schema'] as const;
+      const rules = h.read((store) => kinds.map((kind) => contractRule(store, kind)));
+      const openapi = h.read((store) => contractRule(store, 'openapi'));
+      await saveSettings(COMPLETE);
+      for (const rule of rules) {
+        await expectRejected([rule.id]);
+        await expectRejected([rule.id], 'B');
+        // 실행기 있는 규칙과 함께여도 받지 않는다
+        await expectRejected([openapi.id, rule.id], 'B');
+      }
+      expect((await createTyped([openapi.id], 'B')).run.type).toBe('B');
+    });
+
+    it('형식이 틀린 type은 -32602, 에이전트 주체는 유형과 무관하게 -32020이고 아무것도 남지 않는다', async () => {
+      const rule = await approvedRule();
+      await saveSettings(COMPLETE);
+      for (const type of ['E', 'a', '', 1, null]) {
+        const raw = await h.client.requestRaw({
+          jsonrpc: '2.0',
+          id: 7,
+          method: 'run.create',
+          params: { projectId: h.project.id, ruleIds: [rule.id], author: human, type },
+        });
+        expect(raw, String(type)).toMatchObject({ error: { code: ErrorCode.InvalidParams } });
+      }
+      const agent = await rpcError(
+        h.client.call('run.create', {
+          projectId: h.project.id,
+          ruleIds: [rule.id],
+          author: implementerAgent,
+          type: 'D',
+        }),
+      );
+      expect(agent.code).toBe(ErrorCode.Unauthorized);
+      expect(runCount()).toBe(0);
+      expect(runStartCount()).toBe(0);
     });
   });
 

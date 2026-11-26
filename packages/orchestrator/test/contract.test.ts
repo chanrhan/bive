@@ -647,19 +647,21 @@ describe('contract 검사 규칙: 계약에 매인 내장 규칙 (ADR-100 B⑨, 
       { by: human, at: iso(T0) },
     );
 
-  it('사람의 [실행] 대상이 되지 않고(-32009, 실행 유형 B 전), 사람 편집 · 에이전트 폐기도 받지 않으며(builtin_rule), 자동 시작이 없다', async () => {
+  it('사람의 [실행]은 유형 B 실행만 만들고(유형 A로 주면 -32009, M3-06 #51), 사람 편집 · 에이전트 폐기도 받지 않으며(builtin_rule), 자동 시작이 없다', async () => {
     const h = await harness(makeRepo());
     h.read(settle);
     const { rule } = await register(h, 'openapi.yaml');
-    const run = await rpcError(
-      h.client.call('run.create', { projectId: h.project.id, ruleIds: [rule.id], author: human }),
-    );
-    expect(run.code).toBe(-32009);
+    const run = await h.client.call('run.create', {
+      projectId: h.project.id,
+      ruleIds: [rule.id],
+      author: human,
+    });
+    expect(run.run).toMatchObject({ type: 'B', targetRuleIds: [rule.id] });
     h.read((store) =>
       expect(() =>
         createRun(
           store,
-          { ruleIds: [rule.id], author: human },
+          { ruleIds: [rule.id], author: human, type: 'A' },
           { clientId: null },
           {
             now: () => T0,
@@ -691,7 +693,8 @@ describe('contract 검사 규칙: 계약에 매인 내장 규칙 (ADR-100 B⑨, 
           { now: () => T0 },
         ),
       ).toThrow(/내장/);
-      expect(store.runs.list()).toEqual([]);
+      // 실행은 사람이 만든 유형 B 실행 하나뿐이다 (자동 시작 없음)
+      expect(store.runs.list().map((item) => item.id)).toEqual([run.run.id]);
       expect(store.ruleRetirements.retiredRuleIds().size).toBe(0);
       expect(store.rules.get(rule.id)).toEqual(rule);
       expect(store.normChanges.list().map((entry) => entry.kind)).toEqual(['created']);
