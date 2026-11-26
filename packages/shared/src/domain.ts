@@ -23,6 +23,8 @@ import {
   ProposalSource,
   ProposalState,
   ProvisionalPolicy,
+  REVIEW_ACTIONS_BY_KIND,
+  ReviewItemKind,
   Risk,
   RuleKind,
   RunStatus,
@@ -68,7 +70,6 @@ export type EntityName = z.infer<typeof EntityName>;
 export const RESERVED_ENTITY_NAMES = [
   'Adr',
   'CodeChange',
-  'ReviewItem',
   'ChatThread',
   'ChatMessage',
   'CoverageRecord',
@@ -2103,6 +2104,68 @@ export const MutationReinforcement = z.strictObject({
   createdAt: Timestamp,
 });
 export type MutationReinforcement = z.infer<typeof MutationReinforcement>;
+
+// ── 검토 대기열 (TODO-02 · COST-01 · JDG-04, M3-08 #53, ADR-100 B④ · A17, ADR-145) ──────────
+
+/** 판정 격리 사유 상한 (UTF-16 코드 단위, 규칙화 불가 사유와 같다). */
+export const QUARANTINE_REASON_MAX = 4000;
+
+/**
+ * 검토 대기열 항목의 처리 기록 (사람만, 한 번만). 액션마다 결과가 다르다.
+ * - `reinforce`: 사람이 시작한 유형 C 테스트 보강 실행(`runId`). 사유 없음
+ * - `quarantine`: 그 규칙의 판정 격리 기록(`judgmentId`, 판정 상태 '격리'). 사유 필수
+ */
+export const ReviewResolution = z.discriminatedUnion('action', [
+  z.strictObject({
+    action: z.literal('reinforce'),
+    by: HumanAuthor,
+    at: Timestamp,
+    reason: z.null(),
+    runId: Ulid,
+  }),
+  z.strictObject({
+    action: z.literal('quarantine'),
+    by: HumanAuthor,
+    at: Timestamp,
+    reason: NonEmptyString.max(QUARANTINE_REASON_MAX),
+    judgmentId: Ulid,
+  }),
+]);
+export type ReviewResolution = z.infer<typeof ReviewResolution>;
+
+/**
+ * 검토 대기열 항목 1건 (ADR-145). 실행의 종료 상태를 저장하는 같은 쓰기에서 DB가 등록한다(코드가 넣지 않는다):
+ * - `budget_exceeded`: 실행이 예산 초과로 끝남 (유형 무관)
+ * - `mutant_survived`: 변이 보강 실행(유형 C)이 실패로 끝났고 원인 변이 기록(`mutationResultId`)의 규칙이 지금도 '변이 생존'
+ * 열린 항목은 실행마다 많아야 하나다. 처리(`resolution`)는 열림 → 처리됨 한 번이고 지우거나 되돌릴 수 없다.
+ */
+export const ReviewItem = z
+  .strictObject({
+    seq: z.int().positive(),
+    kind: ReviewItemKind,
+    runId: Ulid,
+    mutationResultId: Ulid.nullable(),
+    createdAt: Timestamp,
+    resolution: ReviewResolution.nullable(),
+  })
+  .superRefine((item, ctx) => {
+    if ((item.kind === 'mutant_survived') !== (item.mutationResultId !== null)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '변이 생존 항목만 원인 변이 기록을 가집니다',
+        path: ['mutationResultId'],
+      });
+    }
+    const allowed: readonly string[] = REVIEW_ACTIONS_BY_KIND[item.kind];
+    if (item.resolution !== null && !allowed.includes(item.resolution.action)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '항목 종류가 받지 않는 액션입니다',
+        path: ['resolution', 'action'],
+      });
+    }
+  });
+export type ReviewItem = z.infer<typeof ReviewItem>;
 
 // ── 코드 열람 기록 (MET-01, M2-01, ADR-084) ─────────────────
 

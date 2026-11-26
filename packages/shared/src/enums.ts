@@ -585,3 +585,48 @@ export const CODE_OPEN_REASON_LABELS = {
   info_lacking: '정보 부족',
   debugging: '디버깅',
 } as const satisfies Record<CodeOpenReason, string>;
+
+/**
+ * 검토 대기열 항목 종류 (TODO-02 · COST-01 · JDG-04, M3-08 #53, ADR-100 B④ · A17, ADR-145). 실행이 예산 초과로 끝나면
+ * `budget_exceeded`, 변이 생존의 테스트 보강 실행이 실패로 끝났고 그 규칙이 아직 '변이 생존'이면 `mutant_survived`.
+ */
+export const ReviewItemKind = z.enum(['budget_exceeded', 'mutant_survived']);
+export type ReviewItemKind = z.infer<typeof ReviewItemKind>;
+export const REVIEW_ITEM_KIND_LABELS = {
+  budget_exceeded: '예산 초과',
+  mutant_survived: '변이 생존',
+} as const satisfies Record<ReviewItemKind, string>;
+
+/** 검토 대기열 항목의 처리 상태 (화면 정의서 SCR-18 필터 "처리 상태"). 처리는 한 번만 기록된다. */
+export const ReviewItemState = z.enum(['open', 'resolved']);
+export type ReviewItemState = z.infer<typeof ReviewItemState>;
+export const REVIEW_ITEM_STATE_LABELS = {
+  open: '열림',
+  resolved: '처리됨',
+} as const satisfies Record<ReviewItemState, string>;
+
+/**
+ * 검토 대기열 처리 액션 (PRD TODO-02, ADR-145). 예산 초과: 한도 상향 재개 · 허용 목록 축소 재개 · 규칙 분할. 변이 생존: 테스트 보강 ·
+ * 판정 격리. 변이 생존의 이의 제기는 정의 전이라(PRD 미결 #7) 액션이 아니다.
+ */
+export const ReviewAction = z.enum([
+  'raise_limit_resume',
+  'narrow_allowlist_resume',
+  'split_rule',
+  'reinforce',
+  'quarantine',
+]);
+export type ReviewAction = z.infer<typeof ReviewAction>;
+export const REVIEW_ACTION_LABELS = {
+  raise_limit_resume: '한도 상향 재개',
+  narrow_allowlist_resume: '허용 목록 축소 재개',
+  split_rule: '규칙 분할',
+  reinforce: '테스트 보강',
+  quarantine: '판정 격리',
+} as const satisfies Record<ReviewAction, string>;
+
+/** 항목 종류마다 받는 액션 (DB CHECK `review_items`와 같은 짝). */
+export const REVIEW_ACTIONS_BY_KIND = {
+  budget_exceeded: ['raise_limit_resume', 'narrow_allowlist_resume', 'split_rule'],
+  mutant_survived: ['reinforce', 'quarantine'],
+} as const satisfies Record<ReviewItemKind, readonly ReviewAction[]>;

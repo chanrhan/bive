@@ -29,6 +29,7 @@ import {
   Proposal,
   ProposalPayload,
   Requirement,
+  ReviewItem,
   RoleSettings,
   Rule,
   Run,
@@ -54,6 +55,8 @@ import {
   ProposalKind,
   Risk,
   ProposalState,
+  ReviewItemKind,
+  ReviewItemState,
   RuleWriterSkipReason,
   RuleWriterState,
   RunStatus,
@@ -514,6 +517,10 @@ export const DomainErrorReason = {
   UnrulableReasonRequired: 'UNRULABLE_REASON_REQUIRED',
   /** 규칙화 불가 사유가 상한을 넘는다 (ADR-137) */
   UnrulableReasonInvalid: 'UNRULABLE_REASON_INVALID',
+  /** 판정 격리 사유가 비었다 (공백만 포함, TODO-02 · ADR-145) */
+  QuarantineReasonRequired: 'QUARANTINE_REASON_REQUIRED',
+  /** 판정 격리 사유가 상한을 넘는다 (ADR-145) */
+  QuarantineReasonInvalid: 'QUARANTINE_REASON_INVALID',
 } as const;
 export type DomainErrorReason = (typeof DomainErrorReason)[keyof typeof DomainErrorReason];
 
@@ -1454,6 +1461,92 @@ export const ContractListResult = z.strictObject({
 });
 export type ContractListResult = z.infer<typeof ContractListResult>;
 
+// ── 검토 대기열 (TODO-02 · COST-01 · JDG-04, SCR-18, M3-08 #53, ADR-100 B④ · A17, ADR-145) ──────────
+// - 항목은 실행의 종료 상태를 저장하는 같은 쓰기에서 DB가 등록한다(이 이름 공간에 항목을 만드는 메서드는 없다)
+// - 조회는 사람 · 앱 누구나, 처리 액션은 사람 주체만(에이전트 -32020, 저장소를 열기 전). 없는 항목 -32004, 이미 처리됨 ·
+//   그 종류가 받지 않는 액션은 -32009(`data.reason` = {@link ReviewConflictReason}). 처리는 항목마다 한 번이다
+// - 변이 생존의 이의 제기는 정의 전이라(PRD 미결 #7) 메서드가 없다(부르면 -32601)
+// - 값은 저장된 항목 · 실행 · 규칙에서만 만든다(NFR-03). 규칙 제목은 원문이라 화면은 표시 값으로 바꿔 그린다
+
+/** 항목이 가리키는 실행 (요약). */
+export const ReviewQueueRun = z.strictObject({
+  id: Ulid,
+  displayId: displayIdSchema('EXE'),
+  type: RunType,
+  status: RunStatus,
+  failureReason: z.string().nullable(),
+});
+export type ReviewQueueRun = z.infer<typeof ReviewQueueRun>;
+
+/** 항목의 대상 규칙 (변이 생존 = 원인 변이 기록의 규칙, 예산 초과 = 실행의 대상 규칙들, 표시 ID 순이 아니라 실행의 순서). */
+export const ReviewQueueRule = z.strictObject({
+  id: Ulid,
+  displayId: displayIdSchema('RULE'),
+  title: z.string(),
+});
+export type ReviewQueueRule = z.infer<typeof ReviewQueueRule>;
+
+export const ReviewQueueEntry = z.strictObject({
+  item: ReviewItem,
+  run: ReviewQueueRun,
+  rules: z.array(ReviewQueueRule),
+});
+export type ReviewQueueEntry = z.infer<typeof ReviewQueueEntry>;
+
+/** `reviewQueue.list`: 등록 순(오래된 것 먼저). `kind` · `state`로 거른다(생략하면 전부). */
+export const ReviewQueueListParams = z.strictObject({
+  projectId: Ulid,
+  kind: ReviewItemKind.optional(),
+  state: ReviewItemState.optional(),
+});
+export type ReviewQueueListParams = z.infer<typeof ReviewQueueListParams>;
+export const ReviewQueueListResult = z.strictObject({ entries: z.array(ReviewQueueEntry) });
+export type ReviewQueueListResult = z.infer<typeof ReviewQueueListResult>;
+
+export const ReviewQueueGetParams = z.strictObject({ projectId: Ulid, seq: z.int().positive() });
+export type ReviewQueueGetParams = z.infer<typeof ReviewQueueGetParams>;
+export const ReviewQueueEntryResult = z.strictObject({ entry: ReviewQueueEntry });
+export type ReviewQueueEntryResult = z.infer<typeof ReviewQueueEntryResult>;
+
+/**
+ * `reviewQueue.reinforce`: 변이 생존 항목의 테스트 보강. 사람이 시작한 유형 C 실행 1개를 사람의 `run.create`와 같은 문(설정 ·
+ * 유형 · 대상 규칙 · 승인 기록 `run_start`)으로 만들고, 원인 변이 기록과 잇는다(그 실행의 변이 주입 단계 = 같은 변이의 재주입).
+ */
+export const ReviewQueueReinforceParams = z.strictObject({
+  projectId: Ulid,
+  seq: z.int().positive(),
+  author: Author,
+});
+export type ReviewQueueReinforceParams = z.infer<typeof ReviewQueueReinforceParams>;
+export const ReviewQueueReinforceResult = z.strictObject({
+  entry: ReviewQueueEntry,
+  run: Run,
+  steps: z.array(Step),
+  approvalLog: ApprovalLogEntry,
+});
+export type ReviewQueueReinforceResult = z.infer<typeof ReviewQueueReinforceResult>;
+
+/**
+ * `reviewQueue.quarantine`: 변이 생존 항목의 판정 격리. 공백만인 사유는 -32001(`QUARANTINE_REASON_REQUIRED`), 상한 초과는
+ * -32001(`QUARANTINE_REASON_INVALID`). 그 규칙에 판정 상태 '격리' 기록 1건을 남긴다(그 뒤 실제 판정이 나오면 그것이 최신이다).
+ */
+export const ReviewQueueQuarantineParams = z.strictObject({
+  projectId: Ulid,
+  seq: z.int().positive(),
+  reason: z.string(),
+  author: Author,
+});
+export type ReviewQueueQuarantineParams = z.infer<typeof ReviewQueueQuarantineParams>;
+export const ReviewQueueQuarantineResult = z.strictObject({
+  entry: ReviewQueueEntry,
+  judgment: JudgmentResult,
+});
+export type ReviewQueueQuarantineResult = z.infer<typeof ReviewQueueQuarantineResult>;
+
+/** 처리 액션이 -32009로 거부하는 이유 (`error.data.reason`). */
+export const ReviewConflictReason = z.enum(['already_resolved', 'action_not_allowed']);
+export type ReviewConflictReason = z.infer<typeof ReviewConflictReason>;
+
 /**
  * 메서드 이름 → 파라미터 · 결과 스키마. architecture.md 5장 표의 메서드는 해당 이슈에서 여기에 추가한다.
  * 파라미터가 없는 메서드는 `z.undefined()`로 둔다 (요청에 `params`를 넣으면 -32602).
@@ -1493,6 +1586,16 @@ export const METHODS = {
   'blocks.set': { params: BlocksSetParams, result: BlocksSetResult },
   'contract.register': { params: ContractRegisterParams, result: ContractRegisterResult },
   'contract.list': { params: ContractListParams, result: ContractListResult },
+  'reviewQueue.list': { params: ReviewQueueListParams, result: ReviewQueueListResult },
+  'reviewQueue.get': { params: ReviewQueueGetParams, result: ReviewQueueEntryResult },
+  'reviewQueue.reinforce': {
+    params: ReviewQueueReinforceParams,
+    result: ReviewQueueReinforceResult,
+  },
+  'reviewQueue.quarantine': {
+    params: ReviewQueueQuarantineParams,
+    result: ReviewQueueQuarantineResult,
+  },
   'settings.get': { params: SettingsGetParams, result: SettingsResult },
   'settings.update': { params: SettingsUpdateParams, result: SettingsResult },
   'settings.validateForRun': { params: SettingsValidateParams, result: SettingsValidateResult },
@@ -1616,6 +1719,18 @@ export type BlocksChangedEvent = z.infer<typeof BlocksChangedEvent>;
 /** 블록 선언 알림 이름. 렌더러는 받으면 열린 규칙 · 요구사항 상세의 블록 선언을 다시 조회한다. */
 export const BLOCK_EVENT_NAMES = ['event.blocks.changed'] as const;
 
+// ── 검토 대기열 알림 (TODO-02, SCR-18, M3-08 #53, ADR-145) ──────────
+// - 검토 대기열 항목이 생기거나(실행 종료 저장) 처리된 저장소 사용이 끝난 뒤(커밋 뒤) 1개. 규범 변경 알림처럼 저장소를 여닫는
+//   한 곳에서 사용 전후의 항목 수 · 처리된 수를 비교한다. 기다리지 않는다
+// - 내용 없이 프로젝트 ID만 싣는다. 받는 쪽은 `reviewQueue.list`를 다시 조회한다
+
+/** `event.reviewQueue.changed`: 프로젝트의 검토 대기열 항목이 생기거나 처리됨. */
+export const ReviewQueueChangedEvent = z.strictObject({ projectId: Ulid });
+export type ReviewQueueChangedEvent = z.infer<typeof ReviewQueueChangedEvent>;
+
+/** 검토 대기열 알림 이름. */
+export const REVIEW_QUEUE_EVENT_NAMES = ['event.reviewQueue.changed'] as const;
+
 /** 알림 이름 → 파라미터 스키마. `event.*` 알림은 해당 이슈에서 추가한다. */
 export const NOTIFICATIONS = {
   'event.run.updated': { params: RunUpdatedEvent },
@@ -1624,6 +1739,7 @@ export const NOTIFICATIONS = {
   'event.ruleWriter.changed': { params: RuleWriterChangedEvent },
   'event.normChange.appended': { params: NormChangeAppendedEvent },
   'event.blocks.changed': { params: BlocksChangedEvent },
+  'event.reviewQueue.changed': { params: ReviewQueueChangedEvent },
 } as const satisfies Record<string, NotificationSpec>;
 
 export type NotificationParams<N extends NotificationName> = z.infer<
