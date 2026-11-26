@@ -167,8 +167,23 @@ interface World {
 const RETIRE_STATEMENT = 'WHEN 요청이 오면 THE SYSTEM SHALL 폐기될규칙만의고유조각문장을 담는다';
 const RETIRE_GROUNDS = '진술 "폐기될규칙만의고유조각문장"은 더는 맞지 않아 효력을 가지면 안 된다';
 
-const seedWorld = (store: ProjectStore, options: { declared: boolean }): World => {
+/** 규칙 상한을 넘기는 채움 규칙 수 (ADR-140: 상한을 넘을 때만 고른다). 대상 블록 filler는 어느 기준과도 겹치지 않는다. */
+const PAD_RULES = 45;
+
+/** 채움: 요구사항 1개 아래 filler 규칙 `n`개 (다른 시드보다 오래돼 A15 줄이기에서 먼저 빠진다). */
+const pad = (store: ProjectStore, n: number, offset = 1): Rule[] => {
+  const fillerReq = seedNormRequirement(store, '채움 요구사항', T0 + offset);
+  return Array.from({ length: n }, (_, i) =>
+    rule(store, fillerReq, ['filler'], offset + 1 + i, `채움 규칙 ${String(i)}`),
+  );
+};
+
+const seedWorld = (
+  store: ProjectStore,
+  options: { declared: boolean; padded?: boolean },
+): World => {
   const builtins = options.declared ? declare(store) : [];
+  if (options.padded ?? true) pad(store, PAD_RULES);
   const targetReq = seedNormRequirement(store, '헬스 체크 응답에 서버 시각 포함', T0 + 100);
   const target = rule(store, targetReq, ['health'], 110, '서버 시각');
   const authReq = seedNormRequirement(store, '로그인 세션 확인', T0 + 120);
@@ -293,14 +308,16 @@ describe('고르는 규칙: 대상 블록과 겹치는 규칙 · 그 부모 요�
     // 연결 계약: 검사 규칙(대상 블록 없음)이 남으므로 부모 요구사항이 블록 밖이어도 계약이 남는다
     expect(ids(input.contracts ?? [])).toEqual(['CON-001']);
 
-    // 수: 전체는 효력 있는 전부, 블록 밖과 상한은 따로 (상한 안이라 잘림 없음)
+    // 수: 전체는 효력 있는 전부(채움 포함, 규칙이 상한을 넘는다), 블록 밖과 상한은 따로 (고른 범위는 상한 안이라 잘림 없음)
+    const ruleTotal = expectedRules.length + 4 + PAD_RULES;
+    expect(ruleTotal).toBeGreaterThan(NORM_INPUT_LIMITS.rules);
     expect(input.summary).toEqual({
-      requirements: { total: 7, included: 5, omitted: 0, outOfBlock: 2 },
+      requirements: { total: 8, included: 5, omitted: 0, outOfBlock: 3 },
       rules: {
-        total: expectedRules.length + 4,
+        total: ruleTotal,
         included: expectedRules.length,
         omitted: 0,
-        outOfBlock: 4,
+        outOfBlock: 4 + PAD_RULES,
       },
       contracts: { total: 1, included: 1, omitted: 0, outOfBlock: 0 },
       truncated: false,
@@ -314,9 +331,9 @@ describe('고르는 규칙: 대상 블록과 겹치는 규칙 · 그 부모 요�
     expect(lines[0]).toBe(
       '고른 범위: 대상 블록(health)과 겹치거나 대상 블록이 없는 규칙과 작업 대상 규칙, 그 부모 요구사항 · 규칙이 없는 요구사항 · 작업 대상 요구사항, 연결 계약만 실음. 블록 밖 규범은 싣지 않았고, 검사 단계는 효력 있는 규칙 전체를 판정한다',
     );
-    expect(lines[1]).toBe('요구사항 (효력 7건 중 대상 블록 관련 5건, 블록 밖 2건 뺌)');
+    expect(lines[1]).toBe('요구사항 (효력 8건 중 대상 블록 관련 5건, 블록 밖 3건 뺌)');
     expect(lines).toContain(
-      `규칙 (효력 ${String(expectedRules.length + 4)}건 중 대상 블록 관련 ${String(expectedRules.length)}건, 블록 밖 4건 뺌)`,
+      `규칙 (효력 ${String(ruleTotal)}건 중 대상 블록 관련 ${String(expectedRules.length)}건, 블록 밖 ${String(4 + PAD_RULES)}건 뺌)`,
     );
     expect(lines).toContain('계약 (효력 1건 중 대상 블록 관련 1건, 블록 밖 0건 뺌)');
     expect(listedIds(text, 'RULE')).toEqual(expectedRules);
@@ -327,6 +344,7 @@ describe('고르는 규칙: 대상 블록과 겹치는 규칙 · 그 부모 요�
       '영수증 번호',
       '부모 해제 인증',
       '결제 영수증',
+      '채움 규칙',
     ]) {
       expect(text).not.toContain(absent);
     }
@@ -347,7 +365,7 @@ describe('고르는 규칙: 대상 블록과 겹치는 규칙 · 그 부모 요�
     });
     // 로그 한 줄도 블록 밖 수를 적는다
     expect(normInputSummaryText(input.summary)).toBe(
-      `요구사항 7건 중 5건 (블록 밖 2건), 규칙 ${String(expectedRules.length + 4)}건 중 ${String(expectedRules.length)}건 (블록 밖 4건)`,
+      `요구사항 8건 중 5건 (블록 밖 3건), 규칙 ${String(ruleTotal)}건 중 ${String(expectedRules.length)}건 (블록 밖 ${String(4 + PAD_RULES)}건)`,
     );
   });
 
@@ -384,7 +402,7 @@ describe('고르는 규칙: 대상 블록과 겹치는 규칙 · 그 부모 요�
     expect(ids(input.rules)).toContain(w.authLib.displayId);
     expect(ids(input.rules)).toContain(w.detachedAuth.displayId);
     expect(ids(input.rules)).not.toContain(w.undeclared.displayId);
-    expect(input.summary.rules.outOfBlock).toBe(1);
+    expect(input.summary.rules.outOfBlock).toBe(1 + PAD_RULES);
     expect(ids(input.requirements)).toContain(w.authLibReq.displayId);
     expect(ids(input.requirements)).not.toContain(w.undeclaredReq.displayId);
   });
@@ -405,6 +423,132 @@ describe('고르는 규칙: 대상 블록과 겹치는 규칙 · 그 부모 요�
     const without = collectNormInput(store, { requirementIds: [], ruleIds: [w.auth.id] }, NO_CASES);
     expect(ids(without.rules)).not.toContain(w.target.displayId);
     expect(ids(without.rules)).not.toContain(w.libHealth.displayId);
+  });
+
+  it('겹침은 이름이 정확히 같을 때만이다: auth 기준에 auth-admin · health 기준에 healthz는 겹치지 않는다 (부분 문자열 아님)', () => {
+    const { store } = openStore();
+    const w = seedWorld(store, { declared: true });
+    const adminReq = seedNormRequirement(store, '관리자 로그인', T0 + 400);
+    const authAdmin = rule(store, adminReq, ['auth-admin'], 410, '관리자 세션');
+    const healthz = rule(store, adminReq, ['healthz'], 420, '헬스 별칭');
+    const byAuth = collectNormInput(store, { requirementIds: [], ruleIds: [w.auth.id] }, NO_CASES);
+    expect(ids(byAuth.rules)).toContain(w.auth.displayId);
+    expect(ids(byAuth.rules)).not.toContain(authAdmin.displayId);
+    expect(ids(byAuth.rules)).not.toContain(healthz.displayId);
+    const byAdmin = collectNormInput(
+      store,
+      { requirementIds: [], ruleIds: [authAdmin.id] },
+      NO_CASES,
+    );
+    expect(ids(byAdmin.rules)).not.toContain(w.auth.displayId);
+    const byHealth = collectNormInput(
+      store,
+      { requirementIds: [], ruleIds: [w.target.id] },
+      NO_CASES,
+    );
+    expect(ids(byHealth.rules)).not.toContain(healthz.displayId);
+    expect(ids(byHealth.rules)).not.toContain(authAdmin.displayId);
+  });
+});
+
+describe('언제 고르는가: 효력 있는 규범이 어느 종류든 상한을 넘을 때만 (ADR-100 K1 "규범이 많아지면" · A15, ADR-140)', () => {
+  /** 선언 · 대상 블록이 있는 작은 프로젝트: health 대상 1개, 블록 밖 auth 1개. */
+  const small = (store: ProjectStore) => {
+    store.blockDeclarations.set(SAMPLE, { at: at(0), by: human });
+    const targetReq = seedNormRequirement(store, '헬스 체크 응답에 서버 시각 포함', T0 + 100);
+    const target = rule(store, targetReq, ['health'], 110, '서버 시각');
+    const authReq = seedNormRequirement(store, '로그인 세션 확인', T0 + 120);
+    const auth = rule(store, authReq, ['auth'], 130, '세션 쿠키');
+    return { target, auth };
+  };
+  const selected = (input: NormInput): boolean => input.summary.blocks !== undefined;
+
+  it('상한 안이면 블록 선언과 대상 블록이 있어도 전체이고, 작업 지시(블록 선언 절 밖) · 세션 기록이 선언 없는 프로젝트와 글자까지 같다', () => {
+    const declared = openStore().store;
+    const plain = openStore().store;
+    const a = seedWorld(declared, { declared: false, padded: false });
+    const b = seedWorld(plain, { declared: false, padded: false });
+    declared.blockDeclarations.set(SAMPLE, { at: at(999), by: human });
+    const withDecl = collectNormInput(
+      declared,
+      { requirementIds: [], ruleIds: [a.target.id] },
+      NO_CASES,
+    );
+    const without = collectNormInput(
+      plain,
+      { requirementIds: [], ruleIds: [b.target.id] },
+      NO_CASES,
+    );
+    expect(selected(withDecl)).toBe(false);
+    expect(ids(withDecl.rules)).toContain(a.auth.displayId);
+    expect(withDecl.blocks?.version).toBe(1);
+    const withoutBlockSection: NormInput = { ...withDecl };
+    delete (withoutBlockSection as { blocks?: unknown }).blocks;
+    expect(renderNormInput(withoutBlockSection, '이번 작업 대상')).toBe(
+      renderNormInput(without, '이번 작업 대상'),
+    );
+    expect(normInputRecord(withDecl)).toEqual(normInputRecord(without));
+    expect(normInputSummaryText(withDecl.summary)).toBe(normInputSummaryText(without.summary));
+  });
+
+  it('규칙 수 경계: 상한과 같으면 전체, 상한 + 1이면 고른다', () => {
+    const { store } = openStore();
+    const { target, auth } = small(store);
+    pad(store, NORM_INPUT_LIMITS.rules - 2);
+    const atLimit = collectNormInput(store, { requirementIds: [], ruleIds: [target.id] }, NO_CASES);
+    expect(atLimit.summary.rules.total).toBe(NORM_INPUT_LIMITS.rules);
+    expect(selected(atLimit)).toBe(false);
+    expect(ids(atLimit.rules)).toContain(auth.displayId);
+    pad(store, 1, 500);
+    const over = collectNormInput(store, { requirementIds: [], ruleIds: [target.id] }, NO_CASES);
+    expect(over.summary.rules.total).toBe(NORM_INPUT_LIMITS.rules + 1);
+    expect(over.summary.requirements.total).toBeLessThanOrEqual(NORM_INPUT_LIMITS.requirements);
+    expect(selected(over)).toBe(true);
+    expect(ids(over.rules)).not.toContain(auth.displayId);
+  });
+
+  it('요구사항 수만 경계: 상한과 같으면 전체, 상한 + 1이면 고른다 (규칙은 상한 안)', () => {
+    const { store } = openStore();
+    const { target, auth } = small(store);
+    for (let i = 0; i < NORM_INPUT_LIMITS.requirements - 2; i += 1) {
+      seedNormRequirement(store, `규칙 없는 요구사항 ${String(i)}`, T0 + 200 + i);
+    }
+    const atLimit = collectNormInput(store, { requirementIds: [], ruleIds: [target.id] }, NO_CASES);
+    expect(atLimit.summary.requirements.total).toBe(NORM_INPUT_LIMITS.requirements);
+    expect(selected(atLimit)).toBe(false);
+    seedNormRequirement(store, '하나 더', T0 + 400);
+    const over = collectNormInput(store, { requirementIds: [], ruleIds: [target.id] }, NO_CASES);
+    expect(over.summary.requirements.total).toBe(NORM_INPUT_LIMITS.requirements + 1);
+    expect(over.summary.rules.total).toBeLessThanOrEqual(NORM_INPUT_LIMITS.rules);
+    expect(selected(over)).toBe(true);
+    expect(ids(over.rules)).not.toContain(auth.displayId);
+  });
+
+  it('계약 수만 경계: 상한과 같으면 전체, 상한 + 1이면 고른다 (요구사항 · 규칙은 상한 안)', () => {
+    const { store } = openStore();
+    const { target, auth } = small(store);
+    const contract = (i: number) =>
+      store.contracts.create({
+        id: newId(),
+        kind: 'openapi',
+        sourceFile: `contracts/c${String(i)}.yaml`,
+        contentHash: 'b'.repeat(64),
+        sourceCommit: 'a'.repeat(40),
+        parentRequirementId: null,
+        author: human,
+        createdAt: at(600 + i),
+      });
+    for (let i = 0; i < NORM_INPUT_LIMITS.contracts; i += 1) contract(i);
+    const atLimit = collectNormInput(store, { requirementIds: [], ruleIds: [target.id] }, NO_CASES);
+    expect(atLimit.summary.contracts?.total).toBe(NORM_INPUT_LIMITS.contracts);
+    expect(selected(atLimit)).toBe(false);
+    contract(NORM_INPUT_LIMITS.contracts);
+    const over = collectNormInput(store, { requirementIds: [], ruleIds: [target.id] }, NO_CASES);
+    expect(over.summary.contracts?.total).toBe(NORM_INPUT_LIMITS.contracts + 1);
+    expect(over.summary.rules.total).toBeLessThanOrEqual(NORM_INPUT_LIMITS.rules);
+    expect(over.summary.requirements.total).toBeLessThanOrEqual(NORM_INPUT_LIMITS.requirements);
+    expect(selected(over)).toBe(true);
+    expect(ids(over.rules)).not.toContain(auth.displayId);
   });
 });
 
@@ -562,17 +706,19 @@ describe('블록 선언이 없거나 기준 규칙에 대상 블록이 없으면
           item.normState === 'approved' &&
           !store.ruleRetirements.retiredRuleIds().has(item.id),
       ).length;
+    // 채움으로 규칙이 상한을 넘는다: 고르지 않고 효력 있는 전체에 A15의 줄이기만 쓴다 (블록 밖 수 없음)
+    expect(effectiveRuleCount).toBeGreaterThan(NORM_INPUT_LIMITS.rules);
     expect(input.summary.rules).toEqual({
       total: effectiveRuleCount,
-      included: effectiveRuleCount,
-      omitted: 0,
+      included: NORM_INPUT_LIMITS.rules,
+      omitted: effectiveRuleCount - NORM_INPUT_LIMITS.rules,
     });
-    expect(input.summary.requirements).toEqual({ total: 7, included: 7, omitted: 0 });
+    expect(input.summary.requirements).toEqual({ total: 8, included: 8, omitted: 0 });
     expect('blocks' in input.summary).toBe(false);
     const text = renderNormInput(input, '이번 작업 대상');
     expect(text).not.toContain('고른 범위');
     expect(text).not.toContain('대상 블록 관련');
-    expect(dataLines(text)[0]).toBe('요구사항 (효력 7건 중 7건)');
+    expect(dataLines(text)[0]).toBe('요구사항 (효력 8건 중 8건)');
     const record = normInputRecord(input);
     expect(Object.keys(record.summary)).toEqual([
       'requirements',
@@ -739,8 +885,8 @@ describe('규칙 작성 역할의 세션: 새 요구사항은 전체, 요구사�
     expect(freshSession?.normInput?.summary.rules).not.toHaveProperty('outOfBlock');
     expect(rejudgeSession?.normInput?.summary).toMatchObject({
       blocks: ['health'],
-      rules: { outOfBlock: 4 },
-      requirements: { outOfBlock: 2 },
+      rules: { outOfBlock: 4 + PAD_RULES },
+      requirements: { outOfBlock: 3 },
       truncated: false,
     });
     expect(rejudgeSession?.normInput?.ruleDisplayIds).not.toContain(w.auth.displayId);
@@ -748,6 +894,9 @@ describe('규칙 작성 역할의 세션: 새 요구사항은 전체, 요구사�
 });
 
 // ── 실행 안 세션: 테스트 작성 · 구현 · 이의 판단 ──────────────────────
+
+/** 실행 하네스의 채움 규칙 수 (REQ-004 아래 filler). */
+const RUN_PAD_RULES = 50;
 
 /** 실행 하네스의 선언 · 내장 규칙과 대상 밖 규범 (RULE-001 = health 대상). */
 const seedRun = (h: PipelineHarness) =>
@@ -759,6 +908,8 @@ const seedRun = (h: PipelineHarness) =>
     const billingReq = seedNormRequirement(store, '결제 영수증', T0 + 1130);
     const billing = rule(store, billingReq, ['billing'], 1140, '영수증 번호');
     const legacy = rule(store, billingReq, [], 1150, '옛 규칙');
+    // 규칙이 상한을 넘게 채운다 (상한 안이면 고르지 않는다, ADR-140). 폴더가 없는 시드 규칙이라 검사는 판정하지 않는다
+    pad(store, RUN_PAD_RULES, 1200);
     return { builtins, authReq, auth, libHealth, billingReq, billing, legacy };
   });
 
@@ -790,12 +941,12 @@ describe('테스트 작성 · 구현 세션: 실행의 대상 규칙(health)으�
       const [session] = storedSessions(h).filter((item) => item.role === role);
       expect(session?.normInput, role).toEqual({
         summary: {
-          requirements: { total: 3, included: 3, omitted: 0, outOfBlock: 0 },
+          requirements: { total: 4, included: 3, omitted: 0, outOfBlock: 1 },
           rules: {
-            total: expectedRules.length + 2,
+            total: expectedRules.length + 2 + RUN_PAD_RULES,
             included: expectedRules.length,
             omitted: 0,
-            outOfBlock: 2,
+            outOfBlock: 2 + RUN_PAD_RULES,
           },
           truncated: false,
           blocks: ['health'],
@@ -869,7 +1020,7 @@ describe('이의 판단 세션: 이의 대상(블록 밖 auth)과 실행의 대�
     const [judgeSession] = storedSessions(h).filter((item) => item.role === 'rule-writer');
     expect(judgeSession?.normInput?.summary).toMatchObject({
       blocks: ['auth', 'health'],
-      rules: { outOfBlock: 1 },
+      rules: { outOfBlock: 1 + RUN_PAD_RULES },
     });
     // 같은 실행의 구현 세션은 health 기준 (auth 규칙 없음)
     const implementer = h.sessions.filter((spec) => spec.role === 'implementer');

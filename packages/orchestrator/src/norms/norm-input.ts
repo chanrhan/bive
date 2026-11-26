@@ -18,7 +18,7 @@
 // - 효력 있는 계약이 있으면 규칙 절 뒤에 계약 절(표시 ID · 종류 · 원본 파일)을 싣는다(M3-04 #49, ADR-100 K1 · A14, ADR-129). 같은
 //   표시 값 변환 · 상한 · 줄이기(최근 등록 순으로 상한까지)를 따른다. 계약 내용은 싣지 않는다(목록만). 계약이 없으면 절이 없다
 //   (지금까지의 작업 지시 그대로). 계약 검사 규칙의 부모 줄은 그 계약을 가리킨다
-// - 대상 블록으로 고르기(M3-29 #231, ADR-100 K1, ADR-140): 블록 선언이 있고 기준 규칙(초점 규칙과 넷째 인자의 `blockBasisRuleIds`)이 모두 대상
+// - 대상 블록으로 고르기(M3-29 #231, ADR-100 K1, ADR-140): 효력 있는 요구사항 · 규칙 · 계약 가운데 어느 종류든 상한을 넘고, 블록 선언이 있고 기준 규칙(초점 규칙과 넷째 인자의 `blockBasisRuleIds`)이 모두 대상
 //   블록을 가지면, 효력 있는 규범 가운데 기준 블록과 이름이 겹치는 규칙 · 대상 블록이 없는 규칙 · 기준 규칙 자신, 그 규칙들의 부모
 //   요구사항 · 규칙이 없는 요구사항 · 초점 요구사항, 연결 계약만 남긴다({@link blockScopeOf}). 고른 범위에 A15의 줄이기를 그대로
 //   쓴다(먼저 고르고 그다음 줄인다). 블록으로 뺀 수(`outOfBlock`)와 상한으로 뺀 수(`omitted`)는 따로 남는다. 선언이 없거나 기준을
@@ -280,8 +280,9 @@ export interface NormInputBlockScope {
 }
 
 /**
- * 대상 블록으로 고른 범위 (ADR-100 K1, ADR-140). 고르지 않으면 `null`(효력 있는 규범 전체가 범위다):
- * - 블록 선언이 없음 · 기준 규칙이 없음(규칙 작성 세션: 아직 규칙이 없다) · 기준 규칙 가운데 하나라도 없거나 대상 블록이 빈 목록
+ * 대상 블록으로 고른 범위 (ADR-100 K1, ADR-140). `declared`는 "선언이 있고 상한을 넘음"이다(부르는 쪽이 정한다). 고르지 않으면
+ * `null`(효력 있는 규범 전체가 범위다):
+ * - 선언이 없거나 상한 안 · 기준 규칙이 없음(규칙 작성 세션: 아직 규칙이 없다) · 기준 규칙 가운데 하나라도 없거나 대상 블록이 빈 목록
  * 고르면:
  * - 규칙: 기준 규칙 자신, 대상 블록 이름이 기준 블록과 하나라도 같은 규칙(이름 그대로 비교, 선언에 없는 이름도 같다), 대상 블록이
  *   빈 규칙(내장 구조 규칙 · 계약 검사 규칙 · 옛 규칙: 어느 블록에 걸리는지 모르므로 넣는다)
@@ -354,7 +355,7 @@ export const blockScopeOf = (
 
 /**
  * 저장소에서 규범 입력을 모은다 (읽기만). 상한은 {@link NORM_INPUT_LIMITS}.
- * 블록 선언이 있으면 먼저 대상 블록으로 고르고({@link blockScopeOf}, M3-29 · ADR-140), 고른 범위 안에서
+ * 어느 종류든 상한을 넘고 블록 선언이 있으면 먼저 대상 블록으로 고르고({@link blockScopeOf}, M3-29 · ADR-140), 고른 범위 안에서
  * 초점 규칙 → 초점 요구사항과 초점 규칙의 부모 → 그 요구사항들을 부모로 하는 규칙 순으로 먼저 남긴다(A15).
  */
 export const collectNormInput = (
@@ -375,8 +376,14 @@ export const collectNormInput = (
       focusRequirements.add(rule.parentRequirementId);
     }
   }
+  // 대상 블록으로 고르는 것은 "규범이 많아질 때"뿐이다 (ADR-100 K1 · A15, ADR-140): 어느 종류든 효력 있는 수가 그 종류의 상한을
+  // 넘어 A15의 줄이기가 돌 때만 고른다. 상한 안이면 선언이 있어도 전체 (작업 지시 · 세션 기록이 고르기 전과 같다)
+  const overLimit =
+    allRequirements.length > limits.requirements ||
+    allRules.length > limits.rules ||
+    contractsAll.length > limits.contracts;
   const scope = blockScopeOf(
-    blocks !== null,
+    blocks !== null && overLimit,
     [...new Set([...focus.ruleIds, ...(blockOptions.blockBasisRuleIds ?? [])])],
     focusRequirements,
     (ruleId) => store.rules.get(ruleId),

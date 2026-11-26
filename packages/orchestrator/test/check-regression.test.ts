@@ -33,7 +33,12 @@ import { retireAgentRule, supersedeAgentRule, upholdAgentRule } from '../src/nor
 import { caseNameLiterals, knownCaseMatcher } from '../src/norms/case-names.js';
 import { CHECK_UNDECIDED_REASON, settleCheckFailure } from '../src/norms/check-contradiction.js';
 import { ensureBuiltinStructureRules } from '../src/norms/builtin-rules.js';
-import { NORM_INPUT_BEGIN, NORM_INPUT_END, normInputScopeLine } from '../src/norms/norm-input.js';
+import {
+  NORM_INPUT_BEGIN,
+  NORM_INPUT_END,
+  NORM_INPUT_LIMITS,
+  normInputScopeLine,
+} from '../src/norms/norm-input.js';
 import {
   CHECK_CASE_NOT_INSTRUCTION,
   CHECK_CASES_BEGIN,
@@ -1749,6 +1754,17 @@ describe('검사 단계는 고른 범위와 무관하게 효력 있는 규칙 �
         ) as unknown;
         const record = store.blockDeclarations.set(declaration, { at, by: human });
         ensureBuiltinStructureRules(store, { declaration: record, at, newId: harnessId });
+        // 규칙이 상한을 넘게 채운다 (상한 안이면 고르지 않는다, ADR-140). 폴더 없는 시드 규칙이라 검사는 판정하지 않는다
+        const filler = seedNormRequirement(store, '채움 요구사항', Date.now());
+        for (let i = 0; i < NORM_INPUT_LIMITS.rules; i += 1) {
+          seedNormRule(store, {
+            title: `채움 규칙 ${String(i)}`,
+            statement: `WHEN 요청이 오면 THE SYSTEM SHALL 채움 규칙 ${String(i)}을 지킨다`,
+            parent: filler,
+            at: Date.now(),
+            targetBlocks: ['filler'],
+          });
+        }
       }),
     );
   /** 대상 RULE-001은 health, 대상 밖 RULE-002는 auth (구현 · 테스트 작성 세션의 규범 입력에서 빠진다). */
@@ -1799,6 +1815,8 @@ describe('검사 단계는 고른 범위와 무관하게 효력 있는 규칙 �
     const judgeSession = sessionsOf(h).find((session) => session.role === 'rule-writer');
     expect(judgeSession?.normInput?.ruleDisplayIds).toContain('RULE-002');
     expect(judgeSession?.normInput?.summary.blocks).toEqual(['health', 'auth']);
+    expect(judgeSession?.normInput?.summary.rules.outOfBlock).toBe(NORM_INPUT_LIMITS.rules);
+    expect(judgeNorms).not.toContain('채움 규칙');
     expect(h.requests.map((request) => request.ruleIds)).toEqual([[rule2.id]]);
   }, 120_000);
 
