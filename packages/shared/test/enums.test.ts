@@ -234,12 +234,13 @@ describe('생성 주체 (NRM-01, ADR-008, ADR-009)', () => {
     expect(AUTHOR_KIND_LABELS).toEqual({ human: '사람', agent: '에이전트' });
   });
 
-  it('에이전트 역할 5종', () => {
+  it('에이전트 역할 6종 (변이 주입 역할은 M3-07 #52)', () => {
     expectEnum(
       AgentRole,
-      ['rule-writer', 'planner', 'test-writer', 'implementer', 'chat'],
+      ['rule-writer', 'planner', 'test-writer', 'implementer', 'mutator', 'chat'],
       AGENT_ROLE_LABELS,
     );
+    expect(AGENT_ROLE_LABELS.mutator).toBe('변이 주입');
   });
 });
 
