@@ -7,6 +7,8 @@
 // - 규칙마다 최신 판정을 붙인다. 판정 기록이 없으면 미판정 (judgments/latest-judgment.ts)
 // - `rule.get`만 최신 실행 링크(`latestRun`: 그 규칙을 대상으로 한 최신 실행 1건과 실행 합계 비용 · 턴)를 더 싣는다
 //   (COST-02, M3-16 · ADR-134). `rule.list`에는 싣지 않는다(목록에서 규칙마다 실행 · 세션을 읽지 않게)
+// - `rule.list`는 추적성 결함(`traceability`: 규칙 없는 요구사항 · 부모 없는 규칙, NRM-06)도 싣는다(M3-11 #56, ADR-137).
+//   정의는 검증 요약 모듈의 `traceabilityOf` 한 곳이다
 // - `judgment.list`: 규칙 상세의 실행 이력. 판정 기록 테이블(`judgments`)의 기록을 최신부터, 실행 표시 ID와 함께 (ADR-073)
 // - `rule.update`: 사람의 규칙 직접 편집(제목 · 진술, ADR-100 B② · A8). 사람 주체만 받고(에이전트 -32020) 편집 · 확인됨 ·
 //   승인 기록 `rule_edit`(before · after diff)을 트랜잭션 1개로 남긴다(C2: 사람 행동은 승인 기록). 이 처리기가 저장소의
@@ -45,6 +47,7 @@ import {
   ruleRetirementView,
 } from '../norms/effective.js';
 import { CONTROL_CHARACTERS, earsStatementProblem } from '../tools/ears.js';
+import { traceabilityOf } from '../verification/summary.js';
 import { withProjectStore } from './project-store-access.js';
 import { RpcError, type MethodHandlers, type RequestContext } from './server.js';
 
@@ -261,6 +264,8 @@ export const createRuleHandlers = ({
         rules: listedRules(store, includeRetired === true).map((rule) =>
           listedItem(store, rule, lookup, retired),
         ),
+        // 추적성 결함: 같은 저장소 열림에서 검증 요약과 같은 함수로 정한다(화면이 다시 세지 않는다, ADR-137)
+        traceability: traceabilityOf(store),
       };
     }),
   'rule.get': ({ projectId, id }) =>

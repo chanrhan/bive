@@ -1,0 +1,21 @@
+# 규칙 작성 제안 0개 (M3-11 #56, NRM-06, ADR-137). 규칙 작성 세션이 규칙을 하나도 만들지 않고 정상 종료한다.
+# 요구사항은 "규칙 없는 요구사항"(추적성 결함)으로 남고, 만든 규칙이 없어 실행 자동 시작도 없다.
+# 형식: src/agent/scenario.ts. 규칙 작성 역할만 있다(실행 안 세션 없음).
+name: no-rules
+description: 규칙 작성 세션이 도구를 부르지 않고 끝나 요구사항이 규칙 없는 요구사항으로 남음
+roles:
+  rule-writer:
+    sessions:
+      - turns:
+          - message: 이 요구사항은 검사할 수 있는 규칙으로 옮길 기준을 찾지 못했습니다.
+        result:
+          subtype: success
+          total_cost_usd: 0.0105
+          num_turns: 1
+          modelUsage:
+            model-a:
+              inputTokens: 900
+              outputTokens: 120
+              cacheReadInputTokens: 0
+              cacheCreationInputTokens: 2100
+              costUSD: 0.0105

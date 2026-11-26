@@ -91,7 +91,11 @@ const listRules = async () => (await h.client.call('rule.list', { projectId: h.p
 
 describe('rule.list: 승인된 규칙만, 최신 판정(없으면 미판정)과 함께', () => {
   it('규칙이 없으면 빈 목록', async () => {
-    expect(await h.client.call('rule.list', { projectId: h.project.id })).toEqual({ rules: [] });
+    expect(await h.client.call('rule.list', { projectId: h.project.id })).toEqual({
+      rules: [],
+      // 추적성 결함도 함께 싣는다 (M3-11, ADR-137)
+      traceability: { requirementsWithoutRules: [], parentlessRules: [] },
+    });
   });
 
   it('승인 대기 · 거절된 제안은 빼고, 승인된 규칙만 표시 ID 순으로 미판정과 함께 돌려준다', async () => {

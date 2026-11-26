@@ -16,6 +16,8 @@
 // - 사람 확인 기준 준수(ADR-100 D7, ADR-117): 위 분모를 지금 확인됨인 규칙으로 좁힌 것. 효력 있는 확인됨 규칙이 없으면 `null`.
 //   규칙 화면 필터 `준수 집계: 판정 가능` + `확인: 확인됨`(= "사람 확인" 값, rulesView.ts `complianceValues`)과 같은 정의다
 // - 에이전트 폐기 수(ADR-100 B⑦, ADR-117): 규범 변경 기록의 에이전트 폐기 · 대체 대상 규칙 수(전체 누적)
+// - 추적성 결함 · 규칙화 불가 비율(NRM-06 · NRM-08, M3-11 #56 · ADR-137): 규칙 없는 요구사항 · 부모 없는 규칙의 목록과 '규칙화
+//   불가' 요구사항 수 / 삭제되지 않은 요구사항 수. 같은 함수(`traceabilityOf`)를 `rule.list`도 쓴다
 // - 실행당 비용: 끝난 실행(병합 · 실패 · 예산 초과) 중 세션 비용을 모두 아는 실행(`usage.run.costUsd`가 있고
 //   값 모르는 세션 0개)의 비용 평균(1e-9 USD 반올림). 그런 실행이 없으면 `null`
 // - 실행 링크: 위 판정의 실행(= 기준 실행)과 그 실행의 비용 합계 · 턴(`runs.usage`, 값 없으면 `null`)
@@ -30,10 +32,12 @@ import {
   type NormChangeKind,
   RUN_STEP_PLANS,
   type Rule,
+  type Requirement,
   type RuleJudgment,
   type Run,
   type Step,
   type StepKind,
+  type Traceability,
   type Ulid,
   type UsageTotals,
   type VerificationBasis,
@@ -115,16 +119,72 @@ export const isJudgeable = (
 
 /**
  * 추적성 결함 가운데 부모 없는 규칙 (NRM-06, 기획서 4.1): 효력 있는 규칙 가운데 부모 요구사항이 없는 것(부모가 지워져 해제된 규칙).
- * 내장 구조 규칙은 부모가 없는 것이 정상이라 결함에서 뺀다(NRM-02 · NRM-06, M3-03 #48 · ADR-127). 폐기된 규칙도 뺀다(ADR-100 NRM-06).
- * 화면 · 응답에 결함 수와 목록을 싣는 일은 M3-11이 하고 이 함수를 기준으로 쓴다. 내장 구조 규칙은 준수 분모(`isJudgeable`)에는 든다.
+ * 내장 규칙(`builtin`: 구조 규칙 · 계약 검사 규칙)은 부모가 없는 것이 정상이라 결함에서 뺀다(NRM-02 · NRM-06, ADR-127 · ADR-129).
+ * 폐기된 규칙도 뺀다(ADR-100 NRM-06). `liveRequirementIds`(삭제되지 않은 요구사항 ID)를 주면 부모 ID는 있으나 그 요구사항이
+ * 삭제됐거나 없는 규칙도 부모 없는 규칙이다(ADR-137). 내장 구조 규칙은 준수 분모(`isJudgeable`)에는 든다.
  */
 export const parentlessRuleDefects = (
   rules: readonly Rule[],
   retired: ReadonlySet<string>,
+  liveRequirementIds?: ReadonlySet<string>,
 ): Rule[] =>
   rules.filter(
-    (rule) => isEffectiveRule(rule, retired) && !rule.builtin && rule.parentRequirementId === null,
+    (rule) =>
+      isEffectiveRule(rule, retired) &&
+      !rule.builtin &&
+      (rule.parentRequirementId === null ||
+        (liveRequirementIds !== undefined && !liveRequirementIds.has(rule.parentRequirementId))),
   );
+
+/**
+ * 추적성 결함 가운데 규칙 없는 요구사항 (NRM-06 · NRM-08, ADR-137): 삭제되지 않았고 '규칙화 불가'가 아니며 효력 있는 자식 규칙이
+ * 하나도 없는 요구사항(받은 순서). 효력 없는 규칙(삭제 · 폐기 · 잠정)은 자식으로 세지 않는다: 자식 규칙이 모두 폐기된 요구사항은
+ * 규칙 없는 요구사항이다(ADR-112 "폐기 규칙만 자식으로 남은 요구사항", ADR-100 NRM-06 "폐기된 규칙은 결함 계산에서 뺀다").
+ */
+export const requirementsWithoutRules = (
+  requirements: readonly Requirement[],
+  rules: readonly Rule[],
+  retired: ReadonlySet<string>,
+): Requirement[] => {
+  const covered = new Set(
+    rules
+      .filter((rule) => isEffectiveRule(rule, retired))
+      .flatMap((rule) => (rule.parentRequirementId === null ? [] : [rule.parentRequirementId])),
+  );
+  return requirements.filter(
+    (requirement) =>
+      requirement.deletedAt === null &&
+      requirement.unrulable === null &&
+      !covered.has(requirement.id),
+  );
+};
+
+/** 추적성 결함 (NRM-06, ADR-137): 두 목록을 저장소의 삭제되지 않은 요구사항 · 규칙에서 정한다(표시 ID 순). */
+export const traceabilityOf = (store: ProjectStore): Traceability => {
+  const requirements = store.requirements.list();
+  const rules = store.rules.list();
+  const retired = retiredRuleSet(store);
+  const live = new Set(
+    requirements.filter((item) => item.deletedAt === null).map((item) => item.id),
+  );
+  return {
+    requirementsWithoutRules: requirementsWithoutRules(requirements, rules, retired).map(
+      ({ id, displayId }) => ({ id, displayId }),
+    ),
+    parentlessRules: parentlessRuleDefects(rules, retired, live).map(({ id, displayId }) => ({
+      id,
+      displayId,
+    })),
+  };
+};
+
+/** 규칙화 불가 비율의 수 (NRM-08, ADR-137): 삭제되지 않은 요구사항 가운데 '규칙화 불가' 수와 전체 수. */
+export const unrulableCountOf = (
+  requirements: readonly Requirement[],
+): VerificationSummaryResult['unrulable'] => {
+  const live = requirements.filter((item) => item.deletedAt === null);
+  return { count: live.filter((item) => item.unrulable !== null).length, total: live.length };
+};
 
 /** 시각 → 정렬 값. 없거나 읽을 수 없으면 가장 앞. */
 const timeOf = (iso: string | null): number => {
@@ -346,6 +406,8 @@ export const verificationSummary = (
     confirmedCompliance: confirmed.compliance,
     confirmedDenominator: confirmed.denominator,
     agentRetiredRules: agentRetiredRuleCount(store.normChanges.list()),
+    traceability: traceabilityOf(store),
+    unrulable: unrulableCountOf(store.requirements.list()),
     costPerRunUsd: costPerRun(finished),
     rules: rows,
     pipeline: shown === undefined ? null : pipelineOf(shown, store.runs.steps(shown.id), queued),

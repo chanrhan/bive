@@ -13,10 +13,22 @@
 //   때만 다시 시도를 맡긴다 (M3-26, ADR-099)
 // - 사람의 작성 · 편집은 그 저장과 같은 트랜잭션에서 확인됨이 된다. 근거는 요구사항 자체의 작성 · 수정 기록이고 승인 기록에는
 //   항목을 만들지 않는다 (ADR-100 B① · A1, M7-01). 삭제는 확인 상태를 바꾸지 않는다
-import { type Author, createUlidGenerator, ErrorCode } from '@bive/shared';
+// - `requirement.markUnrulable` (NRM-08, M3-11 #56, ADR-137): 사람이 규칙 없는 요구사항에 '규칙화 불가'와 사유를 남긴다. 사람
+//   주체만(-32020은 저장소를 열기 전), 빈 사유 -32001. 삭제됨 · 이미 표시됨 · 효력 있는 자식 규칙이 있음은 -32009(이미 표시한
+//   사유는 바꾸지 않는다). "규칙 없는 요구사항"의 판정은 추적성 결함 함수(`traceabilityOf`) 한 곳이다. 기록은 요구사항의 수정
+//   주체 · 시각이고(승인 기록 없음) 같은 트랜잭션에서 확인됨이 된다. 규칙 작성 세션 · 재판단을 띄우지 않는다
+import {
+  type Author,
+  createUlidGenerator,
+  DomainErrorReason,
+  ErrorCode,
+  UNRULABLE_REASON_MAX,
+  type UnrulableConflictReason,
+} from '@bive/shared';
 
 import { confirmHumanRequirementWrite } from '../confirmations/confirmation-service.js';
 import type { RuleWriterLauncher } from '../rule-writer/rule-writer-service.js';
+import { traceabilityOf } from '../verification/summary.js';
 import { withProjectStore } from './project-store-access.js';
 import { RpcError, type MethodHandlers } from './server.js';
 
@@ -39,6 +51,7 @@ type RequirementMethods = Pick<
   | 'requirement.delete'
   | 'requirement.get'
   | 'requirement.list'
+  | 'requirement.markUnrulable'
 >;
 
 /** 파이프로 규범을 직접 바꿀 수 있는 주체는 사람뿐이다. */
@@ -47,6 +60,26 @@ const assertHuman = (author: Author): void => {
     throw new RpcError(
       ErrorCode.Unauthorized,
       '에이전트는 요구사항을 직접 바꿀 수 없습니다. 제안 승인을 거칩니다 (NRM-04)',
+    );
+  }
+};
+
+/** 규칙화 불가로 표시할 수 없는 상태의 -32009 (`data.reason`). */
+const unrulableConflict = (reason: UnrulableConflictReason, message: string): RpcError =>
+  new RpcError(ErrorCode.StateConflict, message, { reason });
+
+/** 규칙화 불가 사유의 형식 (빈 사유 · 상한). 저장은 받은 원문 그대로다. */
+const assertUnrulableReason = (reason: string): void => {
+  if (reason.trim().length === 0) {
+    throw new RpcError(ErrorCode.ValidationFailed, '규칙화 불가 사유가 비어 있습니다', {
+      reason: DomainErrorReason.UnrulableReasonRequired,
+    });
+  }
+  if (reason.length > UNRULABLE_REASON_MAX) {
+    throw new RpcError(
+      ErrorCode.ValidationFailed,
+      `규칙화 불가 사유는 ${String(UNRULABLE_REASON_MAX)}자까지입니다`,
+      { reason: DomainErrorReason.UnrulableReasonInvalid },
     );
   }
 };
@@ -125,6 +158,45 @@ export const createRequirementHandlers = ({
         ruleWriter?.rejudge(store, { projectId, requirement, change: 'deleted', childRuleIds });
         return { requirement };
       });
+    },
+    'requirement.markUnrulable': ({ projectId, id, reason, author }) => {
+      assertHuman(author);
+      assertUnrulableReason(reason);
+      return withProjectStore(biveHome, projectId, (store) => ({
+        requirement: store.transaction(() => {
+          const current = store.requirements.get(id);
+          if (current === null) {
+            throw new RpcError(ErrorCode.NotFound, `요구사항을 찾을 수 없습니다: ${id}`);
+          }
+          if (current.deletedAt !== null) {
+            throw unrulableConflict(
+              'requirement_deleted',
+              `삭제된 요구사항입니다 (${current.deletedAt})`,
+            );
+          }
+          if (current.unrulable !== null) {
+            throw unrulableConflict(
+              'already_unrulable',
+              '이미 규칙화 불가로 표시된 요구사항입니다',
+            );
+          }
+          // 규칙 없는 요구사항만 받는다: 효력 있는 자식 규칙이 있으면 "규칙화 불가"가 사실과 어긋난다
+          const withoutRules = traceabilityOf(store).requirementsWithoutRules.some(
+            (item) => item.id === current.id,
+          );
+          if (!withoutRules) {
+            throw unrulableConflict('has_rules', '효력 있는 자식 규칙이 있는 요구사항입니다');
+          }
+          // 사람의 표시는 요구사항 편집과 같이 저장이 곧 확인됨이다 (ADR-100 B① · A1, 승인 기록에는 쓰지 않음)
+          return confirmHumanRequirementWrite(
+            store,
+            store.requirements.markUnrulable(current.id, reason, {
+              by: author,
+              at: timestamp(),
+            }),
+          );
+        }),
+      }));
     },
     'requirement.get': ({ projectId, id }) =>
       withProjectStore(biveHome, projectId, (store) => {
