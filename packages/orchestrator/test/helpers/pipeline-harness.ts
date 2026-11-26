@@ -237,6 +237,8 @@ export interface PipelineSetupOptions {
   scenariosDir?: string;
   /** 승인된 규칙을 하나 더 (RULE-002, 대상 아님) */
   secondRule?: boolean;
+  /** RULE-002의 대상 블록 이름 (기본 빈 목록, M3-29) */
+  secondRuleTargetBlocks?: readonly string[];
   /** 실행 시작 전 저장소를 고치고 커밋한다 */
   prepareRepo?: (repo: string) => void;
   /** 시드 요구사항 · 대상 규칙(RULE-001)의 글 (기본 글을 바꿔 넣는다) */
@@ -305,7 +307,7 @@ export const setupPipeline = (options: PipelineSetupOptions): PipelineHarness =>
           checkKinds: seeded.rule.checkKinds,
           parentRequirementId: seeded.rule.parentRequirementId,
           builtin: false,
-          targetBlockIds: [],
+          targetBlockIds: [...(options.secondRuleTargetBlocks ?? [])],
           risk: null,
           contractId: null,
           author: seeded.rule.author,

@@ -32,7 +32,13 @@ import { readNormChanges } from '../src/ipc/norm-change-handlers.js';
 import { retireAgentRule, supersedeAgentRule, upholdAgentRule } from '../src/norms/agent-rule.js';
 import { caseNameLiterals, knownCaseMatcher } from '../src/norms/case-names.js';
 import { CHECK_UNDECIDED_REASON, settleCheckFailure } from '../src/norms/check-contradiction.js';
-import { NORM_INPUT_BEGIN, NORM_INPUT_END } from '../src/norms/norm-input.js';
+import { ensureBuiltinStructureRules } from '../src/norms/builtin-rules.js';
+import {
+  NORM_INPUT_BEGIN,
+  NORM_INPUT_END,
+  NORM_INPUT_LIMITS,
+  normInputScopeLine,
+} from '../src/norms/norm-input.js';
 import {
   CHECK_CASE_NOT_INSTRUCTION,
   CHECK_CASES_BEGIN,
@@ -64,7 +70,7 @@ import {
   setupPipeline,
   stepOf,
 } from './helpers/pipeline-harness.js';
-import { cleanup, waitFor } from './helpers/process.js';
+import { cleanup, REPO_ROOT, waitFor } from './helpers/process.js';
 
 const newId = createUlidGenerator();
 
@@ -1731,3 +1737,114 @@ describe('이의 반영으로 끝난 실행도 대상 규칙이 여전히 효력
 });
 
 // 병합 재검사 쪽은 test/pipeline-merge.test.ts가 단언한다(수용 기준 3).
+
+// ── 대상 블록으로 고른 규범 입력과 검사 단계 (M3-29 #231 수용 기준 4, ADR-100 A15 · D5, ADR-140) ──────────
+
+describe('검사 단계는 고른 범위와 무관하게 효력 있는 규칙 전체를 판정한다 (M3-29 #231 수용 기준 4, 최종 방어선)', () => {
+  /** 예제 선언 저장 + 내장 구조 규칙 (사람의 `blocks.set` 처리기와 같은 트랜잭션). */
+  const declareSample = (h: PipelineHarness): void =>
+    withProject(h.biveHome, h.project.id, (store) =>
+      store.transaction(() => {
+        const at = new Date().toISOString();
+        const declaration = JSON.parse(
+          fs.readFileSync(
+            path.join(REPO_ROOT, 'fixtures', 'blocks', 'sample-next-app.json'),
+            'utf8',
+          ),
+        ) as unknown;
+        const record = store.blockDeclarations.set(declaration, { at, by: human });
+        ensureBuiltinStructureRules(store, { declaration: record, at, newId: harnessId });
+        // 규칙이 상한을 넘게 채운다 (상한 안이면 고르지 않는다, ADR-140). 폴더 없는 시드 규칙이라 검사는 판정하지 않는다
+        const filler = seedNormRequirement(store, '채움 요구사항', Date.now());
+        for (let i = 0; i < NORM_INPUT_LIMITS.rules; i += 1) {
+          seedNormRule(store, {
+            title: `채움 규칙 ${String(i)}`,
+            statement: `WHEN 요청이 오면 THE SYSTEM SHALL 채움 규칙 ${String(i)}을 지킨다`,
+            parent: filler,
+            at: Date.now(),
+            targetBlocks: ['filler'],
+          });
+        }
+      }),
+    );
+  /** 대상 RULE-001은 health, 대상 밖 RULE-002는 auth (구현 · 테스트 작성 세션의 규범 입력에서 빠진다). */
+  const blocks = { seedTexts: { targetBlocks: ['health'] }, secondRuleTargetBlocks: ['auth'] };
+  /** 작업 지시의 규범 자료 (시작 · 끝 표시 줄 사이). */
+  const normsOf = (prompt: string): string =>
+    prompt.slice(prompt.indexOf(NORM_INPUT_BEGIN), prompt.indexOf(NORM_INPUT_END));
+
+  it('구현 세션 입력에서 빠진 블록 밖 RULE-002가 검사에서 실패하면 그 시도는 통과하지 못하고, 판단 세션은 RULE-002를 판단 대상 · 규범 자료로 받아 모순 아님 뒤 회귀한 시도 2가 통과해야 병합된다', async () => {
+    const files = scenarioWith('check-blocks-uphold', [
+      { tool: 'uphold_rule', args: { ruleId: '{{ruleId}}', grounds: UPHOLD_GROUNDS } },
+    ]);
+    const h = setup({ ...files, ...blocks });
+    declareSample(h);
+    const rule2 = rule2Of(h);
+    const detail = await runAll(h);
+    expect(detail.run.status).toBe('merged');
+    expect(attempts(detail, 'implementation', 'check')).toEqual([
+      'implementation#1:passed',
+      'implementation#2:passed',
+      'check#1:failed',
+      'check#2:passed',
+    ]);
+    // 구현 · 테스트 작성 세션의 규범 자료에 RULE-002가 없다 (health로 골랐다)
+    for (const role of ['implementer', 'test-writer'] as const) {
+      const specs = specsOf(h, role);
+      expect(specs.length, role).toBeGreaterThan(0);
+      for (const spec of specs) {
+        const norms = normsOf(spec.prompt);
+        expect(norms, role).toContain(normInputScopeLine(['health']));
+        expect(norms, role).not.toContain('- RULE-002');
+      }
+    }
+    // 검사 단계는 RULE-002를 판정했다 (시도 1 실패 · 시도 2 통과)
+    const rule2Judgments = withProject(h.biveHome, h.project.id, (store) =>
+      store.judgments.listByRun(h.runId).filter((judgment) => judgment.ruleId === rule2.id),
+    );
+    expect(rule2Judgments.map((judgment) => [judgment.stepId, judgment.status])).toEqual([
+      [stepOf(detail, 'check', 1).id, 'fail'],
+      [stepOf(detail, 'check', 2).id, 'pass'],
+    ]);
+    // 판단 세션: 실패한 RULE-002가 초점으로 규범 자료에 있고 기준 블록에 auth가 든다 (블록 밖이어도 판단 입력에서 빠지지 않는다)
+    const [judge] = specsOf(h, 'rule-writer');
+    const judgeNorms = normsOf(judge?.prompt ?? '');
+    expect(judgeNorms).toContain(normInputScopeLine(['health', 'auth']));
+    expect(judgeNorms).toContain('- RULE-002 (이번 작업 대상)');
+    expect(judgeNorms).toContain('- RULE-001 (이번 작업 대상)');
+    const judgeSession = sessionsOf(h).find((session) => session.role === 'rule-writer');
+    expect(judgeSession?.normInput?.ruleDisplayIds).toContain('RULE-002');
+    expect(judgeSession?.normInput?.summary.blocks).toEqual(['health', 'auth']);
+    expect(judgeSession?.normInput?.summary.rules.outOfBlock).toBe(NORM_INPUT_LIMITS.rules);
+    expect(judgeNorms).not.toContain('채움 규칙');
+    expect(h.requests.map((request) => request.ruleIds)).toEqual([[rule2.id]]);
+  }, 120_000);
+
+  it('블록 밖 RULE-002가 매번 실패하면 실행은 병합되지 않는다 (규범 입력에서 빠진 규칙도 검사 단계가 막는다)', async () => {
+    const h = setup({
+      ...scenarioWith('check-blocks-repeat', []),
+      ...blocks,
+      launcher: stubLauncher({ status: 'ended', sessionId: newId(), endReason: 'success' }),
+      fails: (kind) => kind === 'check',
+    });
+    declareSample(h);
+    const detail = await runToEnd(h);
+    expect(detail.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'regression_limit',
+      mergeCommit: null,
+    });
+    expect(attempts(detail, 'check')).toEqual([
+      'check#1:failed',
+      'check#2:failed',
+      'check#3:failed',
+    ]);
+    expect(mergeCount(h)).toBe(0);
+    const implementers = specsOf(h, 'implementer');
+    expect(implementers).toHaveLength(3);
+    for (const spec of implementers) {
+      expect(normsOf(spec.prompt)).toContain(normInputScopeLine(['health']));
+      expect(normsOf(spec.prompt)).not.toContain('- RULE-002');
+    }
+  }, 120_000);
+});
