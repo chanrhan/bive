@@ -10,6 +10,7 @@ import { createNormChangeHandlers } from './norm-change-handlers.js';
 import { createProjectHandlers } from './project-handlers.js';
 import { createProposalHandlers } from './proposal-handlers.js';
 import { createRequirementHandlers } from './requirement-handlers.js';
+import { createReviewQueueHandlers } from './review-queue-handlers.js';
 import { createRuleHandlers, type RuleEditStarter } from './rule-handlers.js';
 import { createRuleWriterHandlers } from './rule-writer-handlers.js';
 import { createRunHandlers } from './run-handlers.js';
@@ -94,6 +95,7 @@ export const createHandlers = ({
   ...createContractHandlers({ biveHome, now }),
   ...createSettingsHandlers({ biveHome, now }),
   ...createRunHandlers({ biveHome, now, ...(engine === undefined ? {} : { engine }) }),
+  ...createReviewQueueHandlers({ biveHome, now }),
   ...createVerificationHandlers({ biveHome }),
   ...createToolCallHandlers({ biveHome }),
   ...createCodeOpenHandlers({ biveHome, now }),

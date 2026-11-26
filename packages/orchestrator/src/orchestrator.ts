@@ -15,7 +15,7 @@ import { ProposalEventPublisher } from './events/proposal-events.js';
 import { ruleWriterChangedNotifier } from './events/rule-writer-events.js';
 import { RunEventPublisher } from './events/run-events.js';
 import { createHandlers } from './ipc/handlers.js';
-import { onNormChangeAppended } from './ipc/project-store-access.js';
+import { onNormChangeAppended, onReviewQueueChanged } from './ipc/project-store-access.js';
 import { PipeServer } from './ipc/server.js';
 import { NetPipeTransport, type PipeTransport } from './ipc/transport.js';
 import { DEFAULT_IDLE_SHUTDOWN_MS, Lifecycle, type RunTracker } from './lifecycle.js';
@@ -139,6 +139,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
   let boundSocket: string | null = null;
   /** 규범 변경 알림 해제 (등록 전이면 null) */
   let stopNormChangeEvents: (() => void) | null = null;
+  /** 검토 대기열 알림 해제 (등록 전이면 null) */
+  let stopReviewQueueEvents: (() => void) | null = null;
 
   /**
    * 소켓 · 토큰은 이 인스턴스의 것일 때만 지운다 (같은 죽은 잠금을 동시에 인수한 경합의 진 쪽이
@@ -161,6 +163,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       if (token !== null) unlinkTokenIfOurs(paths.token, token);
       stopNormChangeEvents?.();
       stopNormChangeEvents = null;
+      stopReviewQueueEvents?.();
+      stopReviewQueueEvents = null;
       lock.release();
     }
   };
@@ -207,6 +211,15 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
       options.biveHome,
       normChangeAppendedNotifier({ sink: () => server, log }),
     );
+    // 검토 대기열 항목이 생기거나(실행 종료 저장) 처리된 저장소 사용 뒤 → event.reviewQueue.changed (M3-08 #53, ADR-145).
+    // 기다리지 않고, 송신 실패는 기록만 남긴다
+    stopReviewQueueEvents = onReviewQueueChanged(options.biveHome, (projectId) => {
+      server?.notify('event.reviewQueue.changed', { projectId }).catch((error: unknown) => {
+        log(
+          `검토 대기열 알림 전달 실패: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    });
     // 제안 처리 저장 뒤 → event.proposal.changed (M1-36, ADR-076). 기다리지 않는다. 새 제안은 생기지 않는다(M7-02):
     // 규칙 작성 결과는 제안 없이 바로 반영되고, 이 변경 전부터 대기 중이던 제안만 처리된다
     const proposalEvents = new ProposalEventPublisher({ sink: () => server, log });

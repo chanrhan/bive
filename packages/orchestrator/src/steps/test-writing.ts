@@ -359,8 +359,8 @@ const ignoredForCommit = async (
 const reinforcedMutant = (context: StepContext): { mutant?: MutantPatch } => {
   if (!isReinforcementRun(context)) return {};
   const mutant = context.read((store) => {
-    const link = store.mutations.reinforcementOfRun(context.run.id);
-    return link === null ? null : (store.mutations.get(link.mutationResultId)?.mutant ?? null);
+    const causeId = store.mutations.reinforcementCauseOfRun(context.run.id);
+    return causeId === null ? null : (store.mutations.get(causeId)?.mutant ?? null);
   });
   return mutant === null ? {} : { mutant };
 };

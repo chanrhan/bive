@@ -2809,3 +2809,66 @@ describe('변이 판정 기록을 쓰는 곳은 변이 주입 단계 실행기 �
     }
   });
 });
+
+describe('검토 대기열 항목을 쓰는 곳은 검토 대기열 모듈 하나 (M3-08 #53, TODO-02, ADR-145, 코드 구조)', () => {
+  it('항목 처리 · 사람 보강 연결 쓰기는 review/review-queue.ts 하나이고, 그 모듈은 사람 전용 처리기 둘만 가져오며, 저장소의 검토 대기열을 아는 파일은 정해져 있고 에이전트 도구 · 세션 · 엔진 · 단계 코드는 모른다', () => {
+    const files = sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+    const using = (pattern: RegExp) =>
+      files
+        .filter((f) => pattern.test(f.text))
+        .map((f) => f.rel)
+        .sort();
+    // 처리(열림 → 처리됨)와 사람이 시작한 보강 연결을 쓰는 곳
+    expect(using(/\.reviewQueue\s*\.\s*resolve\(/)).toEqual(['review/review-queue.ts']);
+    expect(using(/\.reviewQueue\s*\.\s*linkReinforcement\(/)).toEqual(['review/review-queue.ts']);
+    // 저장소의 검토 대기열(`reviewQueue` 낱말: 별칭 · 구조 분해 · 대괄호 접근도 이 낱말을 쓴다)을 아는 파일: 모듈 · 처리기(조회) ·
+    // 알림의 변경 표지 · 오케스트레이터 알림 배선 · 테스트 보강 메서드 이름(실행 처리기)
+    expect(using(/\breviewQueue\b/)).toEqual([
+      'ipc/project-store-access.ts',
+      'ipc/review-queue-handlers.ts',
+      'ipc/run-handlers.ts',
+      'orchestrator.ts',
+      'review/review-queue.ts',
+    ]);
+    expect(
+      files
+        .filter((f) => /\.reviewQueue\b/.test(f.text))
+        .map((f) => f.rel)
+        .sort(),
+    ).toEqual([
+      'ipc/project-store-access.ts',
+      'ipc/review-queue-handlers.ts',
+      // 알림 이름 `event.reviewQueue.changed`
+      'orchestrator.ts',
+      'review/review-queue.ts',
+    ]);
+    // 항목을 넣는 것은 DB 트리거다: 오케스트레이터에는 두 표의 이름(날 SQL)이 없다
+    expect(using(/\breview_items\b|\breview_reinforcements\b/)).toEqual([]);
+    // 모듈을 가져오는 곳은 처리기 둘 (테스트 보강은 실행을 만드는 사람 RPC라 실행 처리기에 있다). 둘 다 사람 주체를 먼저 본다
+    expect(using(/from '[./]+\/?review\/review-queue\.js'/)).toEqual([
+      'ipc/review-queue-handlers.ts',
+      'ipc/run-handlers.ts',
+    ]);
+    const read = (rel: string) => fs.readFileSync(path.join(SRC_DIR, rel), 'utf8');
+    expect(read('ipc/review-queue-handlers.ts')).toMatch(
+      /'reviewQueue\.quarantine': \([^)]*author[^)]*\) => \{\s*const human = assertHuman\(author\);/,
+    );
+    expect(read('ipc/run-handlers.ts')).toMatch(
+      /'reviewQueue\.reinforce': \([^)]*author[^)]*\)[^{]*=> \{\s*assertHumanRunStarter\(author\);/,
+    );
+    // 테스트 보강의 연결 · 처리를 부르는 곳은 실행 처리기 하나
+    expect(using(/\breinforcementTarget\(|\brecordReinforcement\(/)).toEqual([
+      'ipc/run-handlers.ts',
+    ]);
+    for (const { rel, text } of files) {
+      if (
+        /^(tools|agent|engine|steps|judge|mutation|test-writer|implementer|rule-writer)\//.test(rel)
+      ) {
+        expect(/reviewQueue|review-queue/.test(text), rel).toBe(false);
+      }
+    }
+  });
+});
