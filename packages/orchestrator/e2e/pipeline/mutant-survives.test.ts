@@ -121,7 +121,7 @@ describe('mutant-survives: 변이 생존 → 자동 보강(유형 C) → 재주�
         git(e.repo, 'ls-tree', '-r', '--name-only', 'main', 'bive-acceptance/RULE-003/').split(
           '\n',
         ),
-      ).toEqual([weakTest, 'bive-acceptance/RULE-003/health-service-name.acc.ts']);
+      ).toEqual(['bive-acceptance/RULE-003/health-service-name.acc.ts', weakTest]);
       expect(
         git(
           e.repo,
