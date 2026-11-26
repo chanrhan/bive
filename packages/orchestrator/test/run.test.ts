@@ -12,7 +12,6 @@ import {
   RUN_STEP_PLANS,
   type Rule,
   type RunType,
-  STEP_ROLES,
   type SettingsPatch,
   SETTINGS_INCOMPLETE_MESSAGE,
   SETTINGS_INCOMPLETE_REASON,
