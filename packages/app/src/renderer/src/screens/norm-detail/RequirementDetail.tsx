@@ -7,6 +7,10 @@
 //   저장 중에는 다시 부르지 않고, 실패하면 입력을 남긴 채 "요구사항 저장 실패"
 // - 삭제: 두 번 눌러 확인(SCR-02). 첫 클릭은 [삭제 확인]으로 바뀌기만 하고(호출 없음), 두 번째 클릭에서
 //   requirement.delete 1회. 버튼을 벗어나면 확인 대기가 풀린다. 실패하면 "요구사항 삭제 실패"
+// - 규칙화 불가 (NRM-08, M3-11 #56 · ADR-137): 서버가 규칙 없는 요구사항으로 정한 것에만 [규칙화 불가]. 누르면 본문 편집과 같은
+//   틀의 사유 입력 → [확인](⌘↵ · Ctrl+Enter) 1회 = requirement.markUnrulable, [취소](Esc)는 호출 없음. 사유가 공백만이면 [확인]이
+//   꺼진다. 실패하면 입력을 남긴 채 "규칙화 불가 표시 실패". 표시된 요구사항은 "규칙화 불가" 줄에 사유를 보인다(숨은 글자는
+//   보이는 표기, visibleLines). 되돌리는 동작은 화면 정의서에 없어 두지 않는다
 // - 변경 이력(P1) · 자식 계약(P1)은 해당 이슈 전 미노출 (ADR-035)
 // - 구현 위치 (SCR-02 상세 "자식 규칙의 대상 블록만", M3-19 #64 · ADR-126): 자식 규칙(rule.list 1회, 위와 같은 결과) 가운데 효력
 //   있는 것의 대상 블록을 중복 없이, 지금 블록 선언(blocks.get) 순서로(선언에 없는 이름은 뒤에 이름 순, "선언 외"). 없으면 "없음".
@@ -25,7 +29,7 @@ import { type ReactNode, useEffect, useRef, useState } from 'react';
 
 import { AuthorMark } from '../../components/AuthorMark/AuthorMark.js';
 import { StatusBadge } from '../../components/StatusBadge/StatusBadge.js';
-import { visibleText } from '../../components/VisibleText/visibleText.js';
+import { visibleLines, visibleText } from '../../components/VisibleText/visibleText.js';
 import {
   type BlockDeclarationLoad,
   BLOCK_TEXT,
@@ -34,7 +38,11 @@ import {
 } from '../rules/blockView.js';
 import type { RulesLoad } from '../rules/useRules.js';
 import { BlockList } from './BlockList.js';
-import { canSaveEdit, REQUIREMENT_DETAIL_TEXT as TEXT } from './requirementDetailView.js';
+import {
+  canSaveEdit,
+  canSubmitUnrulable,
+  REQUIREMENT_DETAIL_TEXT as TEXT,
+} from './requirementDetailView.js';
 import { RuleDetail } from './RuleDetail.js';
 import { ruleAuthorName } from './ruleDetailView.js';
 import { type RuleWriterStatusView, ruleWriterStatusView } from './ruleWriterStatusView.js';
@@ -51,9 +59,13 @@ export interface RequirementDetailProps {
   onUpdate: (text: string) => Promise<void>;
   /** 삭제 (requirement.delete). 거부되면 실패 표시 */
   onDelete: () => Promise<void>;
+  /** [규칙화 불가]를 보일지: 서버가 정한 규칙 없는 요구사항이고 아직 규칙화 불가가 아닐 때 (기본 거짓) */
+  canMarkUnrulable?: boolean;
+  /** 규칙화 불가 표시 (requirement.markUnrulable). 거부되면 실패 표시 */
+  onMarkUnrulable?: (reason: string) => Promise<void>;
 }
 
-type Busy = 'save' | 'delete' | null;
+type Busy = 'save' | 'delete' | 'unrulable' | null;
 
 const isMac = (): boolean => /Mac|iPhone|iPad/.test(navigator.userAgent);
 
@@ -64,12 +76,16 @@ export const RequirementDetail = ({
   rules,
   onUpdate,
   onDelete,
+  canMarkUnrulable = false,
+  onMarkUnrulable,
 }: RequirementDetailProps): React.JSX.Element => {
   const children = useChildRules(projectId, requirement.id, requirement.updatedAt, rules);
   const writer = useRuleWriterStatus(projectId, requirement.id, requirement.updatedAt);
   const declaration = useBlockDeclaration(projectId);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  const [marking, setMarking] = useState(false);
+  const [reason, setReason] = useState('');
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState<Busy>(null);
   const [failed, setFailed] = useState<Busy>(null);
@@ -77,6 +93,7 @@ export const RequirementDetail = ({
   const busyRef = useRef(false);
   const mounted = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const reasonRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     mounted.current = true;
@@ -89,7 +106,11 @@ export const RequirementDetail = ({
     if (editing) inputRef.current?.focus();
   }, [editing]);
 
-  const run = (kind: 'save' | 'delete', call: () => Promise<void>, onDone: () => void): void => {
+  useEffect(() => {
+    if (marking) reasonRef.current?.focus();
+  }, [marking]);
+
+  const run = (kind: Exclude<Busy, null>, call: () => Promise<void>, onDone: () => void): void => {
     busyRef.current = true;
     setBusy(kind);
     setFailed(null);
@@ -134,6 +155,30 @@ export const RequirementDetail = ({
     );
   };
 
+  const startMark = (): void => {
+    if (busyRef.current) return;
+    setReason('');
+    setArmed(false);
+    setFailed(null);
+    setMarking(true);
+  };
+
+  const cancelMark = (): void => {
+    if (busyRef.current) return;
+    setMarking(false);
+    setFailed(null);
+  };
+
+  const submitMark = (): void => {
+    if (busyRef.current || onMarkUnrulable === undefined || !canSubmitUnrulable(reason)) return;
+    const text = reason;
+    run(
+      'unrulable',
+      () => onMarkUnrulable(text),
+      () => setMarking(false),
+    );
+  };
+
   const remove = (): void => {
     if (busyRef.current) return;
     if (!armed) {
@@ -155,7 +200,7 @@ export const RequirementDetail = ({
         <h2 className="rule-detail-title" data-testid="requirement-detail-id">
           {requirement.displayId}
         </h2>
-        {!editing && (
+        {!editing && !marking && (
           <div className="requirement-actions">
             <button
               type="button"
@@ -166,6 +211,17 @@ export const RequirementDetail = ({
             >
               {TEXT.edit}
             </button>
+            {canMarkUnrulable && onMarkUnrulable !== undefined && (
+              <button
+                type="button"
+                className="requirement-action"
+                data-testid="requirement-unrulable"
+                disabled={busy !== null}
+                onClick={startMark}
+              >
+                {TEXT.unrulable}
+              </button>
+            )}
             <button
               type="button"
               className="requirement-action"
@@ -190,7 +246,11 @@ export const RequirementDetail = ({
 
       {failed !== null && (
         <p className="rule-detail-error" data-testid="requirement-action-error" role="alert">
-          {failed === 'save' ? TEXT.saveFailed : TEXT.removeFailed}
+          {failed === 'save'
+            ? TEXT.saveFailed
+            : failed === 'unrulable'
+              ? TEXT.unrulableFailed
+              : TEXT.removeFailed}
         </p>
       )}
 
@@ -265,6 +325,73 @@ export const RequirementDetail = ({
             name={ruleAuthorName(requirement.author)}
           />
         </Field>
+        {requirement.unrulable !== null ? (
+          <Field id="unrulable" label={TEXT.unrulable}>
+            <p className="rule-detail-text" data-testid="requirement-unrulable-reason">
+              {visibleLines(requirement.unrulable.reason)}
+            </p>
+          </Field>
+        ) : (
+          marking && (
+            <Field id="unrulable" label={TEXT.unrulable}>
+              <div className="requirement-editor" data-testid="requirement-unrulable-editor">
+                <textarea
+                  ref={reasonRef}
+                  className="requirement-edit-input"
+                  data-testid="requirement-unrulable-input"
+                  aria-label={TEXT.unrulableLabel}
+                  placeholder={TEXT.unrulablePlaceholder}
+                  rows={2}
+                  value={reason}
+                  readOnly={busy === 'unrulable'}
+                  aria-busy={busy === 'unrulable'}
+                  onChange={(event) => {
+                    setReason(event.target.value);
+                    setFailed(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                      event.preventDefault();
+                      submitMark();
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      cancelMark();
+                    }
+                  }}
+                />
+                <div className="requirement-editor-bar">
+                  <span className="requirement-editor-hint">
+                    {isMac() ? '⌘↵ 확인 · Esc 취소' : 'Ctrl+Enter 확인 · Esc 취소'}
+                  </span>
+                  <span className="requirement-editor-buttons">
+                    <button
+                      type="button"
+                      className="requirement-action"
+                      data-testid="requirement-unrulable-cancel"
+                      disabled={busy !== null}
+                      onClick={cancelMark}
+                    >
+                      {TEXT.cancel}
+                    </button>
+                    <button
+                      type="button"
+                      className="requirement-action"
+                      data-testid="requirement-unrulable-confirm"
+                      data-primary="true"
+                      disabled={busy !== null || !canSubmitUnrulable(reason)}
+                      aria-busy={busy === 'unrulable'}
+                      onClick={submitMark}
+                    >
+                      {TEXT.unrulableConfirm}
+                    </button>
+                  </span>
+                </div>
+              </div>
+            </Field>
+          )
+        )}
       </dl>
 
       <section

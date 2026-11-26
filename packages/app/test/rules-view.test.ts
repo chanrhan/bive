@@ -30,6 +30,7 @@ import {
   riskText,
   ruleCriteria,
   ruleCard,
+  ruleDefectsOf,
   ruleSearchText,
   visibleRules,
   whenCondition,
@@ -252,6 +253,27 @@ describe('카드', () => {
     ]);
     // 잠정 표시는 없어졌다 (ADR-100 명세 변경 목록 SCR-03)
     expect(marks(PROVISIONAL)).toEqual(['미판정']);
+  });
+
+  it('부모 없는 규칙 (M3-11, ADR-137): 서버 목록에 든 규칙만 판정 예외 다음 "추적성 결함"(위험 색), 모르면 없다', () => {
+    const defects = ruleDefectsOf({
+      parentlessRules: [
+        { id: PASS.rule.id, displayId: PASS.rule.displayId },
+        { id: UNCONFIRMED.rule.id, displayId: UNCONFIRMED.rule.displayId },
+      ],
+    });
+    expect(ruleCard(PASS, defects).exceptions).toEqual([
+      { key: 'traceability', label: '추적성 결함', tone: 'danger' },
+    ]);
+    const unconfirmedFailed = judged(UNCONFIRMED.rule, 'fail');
+    const card = ruleCard(unconfirmedFailed, defects);
+    expect(
+      [...card.statuses.flatMap(statusExceptions), ...card.exceptions].map((m) => m.label),
+    ).toEqual(['실패', '추적성 결함', '미확인']);
+    expect(ruleCard(FAIL, defects).exceptions).toEqual([]);
+    expect(ruleCard(PASS, null).exceptions).toEqual([]);
+    expect(ruleCard(PASS, ruleDefectsOf(null)).exceptions).toEqual([]);
+    expect(ruleCard(PASS).exceptions).toEqual([]);
   });
 
   it('폐기된 규칙: 폐기 전 판정 예외 없이 폐기 · 미확인 (폐기 뒤 판정하지 않음, ADR-112)', () => {

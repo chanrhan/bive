@@ -31,6 +31,7 @@ import {
   RETIRED_HIDDEN,
   ruleCard,
   ruleCriteria,
+  ruleDefectsOf,
   RULES_LIST_ID,
   ruleKey,
   ruleSearchText,
@@ -57,7 +58,10 @@ export const RulesScreen = (): React.JSX.Element => {
 };
 
 const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => {
-  const { load, replace } = useRules(projectId);
+  const { load, replace, traceability } = useRules(projectId);
+  // 부모 없는 규칙의 예외는 같은 rule.list 응답의 추적성 결함에서만 (ADR-137)
+  const defects = useMemo(() => ruleDefectsOf(traceability), [traceability]);
+  const card = useCallback((item: RuleWithJudgment) => ruleCard(item, defects), [defects]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // [실행]으로 만든 마지막 실행과 그 대상 규칙 (그 규칙의 상세에서만 보인다, ADR-105)
   const [created, setCreated] = useState<{ ruleId: string; run: CreatedRun } | null>(null);
@@ -111,7 +115,7 @@ const RulesPanes = ({ projectId }: { projectId: string }): React.JSX.Element => 
             label={TEXT.list}
             items={items}
             itemKey={ruleKey}
-            card={ruleCard}
+            card={card}
             searchText={ruleSearchText}
             criteria={criteria}
             emptyText={TEXT.empty}

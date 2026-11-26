@@ -4,6 +4,9 @@
 // 3) 잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드 미노출, 실행당 비용 · 실행 링크 비용은 값이 없으면 '없음'
 // 4) 준수 카드 → 규칙 화면 `준수 집계: 판정 가능`, 최근 실행이 중단이면 [재개] → run.resume
 // 이슈 #44(M2-02) 수용 기준 1 · 2: "코드 열람" 영역의 사유별 건수, 기록이 없으면 영역 값 '없음' (MET-01, ADR-088)
+// 이슈 #56(M3-11) 수용 기준 4: 규칙화 불가 비율 카드 · 추적성 결함 카드가 보이고 누르면 요구사항 화면이 그 상태 칩으로 열린다
+// (요구사항이 없으면 비율은 '없음', NRM-06 · NRM-08 · ADR-137). 규칙 작성 제안 0개 흐름(no-rules 시나리오)은 같은 상태(규칙 없는
+// 요구사항 1개)를 가짜 응답으로 보인다(시나리오 파일은 오케스트레이터 시험 traceability.test.ts가 지킨다)
 // 데이터는 가짜 브리지의 project.current · verification.summary · codeOpen.summary · rule.list 응답으로만 만든다.
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -15,6 +18,7 @@ import {
   EMPTY_CODE_OPEN_SUMMARY,
   EMPTY_SUMMARY,
   LINK_1,
+  REQUIREMENTS,
   NO_CONFIRMED_SUMMARY,
   PROJECT,
   RULES,
@@ -25,6 +29,7 @@ import {
   stages,
   SUMMARY,
   TOOLTIPS,
+  TRACEABILITY,
   verificationScreenUpdateFailedChecklist,
   verificationSkippedChecklist,
 } from './checklists/scr-05.js';
@@ -68,6 +73,15 @@ const openScreen = async (
   await page.getByRole('button', { name: '검증', exact: true }).click();
   return bive;
 };
+
+/** 지표 카드 이름 (화면 정의서 SCR-05 지표 카드 순서, 잠정 승인 자리는 에이전트 폐기 규칙, ADR-117 · ADR-137). */
+const METRIC_LABELS = [
+  '준수',
+  '에이전트 폐기 규칙',
+  '규칙화 불가 비율',
+  '추적성 결함',
+  '실행당 비용',
+];
 
 const callsOf = async (bive: BiveMock, method: string): Promise<MockCall[]> =>
   (await bive.calls()).filter((call) => call.method === method);
@@ -254,16 +268,12 @@ test.describe('파이프라인 · 목록 (수용 기준 2)', () => {
 });
 
 test.describe('미노출 · 값 없음 (수용 기준 3)', () => {
-  test('잠정 · 변이 · 규칙화 불가 · 추적성 결함 카드가 없고 지표 카드는 준수 · 에이전트 폐기 규칙 · 실행당 비용 3개', async ({
+  test('잠정 · 변이 카드가 없고 지표 카드는 준수 · 에이전트 폐기 규칙 · 규칙화 불가 비율 · 추적성 결함 · 실행당 비용 5개 (M3-11)', async ({
     page,
   }) => {
     await openScreen(page);
-    await expect(page.getByTestId('metric-label')).toHaveText([
-      '준수',
-      '에이전트 폐기 규칙',
-      '실행당 비용',
-    ]);
-    for (const text of ['잠정', '변이', '규칙화 불가', '추적성 결함']) {
+    await expect(page.getByTestId('metric-label')).toHaveText(METRIC_LABELS);
+    for (const text of ['잠정', '변이']) {
       await expect(page.getByTestId('metric-label').filter({ hasText: text })).toHaveCount(0);
     }
   });
@@ -351,12 +361,18 @@ test.describe('코드 열람 영역 (#44 수용 기준 1 · 2, MET-01 · ADR-088
     await expect(hint).toHaveRole('button');
     await expect(hint).toHaveAccessibleName('코드 열람');
     await expect(hint).not.toHaveAttribute('title');
-    // 지표 카드의 버튼(준수 두 기준 → 에이전트 폐기 규칙) 다음 Tab 한 번으로 닿는다 (실행당 비용 카드는 초점을 받지 않는다)
+    // 지표 카드의 버튼(준수 두 기준 → 에이전트 폐기 규칙 → 규칙화 불가 비율 → 추적성 결함) 다음 Tab 한 번으로 닿는다
+    // (실행당 비용 카드는 초점을 받지 않는다)
     await page.getByTestId('metric-compliance-all').focus();
-    await page.keyboard.press('Tab');
-    await expect(page.getByTestId('metric-compliance-confirmed')).toBeFocused();
-    await page.keyboard.press('Tab');
-    await expect(page.getByTestId('metric-agent-retired')).toBeFocused();
+    for (const next of [
+      'metric-compliance-confirmed',
+      'metric-agent-retired',
+      'metric-unrulable',
+      'metric-traceability',
+    ]) {
+      await page.keyboard.press('Tab');
+      await expect(page.getByTestId(next)).toBeFocused();
+    }
     await page.keyboard.press('Tab');
     await expect(hint).toBeFocused();
     await expect(page.getByRole('tooltip')).toHaveText(TOOLTIPS['code-open-hint'].text);
@@ -386,11 +402,7 @@ test.describe('코드 열람 영역 (#44 수용 기준 1 · 2, MET-01 · ADR-088
     await expect(area(page).getByTestId('code-open-reason')).toHaveCount(0);
     await expect(page.getByTestId('verification-screen')).toHaveAttribute('data-state', 'ready');
     await expect(page.getByTestId('verification-load-error')).toHaveCount(0);
-    await expect(page.getByTestId('metric-label')).toHaveText([
-      '준수',
-      '에이전트 폐기 규칙',
-      '실행당 비용',
-    ]);
+    await expect(page.getByTestId('metric-label')).toHaveText(METRIC_LABELS);
     await expect(page.getByTestId('pipeline-stage')).toHaveCount(STAGE_LABELS.length);
     await expect(page.getByTestId('verification-rule')).toHaveCount(5);
   });
@@ -629,6 +641,92 @@ test.describe('이동 · 재개 (수용 기준 4)', () => {
     await expect(page.getByTestId('card')).toHaveCount(6);
   });
 
+  /** 요구사항 화면까지 여는 응답: 요구사항 목록 · 같은 추적성 결함을 실은 규칙 목록 (테스트 전용 데이터). */
+  const REQUIREMENT_SCREEN: MockResponses = {
+    'requirement.list': { result: { requirements: REQUIREMENTS } },
+    'rule.list': { result: { rules: RULES, traceability: TRACEABILITY } },
+    'ruleWriter.status': { result: { entries: [] } },
+    'blocks.get': { result: { current: null } },
+  };
+  const statusChip = (page: Page) =>
+    page.getByTestId('filter-chip-status').getByTestId('filter-chip-button');
+
+  test('규칙화 불가 비율 카드: "규칙화 불가 / 요구사항"이 보이고 누르면 요구사항 화면이 "상태: 규칙화 불가"로 열려 그 요구사항만 보인다 (M3-11 수용 기준 4)', async ({
+    page,
+  }) => {
+    await openScreen(page, REQUIREMENT_SCREEN);
+    const card = page.getByTestId('metric-unrulable');
+    await expect(card.getByTestId('metric-label')).toHaveText('규칙화 불가 비율');
+    await expect(card.getByTestId('metric-value')).toHaveText('1 / 3');
+    await expect(card).toHaveAttribute('data-state', 'value');
+    await card.click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'requirements');
+    await expect(statusChip(page)).toHaveText('상태: 규칙화 불가');
+    await expect(page.getByTestId('card-id')).toHaveText(['REQ-003']);
+    await expect(page.getByTestId('card').getByTestId('card-exception')).toHaveText([
+      '규칙화 불가',
+    ]);
+    await expect(page.getByTestId('list-result')).toHaveText('3개 중 1개 · 초기화');
+  });
+
+  test('추적성 결함 카드: 규칙 없는 요구사항 + 부모 없는 규칙 수가 보이고 누르면 요구사항 화면이 "상태: 추적성 결함"으로 열려 규칙 없는 요구사항만 보인다 (M3-11 수용 기준 4)', async ({
+    page,
+  }) => {
+    await openScreen(page, REQUIREMENT_SCREEN);
+    const card = page.getByTestId('metric-traceability');
+    await expect(card.getByTestId('metric-label')).toHaveText('추적성 결함');
+    await expect(card.getByTestId('metric-value')).toHaveText('2');
+    await card.click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'requirements');
+    await expect(statusChip(page)).toHaveText('상태: 추적성 결함');
+    await expect(page.getByTestId('card-id')).toHaveText(['REQ-001']);
+    await expect(page.getByTestId('card').getByTestId('card-exception')).toHaveText([
+      '추적성 결함',
+    ]);
+    // 앞 카드의 칩이 남지 않는다: 규칙화 불가 카드로 다시 열면 그 상태 하나만
+    await page.getByRole('button', { name: '검증', exact: true }).click();
+    await page.getByTestId('metric-unrulable').click();
+    await expect(statusChip(page)).toHaveText('상태: 규칙화 불가');
+    await expect(page.getByTestId('card-id')).toHaveText(['REQ-003']);
+  });
+
+  test('규칙 작성 제안 0개로 끝난 요구사항 하나(no-rules 흐름): 추적성 결함 1, 규칙화 불가 비율 "0 / 1" (0은 센 값)', async ({
+    page,
+  }) => {
+    await openScreen(page, {
+      'verification.summary': {
+        result: {
+          ...SUMMARY,
+          traceability: {
+            requirementsWithoutRules: TRACEABILITY.requirementsWithoutRules,
+            parentlessRules: [],
+          },
+          unrulable: { count: 0, total: 1 },
+        },
+      },
+    });
+    await expect(page.getByTestId('metric-traceability').getByTestId('metric-value')).toHaveText(
+      '1',
+    );
+    await expect(page.getByTestId('metric-unrulable').getByTestId('metric-value')).toHaveText(
+      '0 / 1',
+    );
+  });
+
+  test('요구사항이 없으면 규칙화 불가 비율은 "없음"(0 / 0 · 0%가 아님)이고 상태 속성이 none, 추적성 결함은 "0" (ADR-117 · ADR-137)', async ({
+    page,
+  }) => {
+    await openScreen(page, { 'verification.summary': { result: EMPTY_SUMMARY } });
+    const card = page.getByTestId('metric-unrulable');
+    await expect(card.getByTestId('metric-value')).toHaveText('없음');
+    await expect(card).toHaveAttribute('data-state', 'none');
+    await expect(card).not.toContainText('%');
+    await expect(card).not.toContainText('0 / 0');
+    await expect(page.getByTestId('metric-traceability').getByTestId('metric-value')).toHaveText(
+      '0',
+    );
+  });
+
   for (const width of [820, 1280]) {
     test(`창 폭 ${String(width)}에서 지표 카드의 이름 · 값이 한 줄로 잘리지 않고 가로 스크롤이 없다`, async ({
       page,
@@ -854,7 +952,9 @@ test.describe('공통 툴팁: 준수 카드의 기준 · 코드 열람 한계 �
   const NEIGHBOR: Record<Target, { from: string; key: 'Tab' | 'Shift+Tab' }> = {
     'metric-compliance-all': { from: 'metric-compliance-confirmed', key: 'Shift+Tab' },
     'metric-compliance-confirmed': { from: 'metric-compliance-all', key: 'Tab' },
-    'code-open-hint': { from: 'metric-agent-retired', key: 'Tab' },
+    'metric-unrulable': { from: 'metric-agent-retired', key: 'Tab' },
+    'metric-traceability': { from: 'metric-unrulable', key: 'Tab' },
+    'code-open-hint': { from: 'metric-traceability', key: 'Tab' },
   };
   const keyboardFocus = async (page: Page, target: Target): Promise<void> => {
     const { from, key } = NEIGHBOR[target];

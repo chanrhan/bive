@@ -4,9 +4,20 @@ import { describe, expect, it } from 'vitest';
 
 import {
   canSaveEdit,
+  canSubmitUnrulable,
   childRulesOf,
   REQUIREMENT_DETAIL_TEXT,
 } from '../src/renderer/src/screens/norm-detail/requirementDetailView.js';
+
+describe('canSubmitUnrulable: 규칙화 불가 사유를 보낼 수 있는가 (M3-11, ADR-137)', () => {
+  it('공백만(유니코드 공백 · 줄바꿈 포함)이면 보내지 않고, 글이 있으면 앞뒤 공백째 보낸다', () => {
+    for (const blank of ['', ' ', '\t\n', '　 ']) expect(canSubmitUnrulable(blank)).toBe(false);
+    expect(canSubmitUnrulable('측정 기준 없음')).toBe(true);
+    expect(canSubmitUnrulable(' 사유 ')).toBe(true);
+    expect(REQUIREMENT_DETAIL_TEXT.unrulable).toBe('규칙화 불가');
+    expect(REQUIREMENT_DETAIL_TEXT.unrulableFailed).toBe('규칙화 불가 표시 실패');
+  });
+});
 
 const REQ = '01JB0000000000000000000001';
 const OTHER = '01JB0000000000000000000002';

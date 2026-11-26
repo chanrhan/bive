@@ -39,7 +39,34 @@ import {
   runLinkParts,
   STEP_LABELS,
   STEP_STATUS_TEXT,
+  TEXT,
+  traceabilityCount,
+  traceabilityHint,
+  unrulableText,
 } from '../src/renderer/src/screens/verification/verificationView.js';
+
+describe('규칙화 불가 비율 · 추적성 결함 카드 (M3-11 #56, NRM-06 · NRM-08 · ADR-137)', () => {
+  it('규칙화 불가 비율: "규칙화 불가 / 요구사항", 요구사항이 없으면 "없음"(0 / 0 · 0%가 아님), 0건은 센 값', () => {
+    expect(unrulableText({ count: 1, total: 4 })).toBe('1 / 4');
+    expect(unrulableText({ count: 0, total: 3 })).toBe('0 / 3');
+    expect(unrulableText({ count: 0, total: 0 })).toBe('없음');
+    expect(TEXT.unrulable).toBe('규칙화 불가 비율');
+  });
+
+  it('추적성 결함: 규칙 없는 요구사항 수 + 부모 없는 규칙 수, 툴팁에 둘을 나눠 적는다', () => {
+    const traceability = {
+      requirementsWithoutRules: [
+        { id: '01JA0000000000000000000001', displayId: 'REQ-001' },
+        { id: '01JA0000000000000000000002', displayId: 'REQ-002' },
+      ],
+      parentlessRules: [{ id: '01JA0000000000000000000003', displayId: 'RULE-001' }],
+    };
+    expect(traceabilityCount(traceability)).toBe(3);
+    expect(traceabilityCount({ requirementsWithoutRules: [], parentlessRules: [] })).toBe(0);
+    expect(traceabilityHint(traceability)).toBe('규칙 없는 요구사항 2 · 부모 없는 규칙 1');
+    expect(TEXT.traceability).toBe('추적성 결함');
+  });
+});
 
 describe('표시명', () => {
   it('단계 · 단계 상태 · 실행 상태 표시명이 shared와 같다', () => {

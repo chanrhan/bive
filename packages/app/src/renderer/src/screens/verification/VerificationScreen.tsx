@@ -1,7 +1,8 @@
 // 검증 화면 (screens.md SCR-05): 머리줄 · 지표 카드 · 코드 열람 · 파이프라인 · 규칙별 최신 판정 목록.
 // - 값은 verification.summary · codeOpen.summary 결과에서만 그린다(NFR-03). 표시 규칙은 verificationView.ts
-// - 지표 카드는 준수(전체 기준 · 사람 확인 기준) · 에이전트 폐기 규칙 · 실행당 비용 (ADR-100 D7 · B⑦, ADR-117). 잠정 · 변이 ·
-//   규칙화 불가 · 추적성 결함 카드, 준수 추이 그래프는 기능 이슈 전까지 미노출 (ADR-035)
+// - 지표 카드는 준수(전체 기준 · 사람 확인 기준) · 에이전트 폐기 규칙 · 규칙화 불가 비율 · 추적성 결함 · 실행당 비용 (ADR-100 D7 ·
+//   B⑦, ADR-117 · ADR-137). 잠정 · 변이 카드, 준수 추이 그래프는 기능 이슈 전까지 미노출 (ADR-035)
+// - 규칙화 불가 비율 · 추적성 결함 카드 → 요구사항 화면 `상태: 규칙화 불가` · `상태: 추적성 결함` (SCR-05 이동 경로, ADR-137)
 // - 코드 열람 = 열람 사유 분포(MET-01, M2-02 · ADR-088): 사유 3종의 건수, 기록이 없으면 '없음'. 검증 요약과 따로 불러
 //   이 영역의 로딩 · 실패는 이 영역 안에서만 보인다(로딩 = 자리 비움, 실패 = "코드 열람 불러오기 실패")
 // - 준수 카드의 전체 기준 → 규칙 화면 `준수 집계: 판정 가능` 필터 (분모 목록, JDG-03), 사람 확인 기준 → `준수 집계: 판정 가능`
@@ -28,6 +29,7 @@ import { visibleText } from '../../components/VisibleText/visibleText.js';
 import { EmptyState } from '../../layout/EmptyState.js';
 import { useNavigation } from '../../navigation/NavigationContext.js';
 import { useProject } from '../../project/ProjectContext.js';
+import { REQUIREMENTS_LIST_ID, requirementStatusFilter } from '../requirements/requirementsView.js';
 import { RULES_LIST_ID } from '../rules/rulesView.js';
 import { type CodeOpenSummaryLoad, useCodeOpenSummary } from './useCodeOpenSummary.js';
 import { useVerification } from './useVerification.js';
@@ -53,6 +55,9 @@ import {
   STEP_LABELS,
   STEP_STATUS_TEXT,
   TEXT,
+  traceabilityCount,
+  traceabilityHint,
+  unrulableText,
 } from './verificationView.js';
 
 export const VerificationScreen = (): React.JSX.Element => {
@@ -113,6 +118,14 @@ const VerificationContent = ({
     (filter: FilterState) => {
       setListFilter(RULES_LIST_ID, filter);
       navigate('rules');
+    },
+    [navigate],
+  );
+  // 규칙화 불가 · 추적성 결함 카드: 요구사항 목록을 그 상태 칩 하나로 연다(앞 필터는 남지 않는다)
+  const openRequirements = useCallback(
+    (status: 'traceability' | 'unrulable') => {
+      setListFilter(REQUIREMENTS_LIST_ID, requirementStatusFilter(status));
+      navigate('requirements');
     },
     [navigate],
   );
@@ -183,6 +196,35 @@ const VerificationContent = ({
           </span>{' '}
           <span className="metric-value" data-testid="metric-value">
             {agentRetiredText(summary.agentRetiredRules)}
+          </span>
+        </button>
+        <button
+          type="button"
+          className="metric-card"
+          data-testid="metric-unrulable"
+          data-state={summary.unrulable.total === 0 ? 'none' : 'value'}
+          {...tooltipTrigger(TEXT.unrulableHint, 'action')}
+          onClick={() => openRequirements('unrulable')}
+        >
+          <span className="metric-label" data-testid="metric-label">
+            {TEXT.unrulable}
+          </span>{' '}
+          <span className="metric-value" data-testid="metric-value">
+            {unrulableText(summary.unrulable)}
+          </span>
+        </button>
+        <button
+          type="button"
+          className="metric-card"
+          data-testid="metric-traceability"
+          {...tooltipTrigger(traceabilityHint(summary.traceability), 'action')}
+          onClick={() => openRequirements('traceability')}
+        >
+          <span className="metric-label" data-testid="metric-label">
+            {TEXT.traceability}
+          </span>{' '}
+          <span className="metric-value" data-testid="metric-value">
+            {String(traceabilityCount(summary.traceability))}
           </span>
         </button>
         <div className="metric-card" data-testid="metric-cost-per-run">
