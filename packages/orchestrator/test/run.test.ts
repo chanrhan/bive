@@ -450,6 +450,41 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
       expect((await createTyped([rule.id], 'C')).run.type).toBe('C');
     });
 
+    it('내장이 아닌 규칙은 검사 종류가 구조 검사 · 계약 검사여도 인수 테스트 검사 규칙이다: 유형 B로 주면 -32009, 유도하면 A', async () => {
+      const [structureKind, contractKind] = h.read((store) => {
+        const requirement = store.requirements.create({
+          id: newId(),
+          text: '구조 규칙을 사람이 적음',
+          author: human,
+          normState: 'approved',
+          createdAt: iso(T0),
+        });
+        return (['structure', 'contract'] as const).map((kind) =>
+          store.rules.create({
+            id: newId(),
+            title: `사람 규칙 ${kind}`,
+            statement: 'WHEN 파일이 다른 블록을 가져오면 THE SYSTEM SHALL 선언한 방향만 허용한다',
+            kind: 'architecture',
+            checkKinds: [kind],
+            parentRequirementId: requirement.id,
+            builtin: false,
+            targetBlockIds: [],
+            risk: null,
+            contractId: null,
+            author: human,
+            normState: 'approved',
+            createdAt: iso(T0),
+          }),
+        );
+      });
+      await saveSettings(COMPLETE);
+      for (const rule of [structureKind, contractKind]) {
+        if (rule === undefined) throw new Error('규칙 없음');
+        await expectRejected([rule.id], 'B', /구조 검사 · 계약 검사 규칙만/);
+        expect((await createTyped([rule.id])).run.type).toBe('A');
+      }
+    });
+
     it('검사 실행기가 없는 계약 종류의 계약 검사 규칙은 유형 B의 대상으로도 받지 않는다 (판정 없음, -32009)', async () => {
       const kinds = ['db-schema', 'asyncapi', 'external-api', 'cache', 'json-schema'] as const;
       const rules = h.read((store) => kinds.map((kind) => contractRule(store, kind)));

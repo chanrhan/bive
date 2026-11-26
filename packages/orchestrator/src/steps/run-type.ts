@@ -3,7 +3,7 @@
 // - 인수 테스트 보호의 기준: A = Red 확인 때의 해시, C · D = Green 확인 때의 해시(C: 새 테스트, D: 기준 커밋), B = 기준 커밋의
 //   git 트리(그 실행에서 인수 테스트를 쓰는 단계가 없다: 기준 커밋과 판정 커밋 사이에 `bive-acceptance/` 변경이 없어야 한다)
 // - 유형 C의 소스 파일 쓰기 거부: 기준 커밋과 판정 커밋 사이의 변경이 대상 규칙 폴더와 BIVE 선언 파일뿐이어야 한다
-import type { Run, RunType, Step, StepKind } from '@bive/shared';
+import type { JudgmentResult, Run, RunType, Step, StepKind } from '@bive/shared';
 
 import type { GitRunner } from '../git/git-exec.js';
 import { ACCEPTANCE_DECLARATION_FILES } from '../judge/acceptance-env.js';
@@ -122,3 +122,23 @@ export const testOnlyViolations = async (
   (await changedPathsBetween(git, repoPath, baseCommit, commit)).filter(
     (file) => !isTestOnlyPath(file, ruleDisplayIds),
   );
+
+/**
+ * 유형 B의 대상 정적 검사 규칙 가운데 판정이 병합으로 갈 수 없는 것 (ADR-136 ⑫): 판정 기록이 없음(판정 없음) · 막지 않는 실패(등록
+ * 문서의 형식 오류)만 있음. 막는 실패는 여기 들지 않는다(검사 단계는 구현 회귀, 병합 재검사는 재검사 실패). 검사 단계와 병합 재검사가
+ * 같이 쓴다. 유형 B가 아니면 늘 빈 목록.
+ */
+export const unjudgedStaticTargets = (
+  run: Pick<Run, 'type' | 'targetRuleIds'>,
+  recorded: readonly Pick<JudgmentResult, 'ruleId' | 'status'>[],
+  nonBlocking: ReadonlySet<string>,
+): string[] =>
+  run.type !== 'B'
+    ? []
+    : run.targetRuleIds.filter(
+        (id) =>
+          !recorded.some(
+            (judgment) =>
+              judgment.ruleId === id && (judgment.status === 'pass' || !nonBlocking.has(id)),
+          ),
+      );

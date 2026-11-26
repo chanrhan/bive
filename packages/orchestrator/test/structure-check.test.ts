@@ -25,7 +25,7 @@ import { stringify } from 'yaml';
 import { loadScenario, ScenarioSchema } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
-import type { StepExecutor } from '../src/engine/types.js';
+import type { NormJudgeRequest, StepExecutor } from '../src/engine/types.js';
 import type { PipeServer } from '../src/ipc/server.js';
 import {
   BUILTIN_RULE_CREATED_REASON,
@@ -944,6 +944,93 @@ describe('유형 B: 내장 구조 규칙 [실행] (M3-06 #51 수용 기준 4 · 
       },
     });
     expect(h.judgeCalls).toEqual([]);
+    expect(Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
+  }, 120_000);
+
+  it.each([
+    [
+      '새 파일 추가',
+      'bive-acceptance/RULE-001/added.acc.ts',
+      (worktree: string) =>
+        fs.writeFileSync(
+          path.join(worktree, 'bive-acceptance', 'RULE-001', 'added.acc.ts'),
+          "import { it } from 'vitest';\nit('더함', () => undefined);\n",
+        ),
+    ],
+    [
+      '파일 삭제',
+      RULE1_ACCEPTANCE,
+      (worktree: string) => fs.rmSync(path.join(worktree, RULE1_ACCEPTANCE)),
+    ],
+  ] as const)(
+    '구현 커밋의 인수 테스트 %s도 기준 커밋과 달라 검사가 판정하지 않고 failed (guard_violation)',
+    async (_name, changed, change) => {
+      const h = setup({
+        ...fixScenario(),
+        prepareRepo: (repo) => {
+          undeclaredImport(repo);
+          withRule1Acceptance(repo);
+        },
+        decide: allPassing,
+        executors: (defaults) => ({
+          ...defaults,
+          // 경로 가드를 지나친 변경을 흉내 낸다 (구현 세션은 bive-acceptance/를 쓸 수 없다)
+          implementation: before(defaults.implementation, (context) =>
+            change(context.git.worktreePath),
+          ),
+        }),
+      });
+      const direction = declare(h)['structure.declared-direction'];
+      const runId = humanRun(h, [direction.id]);
+      const detail = await runToEnd({ ...h, runId });
+      expect(detail.run).toMatchObject({ status: 'failed', failureReason: 'guard_violation' });
+      expect(stepOf(detail, 'check').exitDetail).toMatchObject({
+        detail: { stage: 'acceptance_hash', changed: [changed] },
+      });
+      expect(h.judgeCalls).toEqual([]);
+    },
+    120_000,
+  );
+
+  it('대상 밖 인수 테스트 규칙이 검사에서 실패하면 유형 B도 막는다: 판단 세션 없이 구현 회귀 → 상한 뒤 failed (regression_limit), 병합 없음', async () => {
+    const requests: NormJudgeRequest[] = [];
+    const h = setup({
+      ...retryScenario(),
+      prepareRepo: withRule1Acceptance,
+      // 구조 검사는 통과(변형 없음), 기존 인수 테스트 RULE-001만 계속 실패
+      decide: (call) =>
+        Object.fromEntries((call.input.ruleIds ?? []).map((id) => [id, ['failed'] as const])),
+      judgeNorms: () => (request) => {
+        requests.push(request);
+        return Promise.resolve({ status: 'not_opened', reason: 'not_configured', detail: '시험' });
+      },
+    });
+    const builtin = declare(h);
+    const direction = builtin['structure.declared-direction'];
+    const runId = humanRun(h, [direction.id]);
+    const detail = await runToEnd({ ...h, runId });
+    expect(detail.run).toMatchObject({
+      type: 'B',
+      status: 'failed',
+      failureReason: 'regression_limit',
+      regressionCount: 2,
+      mergeCommit: null,
+    });
+    expect(attempts(detail, 'check')).toEqual([
+      'check#1:failed',
+      'check#2:failed',
+      'check#3:failed',
+    ]);
+    expect(exitOf(detail, 'check', 1)).toMatchObject({
+      reason: 'check_failed',
+      judgments: [
+        { ruleId: 'RULE-001', status: 'fail' },
+        { ruleId: builtin['structure.public-api-only'].displayId, status: 'pass' },
+        { ruleId: direction.displayId, status: 'pass' },
+      ],
+    });
+    expect(exitOf(detail, 'check', 1)).not.toHaveProperty('existingRuleJudgment');
+    expect(requests).toEqual([]);
     expect(Number(userGit(h.repo, 'rev-list', '--merges', '--count', 'main'))).toBe(0);
   }, 120_000);
 });

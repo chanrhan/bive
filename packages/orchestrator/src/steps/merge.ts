@@ -44,7 +44,7 @@ import {
 } from '../norms/effective.js';
 import { approvedRules } from './check.js';
 import { TEST_ONLY_STAGE } from './green-check.js';
-import { headStepKindOf, testOnlyViolations } from './run-type.js';
+import { headStepKindOf, testOnlyViolations, unjudgedStaticTargets } from './run-type.js';
 import {
   CONTRACT_STAGE,
   contractJudgmentsFrom,
@@ -439,10 +439,13 @@ export const createMergeExecutor =
       const blocking = recorded.filter((item) => !nonBlocking.has(item.ruleId));
       // 재검사가 도는 동안 대상 규칙이 폐기됐으면 통과여도 병합하지 않는다 (병합 직전, ADR-112)
       retiredDuringCheck = retiredTargets();
+      // 유형 B: 대상 정적 검사 규칙은 병합 커밋에서도 판정이 통과여야 한다 (판정 없음 · 막지 않는 실패는 재검사 실패, ADR-136 ⑫)
+      const unjudgedTargets = unjudgedStaticTargets(context.run, recorded, nonBlocking);
       const passed =
         retiredDuringCheck.length === 0 &&
         judged.result.status === 'completed' &&
-        blocking.every((item) => item.status === 'pass');
+        blocking.every((item) => item.status === 'pass') &&
+        unjudgedTargets.length === 0;
       if (
         retiredDuringCheck.length === 0 &&
         judged.result.status === 'completed' &&
@@ -457,6 +460,7 @@ export const createMergeExecutor =
       recheck = {
         mergeCommit: merge.mergeCommit,
         ruleIds: judged.ruleIds,
+        ...(unjudgedTargets.length === 0 ? {} : { unjudgedTargets }),
         ...judgeSummary(judged.result),
         judgments: judgmentDigest(recorded, judgedRules),
         ...(judged.structure === undefined ? {} : { structure: judged.structure.summary }),
@@ -472,14 +476,19 @@ export const createMergeExecutor =
               detail:
                 retiredDuringCheck.length > 0
                   ? `대상 규칙 폐기: ${retiredDuringCheck.join(', ')}`
-                  : judged.result.status === 'completed'
-                    ? `실패한 규칙: ${blocking
-                        .filter((item) => item.status !== 'pass')
-                        .map(
-                          (item) => judgedRules.find((rule) => rule.id === item.ruleId)?.displayId,
-                        )
+                  : unjudgedTargets.length > 0 && blocking.every((item) => item.status === 'pass')
+                    ? `판정되지 않은 대상 규칙: ${unjudgedTargets
+                        .map((id) => judgedRules.find((rule) => rule.id === id)?.displayId ?? id)
                         .join(', ')}`
-                    : `${judged.result.status}: ${judged.result.message ?? ''}`,
+                    : judged.result.status === 'completed'
+                      ? `실패한 규칙: ${blocking
+                          .filter((item) => item.status !== 'pass')
+                          .map(
+                            (item) =>
+                              judgedRules.find((rule) => rule.id === item.ruleId)?.displayId,
+                          )
+                          .join(', ')}`
+                      : `${judged.result.status}: ${judged.result.message ?? ''}`,
             }),
       };
     };

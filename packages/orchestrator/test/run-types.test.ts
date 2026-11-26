@@ -221,6 +221,26 @@ describe('유형 C: Green 확인 (새 테스트 전부 통과, 수용 기준 2)'
     expect(done.run).toMatchObject({ status: 'failed', failureReason: 'judge_runner_error' });
     expect(attempts(done, 'test_writing')).toEqual(['test_writing#1:passed']);
   }, 60_000);
+
+  it.each([
+    ['건너뜀 · todo만', ['skipped', 'todo'] as const],
+    ['통과에 건너뜀이 섞임', ['passed', 'skipped'] as const],
+  ])(
+    '%s이면 통과가 아니다 (not_green): 테스트 작성으로 돌아가 상한 뒤 failed',
+    async (_name, statuses) => {
+      const h = setup({ runType: 'C', decide: () => ({ 'RULE-001': statuses }) });
+      const done = await runToEnd(h);
+      expect(done.run).toMatchObject({ status: 'failed', failureReason: 'test_retry_limit' });
+      expect(exitOf(done, 'green_check', 1)).toMatchObject({
+        reason: 'not_green',
+        failingCases: statuses
+          .filter((status) => status !== 'passed')
+          .map((status) => expect.objectContaining({ status })),
+      });
+      expect(h.judgeCalls.every((call) => call.kind === 'green_check')).toBe(true);
+    },
+    60_000,
+  );
 });
 
 describe('유형 C: 소스 파일 쓰기 거부 (수용 기준 2, C-18)', () => {
@@ -298,6 +318,72 @@ describe('유형 C: 소스 파일 쓰기 거부 (수용 기준 2, C-18)', () => 
     });
     expect(stepOf(done, 'merge').exitDetail).toMatchObject({
       detail: { stage: 'test_only', changed: [ROUTE] },
+    });
+    expect(mainTip(h)).toBe(before);
+  }, 60_000);
+
+  /** 다른 규칙(RULE-002)의 인수 테스트 폴더 (C가 바꿀 수 없는 인수 테스트) */
+  const OTHER_ACCEPTANCE = 'bive-acceptance/RULE-002/other.acc.ts';
+  const touchOtherRule = (worktree: string): void => {
+    fs.mkdirSync(path.join(worktree, 'bive-acceptance', 'RULE-002'), { recursive: true });
+    fs.writeFileSync(
+      path.join(worktree, OTHER_ACCEPTANCE),
+      "import { it } from 'vitest';\nit('바꿈', () => undefined);\n",
+    );
+  };
+
+  it('테스트 작성 커밋이 다른 규칙의 인수 테스트 폴더를 바꾸면 Green 확인이 판정하지 않고 failed (guard_violation)', async () => {
+    const h = setup({
+      runType: 'C',
+      secondRule: true,
+      decide: allPass,
+      executors: (defaults) => ({
+        ...defaults,
+        test_writing: async (context) => {
+          const outcome = await defaults.test_writing(context);
+          touchOtherRule(context.git.worktreePath);
+          return outcome;
+        },
+      }),
+    });
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({ status: 'failed', failureReason: 'guard_violation' });
+    expect(stepOf(done, 'green_check').exitDetail).toMatchObject({
+      detail: { stage: 'test_only', changed: [OTHER_ACCEPTANCE] },
+    });
+    expect(h.judgeCalls).toEqual([]);
+  }, 60_000);
+
+  it('Green 확인을 거치지 않은 다른 규칙 폴더의 변경도 병합 직전 대조가 따로 막는다 (Green 해시는 그 변경을 담는다)', async () => {
+    const bypass: StepExecutor = (context) =>
+      Promise.resolve({
+        status: 'passed',
+        exitDetail: { acceptanceHashes: hashAcceptanceFiles(context.git.worktreePath) },
+      });
+    const h = setup({
+      runType: 'C',
+      secondRule: true,
+      decide: allPass,
+      executors: (defaults) => ({
+        ...defaults,
+        green_check: bypass,
+        test_writing: async (context) => {
+          const outcome = await defaults.test_writing(context);
+          touchOtherRule(context.git.worktreePath);
+          return outcome;
+        },
+      }),
+    });
+    const before = mainTip(h);
+    const done = await runToEnd(h);
+    expect(attempts(done, 'check')).toEqual(['check#1:passed']);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'guard_violation',
+      currentStep: 'merge',
+    });
+    expect(stepOf(done, 'merge').exitDetail).toMatchObject({
+      detail: { stage: 'test_only', changed: [OTHER_ACCEPTANCE] },
     });
     expect(mainTip(h)).toBe(before);
   }, 60_000);

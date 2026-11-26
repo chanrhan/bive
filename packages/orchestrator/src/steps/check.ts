@@ -68,6 +68,7 @@ import {
   changedPathsBetween,
   headStepKindOf,
   missingBaselineMessage,
+  unjudgedStaticTargets,
 } from './run-type.js';
 import { ACCEPTANCE_DIR } from '../judge/config.js';
 
@@ -299,14 +300,8 @@ export const createCheckExecutor =
     const nonBlocking = nonBlockingContractRuleIds(judged.contracts);
     const blocking = recorded.filter((judgment) => !nonBlocking.has(judgment.ruleId));
     // 유형 B의 대상 규칙은 판정 기록이 통과여야 한다. 판정 없음 · 막지 않는 실패는 구현이 고칠 수 없다 (판정 없이 병합하지 않는다)
-    if (context.run.type === 'B') {
-      const unjudgedTargets = context.run.targetRuleIds.filter(
-        (id) =>
-          !recorded.some(
-            (judgment) =>
-              judgment.ruleId === id && (judgment.status === 'pass' || !nonBlocking.has(id)),
-          ),
-      );
+    {
+      const unjudgedTargets = unjudgedStaticTargets(context.run, recorded, nonBlocking);
       if (unjudgedTargets.length > 0) {
         return halt('step_unmet', {
           ...detail,
