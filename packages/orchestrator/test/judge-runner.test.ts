@@ -464,7 +464,8 @@ it('서버를 끝내는 요청 뒤 헬스 체크', async () => {
     expect(all.exitCode).toBeNull();
     // 같은 실행의 판정마다 폴더가 따로 생겨 이전 원본을 덮어쓰지 않는다
     expect(all.judgeId).not.toBe(forRule.judgeId);
-    expect(readdirSync(path.join(biveHome, 'projects', projectId, 'judge', runId))).toHaveLength(5);
+    // 앞의 판정 4회(서버 생존 필수 판정 포함, M3-54 #311) + 이 시험의 2회
+    expect(readdirSync(path.join(biveHome, 'projects', projectId, 'judge', runId))).toHaveLength(6);
     write('bive-acceptance/RULE-001/health.acc.ts', HEALTH_ACC);
   });
 
