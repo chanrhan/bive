@@ -4,9 +4,11 @@
 // - 실행 알림 · 규범 변경 알림(규칙 작성 세션의 새 규칙 · 폐기 · 대체, M7-14 · ADR-119)을 받으면 지금 목록을 둔 채 다시
 //   불러온다 (M1-19, ADR-076). 다시 읽는 알림은 `events`로 바꿀 수 있다(요구사항 화면의 블록 칩은 규범 변경 알림만, ADR-126)
 // - 늦게 온 이전 요청의 결과는 버린다(마지막으로 보낸 요청의 결과만 쓴다)
+// - `traceability`: 같은 응답의 추적성 결함(규칙 없는 요구사항 · 부모 없는 규칙, M3-11 · ADR-137). 화면은 다시 세지 않고 이 값만
+//   쓴다. 읽는 중 · 실패 · 응답에 칸이 없으면 `null`(결함을 모름: 예외를 보이지 않는다)
 // - `replace`: 규칙 상세의 직접 편집이 저장되면 응답의 규칙으로 목록의 그 항목을 바꾼다(옛 제목 · 진술을 남기지 않음, M7-03).
 //   그 전에 보낸 요청의 결과는 편집 전 값일 수 있어 버리고, 버린 요청이 있었으면 한 번 다시 읽는다(실행 알림의 새로고침을 잃지 않게)
-import type { RuleWithJudgment } from '@bive/shared';
+import type { RuleWithJudgment, Traceability } from '@bive/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { NORM_VIEW_EVENT_NAMES } from '../../runs/refreshCoalescer.js';
@@ -22,6 +24,8 @@ export interface RulesState {
   load: RulesLoad;
   /** 목록의 같은 ID 항목을 바꾼다 (직접 편집 저장 뒤) */
   replace: (item: RuleWithJudgment) => void;
+  /** 마지막으로 읽은 목록의 추적성 결함 (모르면 `null`) */
+  traceability: Traceability | null;
 }
 
 export const useRules = (
@@ -29,7 +33,11 @@ export const useRules = (
   events: readonly string[] = NORM_VIEW_EVENT_NAMES,
 ): RulesState => {
   // 어느 프로젝트의 결과인지 함께 둬서 프로젝트가 바뀐 직후 이전 목록을 보이지 않게 한다
-  const [loaded, setLoaded] = useState<{ projectId: string; load: RulesLoad } | null>(null);
+  const [loaded, setLoaded] = useState<{
+    projectId: string;
+    load: RulesLoad;
+    traceability: Traceability | null;
+  } | null>(null);
   // 마지막 요청 번호. 응답이 왔을 때 번호가 다르면 더 새 요청이 있으므로 버린다
   const seq = useRef(0);
   // 응답을 기다리는 요청 번호 (없으면 0)
@@ -43,15 +51,21 @@ export const useRules = (
       if (inFlight.current === mine) inFlight.current = 0;
     };
     return window.bive.invoke('rule.list', { projectId, includeRetired: true }).then(
-      ({ rules }) => {
+      ({ rules, traceability }) => {
         settle();
         if (seq.current === mine) {
-          setLoaded({ projectId, load: { state: 'ready', items: visibleRules(rules) } });
+          setLoaded({
+            projectId,
+            load: { state: 'ready', items: visibleRules(rules) },
+            traceability: traceability ?? null,
+          });
         }
       },
       () => {
         settle();
-        if (seq.current === mine) setLoaded({ projectId, load: { state: 'error' } });
+        if (seq.current === mine) {
+          setLoaded({ projectId, load: { state: 'error' }, traceability: null });
+        }
       },
     );
   }, [projectId]);
@@ -76,7 +90,7 @@ export const useRules = (
         current === null || current.projectId !== projectId || current.load.state !== 'ready'
           ? current
           : {
-              projectId,
+              ...current,
               load: {
                 state: 'ready',
                 items: visibleRules(replaceRuleItem(current.load.items, item)),
@@ -88,8 +102,10 @@ export const useRules = (
     [projectId, fetchRules],
   );
 
+  const current = loaded !== null && loaded.projectId === projectId ? loaded : null;
   return {
-    load: loaded !== null && loaded.projectId === projectId ? loaded.load : LOADING,
+    load: current?.load ?? LOADING,
     replace,
+    traceability: current?.traceability ?? null,
   };
 };

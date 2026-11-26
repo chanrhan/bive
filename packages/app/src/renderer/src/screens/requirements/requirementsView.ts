@@ -2,15 +2,18 @@
 // 의존하지 않는다 (test/requirements-view.test.ts).
 // - 카드: 1줄 요구사항 문장 · 생성 주체 아이콘, 2줄 표시 ID · 예외 · 시각(마지막 변경 시각)
 // - 예외: 추적성 결함 · 규칙화 불가 · 미확인 · 실패. 미확인은 옛 '잠정' 자리다(ADR-100 명세 변경 목록 SCR-02). 사람이 쓴
-//   요구사항은 저장 즉시 확인됨이라 예외가 없다(B①). 값은 Requirement 필드에서만 도출한다(NFR-03).
-//   추적성 결함(규칙 없는 요구사항)과 실패(자식 규칙 판정)는 규칙 · 판정 데이터가 아직 없어 도출하지 않는다
+//   요구사항은 저장 즉시 확인됨이라 예외가 없다(B①). 규칙화 불가 · 미확인은 Requirement 필드에서 도출한다(NFR-03).
+//   추적성 결함(규칙 없는 요구사항)은 서버가 정한 목록(`rule.list`의 `traceability`)에 든 요구사항만이고 화면은 다시 세지 않는다
+//   (M3-11 #56 · ADR-137). 규칙화 불가인 요구사항은 결함이 아니다(NRM-08: 서버도 빼지만, 표시 직후 아직 다시 읽지 않은 목록에
+//   남아 있어도 결함으로 보이지 않게 규칙화 불가가 앞선다). 목록을 모르면(읽는 중 · 실패 · 칸 없음) 결함을 보이지 않는다.
+//   실패(자식 규칙 판정)는 판정 데이터가 아직 없어 도출하지 않는다
 // - 필터: 상태 · 작성 · 확인 · 블록. 옛 "승인"(승인 · 대기 · 잠정) 칩은 "확인"(미확인 · 확인됨)으로 바뀌었다. 블록 값은 그
 //   요구사항의 구현 위치(효력 있는 자식 규칙의 대상 블록, rule.list에서 만든다. M3-19 #64 · ADR-126). 위험도 칩은 SCR-02 필터에
 //   없어 두지 않는다
-import type { AuthorKind, ConfirmationState, Requirement } from '@bive/shared';
+import type { AuthorKind, ConfirmationState, Requirement, Traceability } from '@bive/shared';
 
 import { AUTHOR_LABELS } from '../../components/AuthorMark/labels.js';
-import type { FilterCriterion } from '../../components/ListView/filter.js';
+import type { FilterCriterion, FilterState } from '../../components/ListView/filter.js';
 import {
   CONFIRMATION_LABELS,
   type ExceptionMark,
@@ -56,9 +59,27 @@ const EXCEPTION_TONES = {
 export const visibleRequirements = (requirements: readonly Requirement[]): Requirement[] =>
   requirements.filter((requirement) => requirement.deletedAt === null);
 
-/** 요구사항의 예외. 근거 필드가 있는 것만 (추적성 결함 · 실패는 규칙 · 판정 데이터가 생기면 더한다). */
-export const requirementExceptions = (requirement: Requirement): RequirementException[] => {
+/** 서버가 정한 규칙 없는 요구사항 ID (`rule.list`의 `traceability`). 모르면 `null`. */
+export type RequirementDefects = ReadonlySet<string> | null;
+
+/** `traceability` → 규칙 없는 요구사항 ID 집합 (모르면 `null`). */
+export const requirementDefectsOf = (
+  traceability: Pick<Traceability, 'requirementsWithoutRules'> | null,
+): RequirementDefects =>
+  traceability === null
+    ? null
+    : new Set(traceability.requirementsWithoutRules.map((item) => item.id));
+
+/** 요구사항의 예외 (실패는 판정 데이터가 생기면 더한다). `defects` = {@link requirementDefectsOf}. */
+export const requirementExceptions = (
+  requirement: Requirement,
+  defects: RequirementDefects = null,
+): RequirementException[] => {
   const out: RequirementException[] = [];
+  // 규칙화 불가는 추적성 결함과 구분한다: 둘이 함께 보이지 않는다 (NRM-08)
+  if (requirement.unrulable === null && defects?.has(requirement.id) === true) {
+    out.push('traceability');
+  }
   if (requirement.unrulable !== null) out.push('unrulable');
   if (requirement.confirmation.state === 'unconfirmed') out.push('unconfirmed');
   return out;
@@ -82,15 +103,27 @@ export interface RequirementCardData {
   author: AuthorKind;
 }
 
-export const requirementCard = (requirement: Requirement): RequirementCardData => ({
+export const requirementCard = (
+  requirement: Requirement,
+  defects: RequirementDefects = null,
+): RequirementCardData => ({
   title: requirement.text,
   id: requirement.displayId,
-  exceptions: requirementExceptions(requirement).map(toMark),
+  exceptions: requirementExceptions(requirement, defects).map(toMark),
   dateTime: requirement.updatedAt,
   author: requirement.author.kind,
 });
 
 export const requirementKey = (requirement: Requirement): string => requirement.id;
+
+/** 상태 칩 하나만 고른 요구사항 목록 필터 (검증 화면의 규칙화 불가 · 추적성 결함 카드가 건다, SCR-05 → SCR-02, ADR-137). */
+export const requirementStatusFilter = (status: 'traceability' | 'unrulable'): FilterState =>
+  Object.freeze({
+    query: '',
+    selected: Object.freeze({ status: Object.freeze([status]) }),
+    problemOnly: false,
+    includeHidden: false,
+  });
 
 /**
  * 필터 기준 4종 (SCR-02 필터: 상태 · 작성 · 확인 · 블록, 확인은 ADR-100 명세 변경 목록 SCR-02). 순서가 칩 순서다.
@@ -98,6 +131,7 @@ export const requirementKey = (requirement: Requirement): string => requirement.
  */
 export const requirementCriteria = (
   blocks: ReadonlyMap<string, readonly string[]>,
+  defects: RequirementDefects = null,
 ): readonly FilterCriterion<Requirement>[] => [
   {
     id: 'status',
@@ -110,7 +144,7 @@ export const requirementCriteria = (
       })),
     ],
     values: (requirement) => {
-      const exceptions = requirementExceptions(requirement);
+      const exceptions = requirementExceptions(requirement, defects);
       return exceptions.length === 0 ? ['normal'] : exceptions;
     },
   },

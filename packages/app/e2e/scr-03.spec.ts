@@ -260,6 +260,43 @@ test.describe('목록', () => {
   });
 });
 
+test.describe('부모 없는 규칙의 추적성 결함 (M3-11 #56 수용 기준 3, NRM-06 · ADR-137)', () => {
+  const traceability = {
+    requirementsWithoutRules: [],
+    parentlessRules: [{ id: RULES[0]?.rule.id ?? '', displayId: 'RULE-001' }],
+  };
+
+  test('서버가 부모 없는 규칙으로 정한 규칙의 카드 2줄째에 "추적성 결함"(위험 색)이 보이고 [문제만]에 잡힌다. 다른 카드에는 없다', async ({
+    page,
+  }) => {
+    await openScreen(page, { 'rule.list': { result: { rules: RULES, traceability } } });
+    const card = page.getByTestId('card').filter({ hasText: 'RULE-001' });
+    // 통과 · 확인됨이라 다른 예외가 없던 카드
+    await expect(card.getByTestId('card-exception')).toHaveText(['추적성 결함']);
+    await expect(card.getByTestId('card-exception')).toHaveAttribute('data-tone', 'danger');
+    await expect(page.getByTestId('card-exception').filter({ hasText: '추적성 결함' })).toHaveCount(
+      1,
+    );
+    await page.getByTestId('problem-toggle').click();
+    // 정상이던 RULE-001도 문제 항목이 되어 모든 카드가 남는다
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    expect(await cardIds(page)).toContain('RULE-001');
+  });
+
+  test('응답에 추적성 결함이 없으면(옛 응답) 어느 카드에도 "추적성 결함"이 없고 [문제만]은 RULE-001을 뺀다', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+    await expect(page.getByTestId('card-exception').filter({ hasText: '추적성 결함' })).toHaveCount(
+      0,
+    );
+    await page.getByTestId('problem-toggle').click();
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length - 1);
+    expect(await cardIds(page)).not.toContain('RULE-001');
+  });
+});
+
 test.describe('필터 칩 (수용 기준 3)', () => {
   test('칩 7종이 있고 변이만 값이 없어 0건 비활성, 블록 · 위험도는 활성 (#64)', async ({
     page,

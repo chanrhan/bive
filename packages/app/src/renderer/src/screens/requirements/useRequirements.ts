@@ -1,5 +1,6 @@
 // 요구사항 목록 불러오기 · 새 요구사항 저장 · 직접 편집 · 삭제
-// (RPC `requirement.list` · `requirement.create` · `requirement.update` · `requirement.delete`, ADR-047 · ADR-078).
+// (RPC `requirement.list` · `requirement.create` · `requirement.update` · `requirement.delete`, ADR-047 · ADR-078) · 규칙화 불가
+// 표시(`requirement.markUnrulable`, M3-11 · ADR-137).
 // - 프로젝트가 바뀌면 다시 불러오고, 그동안은 로딩이다(이전 프로젝트 목록을 보이지 않음)
 // - 저장 뒤 다시 불러오는 동안은 지금 목록을 그대로 둔다(깜박임 없음)
 // - 편집 · 삭제가 성공하면 응답의 요구사항을 목록에 바로 반영하고(편집 = 교체, 삭제 = 빠짐) 목록을 다시 불러온다
@@ -23,6 +24,8 @@ export interface UseRequirements {
   update(id: string, text: string): Promise<void>;
   /** 사람의 삭제(소프트 삭제): 목록에서 빼고 다시 불러온다. 실패하면 거부된다. */
   remove(id: string): Promise<void>;
+  /** 사람의 규칙화 불가 표시(사유): 응답의 요구사항으로 바꾸고 다시 불러온다. 실패하면 거부된다 (ADR-137). */
+  markUnrulable(id: string, reason: string): Promise<void>;
 }
 
 export const useRequirements = (projectId: string): UseRequirements => {
@@ -103,6 +106,19 @@ export const useRequirements = (projectId: string): UseRequirements => {
     [projectId, applyResult],
   );
 
+  const markUnrulable = useCallback(
+    async (id: string, reason: string): Promise<void> => {
+      const { requirement } = await window.bive.invoke('requirement.markUnrulable', {
+        projectId,
+        id,
+        reason,
+        author: { kind: 'human' },
+      });
+      applyResult(requirement);
+    },
+    [projectId, applyResult],
+  );
+
   const load = loaded !== null && loaded.projectId === projectId ? loaded.load : LOADING;
-  return { load, create, update, remove };
+  return { load, create, update, remove, markUnrulable };
 };

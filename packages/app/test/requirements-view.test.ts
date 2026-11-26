@@ -12,7 +12,9 @@ import {
   EXCEPTION_LABELS,
   requirementCriteria,
   requirementCard,
+  requirementDefectsOf,
   requirementExceptions,
+  requirementStatusFilter,
   visibleRequirements,
 } from '../src/renderer/src/screens/requirements/requirementsView.js';
 
@@ -186,5 +188,66 @@ describe('필터 기준', () => {
         selected: { block: ['auth', 'lib', 'gone'] },
       }).map((e) => e.item.displayId),
     ).not.toContain(UNRULABLE.displayId);
+  });
+});
+
+describe('추적성 결함 (M3-11 #56, NRM-06 · NRM-08 · ADR-137)', () => {
+  const defects = requirementDefectsOf({
+    requirementsWithoutRules: [
+      { id: NORMAL.id, displayId: NORMAL.displayId },
+      { id: UNCONFIRMED.id, displayId: UNCONFIRMED.displayId },
+      // 표시 직후 다시 읽지 않은 목록에 남은 규칙화 불가 요구사항
+      { id: UNRULABLE.id, displayId: UNRULABLE.displayId },
+    ],
+  });
+
+  it('서버 목록에 든 요구사항만 추적성 결함이고 맨 앞이다. 목록을 모르면(null) 결함이 없다', () => {
+    expect(requirementExceptions(NORMAL, defects)).toEqual(['traceability']);
+    expect(requirementExceptions(UNCONFIRMED, defects)).toEqual(['traceability', 'unconfirmed']);
+    expect(requirementExceptions(NORMAL, null)).toEqual([]);
+    expect(requirementExceptions(NORMAL, requirementDefectsOf(null))).toEqual([]);
+    expect(requirementExceptions(NORMAL, new Set())).toEqual([]);
+    expect(requirementCard(NORMAL, defects).exceptions).toEqual([
+      { key: 'traceability', label: '추적성 결함', tone: 'danger' },
+    ]);
+  });
+
+  it('규칙화 불가인 요구사항은 목록에 남아 있어도 추적성 결함으로 보이지 않는다 (둘은 구분)', () => {
+    expect(requirementExceptions(UNRULABLE, defects)).toEqual(['unrulable']);
+    expect(requirementCard(UNRULABLE, defects).exceptions).toEqual([
+      { key: 'unrulable', label: '규칙화 불가', tone: 'warning' },
+    ]);
+  });
+
+  it('상태 칩: 추적성 결함 · 규칙화 불가를 따로 세고, 카드의 상태 필터는 그 값만 남긴다', () => {
+    const items = [NORMAL, UNRULABLE, UNCONFIRMED];
+    const entries: ListEntry<Requirement>[] = items.map((item, index) => ({
+      item,
+      key: item.id,
+      searchText: item.text,
+      problem: requirementExceptions(item, defects).length > 0,
+      time: null,
+      index,
+    }));
+    const criteria = requirementCriteria(new Map(), defects);
+    expect(countOptions(entries, criteria, EMPTY_FILTER)['status']).toEqual({
+      normal: 0,
+      traceability: 2,
+      unrulable: 1,
+      unconfirmed: 1,
+      failed: 0,
+    });
+    const keep = (status: 'traceability' | 'unrulable') =>
+      filterEntries(entries, criteria, requirementStatusFilter(status)).map(
+        (entry) => entry.item.displayId,
+      );
+    expect(keep('traceability')).toEqual([NORMAL.displayId, UNCONFIRMED.displayId]);
+    expect(keep('unrulable')).toEqual([UNRULABLE.displayId]);
+    expect(requirementStatusFilter('unrulable')).toEqual({
+      query: '',
+      selected: { status: ['unrulable'] },
+      problemOnly: false,
+      includeHidden: false,
+    });
   });
 });

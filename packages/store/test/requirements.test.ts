@@ -95,6 +95,42 @@ describe('requirements 테이블 · 리포지토리', () => {
     });
   });
 
+  it('규칙화 불가 표시: 사유 · 수정 시각 · 수정 주체만 바뀌고, 이미 표시됐거나 삭제됐거나 없으면 거부하고 바꾸지 않는다 (ADR-137)', () => {
+    withStore((store) => {
+      const created = store.requirements.create(input());
+      const marked = store.requirements.markUnrulable(created.id, '측정 기준 없음', {
+        by: human,
+        at: T1,
+      });
+      expect(marked).toEqual({
+        ...created,
+        unrulable: { reason: '측정 기준 없음' },
+        updatedAt: T1,
+        updatedBy: human,
+      });
+      expect(store.requirements.get(created.id)).toEqual(marked);
+      expect(
+        store.db.prepare('SELECT unrulable_reason FROM requirements WHERE id = ?').get(created.id),
+      ).toEqual({ unrulable_reason: '측정 기준 없음' });
+      // 이미 표시된 사유는 바꾸지 않는다
+      expect(() =>
+        store.requirements.markUnrulable(created.id, '다른 사유', { by: human, at: T2 }),
+      ).toThrow(ConflictError);
+      expect(store.requirements.get(created.id)).toEqual(marked);
+      // 빈 사유는 스키마가 거부한다
+      const other = store.requirements.create(input());
+      expect(() => store.requirements.markUnrulable(other.id, '', { by: human, at: T2 })).toThrow();
+      expect(store.requirements.get(other.id)?.unrulable).toBeNull();
+      store.requirements.softDelete(other.id, { by: human, at: T2 });
+      expect(() =>
+        store.requirements.markUnrulable(other.id, '사유', { by: human, at: T2 }),
+      ).toThrow(ConflictError);
+      expect(() =>
+        store.requirements.markUnrulable(newId(), '사유', { by: human, at: T2 }),
+      ).toThrow(NotFoundError);
+    });
+  });
+
   it('소프트 삭제: 행은 남고 deletedAt이 채워지며 목록에서 빠진다', () => {
     withStore((store) => {
       const a = store.requirements.create(input());
