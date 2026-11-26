@@ -937,6 +937,8 @@ test.describe('필터 칩 (수용 기준 4)', () => {
       planner: '0',
       'test-writer': '0',
       implementer: '0',
+      // 변이 주입 역할 (M3-07 #52): 규범을 쓰지 않아 늘 0건 · 비활성
+      mutator: '0',
       chat: '1',
       human: '0',
       orchestrator: '2',

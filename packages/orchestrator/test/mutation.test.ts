@@ -489,6 +489,8 @@ describe('변이 주입 세션 · propose_mutant · 판정 (수용 기준 1)', (
           },
           { tool: 'propose_mutant', args: VALID_MUTANT },
           { tool: 'propose_mutant', args: { path: HEALTH, search: 'getDb', replace: 'x' } },
+          // 받아들인 뒤에는 읽기 도구도 닫힌 세션으로 거부한다 (실행기가 닫힘)
+          { tool: 'read_file', args: { path: 'rules/RULE-001.md' } },
         ],
       },
     });
@@ -506,6 +508,7 @@ describe('변이 주입 세션 · propose_mutant · 판정 (수용 기준 1)', (
       ['denied', 'invalid_args'],
       ['error', 'not_found'],
       ['ok', null],
+      ['denied', 'session_closed'],
       ['denied', 'session_closed'],
     ]);
     // 판정은 받아들인 변이 1개만

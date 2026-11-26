@@ -19,5 +19,6 @@ export const AGENT_ROLE_LABELS = {
   planner: '계획',
   'test-writer': '테스트 작성',
   implementer: '구현',
+  mutator: '변이 주입',
   chat: '채팅',
 } as const satisfies Record<AgentRole, string>;
