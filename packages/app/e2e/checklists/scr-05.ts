@@ -396,6 +396,15 @@ export const MUTATION_RULES: RuleWithJudgment[] = RULES.map((item) => ({
   mutation: MUTATION_OF[item.rule.displayId] ?? 'unverified',
 }));
 
+/**
+ * `MUTATION_RULES`와 짝인 추적성 결함: 변이 생존 RULE-002(실패 · 미확인)가 부모 없는 규칙이기도 하다 → 카드 예외 순서
+ * 실패 · 변이 생존 · 추적성 결함 · 미확인 (테스트 전용 데이터).
+ */
+export const MUTATION_TRACEABILITY: VerificationSummaryResult['traceability'] = {
+  requirementsWithoutRules: [],
+  parentlessRules: [{ id: RULES[1]?.rule.id ?? '', displayId: 'RULE-002' }],
+};
+
 /** 미노출 요소 (ADR-035): 잠정 카드. 변이 검증됨 카드 · 준수 추이는 M3-15가 열었다(ADR-146). */
 const hidden: ElementCheck[] = [
   { label: '잠정 카드 미노출', testId: 'metric-provisional', absent: true },

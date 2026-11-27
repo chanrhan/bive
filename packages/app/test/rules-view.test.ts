@@ -276,6 +276,30 @@ describe('카드', () => {
     expect(ruleCard(PASS).exceptions).toEqual([]);
   });
 
+  it('변이 생존 (M3-15, ADR-146): 판정 예외 바로 뒤 · 추적성 결함 · 미확인 앞, 정상 변이 상태 · 폐기 규칙 · 옛 응답은 예외 없음', () => {
+    const defects = ruleDefectsOf({
+      parentlessRules: [{ id: UNCONFIRMED.rule.id, displayId: UNCONFIRMED.rule.displayId }],
+    });
+    const survived = { ...judged(UNCONFIRMED.rule, 'fail'), mutation: 'survived' as const };
+    const card = ruleCard(survived, defects);
+    expect(
+      [...card.statuses.flatMap(statusExceptions), ...card.exceptions].map((m) => m.label),
+    ).toEqual(['실패', '변이 생존', '추적성 결함', '미확인']);
+    expect(card.exceptions[0]).toEqual({
+      key: 'mutation:survived',
+      label: '변이 생존',
+      tone: 'danger',
+    });
+    for (const mutation of ['verified', 'unverified'] as const) {
+      expect(ruleCard({ ...PASS, mutation }).exceptions).toEqual([]);
+    }
+    expect(ruleCard(PASS).exceptions).toEqual([]);
+    expect(ruleCard({ ...RETIRED, mutation: 'survived' }).exceptions.map((m) => m.label)).toEqual([
+      '폐기',
+      '미확인',
+    ]);
+  });
+
   it('폐기된 규칙: 폐기 전 판정 예외 없이 폐기 · 미확인 (폐기 뒤 판정하지 않음, ADR-112)', () => {
     const card = ruleCard(RETIRED);
     expect(card.statuses).toEqual([]);

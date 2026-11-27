@@ -1090,6 +1090,22 @@ test.describe('준수 추이 그래프 · 변이 검증됨 카드 (#60 수용 �
       'verification.trend': { result: TRUNCATED_TREND },
     });
     await expect(trendArea(page).getByTestId('trend-truncated')).toHaveText('최근 30개');
+    // 잘림 표기는 제목 밖이라 제목의 접근 이름은 "준수 추이" 그대로이고 같은 줄에 있다
+    const heading = trendArea(page).getByRole('heading', { level: 2 });
+    await expect(heading).toHaveAccessibleName('준수 추이');
+    await expect(heading.getByTestId('trend-truncated')).toHaveCount(0);
+    const [headBox, noteBox] = await Promise.all([
+      heading.boundingBox(),
+      trendArea(page).getByTestId('trend-truncated').boundingBox(),
+    ]);
+    expect(headBox !== null && noteBox !== null && noteBox.x > headBox.x + headBox.width).toBe(
+      true,
+    );
+    expect(
+      Math.abs(
+        (headBox?.y ?? 0) + (headBox?.height ?? 0) - ((noteBox?.y ?? 0) + (noteBox?.height ?? 0)),
+      ),
+    ).toBeLessThan(4);
     const compliance = await linePoints(page, 'compliance');
     expect(compliance).toHaveLength(1);
     expect(compliance[0]).toHaveLength(30);

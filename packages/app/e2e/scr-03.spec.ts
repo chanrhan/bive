@@ -29,6 +29,7 @@ import { CHIPS, PROJECT, RETIRED_RULE, RULES, VISIBLE_ORDER } from './checklists
 import {
   CODE_OPEN_SUMMARY,
   MUTATION_RULES,
+  MUTATION_TRACEABILITY,
   run as summaryRun,
   SUMMARY,
   TREND,
@@ -581,6 +582,22 @@ test.describe('변이 상태: 필터 칩 · 카드 예외 "변이 생존" (#60 �
     await page.getByTestId('hidden-toggle').click();
     await page.getByTestId('problem-toggle').click();
     expect(await cardIds(page)).toContain('RULE-001');
+  });
+
+  test('변이 생존과 추적성 결함을 함께 가진 카드: 실패 → 변이 생존 → 추적성 결함 → 미확인 순서', async ({
+    page,
+  }) => {
+    await openScreen(page, {
+      'rule.list': { result: { rules: MUTATION_RULES, traceability: MUTATION_TRACEABILITY } },
+    });
+    await expect(exceptionsOf(page, 'RULE-002')).toHaveText([
+      '실패',
+      '변이 생존',
+      '추적성 결함',
+      '미확인',
+    ]);
+    // 추적성 결함이 없는 생존 카드는 그대로
+    await expect(exceptionsOf(page, 'RULE-001')).toHaveText(['변이 생존']);
   });
 
   test('변이 상태 칸이 없는 옛 응답이면 칩은 0건 비활성이고 어느 카드에도 "변이 생존"이 없다', async ({

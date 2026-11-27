@@ -312,14 +312,15 @@ const TrendArea = ({ trend }: { trend: VerificationTrendResult | null }): React.
       data-state={state}
       aria-label={TEXT.trend}
     >
-      <h2 className="verification-heading">
-        {TEXT.trend}
+      {/* 잘림 표기는 제목 밖 같은 줄: 제목의 접근 이름은 "준수 추이" 그대로 */}
+      <div className="trend-head">
+        <h2 className="verification-heading">{TEXT.trend}</h2>
         {truncated !== null && (
           <span className="trend-truncated" data-testid="trend-truncated">
             {truncated}
           </span>
         )}
-      </h2>
+      </div>
       {trend === null && (
         <p className="trend-error" data-testid="trend-load-error" role="alert">
           {TEXT.trendLoadFailed}

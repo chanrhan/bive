@@ -23,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PipeServer } from '../src/ipc/server.js';
 import { retireAgentRule } from '../src/norms/agent-rule.js';
-import { isEffectiveRuleBefore } from '../src/norms/effective.js';
+import { isEffectiveRule, isEffectiveRuleBefore } from '../src/norms/effective.js';
 import { createRun } from '../src/runs/run-service.js';
 import { verificationTrend } from '../src/verification/trend.js';
 import type { TestClient } from './helpers/client.js';
@@ -450,6 +450,49 @@ describe('verification.trend: 점마다의 값 (수용 기준 1)', () => {
     expect(isEffectiveRuleBefore(rule, new Map([[rule.id, at]]), Infinity)).toBe(false);
     expect(isEffectiveRuleBefore(rule, new Map([[rule.id, -Infinity]]), at)).toBe(false);
     expect(isEffectiveRuleBefore({ ...rule, normState: 'provisional' }, none, at)).toBe(false);
+  });
+
+  it('순간이 무한대면 지난 시점 효력은 지금의 효력(isEffectiveRule)과 같다: 효력 상태 · 생성 · 삭제 · 폐기 조합 전부', () => {
+    const base = h.read((store) => insertRule(store, '조합', T0));
+    const createdAts = [iso(T0), iso(Date.now() + 10 * HOUR)];
+    const deletedAts = [null, iso(T0 + HOUR), iso(Date.now() + 10 * HOUR)];
+    const retiredTimes = [undefined, T0 + HOUR, Date.now() + 10 * HOUR, -Infinity];
+    let cases = 0;
+    for (const normState of ['approved', 'provisional'] as const) {
+      for (const createdAt of createdAts) {
+        for (const deletedAt of deletedAts) {
+          for (const retired of retiredTimes) {
+            const rule: Rule = { ...base, normState, createdAt, deletedAt };
+            const times = new Map<string, number>(
+              retired === undefined ? [] : [[rule.id, retired]],
+            );
+            expect(
+              isEffectiveRuleBefore(rule, times, Infinity),
+              JSON.stringify({ normState, createdAt, deletedAt, retired }),
+            ).toBe(isEffectiveRule(rule, new Set(times.keys())));
+            cases += 1;
+          }
+        }
+      }
+    }
+    expect(cases).toBe(48);
+  });
+
+  it('앞 실행에서만 판정된 규칙은 뒤 점에서 미판정으로 분모에 든다 (앞 실행의 판정을 이어받지 않는다)', async () => {
+    h.read((store) => {
+      const early = insertRule(store, '앞에서만 판정');
+      const both = insertRule(store, '둘 다 판정');
+      const first = seedRun(store, { ruleIds: [both.id], at: T0 + HOUR, mergeCommit: sha(1) });
+      judge(store, first, early, 'pass');
+      judge(store, first, both, 'pass');
+      const second = seedRun(store, { ruleIds: [both.id], at: T0 + 2 * HOUR, mergeCommit: sha(2) });
+      judge(store, second, both, 'pass');
+    });
+    expect(tallies(await trend()).map(({ compliance }) => compliance)).toEqual([
+      { passed: 2, judgeable: 2 },
+      { passed: 1, judgeable: 2 },
+    ]);
+    expect((await summary()).compliance).toEqual({ passed: 1, judgeable: 2 });
   });
 
   it('미래 시각의 변이 기록은 추이와 검증 요약 카드 어디에도 세지 않는다 (판정 기록과 같은 기준)', async () => {
