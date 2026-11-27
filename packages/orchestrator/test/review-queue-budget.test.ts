@@ -5,6 +5,7 @@
 // - 사람의 run.create와 같은 문(사람만 · 설정 · 실행 1개의 대기 · 하루 한도는 세션을 열 때)을 지나고, 실행 생성 · 연결 · 처리는 트랜잭션 1개
 // - 이어받는 실행이 다시 예산 초과면 그 실행의 새 항목, 보강 실행을 이은 실행도 보강 실행으로 판별된다
 import fs from 'node:fs';
+import path from 'node:path';
 
 import {
   type Author,
@@ -29,6 +30,7 @@ import { RpcError } from '../src/ipc/server.js';
 import type { PipeServer } from '../src/ipc/server.js';
 import { reinforceSurvivedMutants } from '../src/runs/auto-start.js';
 import { createRun, evaluateApprovalStep } from '../src/runs/run-service.js';
+import { EXISTING_TEST_CHANGED_MESSAGE, TEST_ONLY_STAGE } from '../src/steps/green-check.js';
 import { isReinforcementRun } from '../src/steps/run-type.js';
 import type { TestClient } from './helpers/client.js';
 import {
@@ -42,6 +44,14 @@ import {
   withProject,
 } from './helpers/engine-harness.js';
 import { cleanup, makeBiveHome } from './helpers/process.js';
+import {
+  cleanupMutationHarness,
+  HEALTH,
+  runToEnd,
+  settleAll,
+  setup as setupMutation,
+} from './helpers/mutation-harness.js';
+import type { JudgeCall, JudgeDecision } from './helpers/pipeline-harness.js';
 import { startProjectHarness } from './helpers/project-harness.js';
 
 const temps: string[] = [];
@@ -56,6 +66,7 @@ afterEach(async () => {
   await cleanup();
   for (const dir of temps.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 }, 60_000);
+afterEach(cleanupMutationHarness, 60_000);
 
 const agent = { kind: 'agent', role: 'implementer' } as const satisfies Author;
 const clock = { now: Date.now, newId };
@@ -619,7 +630,7 @@ describe('사람 실행의 문 · 작업 가지 (M3-56 수용 기준 3, ADR-147 
     expect(h.read((store) => store.runs.get(result.run.id)?.status)).toBe('queued');
   }, 60_000);
 
-  it('작업 가지의 기준 커밋은 원 실행과 같다(그 사이 기준 브랜치가 움직여도). 원 실행의 브랜치 · 작업 폴더 · 기록은 바뀌지 않는다', async () => {
+  it('이어받는 실행은 기준 커밋에서 첫 단계부터 돈다: 기준 커밋은 원 실행과 같고(그 사이 기준 브랜치가 움직여도) 원 실행이 끝낸 테스트 작성 · Red 확인도 이 실행에서 다시 돌며 이어받은 단계(skipped)는 없다. 원 실행의 브랜치 · 작업 폴더 · 기록은 바뀌지 않는다 (ADR-150)', async () => {
     const h = setup();
     const engine = newEngine(h, {
       implementation: (context) =>
@@ -647,6 +658,32 @@ describe('사람 실행의 문 · 작업 가지 (M3-56 수용 기준 3, ADR-147 
     await engine.settled();
     const next = h.read((store) => store.runs.get(result.run.id)!);
     expect(next.baseCommit).toBe(origin.baseCommit);
+    // 원 실행은 테스트 작성 · Red 확인을 통과하고 구현에서 멈췄다. 이어받는 실행은 그 단계들을 자기 시도로 다시 돌았다
+    expect(
+      before.detail!.steps.map((step) => `${step.kind}#${String(step.attempt)}:${step.status}`),
+    ).toEqual(expect.arrayContaining(['test_writing#1:passed', 'red_check#1:passed']));
+    const { steps, sessions } = h.read((store) => ({
+      steps: store.runs.steps(next.id),
+      sessions: store.sessions.listByRun(next.id),
+    }));
+    expect(steps.map((step) => `${step.kind}#${String(step.attempt)}:${step.status}`)).toEqual([
+      'approval#1:passed',
+      'test_writing#1:passed',
+      'red_check#1:passed',
+      'implementation#1:failed',
+      'check#1:pending',
+      'mutation#1:pending',
+      'merge#1:pending',
+      'screen_update#1:pending',
+    ]);
+    expect(steps.filter((step) => step.status === 'skipped')).toEqual([]);
+    const writing = steps.find((step) => step.kind === 'test_writing')!;
+    expect(sessions.map((session) => [session.role, session.stepId])).toEqual([
+      ['test-writer', writing.id],
+    ]);
+    // 테스트 작성 커밋은 이 실행이 기준 커밋 위에 새로 만든 것이다 (원 실행의 산출 커밋이 아니다)
+    expect(writing.commit).not.toBe(origin.headCommit);
+    expect(userGit(h.repo, 'rev-parse', `${writing.commit!}^`)).toBe(origin.baseCommit);
     expect(next.branch).not.toBe(origin.branch);
     // 이어받는 실행의 가지는 기준 커밋 위에 있다 (main의 새 커밋이 없다)
     expect(userGit(h.repo, 'merge-base', '--is-ancestor', origin.baseCommit!, next.branch!)).toBe(
@@ -784,4 +821,148 @@ describe('보강 사슬 (M3-56 수용 기준 4, ADR-147 ⑦ · ADR-145)', () => 
       ).toEqual([['mutant_survived', result.run.id, cause]]);
     });
   }, 60_000);
+});
+
+describe('보강 실행을 이은 실행의 재주입 · 더하기만은 그 실행 자신의 단계로 걸린다 (M3-56 수용 기준 4, ADR-143 ⑮ · ADR-150)', () => {
+  const EXISTING = 'bive-acceptance/RULE-001/mutation.acc.ts';
+  const ADDED = 'bive-acceptance/RULE-001/reinforce-added.acc.ts';
+  const VALID_MUTANT = { path: HEALTH, search: 'ok: true', replace: 'ok: false' };
+  /** 첫 주입은 생존, 재주입(변이 적용 + 보강 파일 있음)은 검출. Green 확인 · 병합 재검사(변이 없음)는 통과. */
+  const killedByAdded = (call: JudgeCall): JudgeDecision =>
+    Object.fromEntries(
+      (call.input.ruleIds ?? []).map((id) => [
+        id,
+        call.status.includes('M src/') &&
+        call.acceptance.some((file) => file.includes('/reinforce-'))
+          ? (['failed', 'passed'] as const)
+          : (['passed', 'passed'] as const),
+      ]),
+    );
+  type MutationSetup = Parameters<typeof setupMutation>[0];
+  const setupChain = (extra: Partial<MutationSetup> = {}) =>
+    setupMutation({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: { 'RULE-001': [{ tool: 'propose_mutant', args: VALID_MUTANT }] },
+      settings: { ...COMPLETE_SETTINGS, dailyBudgetUsd: 10 },
+      noAutoStart: true,
+      decide: killedByAdded,
+      testWriter: [
+        [
+          {
+            tool: 'write_file',
+            args: {
+              path: ADDED,
+              content: "import { it } from 'vitest';\nit('보강 케이스', () => undefined);\n",
+            },
+          },
+          { message: '보강 테스트 1개를 더했다.' },
+        ],
+      ],
+      ...extra,
+    });
+  /** 유형 A의 생존 → 자동 보강 실행(유형 C) → 그 실행을 예산 초과로 저장 (세션 없이). 그 예산 초과 항목과 원인 변이 기록. */
+  const budgetEndedReinforcement = (h: ReturnType<typeof setupMutation>) =>
+    withProject(h.biveHome, h.projectId, (store) => {
+      const outcome = reinforceSurvivedMutants(store, { runId: h.runId }, clock);
+      if (outcome.status !== 'started') throw new Error(`보강 실행 없음: ${outcome.status}`);
+      const auto = outcome.runs[0]!.detail.run;
+      evaluateApprovalStep(store, auto.id, clock);
+      store.runs.transition(auto.id, {
+        expectedStatus: 'running',
+        run: { ...runEnding(auto, 'budget_exceeded', 'error_max_budget_usd').run, endedAt: at() },
+      });
+      return {
+        auto,
+        cause: store.mutations.reinforcementCauseOfRun(auto.id)!,
+        seq: openBudgetItem(store, auto.id).seq,
+      };
+    });
+  /** 실제 실행 처리기의 한도 상향 재개(같은 예산 값)로 이어받는 실행을 만들고 끝까지 돌린다. */
+  const continueReinforcement = async (
+    h: ReturnType<typeof setupMutation>,
+    seq: number,
+    budget: BudgetSnapshot,
+  ) => {
+    const handlers = createRunHandlers({ biveHome: h.biveHome, now: Date.now, engine: h.engine });
+    const result = await handlers['reviewQueue.resumeWithBudget']!(
+      { projectId: h.projectId, seq, budget, author: human },
+      { connectionId: 1 } as ResumeParams[1],
+    );
+    await settleAll(h);
+    return withProject(h.biveHome, h.projectId, (store) => store.runs.getDetail(result.run.id)!);
+  };
+
+  it('테스트 작성 세션은 기준 커밋의 기존 인수 테스트를 읽기 전용 사본으로 받고, 변이 주입 단계는 새 변이 세션 없이 원인 변이를 다시 주입해 검출 · 병합된다', async () => {
+    const h = setupChain();
+    expect((await runToEnd(h)).run.status).toBe('merged');
+    const { auto, cause, seq } = budgetEndedReinforcement(h);
+    const before = userGit(h.repo, 'show', `main:${EXISTING}`);
+    const next = await continueReinforcement(h, seq, auto.budgetSnapshot);
+    expect(next.run).toMatchObject({ type: 'C', status: 'merged', startedBy: { kind: 'human' } });
+    // 첫 단계부터 돈다: 테스트 작성 시도가 이 실행에서 통과했고 이어받은 단계는 없다
+    expect(next.steps.find((step) => step.kind === 'test_writing')).toMatchObject({
+      attempt: 1,
+      status: 'passed',
+    });
+    // 세션은 원 보강 실행에 없었다(세션 없이 예산 초과): 테스트 작성 세션 하나 · 변이 주입 세션은 유형 A의 것 하나뿐
+    expect(h.sessions.map((spec) => [spec.role, spec.runId])).toEqual([
+      ['mutator', h.runId],
+      ['test-writer', next.run.id],
+    ]);
+    // 더하기만: 기준 커밋(원 실행과 같은 기준 커밋)의 대상 규칙 폴더 파일을 읽기 전용 사본으로 받았다
+    expect(next.run.baseCommit).toBe(
+      withProject(h.biveHome, h.projectId, (store) => store.runs.get(h.runId)!.mergeCommit),
+    );
+    expect(h.sessionFiles[1]).toContain(EXISTING);
+    expect(h.sessionTexts[1]?.[EXISTING]).toBe(`${before}\n`);
+    expect(h.sessions[1]?.prompt).toContain('기존 테스트 파일은 고칠 수 없고 새 파일만 더한다');
+    // 재주입: 원인 변이 기록의 변이를 이 실행의 판정 커밋에 다시 적용 (새 변이 세션 없음, 세션 ID 없는 기록)
+    expect(next.steps.find((step) => step.kind === 'mutation')).toMatchObject({
+      status: 'passed',
+      exitDetail: { reinjected: cause },
+    });
+    const reinjection = h.judgeCalls.at(-1)!;
+    expect(reinjection.input.runId).toBe(next.run.id);
+    expect(reinjection.status).toContain(`M ${HEALTH}`);
+    expect(
+      withProject(h.biveHome, h.projectId, (store) =>
+        store.mutations.listByRun(next.run.id).map((result) => [result.status, result.sessionId]),
+      ),
+    ).toEqual([['verified', null]]);
+    expect(userGit(h.repo, 'show', `main:${EXISTING}`)).toBe(before);
+  }, 90_000);
+
+  it('기준 커밋의 기존 인수 테스트를 바꾼 테스트 작성 커밋은 Green 확인이 막고(guard_violation), 그 실패가 이 실행의 변이 생존 항목이 된다', async () => {
+    const h = setupChain({
+      executors: (current) => ({
+        ...current,
+        test_writing: async (context) => {
+          const outcome = await current.test_writing!(context);
+          if (context.run.type === 'C') {
+            fs.appendFileSync(path.join(context.git.worktreePath, EXISTING), '// 직접 고침\n');
+          }
+          return outcome;
+        },
+      }),
+    });
+    expect((await runToEnd(h)).run.status).toBe('merged');
+    const { auto, cause, seq } = budgetEndedReinforcement(h);
+    const next = await continueReinforcement(h, seq, auto.budgetSnapshot);
+    expect(next.run).toMatchObject({ status: 'failed', failureReason: 'guard_violation' });
+    expect(next.steps.find((step) => step.kind === 'green_check')?.exitDetail).toMatchObject({
+      reason: 'guard_violation',
+      detail: {
+        stage: TEST_ONLY_STAGE,
+        message: EXISTING_TEST_CHANGED_MESSAGE,
+        changed: [EXISTING],
+      },
+    });
+    expect(
+      withProject(h.biveHome, h.projectId, (store) =>
+        store.reviewQueue
+          .list({ state: 'open' })
+          .map((item) => [item.kind, item.runId, item.mutationResultId]),
+      ),
+    ).toEqual([['mutant_survived', next.run.id, cause]]);
+  }, 90_000);
 });

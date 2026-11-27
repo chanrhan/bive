@@ -5,6 +5,7 @@ import fs from 'node:fs';
 
 import {
   type AgentRole,
+  type BudgetSnapshot,
   createUlidGenerator,
   METHODS,
   type ModelUsage,
@@ -1031,7 +1032,7 @@ describe('이어받는 실행: 사용량은 사슬 전체를 이어 센다 (M3-5
       roles: { ...SNAPSHOT.roles, 'test-writer': { maxBudgetUsd: 0.2, maxTurns: 10 } },
     };
     expect(() => assertRaisedBudget(SNAPSHOT, raised, sessions)).not.toThrow();
-    const reasonOf = (next: typeof SNAPSHOT): unknown => {
+    const reasonOf = (next: BudgetSnapshot): unknown => {
       try {
         assertRaisedBudget(SNAPSHOT, next, sessions);
       } catch (error) {
