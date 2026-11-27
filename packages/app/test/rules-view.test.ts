@@ -388,8 +388,9 @@ describe('필터 기준', () => {
     });
   });
 
-  it('변이: 값이 없어 전부 0건 (칩 비활성, ADR-035). 블록 · 위험도도 값이 없는 옛 규칙뿐이면 0건', () => {
-    expect(labels('mutation')).toEqual(['변이 검증됨', '변이 미검증', '변이 생존']);
+  it('변이: 변이 칸이 없는 옛 응답이면 전부 0건 (칩 비활성, ADR-035 · ADR-146). 블록 · 위험도도 값이 없는 옛 규칙뿐이면 0건', () => {
+    // 값 이름은 칩 이름 "변이" 뒤에 붙는 짧은 이름 (고르면 "변이: 생존", M3-15 · ADR-146)
+    expect(labels('mutation')).toEqual(['검증됨', '미검증', '생존']);
     expect(counts['mutation']).toEqual({ verified: 0, unverified: 0, survived: 0 });
     expect(labels('block')).toEqual([]);
     expect(counts['block']).toEqual({});

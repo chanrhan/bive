@@ -319,3 +319,168 @@ button.metric-card:focus-visible {
 .code-open-error {
   color: var(--color-danger);
 }
+
+/* 준수 추이 (M3-15 #60, ADR-146): 범례(선 모양 + 이름 + 끝 값) · 세로축 눈금 · 그리기 영역 · 가로축 표기. 색은 토큰만,
+   선은 통과율 실선(accent) · 변이 검증됨 점선(success)이라 색만으로 가르지 않는다 */
+.verification-trend {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.trend-truncated {
+  margin-left: var(--space-2);
+  font-weight: 400;
+}
+
+.trend-error {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--font-size-2);
+}
+
+.trend-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.trend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-2);
+}
+
+.trend-legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+
+.trend-legend-label {
+  color: var(--color-text-muted);
+}
+
+.trend-legend-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.trend-swatch {
+  display: inline-block;
+  width: var(--space-5);
+  border-top: 2px solid var(--color-accent);
+}
+
+.trend-swatch[data-dashed='true'] {
+  border-top-style: dashed;
+  border-top-color: var(--color-success);
+}
+
+.trend-plot {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: 160px auto;
+  column-gap: var(--space-2);
+  min-width: 0;
+}
+
+.trend-ticks {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  margin: 0;
+  /* 눈금 글자 가운데가 그리기 영역(틀 안쪽 여백만큼 들어감)의 위 · 아래 끝과 맞도록 */
+  padding: calc(var(--space-1) - 0.5em) 0;
+  list-style: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: right;
+}
+
+.trend-frame {
+  min-width: 0;
+  border-left: 1px solid var(--color-border);
+}
+
+/* 안쪽 여백 = 점 반지름: 점은 여백을 뺀 폭 · 높이의 비율 위치라 끝 점도 영역 안에 있다(가로 넘침 없음) */
+.trend-canvas {
+  box-sizing: border-box;
+  position: relative;
+  height: 100%;
+  min-width: 0;
+  padding: var(--space-1);
+}
+
+.trend-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.trend-grid {
+  stroke: var(--color-border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.trend-line {
+  fill: none;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.trend-line-compliance {
+  stroke: var(--color-accent);
+}
+
+.trend-line-mutation {
+  stroke: var(--color-success);
+  stroke-dasharray: 6 4;
+}
+
+.trend-dot {
+  box-sizing: border-box;
+  position: absolute;
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: 50%;
+}
+
+.trend-dot-compliance {
+  background: var(--color-accent);
+}
+
+.trend-dot-mutation {
+  border: 2px solid var(--color-success);
+  background: var(--color-bg);
+}
+
+.trend-axis {
+  display: flex;
+  grid-column: 2;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.trend-axis-label {
+  white-space: nowrap;
+}
+
+.trend-axis-label:only-child {
+  margin: 0 auto;
+}

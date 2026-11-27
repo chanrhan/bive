@@ -348,6 +348,7 @@ export class RunRepository {
   readonly #selectTargets;
   readonly #selectLatestTargeting;
   readonly #selectSteps;
+  readonly #selectMergedRunSteps;
   readonly #ruleState;
   readonly #selectPendingTestChangeChecks;
   readonly #markTestChangeChecked;
@@ -421,6 +422,10 @@ export class RunRepository {
     );
     this.#selectSteps = db.prepare<[string], StepRow>(
       `SELECT ${STEP_COLUMNS} FROM steps WHERE run_id = ?`,
+    );
+    this.#selectMergedRunSteps = db.prepare<[], StepRow>(
+      `SELECT ${STEP_COLUMNS} FROM steps
+       WHERE run_id IN (SELECT id FROM runs WHERE merge_commit IS NOT NULL)`,
     );
     this.#ruleState = db.prepare<[string], { deleted_at: string | null }>(
       'SELECT deleted_at FROM rules WHERE id = ?',
@@ -587,6 +592,21 @@ export class RunRepository {
   /** 실행의 단계 시도를 파이프라인 순서 → 시도 번호 순으로. */
   steps(runId: string): Step[] {
     return this.#selectSteps.all(runId).map(toStep).sort(compareSteps);
+  }
+
+  /**
+   * 병합 커밋이 기록된 실행 전부의 단계 시도 (실행 ID → 파이프라인 순서 → 시도 번호 순, 질의 1회). 준수 추이가 실행마다 따로
+   * 읽지 않게 한다 (M3-15 #60, ADR-146). 단계 시도가 없는 실행은 들지 않는다.
+   */
+  stepsOfMergedRuns(): Map<string, Step[]> {
+    const byRun = new Map<string, Step[]>();
+    for (const step of this.#selectMergedRunSteps.all().map(toStep)) {
+      const list = byRun.get(step.runId);
+      if (list === undefined) byRun.set(step.runId, [step]);
+      else list.push(step);
+    }
+    for (const list of byRun.values()) list.sort(compareSteps);
+    return byRun;
   }
 
   /**

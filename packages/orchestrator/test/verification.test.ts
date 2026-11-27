@@ -324,6 +324,8 @@ describe('verification.summary', () => {
       traceability: { requirementsWithoutRules: [], parentlessRules: [] },
       unrulable: { count: 0, total: 0 },
       costPerRunUsd: null,
+      // 변이 검증됨 (M3-15, ADR-146): 변이 기록이 없으면 0 / 0
+      mutation: { verified: 0, tested: 0 },
       rules: [],
       pipeline: null,
     });

@@ -1426,6 +1426,8 @@ describe('규칙 폐기 · 대체와 효력 판정의 코드 경로 (M7-09 #221,
       // 변이 주입 단계: 금지 경로로 쓸 계약 원본 목록 (M3-07 #52, ADR-139, 읽기만)
       'steps/mutation.ts',
       'verification/summary.ts',
+      // 준수 추이: 지난 시점의 효력(생성 · 삭제 · 폐기 시각)을 되짚는다 (M3-15 #60, ADR-146, 읽기만)
+      'verification/trend.ts',
     ]);
   });
 });
@@ -1513,7 +1515,7 @@ describe('케이스 이름을 세션 입력에 싣는 자리는 모두 같은 �
   it('저장된 판정 기록을 읽는 곳은 고정이고, 세션 입력을 만드는 두 곳(규범 자료 · 인용 출처)은 최근 판정 케이스 이름을 대조 함수로 거른다. 대조 함수는 선택 인자가 아니고, 폐기 · 대체 반영을 부르는 곳은 모두 세션의 기준을 넘긴다', () => {
     // 판정 기록 읽기: 화면 응답(규칙 상세 · 최신 판정 · 검증 지표) · 엔진의 판정 수 · 케이스 이름 대조 · 세션 입력 두 곳뿐
     expect(
-      using(/\bjudgments\s*\.\s*(?:latestForRules|latestByRule|listByRule|listByRun)\(/),
+      using(/\bjudgments\s*\.\s*(?:latestForRules|latestByRule|listByRule|listByRuns?)\(/),
     ).toEqual([
       'engine/pipeline-engine.ts',
       'ipc/rule-handlers.ts',

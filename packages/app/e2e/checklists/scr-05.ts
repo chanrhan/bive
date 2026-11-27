@@ -2,7 +2,8 @@
 // - 기본: 머리줄 "판정 기준 main@커밋" · 지표 카드(준수의 전체 기준 · 사람 확인 기준, 에이전트 폐기 규칙, 실행당 비용, ADR-117) ·
 //   코드 열람(사유 3종 건수, M2-02 · ADR-088) ·
 //   파이프라인(최근 실행의 단계 순서 · 현재 단계) · 규칙별 최신 판정 + 실행 링크(비용 합계 · 턴, 값 없으면 '없음').
-//   규칙화 불가 비율 · 추적성 결함 카드(M3-11 #56 · ADR-137). 잠정 · 변이 카드, 준수 추이 그래프는 미노출 (ADR-035).
+//   규칙화 불가 비율 · 추적성 결함 카드(M3-11 #56 · ADR-137). 변이 검증됨 카드 · 준수 추이 그래프(M3-15 #60 · ADR-146).
+//   잠정 카드는 미노출 (ADR-035).
 //   [재개]는 최근 실행이 중단일 때만 (ADR-011)
 // - 빈: 실행이 없으면 파이프라인 자리 "실행 없음"(ADR-029), 머리줄 "판정 기준 없음", 실행당 비용 '없음',
 //   열람 기록이 없으면 코드 열람 영역 값 '없음'(ADR-088), 요구사항이 없으면 규칙화 불가 비율 '없음'(0 / 0 · 0%가 아님) · 추적성 결함 0
@@ -15,6 +16,8 @@ import type {
   StepStatus,
   VerificationRunLink,
   VerificationSummaryResult,
+  VerificationTrendPoint,
+  VerificationTrendResult,
 } from '@bive/shared';
 
 import { REQUIREMENTS } from './scr-02.js';
@@ -169,6 +172,8 @@ export const SUMMARY: VerificationSummaryResult = {
   traceability: TRACEABILITY,
   unrulable: UNRULABLE,
   costPerRunUsd: 0.2,
+  // 변이 기록이 있는 효력 규칙 3개 가운데 가장 나중 기록이 변이 검증됨인 규칙 2개 (TREND 마지막 점과 같다)
+  mutation: { verified: 2, tested: 3 },
   rules: rows(LIVE),
   pipeline: { run: run(), stages: stages('implementation', 'running'), queued: 0 },
 };
@@ -266,6 +271,7 @@ export const EMPTY_SUMMARY: VerificationSummaryResult = {
   traceability: { requirementsWithoutRules: [], parentlessRules: [] },
   unrulable: { count: 0, total: 0 },
   costPerRunUsd: null,
+  mutation: { verified: 0, tested: 0 },
   rules: LIVE.slice(0, 2).map(({ rule }) => ({
     rule,
     judgment: { status: 'unjudged', latest: null },
@@ -294,13 +300,109 @@ export const EMPTY_CODE_OPEN_SUMMARY: CodeOpenSummaryResult = {
   total: 0,
 };
 
-/** 미노출 요소 (ADR-035): 다음 마일스톤 카드 · 그래프. 규칙화 불가 · 추적성 결함 카드는 M3-11이 열었다(ADR-137). */
+/**
+ * `verification.trend` 가짜 응답: 점 하나 = 판정 기준 실행 EXE-001 (마지막 점 = 요약 카드 값, 테스트 전용 데이터, NFR-03).
+ * 선은 이어질 점이 없어 점만 보인다.
+ */
+export const TREND: VerificationTrendResult = {
+  points: [
+    {
+      runId: RUN_1,
+      runDisplayId: 'EXE-001',
+      branch: 'main',
+      commit: BASIS_COMMIT,
+      mergedAt: '2026-10-16T02:10:00.000Z',
+      compliance: SUMMARY.compliance,
+      mutation: SUMMARY.mutation,
+    },
+  ],
+  truncated: false,
+};
+
+/** `verification.trend` 가짜 응답: 병합된 실행 없음 (점 0개). */
+export const EMPTY_TREND: VerificationTrendResult = { points: [], truncated: false };
+
+/**
+ * `verification.trend` 가짜 응답: 점 둘 = EXE-001 → EXE-003 (`SCREEN_UPDATE_FAILED_SUMMARY`의 판정 기준 EXE-003이 마지막 점, 그
+ * 요약 카드와 같은 값). 통과율 1 / 4 → 2 / 5, 변이 검증됨 1 / 2 → 2 / 3 (테스트 전용 데이터).
+ */
+export const SERIES_TREND: VerificationTrendResult = {
+  points: [
+    {
+      ...(TREND.points[0] as VerificationTrendPoint),
+      compliance: { passed: 1, judgeable: 4 },
+      mutation: { verified: 1, tested: 2 },
+    },
+    {
+      runId: RUN_3,
+      runDisplayId: 'EXE-003',
+      branch: 'main',
+      commit: MERGE_COMMIT_3,
+      mergedAt: '2026-10-16T03:10:00.000Z',
+      compliance: SCREEN_UPDATE_FAILED_SUMMARY.compliance,
+      mutation: SCREEN_UPDATE_FAILED_SUMMARY.mutation,
+    },
+  ],
+  truncated: false,
+};
+
+/** 잘린 추이의 실행 ID · 커밋 (점 i, 테스트 전용 데이터). */
+const trendRun = (i: number) => ({
+  runId: `01JE00000000000000000001${String(i).padStart(2, '0')}`,
+  runDisplayId: `EXE-${String(100 + i)}`,
+  commit: `${String(i).padStart(2, '0')}c0ffe${'0'.repeat(33)}`,
+});
+
+/**
+ * `verification.trend` 가짜 응답: 점 상한(30개)으로 앞 점이 빠짐. 7번째 점은 변이 기록 있는 규칙이 없어(0 / 0) 변이 검증됨 선이
+ * 그 점에서 끊긴다(가짜 점 없음). 마지막 점은 `TRUNCATED_SUMMARY`의 카드 값과 같다 (테스트 전용 데이터).
+ */
+export const TRUNCATED_TREND: VerificationTrendResult = {
+  points: Array.from({ length: 30 }, (_, i) => ({
+    ...trendRun(i),
+    branch: 'main',
+    mergedAt: new Date(Date.parse('2026-09-01T03:00:00.000Z') + i * 86_400_000).toISOString(),
+    compliance: i === 29 ? SUMMARY.compliance : { passed: i % 5, judgeable: 5 },
+    mutation:
+      i === 29
+        ? SUMMARY.mutation
+        : i === 6
+          ? { verified: 0, tested: 0 }
+          : { verified: i % 3, tested: 3 },
+  })),
+  truncated: true,
+};
+
+/** 잘린 추이와 짝인 요약: 판정 기준 = 잘린 추이의 마지막 점 (카드 값은 `SUMMARY`와 같다). */
+export const TRUNCATED_SUMMARY: VerificationSummaryResult = {
+  ...SUMMARY,
+  basis: { branch: 'main', commit: trendRun(29).commit, runId: trendRun(29).runId },
+};
+
+/**
+ * `rule.list` 가짜 응답: 서버가 규칙마다 변이 상태를 실은 응답 (M3-15 #60, ADR-146, 테스트 전용 데이터). 변이 카드에서 연 규칙
+ * 화면(scr-05.spec.ts)과 규칙 화면의 변이 칩 · 예외(scr-03.spec.ts)가 함께 쓴다. RULE-001(통과) · RULE-002(실패 · 미확인) 생존,
+ * RULE-003 미검증, RULE-005 · RULE-006 검증됨, 폐기된 RULE-007 생존(폐기라 값 · 예외 없음). `RULES`(변이 칸 없는 옛 응답)는 그대로다.
+ */
+const MUTATION_OF: Record<string, NonNullable<RuleWithJudgment['mutation']>> = {
+  'RULE-001': 'survived',
+  'RULE-002': 'survived',
+  'RULE-005': 'verified',
+  'RULE-006': 'verified',
+  'RULE-007': 'survived',
+};
+export const MUTATION_RULES: RuleWithJudgment[] = RULES.map((item) => ({
+  ...item,
+  mutation: MUTATION_OF[item.rule.displayId] ?? 'unverified',
+}));
+
+/** 미노출 요소 (ADR-035): 잠정 카드. 변이 검증됨 카드 · 준수 추이는 M3-15가 열었다(ADR-146). */
 const hidden: ElementCheck[] = [
   { label: '잠정 카드 미노출', testId: 'metric-provisional', absent: true },
-  { label: '변이 카드 미노출', testId: 'metric-mutation', absent: true },
   { label: '잠정 승인 문구 없음', text: '잠정 승인', absent: true },
-  { label: '변이 검증됨 문구 없음', text: '변이 검증됨', absent: true },
-  { label: '준수 추이 미노출', text: /추이/, absent: true },
+  // 기간 선택 없음 (SCR-05 머리줄 · 그래프 "기간은 가로축 표기만")
+  { label: '기간 선택 없음', role: 'combobox', absent: true },
+  { label: '기간 문구 없음', text: '기간', absent: true },
 ];
 
 /**
@@ -311,6 +413,7 @@ const hidden: ElementCheck[] = [
 export const TOOLTIPS = {
   'metric-compliance-all': { text: '통과 / 판정 가능', kind: 'action' },
   'metric-compliance-confirmed': { text: '통과 / 판정 가능 · 확인됨 규칙만', kind: 'action' },
+  'metric-mutation': { text: '변이 검증됨 / 변이 기록 규칙', kind: 'action' },
   'metric-unrulable': { text: '규칙화 불가 / 요구사항', kind: 'action' },
   'metric-traceability': { text: '규칙 없는 요구사항 1 · 부모 없는 규칙 1', kind: 'action' },
   'code-open-hint': { text: '링크 경유 열기 시도 수 · 링크 밖 열람 미집계', kind: 'press' },
@@ -321,13 +424,21 @@ const metrics = (
     all,
     confirmed,
     retired,
+    mutation,
     unrulable,
     traceability,
-  }: { all: string; confirmed: string; retired: string; unrulable: string; traceability: string },
+  }: {
+    all: string;
+    confirmed: string;
+    retired: string;
+    mutation: string;
+    unrulable: string;
+    traceability: string;
+  },
   cost: string,
 ): ElementCheck[] => [
   { label: '지표 영역', role: 'region', name: '지표' },
-  { label: '지표 카드 5개', testId: 'metric-label', count: 5 },
+  { label: '지표 카드 6개', testId: 'metric-label', count: 6 },
   { label: '준수 카드', testId: 'metric-compliance', role: 'group', name: '준수' },
   { label: '준수 이름', text: '준수' },
   { label: '준수 기준 2개', testId: 'metric-part-label', count: 2 },
@@ -349,6 +460,12 @@ const metrics = (
     role: 'button',
     text: `에이전트 폐기 규칙 ${retired}`,
     attributes: { title: '폐기 · 대체 누적' },
+  },
+  {
+    label: '변이 검증됨 카드',
+    testId: 'metric-mutation',
+    role: 'button',
+    text: `변이 검증됨 ${mutation}`,
   },
   {
     label: '규칙화 불가 비율 카드',
@@ -376,9 +493,38 @@ export const verificationChecklist = {
       elements: [
         { label: '머리줄', testId: 'verification-basis', text: '판정 기준 main@a1f26b1' },
         ...metrics(
-          { all: '2 / 5', confirmed: '1 / 3', retired: '1', unrulable: '1 / 3', traceability: '2' },
+          {
+            all: '2 / 5',
+            confirmed: '1 / 3',
+            retired: '1',
+            mutation: '2 / 3',
+            unrulable: '1 / 3',
+            traceability: '2',
+          },
           '$0.20',
         ),
+        // 준수 추이: 점 하나(판정 기준 실행) → 선 없이 점만, 가로축 표기 하나, 범례의 끝 값 = 카드 값
+        {
+          label: '준수 추이 영역',
+          testId: 'trend',
+          role: 'region',
+          name: '준수 추이',
+          attributes: { 'data-state': 'single' },
+        },
+        { label: '범례 2개', testId: 'trend-legend-item', count: 2 },
+        {
+          label: '범례 통과율',
+          testId: 'trend-legend-item',
+          text: '통과율 2 / 5',
+          attributes: { 'data-series': 'compliance' },
+        },
+        { label: '범례 변이 검증됨', text: '변이 검증됨', count: 2 },
+        { label: '세로축 눈금 3개', testId: 'trend-tick', count: 3 },
+        { label: '점 2개 (선마다 하나)', testId: 'trend-dot', count: 2 },
+        { label: '선 없음 (점 하나)', testId: 'trend-line', absent: true },
+        { label: '가로축 표기 하나', testId: 'trend-axis-label', count: 1 },
+        { label: '추이 없음 미표시', text: '추이 없음', absent: true },
+        { label: '잘림 표기 없음', testId: 'trend-truncated', absent: true },
         { label: '코드 열람 영역', testId: 'code-open', role: 'region', name: '코드 열람' },
         { label: '코드 열람 사유 3종', testId: 'code-open-label', count: 3 },
         { label: '화면 오류 건수', text: '화면 오류 2' },
@@ -414,14 +560,31 @@ export const verificationChecklist = {
       elements: [
         { label: '머리줄', testId: 'verification-basis', text: '판정 기준 없음' },
         ...metrics(
-          { all: '0 / 2', confirmed: '0 / 1', retired: '0', unrulable: '없음', traceability: '0' },
+          {
+            all: '0 / 2',
+            confirmed: '0 / 1',
+            retired: '0',
+            mutation: '없음',
+            unrulable: '없음',
+            traceability: '0',
+          },
           '없음',
         ),
+        {
+          label: '준수 추이 영역',
+          testId: 'trend',
+          role: 'region',
+          name: '준수 추이',
+          attributes: { 'data-state': 'none' },
+        },
+        { label: '추이 없음', text: '추이 없음' },
+        { label: '그래프 없음', testId: 'trend-svg', absent: true },
         { label: '코드 열람 영역', testId: 'code-open', role: 'region', name: '코드 열람' },
         { label: '코드 열람 값 없음', testId: 'code-open-none', text: '없음' },
         { label: '코드 열람 사유 미표시', testId: 'code-open-reason', absent: true },
         { label: '파이프라인 영역', testId: 'pipeline', role: 'region', name: '파이프라인' },
-        { label: '빈 상태', testId: 'empty-state', text: '실행 없음' },
+        // 빈 상태 문구는 추이(추이 없음)와 파이프라인(실행 없음) 두 곳이라 문구로 찾는다
+        { label: '빈 상태', text: '실행 없음' },
         { label: '단계 없음', testId: 'pipeline-stage', absent: true },
         { label: '재개 버튼 미노출', role: 'button', name: '재개', absent: true },
         { label: '규칙 줄', testId: 'verification-rule', count: 2 },

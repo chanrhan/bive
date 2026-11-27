@@ -50,6 +50,7 @@ import {
   CodeOpenReason,
   ContractKind,
   JudgmentStatus,
+  MutationStatus,
   NormChangeKind,
   ProposalKind,
   Risk,
@@ -335,6 +336,11 @@ export const RuleWithJudgment = z.strictObject({
   rule: Rule,
   judgment: RuleJudgment,
   retirement: RuleRetirementView.optional(),
+  /**
+   * 규칙의 변이 상태 (JDG-04, M3-15 #60, ADR-139 · ADR-143 · ADR-146): 그 규칙의 가장 나중 변이 기록(기록 시각 → ID)의 상태, 기록이
+   * 없으면 '변이 미검증'. `rule.list`는 늘 싣는다. 이 칸이 없는 응답(옛 응답)을 읽는 화면은 변이 상태를 모르는 것으로 본다
+   */
+  mutation: MutationStatus.optional(),
 });
 export type RuleWithJudgment = z.infer<typeof RuleWithJudgment>;
 
@@ -1224,6 +1230,20 @@ export const VerificationPipeline = z.strictObject({
 });
 export type VerificationPipeline = z.infer<typeof VerificationPipeline>;
 
+/** 변이 검증됨 집계 (ADR-146): 변이 기록이 있는 효력 규칙 수와 그 가운데 가장 나중 기록이 '변이 검증됨'인 수. */
+export const VerificationMutationTally = z
+  .strictObject({ verified: z.int().nonnegative(), tested: z.int().nonnegative() })
+  .refine(
+    ({ verified, tested }) => verified <= tested,
+    '변이 검증됨 수가 변이 기록 규칙 수보다 큽니다',
+  );
+export type VerificationMutationTally = z.infer<typeof VerificationMutationTally>;
+
+/** 준수 통과 수 · 판정 가능 수 (`verification.summary`의 `compliance`와 같은 모양). */
+const ComplianceTally = z
+  .strictObject({ passed: z.int().nonnegative(), judgeable: z.int().nonnegative() })
+  .refine(({ passed, judgeable }) => passed <= judgeable, '통과 수가 판정 가능 수보다 큽니다');
+
 export const VerificationSummaryParams = z.strictObject({ projectId: Ulid });
 export type VerificationSummaryParams = z.infer<typeof VerificationSummaryParams>;
 
@@ -1264,6 +1284,11 @@ export const VerificationSummaryResult = z
       .strictObject({ count: z.int().nonnegative(), total: z.int().nonnegative() })
       .refine(({ count, total }) => count <= total, '규칙화 불가 수가 요구사항 수보다 큽니다'),
     costPerRunUsd: UsdOrNull,
+    /**
+     * 변이 검증됨 (JDG-04 · JDG-06, M3-15 #60, ADR-146): 병합된 실행의 변이 기록 가운데 규칙마다 가장 나중 기록을 보고, 효력 있는
+     * 규칙 중 그 기록이 있는 규칙 수(`tested`)와 그 기록이 '변이 검증됨'인 규칙 수(`verified`). 준수 추이의 마지막 점과 같은 값이다
+     */
+    mutation: VerificationMutationTally,
     rules: z.array(VerificationRuleRow),
     pipeline: VerificationPipeline.nullable(),
   })
@@ -1297,6 +1322,47 @@ export const VerificationSummaryResult = z
     },
   );
 export type VerificationSummaryResult = z.infer<typeof VerificationSummaryResult>;
+
+// ── 준수 추이 (JDG-06, SCR-05 그래프, M3-15 #60, ADR-146) ───────
+// - 점 하나 = 병합 커밋이 기록된 실행 하나(판정 기준이 될 수 있었던 실행). 병합되지 않은 실행은 점이 아니다
+// - 순서 = 판정 기준을 고르는 순서(`verification.summary`의 판정 기준과 같은 열쇠)의 오름차순. 마지막 점이 지금의 판정 기준이다
+// - 점의 값 = 그 실행이 판정 기준이던 동안의 마지막 순간(다음 점의 병합 시각 바로 앞, 마지막 점은 지금)에 검증 요약이 보였을
+//   준수와 변이 검증됨. 그래서 마지막 점의 두 값은 `verification.summary`의 `compliance` · `mutation`과 같다
+// - 값은 저장된 판정 · 변이 · 단계 기록과 규칙의 생성 · 삭제 · 폐기 시각에서만 만든다(새 표 없음, 추정 · 보간 없음)
+
+/** 준수 추이가 한 번에 돌려주는 점 상한. 넘으면 최근 점부터 이만큼과 `truncated: true`. */
+export const VERIFICATION_TREND_LIMIT = 30;
+
+export const VerificationTrendPoint = z.strictObject({
+  runId: Ulid,
+  runDisplayId: displayIdSchema('EXE'),
+  branch: z.string().min(1),
+  commit: CommitSha,
+  /** 병합 단계가 통과로 끝난 시각 (그 기록이 없으면 `null`) */
+  mergedAt: Timestamp.nullable(),
+  compliance: ComplianceTally,
+  mutation: VerificationMutationTally,
+});
+export type VerificationTrendPoint = z.infer<typeof VerificationTrendPoint>;
+
+export const VerificationTrendParams = z.strictObject({ projectId: Ulid });
+export type VerificationTrendParams = z.infer<typeof VerificationTrendParams>;
+
+/** 오래된 점부터. 점은 상한(`VERIFICATION_TREND_LIMIT`)까지, 더 있으면 `truncated: true`(앞쪽 점이 빠짐). */
+export const VerificationTrendResult = z
+  .strictObject({
+    points: z.array(VerificationTrendPoint).max(VERIFICATION_TREND_LIMIT),
+    truncated: z.boolean(),
+  })
+  .refine(({ points, truncated }) => !truncated || points.length === VERIFICATION_TREND_LIMIT, {
+    message: '잘린 추이의 점 수가 상한과 다릅니다',
+    path: ['truncated'],
+  })
+  .refine(({ points }) => new Set(points.map((point) => point.runId)).size === points.length, {
+    message: '같은 실행의 점이 둘 있습니다',
+    path: ['points'],
+  });
+export type VerificationTrendResult = z.infer<typeof VerificationTrendResult>;
 
 // ── 코드 열람 기록 (MET-01, M2-01, ADR-084) ─────────────────
 // - 모든 요청에 `projectId`가 필수다. 등록되지 않은 프로젝트는 -32004
@@ -1542,6 +1608,7 @@ export const METHODS = {
     params: VerificationSummaryParams,
     result: VerificationSummaryResult,
   },
+  'verification.trend': { params: VerificationTrendParams, result: VerificationTrendResult },
   'codeOpen.record': { params: CodeOpenRecordParams, result: CodeOpenRecordResult },
   'codeOpen.list': { params: CodeOpenListParams, result: CodeOpenListResult },
   'codeOpen.summary': { params: CodeOpenSummaryParams, result: CodeOpenSummaryResult },

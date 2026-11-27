@@ -75,6 +75,7 @@ export class JudgmentRepository {
   readonly #latest;
   readonly #latestAll;
   readonly #byRun;
+  readonly #byRuns;
   readonly #byRule;
 
   constructor(db: SqliteDatabase) {
@@ -96,6 +97,11 @@ export class JudgmentRepository {
     );
     this.#byRun = db.prepare<[string], JudgmentRow>(
       `SELECT ${COLUMNS} FROM judgments WHERE run_id = ? ORDER BY judged_at, id`,
+    );
+    // 여러 실행의 판정 기록을 한 번에 (실행 ID 목록은 JSON 배열 하나로 넘긴다: 실행 수와 무관하게 질의 1회)
+    this.#byRuns = db.prepare<[string], JudgmentRow>(
+      `SELECT ${COLUMNS} FROM judgments WHERE run_id IN (SELECT value FROM json_each(?))
+       ORDER BY judged_at, id`,
     );
     this.#byRule = db.prepare<[string, number], JudgmentRow>(
       // 미래 시각 행은 이력에서도 뺀다: 최신부터라 맨 위에 와서 실제 기록을 밀어내므로 건수 제한 전에 SQL에서 거른다 (#146)
@@ -152,6 +158,12 @@ export class JudgmentRepository {
   /** 실행의 판정 기록 (판정 시각 순). */
   listByRun(runId: string): JudgmentResult[] {
     return this.#byRun.all(runId).map(toJudgment);
+  }
+
+  /** 여러 실행의 판정 기록 (판정 시각 → ID 순, 질의 1회). 준수 추이가 점마다 따로 읽지 않게 한다 (M3-15 #60, ADR-146). */
+  listByRuns(runIds: readonly string[]): JudgmentResult[] {
+    if (runIds.length === 0) return [];
+    return this.#byRuns.all(JSON.stringify(runIds)).map(toJudgment);
   }
 
   /** 규칙의 판정 이력 (최신부터, 기본 50건). 미래 시각 기록은 최신 판정과 같은 기준으로 뺀다. */

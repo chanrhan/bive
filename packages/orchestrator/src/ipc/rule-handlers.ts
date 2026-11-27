@@ -260,10 +260,13 @@ export const createRuleHandlers = ({
     withProjectStore(biveHome, projectId, (store) => {
       const lookup = latestJudgments(store);
       const retired = retiredRuleSet(store);
+      // 변이 상태: 규칙마다 가장 나중 변이 기록, 없으면 '변이 미검증'(ADR-139 · ADR-143). 질의 1회로 읽는다 (M3-15 #60, ADR-146)
+      const mutations = store.mutations.latestForRules();
       return {
-        rules: listedRules(store, includeRetired === true).map((rule) =>
-          listedItem(store, rule, lookup, retired),
-        ),
+        rules: listedRules(store, includeRetired === true).map((rule) => ({
+          ...listedItem(store, rule, lookup, retired),
+          mutation: mutations.get(rule.id)?.status ?? 'unverified',
+        })),
         // 추적성 결함: 같은 저장소 열림에서 검증 요약과 같은 함수로 정한다(화면이 다시 세지 않는다, ADR-137)
         traceability: traceabilityOf(store),
       };

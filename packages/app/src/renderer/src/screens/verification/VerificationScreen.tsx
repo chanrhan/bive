@@ -1,7 +1,10 @@
 // 검증 화면 (screens.md SCR-05): 머리줄 · 지표 카드 · 코드 열람 · 파이프라인 · 규칙별 최신 판정 목록.
 // - 값은 verification.summary · codeOpen.summary 결과에서만 그린다(NFR-03). 표시 규칙은 verificationView.ts
-// - 지표 카드는 준수(전체 기준 · 사람 확인 기준) · 에이전트 폐기 규칙 · 규칙화 불가 비율 · 추적성 결함 · 실행당 비용 (ADR-100 D7 ·
-//   B⑦, ADR-117 · ADR-137). 잠정 · 변이 카드, 준수 추이 그래프는 기능 이슈 전까지 미노출 (ADR-035)
+// - 지표 카드는 준수(전체 기준 · 사람 확인 기준) · 에이전트 폐기 규칙 · 변이 검증됨 · 규칙화 불가 비율 · 추적성 결함 · 실행당 비용
+//   (ADR-100 D7 · B⑦, ADR-117 · ADR-137 · ADR-146). 잠정 카드는 미노출 (ADR-035, 자리는 폐기 규칙 카드)
+// - 변이 검증됨 카드 → 규칙 화면 `변이: 생존` (SCR-05 이동 경로). 준수 추이 그래프 = 통과율 · 변이 검증됨 두 선(실선 · 점선, 끝 값
+//   글자 범례), 세로축 눈금 0 · 50 · 100%, 가로축은 첫 점 · 마지막 점 표기만(기간 선택 없음). 색은 토큰만, 차트 라이브러리 없이 SVG
+//   (M3-15 #60, ADR-146). 추이만 실패하면 그 영역만 "추이 불러오기 실패"
 // - 규칙화 불가 비율 · 추적성 결함 카드 → 요구사항 화면 `상태: 규칙화 불가` · `상태: 추적성 결함` (SCR-05 이동 경로, ADR-137)
 // - 코드 열람 = 열람 사유 분포(MET-01, M2-02 · ADR-088): 사유 3종의 건수, 기록이 없으면 '없음'. 검증 요약과 따로 불러
 //   이 영역의 로딩 · 실패는 이 영역 안에서만 보인다(로딩 = 자리 비움, 실패 = "코드 열람 불러오기 실패")
@@ -18,6 +21,7 @@ import type {
   VerificationPipeline,
   VerificationRuleRow,
   VerificationSummaryResult,
+  VerificationTrendResult,
 } from '@bive/shared';
 import { useCallback, useState } from 'react';
 
@@ -47,6 +51,9 @@ import {
   currentStepOf,
   formatUsd,
   isResumeUnrecoverable,
+  MUTATION_SURVIVED_FILTER,
+  mutationText,
+  polylinePoints,
   queuedText,
   resumeEndedStatus,
   resumeUnrecoverableText,
@@ -55,8 +62,17 @@ import {
   STEP_LABELS,
   STEP_STATUS_TEXT,
   TEXT,
+  tickText,
   traceabilityCount,
   traceabilityHint,
+  TREND_BOX,
+  TREND_SERIES,
+  TREND_TICKS,
+  trendAxisLabels,
+  trendLastText,
+  trendSegments,
+  trendState,
+  trendTruncatedText,
   unrulableText,
 } from './verificationView.js';
 
@@ -94,6 +110,7 @@ const VerificationBody = ({ projectId }: { projectId: string }): React.JSX.Eleme
         <VerificationContent
           projectId={projectId}
           summary={load.summary}
+          trend={load.trend}
           codeOpen={codeOpen}
           onChanged={reload}
         />
@@ -105,11 +122,13 @@ const VerificationBody = ({ projectId }: { projectId: string }): React.JSX.Eleme
 const VerificationContent = ({
   projectId,
   summary,
+  trend,
   codeOpen,
   onChanged,
 }: {
   projectId: string;
   summary: VerificationSummaryResult;
+  trend: VerificationTrendResult | null;
   codeOpen: CodeOpenSummaryLoad;
   onChanged: () => void;
 }): React.JSX.Element => {
@@ -201,6 +220,21 @@ const VerificationContent = ({
         <button
           type="button"
           className="metric-card"
+          data-testid="metric-mutation"
+          data-state={summary.mutation.tested === 0 ? 'none' : 'value'}
+          {...tooltipTrigger(TEXT.mutationHint, 'action')}
+          onClick={() => openRules(MUTATION_SURVIVED_FILTER)}
+        >
+          <span className="metric-label" data-testid="metric-label">
+            {TEXT.mutation}
+          </span>{' '}
+          <span className="metric-value" data-testid="metric-value">
+            {mutationText(summary.mutation)}
+          </span>
+        </button>
+        <button
+          type="button"
+          className="metric-card"
           data-testid="metric-unrulable"
           data-state={summary.unrulable.total === 0 ? 'none' : 'value'}
           {...tooltipTrigger(TEXT.unrulableHint, 'action')}
@@ -236,6 +270,7 @@ const VerificationContent = ({
           </span>
         </div>
       </section>
+      <TrendArea trend={trend} />
       <CodeOpenArea load={codeOpen} />
       <section className="verification-pipeline" data-testid="pipeline" aria-label={TEXT.pipeline}>
         <h2 className="verification-heading">{TEXT.pipeline}</h2>
@@ -264,6 +299,143 @@ const VerificationContent = ({
     </div>
   );
 };
+
+/** 준수 추이 그래프 (SCR-05 그래프, JDG-06, ADR-146). 값은 `verification.trend`의 점에서만 그린다. */
+const TrendArea = ({ trend }: { trend: VerificationTrendResult | null }): React.JSX.Element => {
+  const points = trend?.points ?? [];
+  const state = trend === null ? 'error' : trendState(points);
+  const truncated = trend === null ? null : trendTruncatedText(points.length, trend.truncated);
+  return (
+    <section
+      className="verification-trend"
+      data-testid="trend"
+      data-state={state}
+      aria-label={TEXT.trend}
+    >
+      <h2 className="verification-heading">
+        {TEXT.trend}
+        {truncated !== null && (
+          <span className="trend-truncated" data-testid="trend-truncated">
+            {truncated}
+          </span>
+        )}
+      </h2>
+      {trend === null && (
+        <p className="trend-error" data-testid="trend-load-error" role="alert">
+          {TEXT.trendLoadFailed}
+        </p>
+      )}
+      {state === 'none' && <EmptyState text={TEXT.trendNone} />}
+      {(state === 'single' || state === 'series') && <TrendChart points={points} />}
+    </section>
+  );
+};
+
+/** 선 두 개(실선 · 점선) · 끝 값 글자 범례 · 세로축 눈금 · 가로축 표기. 점은 원이 늘어나지 않게 SVG 밖 HTML로 비율 위치에 둔다. */
+const TrendChart = ({
+  points,
+}: {
+  points: VerificationTrendResult['points'];
+}): React.JSX.Element => (
+  <div className="trend-body">
+    <ul className="trend-legend" data-testid="trend-legend">
+      {TREND_SERIES.map((series) => (
+        <li
+          key={series.key}
+          className="trend-legend-item"
+          data-testid="trend-legend-item"
+          data-series={series.key}
+        >
+          <span
+            className={`trend-swatch trend-swatch-${series.key}`}
+            data-dashed={series.dashed}
+            aria-hidden="true"
+          />
+          <span className="trend-legend-label">{series.label}</span>{' '}
+          <span className="trend-legend-value" data-testid="trend-legend-value">
+            {trendLastText(points, series.key)}
+          </span>
+        </li>
+      ))}
+    </ul>
+    <div className="trend-plot">
+      <ol className="trend-ticks" aria-hidden="true">
+        {TREND_TICKS.map((rate) => (
+          <li key={rate} className="trend-tick" data-testid="trend-tick">
+            {tickText(rate)}
+          </li>
+        ))}
+      </ol>
+      {/* 그리기 영역은 점 반지름만큼 안쪽 여백을 두고 SVG를 그 안에 그린다. 점(지름 = 여백 × 2)은 여백을 뺀 폭 · 높이의 비율
+          위치라 가운데가 SVG의 같은 좌표에 오고 영역 밖으로 나가지 않는다 */}
+      <div className="trend-frame">
+        <div className="trend-canvas" data-testid="trend-canvas">
+          <svg
+            className="trend-svg"
+            data-testid="trend-svg"
+            viewBox={`0 0 ${String(TREND_BOX.width)} ${String(TREND_BOX.height)}`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            {TREND_TICKS.map((rate) => (
+              <line
+                key={rate}
+                className="trend-grid"
+                x1={0}
+                x2={TREND_BOX.width}
+                y1={(1 - rate) * TREND_BOX.height}
+                y2={(1 - rate) * TREND_BOX.height}
+              />
+            ))}
+            {/* 선은 이어지는 점이 둘 이상인 조각만 (점 하나뿐인 조각은 아래 점으로만 보인다) */}
+            {TREND_SERIES.map((series) =>
+              trendSegments(points, series.key).map((segment, index) =>
+                segment.length < 2 ? null : (
+                  <polyline
+                    key={`${series.key}-${String(index)}`}
+                    className={`trend-line trend-line-${series.key}`}
+                    data-testid="trend-line"
+                    data-series={series.key}
+                    data-dashed={series.dashed}
+                    points={polylinePoints(segment)}
+                  />
+                ),
+              ),
+            )}
+          </svg>
+          {TREND_SERIES.map((series) =>
+            trendSegments(points, series.key)
+              .flat()
+              .map(({ x, y }) => (
+                <span
+                  key={`${series.key}-${String(x)}`}
+                  className={`trend-dot trend-dot-${series.key}`}
+                  data-testid="trend-dot"
+                  data-series={series.key}
+                  style={{
+                    left: `calc(${String(x)} * (100% - var(--space-2)))`,
+                    top: `calc(${String(y)} * (100% - var(--space-2)))`,
+                  }}
+                  aria-hidden="true"
+                />
+              )),
+          )}
+        </div>
+      </div>
+      <ol className="trend-axis" data-testid="trend-axis">
+        {trendAxisLabels(points).map((label, index) => (
+          <li
+            key={`${label}-${String(index)}`}
+            className="trend-axis-label"
+            data-testid="trend-axis-label"
+          >
+            {label}
+          </li>
+        ))}
+      </ol>
+    </div>
+  </div>
+);
 
 const CodeOpenArea = ({ load }: { load: CodeOpenSummaryLoad }): React.JSX.Element => (
   <section className="verification-code-open" data-testid="code-open" aria-label={TEXT.codeOpen}>

@@ -8,6 +8,7 @@ import {
   STEP_KIND_LABELS,
   type RuleWithJudgment,
   STEP_STATUS_LABELS,
+  VerificationTrendPoint,
 } from '@bive/shared';
 import { describe, expect, it } from 'vitest';
 
@@ -42,8 +43,90 @@ import {
   TEXT,
   traceabilityCount,
   traceabilityHint,
+  trendAxisLabels,
+  trendAxisText,
+  trendLastText,
+  trendRate,
+  trendSegments,
+  trendState,
+  trendTruncatedText,
+  trendX,
+  MUTATION_SURVIVED_FILTER,
+  mutationText,
   unrulableText,
 } from '../src/renderer/src/screens/verification/verificationView.js';
+
+describe('변이 검증됨 카드 · 준수 추이 (M3-15 #60, JDG-04 · JDG-06 · ADR-146)', () => {
+  const point = (
+    i: number,
+    compliance: [number, number],
+    mutation: [number, number],
+    mergedAt: string | null = `2026-10-${String(10 + i)}T03:00:00.000Z`,
+  ): VerificationTrendPoint =>
+    VerificationTrendPoint.parse({
+      runId: `01JE00000000000000000000${String(i).padStart(2, '0')}`,
+      runDisplayId: `EXE-${String(i).padStart(3, '0')}`,
+      branch: 'main',
+      commit: String(i).padStart(40, '0'),
+      mergedAt,
+      compliance: { passed: compliance[0], judgeable: compliance[1] },
+      mutation: { verified: mutation[0], tested: mutation[1] },
+    });
+
+  it('카드 값은 "변이 검증됨 / 변이 기록 규칙", 기록 있는 규칙이 없으면 "없음"(0 / 0이 아님). 누르면 변이: 생존만', () => {
+    expect(mutationText({ verified: 2, tested: 3 })).toBe('2 / 3');
+    expect(mutationText({ verified: 0, tested: 4 })).toBe('0 / 4');
+    expect(mutationText({ verified: 0, tested: 0 })).toBe('없음');
+    expect(MUTATION_SURVIVED_FILTER).toEqual({
+      query: '',
+      selected: { mutation: ['survived'] },
+      problemOnly: false,
+      includeHidden: false,
+    });
+  });
+
+  it('선 값은 분모가 0이면 null이고, 그 점에서 그 선만 끊긴다 (0%로 그리지 않는다)', () => {
+    const points = [point(1, [1, 2], [1, 1]), point(2, [0, 0], [0, 0]), point(3, [2, 2], [0, 2])];
+    expect(points.map((p) => trendRate(p, 'compliance'))).toEqual([0.5, null, 1]);
+    expect(points.map((p) => trendRate(p, 'mutation'))).toEqual([1, null, 0]);
+    expect(trendSegments(points, 'compliance')).toEqual([[{ x: 0, y: 0.5 }], [{ x: 1, y: 0 }]]);
+    expect(trendSegments(points, 'mutation')).toEqual([[{ x: 0, y: 0 }], [{ x: 1, y: 1 }]]);
+    expect(trendX(0, 1)).toBe(0.5);
+    expect(trendSegments([point(1, [1, 4], [0, 0])], 'compliance')).toEqual([
+      [{ x: 0.5, y: 0.75 }],
+    ]);
+    expect(trendSegments([point(1, [1, 4], [0, 0])], 'mutation')).toEqual([]);
+  });
+
+  it('범례 끝 값은 마지막 점의 값(카드와 같은 글자), 마지막 점 분모 0이면 "없음"', () => {
+    const points = [point(1, [1, 2], [1, 1]), point(2, [2, 3], [0, 0])];
+    expect(trendLastText(points, 'compliance')).toBe('2 / 3');
+    expect(trendLastText(points, 'mutation')).toBe('없음');
+    expect(trendLastText([], 'compliance')).toBe('없음');
+  });
+
+  it('가로축은 첫 점 · 마지막 점의 병합 시각, 같거나 점 하나면 하나, 병합 시각이 없으면 실행 표시 ID', () => {
+    const first = point(1, [1, 1], [0, 0]);
+    const last = point(5, [1, 1], [0, 0]);
+    const labels = trendAxisLabels([first, point(3, [1, 1], [0, 0]), last]);
+    expect(labels).toHaveLength(2);
+    for (const label of labels) expect(label).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    expect(trendAxisLabels([first])).toEqual([trendAxisText(first)]);
+    expect(trendAxisLabels([first, { ...first, runId: last.runId }])).toEqual([
+      trendAxisText(first),
+    ]);
+    expect(trendAxisText(point(7, [1, 1], [0, 0], null))).toBe('EXE-007');
+    expect(trendAxisLabels([])).toEqual([]);
+  });
+
+  it('영역 상태와 잘림 표기: 점 0개 none · 1개 single · 여럿 series, 잘렸을 때만 "최근 N개"', () => {
+    expect(trendState([])).toBe('none');
+    expect(trendState([point(1, [1, 1], [0, 0])])).toBe('single');
+    expect(trendState([point(1, [1, 1], [0, 0]), point(2, [1, 1], [0, 0])])).toBe('series');
+    expect(trendTruncatedText(30, true)).toBe('최근 30개');
+    expect(trendTruncatedText(30, false)).toBeNull();
+  });
+});
 
 describe('규칙화 불가 비율 · 추적성 결함 카드 (M3-11 #56, NRM-06 · NRM-08 · ADR-137)', () => {
   it('규칙화 불가 비율: "규칙화 불가 / 요구사항", 요구사항이 없으면 "없음"(0 / 0 · 0%가 아님), 0건은 센 값', () => {
