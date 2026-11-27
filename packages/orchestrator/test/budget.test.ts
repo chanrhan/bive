@@ -30,10 +30,18 @@ import type {
 import { loadScenario } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { PipelineEngine } from '../src/engine/pipeline-engine.js';
-import { budgetOverrun, sessionLimits } from '../src/engine/session-budget.js';
+import {
+  budgetOverrun,
+  budgetValueUsages,
+  limitReached,
+  runRemaining,
+  sessionLimits,
+} from '../src/engine/session-budget.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
 import { createRunHandlers } from '../src/ipc/run-handlers.js';
-import { createRun } from '../src/runs/run-service.js';
+import { assertRaisedBudget } from '../src/review/review-queue.js';
+import { lineageSessions } from '../src/runs/run-continuation.js';
+import { createRun, evaluateApprovalStep } from '../src/runs/run-service.js';
 import {
   COMPLETE_SETTINGS,
   copyFixture,
@@ -986,4 +994,168 @@ describe('세션 한도 · 예산 초과 (수용 기준 3 · 4)', () => {
     });
     expectStopped(h, done, initialMain);
   }, 90_000);
+});
+
+// ── 이어받는 실행의 사용량 누적 (M3-56 #319, COST-01, ADR-147 ④, ADR-149) ─────────────
+
+describe('이어받는 실행: 사용량은 사슬 전체를 이어 센다 (M3-56 수용 기준 2)', () => {
+  it('값마다(실행 전체 · 역할, USD · 턴) 쓴 양과 닿았는지는 세션 한도와 같은 계산이다: 닿음 = 남은 값 0 이하 (같으면 닿음)', () => {
+    const sessions = [session('test-writer', 0.1, 3), session('implementer', 0.17, 9)];
+    expect(budgetValueUsages(SNAPSHOT, sessions)).toEqual([
+      { scope: 'run', role: null, measure: 'usd', limit: 0.3, spent: 0.27, reached: false },
+      { scope: 'run', role: null, measure: 'turns', limit: 20, spent: 12, reached: false },
+      { scope: 'role', role: 'test-writer', measure: 'usd', limit: 0.1, spent: 0.1, reached: true },
+      { scope: 'role', role: 'test-writer', measure: 'turns', limit: 10, spent: 3, reached: false },
+      {
+        scope: 'role',
+        role: 'implementer',
+        measure: 'usd',
+        limit: 0.25,
+        spent: 0.17,
+        reached: false,
+      },
+      { scope: 'role', role: 'implementer', measure: 'turns', limit: 15, spent: 9, reached: false },
+    ]);
+    // 세션 한도가 소진(null)인 판정과 같다: 테스트 작성 역할 USD에 닿아 그 역할 세션을 열지 않는다
+    expect(sessionLimits(SNAPSHOT, 'test-writer', sessions)).toBeNull();
+    expect(limitReached('usd', 0.1, 0.1)).toBe(true);
+    expect(limitReached('usd', 0.100000001, 0.1)).toBe(false);
+    expect(limitReached('turns', 10, 10)).toBe(true);
+    expect(limitReached('turns', 11, 10)).toBe(false);
+  });
+
+  it('새 한도 검증: 내림 · 모양 다름 · 닿은 값을 쓴 양보다 크게 올리지 않음은 -32001, 닿지 않은 값은 같아도 된다', () => {
+    const sessions = [session('test-writer', 0.1, 3)];
+    const raised = {
+      ...SNAPSHOT,
+      roles: { ...SNAPSHOT.roles, 'test-writer': { maxBudgetUsd: 0.2, maxTurns: 10 } },
+    };
+    expect(() => assertRaisedBudget(SNAPSHOT, raised, sessions)).not.toThrow();
+    const reasonOf = (next: typeof SNAPSHOT): unknown => {
+      try {
+        assertRaisedBudget(SNAPSHOT, next, sessions);
+      } catch (error) {
+        return (error as { code: number; data: unknown }).data;
+      }
+      return null;
+    };
+    expect(reasonOf(SNAPSHOT)).toEqual({
+      reason: 'BUDGET_NOT_ABOVE_SPENT',
+      fields: ['roles.test-writer.maxBudgetUsd'],
+    });
+    expect(reasonOf({ ...raised, run: { maxBudgetUsd: 0.3, maxTurns: 19 } })).toEqual({
+      reason: 'BUDGET_LOWERED',
+      fields: ['run.maxTurns'],
+    });
+    expect(
+      reasonOf({ run: raised.run, roles: { 'test-writer': raised.roles['test-writer'] } }),
+    ).toEqual({
+      reason: 'BUDGET_SHAPE_MISMATCH',
+      fields: ['roles.implementer'],
+    });
+  });
+
+  it('이어받는 실행이 아닌 실행의 한도 계산은 그 실행의 세션 그대로이고, 이어받는 실행은 원 실행들(뿌리부터)의 세션을 앞에 이어 센다', () => {
+    const biveHome = makeBiveHome();
+    const seeded = seedProject(biveHome, copyFixture(temps));
+    const clock = { now: Date.now, newId };
+    withProject(biveHome, seeded.project.id, (store) => {
+      const at = new Date().toISOString();
+      const start = (): string => {
+        const created = createRun(
+          store,
+          { ruleIds: [seeded.rule.id], author: human },
+          { clientId: null },
+          clock,
+        );
+        evaluateApprovalStep(store, created.run.id, clock);
+        return created.run.id;
+      };
+      const spend = (
+        runId: string,
+        role: 'test-writer' | 'implementer',
+        cost: number,
+        turns: number,
+      ) => {
+        const step = store.runs
+          .steps(runId)
+          .find(
+            (item) => item.kind === (role === 'test-writer' ? 'test_writing' : 'implementation'),
+          )!;
+        const id = newId();
+        store.sessions.start({
+          id,
+          runId,
+          stepId: step.id,
+          role,
+          model: 'test-model',
+          workDir: '/w',
+          startedAt: at,
+        });
+        store.sessions.end(id, {
+          endReason: 'success',
+          totalCostUsd: cost,
+          numTurns: turns,
+          endedAt: at,
+        });
+      };
+      const endBudget = (runId: string) =>
+        store.runs.transition(runId, {
+          expectedStatus: 'running',
+          run: { status: 'budget_exceeded', failureReason: 'budget_exhausted', endedAt: at },
+        });
+      const origin = start();
+      spend(origin, 'test-writer', 1.5, 40);
+      spend(origin, 'implementer', 0.5, 10);
+      endBudget(origin);
+      // 이어받는 실행이 아니면 그 실행의 세션 그대로 (같은 배열, 같은 한도)
+      const own = store.sessions.listByRun(origin);
+      expect(lineageSessions(store, origin)).toEqual(own);
+      const snapshot = store.runs.get(origin)!.budgetSnapshot;
+      expect(sessionLimits(snapshot, 'test-writer', lineageSessions(store, origin))).toEqual(
+        sessionLimits(snapshot, 'test-writer', own),
+      );
+      // 1차 · 2차 (연결은 시험이 직접 잇는다: 검토 대기열 처리기를 거치는 길은 review-queue-budget.test.ts)
+      const first = createRun(
+        store,
+        { ruleIds: [seeded.rule.id], author: human },
+        { clientId: null },
+        clock,
+      );
+      store.runContinuations.link({ runId: first.run.id, originRunId: origin, createdAt: at });
+      evaluateApprovalStep(store, first.run.id, clock);
+      spend(first.run.id, 'test-writer', 0.25, 5);
+      endBudget(first.run.id);
+      const second = createRun(
+        store,
+        { ruleIds: [seeded.rule.id], author: human },
+        { clientId: null },
+        clock,
+      );
+      store.runContinuations.link({
+        runId: second.run.id,
+        originRunId: first.run.id,
+        createdAt: at,
+      });
+      evaluateApprovalStep(store, second.run.id, clock);
+      spend(second.run.id, 'implementer', 0.25, 5);
+      const chain = lineageSessions(store, second.run.id);
+      expect(chain.map((item) => [item.runId, item.role, item.totalCostUsd])).toEqual([
+        [origin, 'test-writer', 1.5],
+        [origin, 'implementer', 0.5],
+        [first.run.id, 'test-writer', 0.25],
+        [second.run.id, 'implementer', 0.25],
+      ]);
+      // 실행 전체 5 USD - 2.5 = 2.5, 200턴 - 60 = 140. 테스트 작성 역할 2 - 1.75 = 0.25 USD, 100 - 45 = 55턴
+      expect(sessionLimits(snapshot, 'test-writer', chain)).toEqual({
+        maxBudgetUsd: 0.25,
+        maxTurns: 55,
+      });
+      expect(runRemaining(snapshot, chain)).toEqual({ maxBudgetUsd: 2.5, maxTurns: 140 });
+      // 집계 초과도 사슬로 본다: 구현 역할 0.75 USD는 2 USD 안이다
+      expect(budgetOverrun(snapshot, 'implementer', chain)).toBeNull();
+      // 비용 표시는 실행마다 자기 비용이다 (합치지 않는다)
+      expect(store.runs.usage(second.run.id)?.run.costUsd).toBe(0.25);
+    });
+  });
 });

@@ -2874,3 +2874,36 @@ describe('검토 대기열 항목을 쓰는 곳은 검토 대기열 모듈 하�
     }
   });
 });
+
+describe('이어받는 실행의 연결을 쓰는 곳은 검토 대기열 모듈 하나 (M3-56 #319, TODO-02 · COST-01, ADR-149, 코드 구조)', () => {
+  it('연결 쓰기는 review/review-queue.ts 하나, 연결 표를 아는 파일은 정해져 있고(날 SQL 없음), 확인 · 연결 · 처리를 부르는 곳은 사람 주체를 먼저 보는 실행 처리기 하나이며, 사람의 run.create는 이어받는 실행의 값을 넘기지 않는다', () => {
+    const files = sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+    const using = (pattern: RegExp) =>
+      files
+        .filter((f) => pattern.test(f.text))
+        .map((f) => f.rel)
+        .sort();
+    expect(using(/\.runContinuations\s*\.\s*link\(/)).toEqual(['review/review-queue.ts']);
+    // 연결 표(`runContinuations` 낱말)를 아는 파일: 쓰는 모듈과 사슬을 읽는 모듈
+    expect(using(/\brunContinuations\b/)).toEqual([
+      'review/review-queue.ts',
+      'runs/run-continuation.ts',
+    ]);
+    expect(using(/\brun_continuations\b/)).toEqual([]);
+    expect(using(/\bcontinuationTarget\(|\brecordContinuation\(/)).toEqual(['ipc/run-handlers.ts']);
+    const handlers = fs.readFileSync(path.join(SRC_DIR, 'ipc/run-handlers.ts'), 'utf8');
+    expect(handlers).toMatch(
+      /'reviewQueue\.resumeWithBudget': \([^)]*author[^)]*\)[^{]*=> \{\s*assertHumanRunStarter\(author\);/,
+    );
+    // 사람의 run.create는 createRun에 네 인자만 넘긴다 (이어받는 실행의 예산 값은 한도 상향 재개 처리기만)
+    const runCreate = handlers.slice(
+      handlers.indexOf("'run.create':"),
+      handlers.indexOf("'run.get':"),
+    );
+    expect(runCreate).toMatch(/createRun\([\s\S]*clock,\n\s*\),\n\s*\);/);
+    expect(using(/\btarget\.seed\b/)).toEqual(['ipc/run-handlers.ts']);
+  });
+});

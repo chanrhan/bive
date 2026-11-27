@@ -231,3 +231,55 @@ export const budgetOverrun = (
       : check.spent > check.limit;
   return checks.find(exceeds) ?? null;
 };
+
+/** 예산 값 하나의 자리와 사용량: 실행 전체(`run`) 또는 역할(`role`)의 USD · 턴. */
+export interface BudgetValueUsage {
+  readonly scope: 'run' | 'role';
+  /** 역할 값이면 그 역할, 실행 전체면 `null` */
+  readonly role: AgentRole | null;
+  readonly measure: 'usd' | 'turns';
+  readonly limit: number;
+  /** 한도 계산용 사용량 ({@link chargeSessions}, 값을 모르는 세션은 추정값) */
+  readonly spent: number;
+  /** 남은 값이 0 이하인지 ({@link sessionLimits}가 세션을 열지 않는 판정과 같은 계산) */
+  readonly reached: boolean;
+}
+
+/** 한도 `limit`에 사용량 `spent`가 닿았는지: 남은 값이 0 이하 ({@link sessionLimits} · {@link runRemaining}과 같은 계산). */
+export const limitReached = (measure: 'usd' | 'turns', limit: number, spent: number): boolean =>
+  measure === 'usd' ? !(remainingUsd(limit, spent) > 0) : !(limit - spent > 0);
+
+/**
+ * 스냅샷의 값마다(실행 전체 → 역할 순, 각각 USD → 턴) 한도 계산용 사용량과 닿았는지 (M3-56 #319, ADR-147 ④ · ADR-149). 한도 상향
+ * 재개가 새 한도를 검증할 때 원 실행(사슬 전체)의 세션 기록으로 부른다. 사용량은 세션 한도와 같은 계산(`chargeSessions`)이다.
+ */
+export const budgetValueUsages = (
+  snapshot: BudgetSnapshot,
+  sessions: readonly Session[],
+): BudgetValueUsage[] => {
+  const charged = chargeSessions(snapshot, sessions);
+  const usage = (
+    scope: BudgetValueUsage['scope'],
+    role: AgentRole | null,
+    limits: BudgetLimits,
+    scoped: readonly ChargedSession[],
+  ): BudgetValueUsage[] =>
+    (['usd', 'turns'] as const).map((measure) => {
+      const limit = measure === 'usd' ? limits.maxBudgetUsd : limits.maxTurns;
+      const spent = totalOf(scoped, measure).value;
+      return { scope, role, measure, limit, spent, reached: limitReached(measure, limit, spent) };
+    });
+  return [
+    ...usage('run', null, snapshot.run, charged),
+    ...Object.entries(snapshot.roles).flatMap(([role, limits]) =>
+      limits === undefined
+        ? []
+        : usage(
+            'role',
+            role as AgentRole,
+            limits,
+            charged.filter((c) => c.session.role === role),
+          ),
+    ),
+  ];
+};
