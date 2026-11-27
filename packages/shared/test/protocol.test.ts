@@ -36,6 +36,7 @@ import {
   RUN_EVENT_NAMES,
   type Rule,
   type RuleJudgment,
+  VERIFICATION_TREND_LIMIT,
 } from '../src/index.js';
 
 /** 파이프 프레임 왕복: JSON 1줄로 직렬화했다가 다시 해석한다. */
@@ -475,18 +476,52 @@ describe('추적성 결함 응답 (M3-11 #56, ADR-137)', () => {
       traceability,
       unrulable: { count: 1, total: 2 },
       costPerRunUsd: null,
+      mutation: { verified: 0, tested: 0 },
       rules: [],
       pipeline: null,
     };
     const parse = (result: unknown) =>
       parseResponse('verification.summary', { jsonrpc: '2.0', id: 1, result });
     expect(parse(base)).toMatchObject({ ok: true });
+    // 변이 검증됨 (M3-15 #60, ADR-146): 필수이고 검증됨 수는 변이 기록 규칙 수를 넘지 못한다
+    expect(parse({ ...base, mutation: { verified: 2, tested: 3 } })).toMatchObject({ ok: true });
+    expect(parse({ ...base, mutation: { verified: 4, tested: 3 } })).toMatchObject({ ok: false });
     expect(parse({ ...base, unrulable: { count: 0, total: 0 } })).toMatchObject({ ok: true });
     expect(parse({ ...base, unrulable: { count: 3, total: 2 } })).toMatchObject({ ok: false });
-    for (const key of ['traceability', 'unrulable'] as const) {
+    for (const key of ['traceability', 'unrulable', 'mutation'] as const) {
       const without: Record<string, unknown> = { ...base };
       delete without[key];
       expect(parse(without)).toMatchObject({ ok: false });
+    }
+  });
+
+  it('verification.trend: 점은 상한까지, 잘렸으면 점 수 = 상한, 같은 실행의 점은 하나, 비율의 분자는 분모를 넘지 못한다 (M3-15 #60, ADR-146)', () => {
+    const point = (i: number) => ({
+      runId: `01JE00000000000000000000${String(i).padStart(2, '0')}`,
+      runDisplayId: `EXE-${String(i + 1).padStart(3, '0')}`,
+      branch: 'main',
+      commit: String(i).padStart(40, '0'),
+      mergedAt: null,
+      compliance: { passed: 1, judgeable: 2 },
+      mutation: { verified: 0, tested: 1 },
+    });
+    const parse = (result: unknown) =>
+      parseResponse('verification.trend', { jsonrpc: '2.0', id: 1, result });
+    const full = Array.from({ length: VERIFICATION_TREND_LIMIT }, (_, i) => point(i));
+    expect(parse({ points: [], truncated: false })).toMatchObject({ ok: true });
+    expect(parse({ points: full, truncated: true })).toMatchObject({ ok: true });
+    expect(parse({ points: full.slice(1), truncated: true })).toMatchObject({ ok: false });
+    expect(
+      parse({ points: [...full, point(VERIFICATION_TREND_LIMIT)], truncated: false }),
+    ).toMatchObject({ ok: false });
+    expect(parse({ points: [point(1), point(1)], truncated: false })).toMatchObject({ ok: false });
+    for (const bad of [
+      { compliance: { passed: 3, judgeable: 2 } },
+      { mutation: { verified: 2, tested: 1 } },
+    ]) {
+      expect(parse({ points: [{ ...point(1), ...bad }], truncated: false })).toMatchObject({
+        ok: false,
+      });
     }
   });
 });

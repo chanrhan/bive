@@ -301,3 +301,98 @@ describe('mutation_reinforcements (M3-54 #311, ADR-141 ③ · ADR-143)', () => {
     });
   });
 });
+
+/** 실행을 병합 커밋까지 기록한다 (단계는 그대로, 실행의 병합 커밋 칸만. 저장소 상태 기계를 지난다). */
+const markMerged = (store: ProjectStore, runId: string, commit: string) => {
+  store.runs.transition(runId, { run: { status: 'running', startedAt: T0 } });
+  store.runs.transition(runId, {
+    run: { mergeCommit: commit, status: 'merged', currentStep: null, endedAt: T1 },
+  });
+};
+
+describe('준수 추이의 묶음 읽기 (M3-15 #60, ADR-146)', () => {
+  it('mutations.list: 비면 빈 목록, 여러 실행 · 규칙의 기록을 기록 시각 → ID 순으로 한 번에', () => {
+    withStore((store) => {
+      expect(store.mutations.list()).toEqual([]);
+      const base = seed(store);
+      const other = runOf(store, base.rule.id, 'A');
+      const late = store.mutations.record(result(base, { recordedAt: T2 }));
+      const early = store.mutations.record(
+        result({ ...base, run: other.run, step: other.step }, { recordedAt: T0 }),
+      );
+      const middle = store.mutations.record(
+        result(base, { status: 'verified', outcome: 'killed', recordedAt: T1 }),
+      );
+      expect(store.mutations.list().map((item) => item.id)).toEqual([early.id, middle.id, late.id]);
+    });
+  });
+
+  it('mutations.latestForRules: 비면 빈 표, 규칙마다 가장 최근 기록(시각이 같으면 ID가 큰 것), 기록 없는 규칙 · 없는 ID는 없음', () => {
+    withStore((store) => {
+      expect(store.mutations.latestForRules().size).toBe(0);
+      const base = seed(store);
+      const second = seed(store);
+      const first = store.mutations.record(result(base, { recordedAt: T2 }));
+      const later = store.mutations.record(
+        result(base, { status: 'verified', outcome: 'killed', recordedAt: T2 }),
+      );
+      store.mutations.record(result(base, { recordedAt: T0 }));
+      // 같은 시각이면 ID가 큰(나중에 만든 ULID) 기록
+      expect(later.id > first.id).toBe(true);
+      const latest = store.mutations.latestForRules();
+      expect([...latest.keys()]).toEqual([base.rule.id]);
+      expect(latest.get(base.rule.id)?.id).toBe(later.id);
+      expect(latest.get(second.rule.id)).toBeUndefined();
+      expect(latest.get(newId())).toBeUndefined();
+    });
+  });
+
+  it('judgments.listByRuns: 빈 입력 · 없는 실행 ID는 빈 목록, 고른 실행들의 기록만 판정 시각 → ID 순으로 한 번에', () => {
+    withStore((store) => {
+      expect(store.judgments.listByRuns([])).toEqual([]);
+      const base = seed(store);
+      const other = runOf(store, base.rule.id, 'A');
+      const third = runOf(store, base.rule.id, 'A');
+      const judge = (target: { run: { id: string }; step: { id: string } }, judgedAt: string) => ({
+        id: newId(),
+        ruleId: base.rule.id,
+        runId: target.run.id,
+        stepId: target.step.id,
+        commit: COMMIT,
+        judgedAt,
+        status: 'pass' as const,
+        runner: 'vitest' as const,
+        exitCode: 0,
+        reporterPath: null,
+        cases: [],
+        quarantineReason: null,
+      });
+      const [a] = store.judgments.record([judge(base, T2)]);
+      const [b] = store.judgments.record([judge(other, T0)]);
+      store.judgments.record([judge(third, T1)]);
+      expect(store.judgments.listByRuns([newId()])).toEqual([]);
+      expect(
+        store.judgments.listByRuns([base.run.id, other.run.id]).map((item) => item.id),
+      ).toEqual([b?.id, a?.id]);
+    });
+  });
+
+  it('runs.stepsOfMergedRuns: 병합 커밋이 없으면 빈 표, 병합된 실행만 실행별 파이프라인 순서로 한 번에', () => {
+    withStore((store) => {
+      expect(store.runs.stepsOfMergedRuns().size).toBe(0);
+      const base = seed(store);
+      const other = runOf(store, base.rule.id, 'A');
+      const unmerged = runOf(store, base.rule.id, 'A');
+      expect(store.runs.stepsOfMergedRuns().size).toBe(0);
+      markMerged(store, base.run.id, 'a'.repeat(40));
+      markMerged(store, other.run.id, 'b'.repeat(40));
+      const byRun = store.runs.stepsOfMergedRuns();
+      expect([...byRun.keys()].sort()).toEqual([base.run.id, other.run.id].sort());
+      expect(byRun.has(unmerged.run.id)).toBe(false);
+      for (const runId of [base.run.id, other.run.id]) {
+        expect(byRun.get(runId)).toEqual(store.runs.steps(runId));
+        expect(byRun.get(runId)?.map((step) => step.kind)).toEqual(RUN_STEP_PLANS.A);
+      }
+    });
+  });
+});

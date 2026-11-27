@@ -7,6 +7,9 @@
 // - 규칙화 불가 비율 = '규칙화 불가' 요구사항 수 / 삭제되지 않은 요구사항 수(요구사항이 없으면 '없음', 0%로 보이지 않음).
 //   추적성 결함 = 규칙 없는 요구사항 수 + 부모 없는 규칙 수(센 값이라 0도 "0"). 두 카드는 요구사항 화면을 그 상태 칩으로 연다
 // - 코드 열람 영역 = `codeOpen.summary`의 사유별 건수. 기록이 하나도 없으면 '없음' (MET-01, M2-02 · ADR-088)
+// - 변이 검증됨 카드 = `mutation`의 "변이 검증됨 / 변이 기록 있는 규칙"(기록 있는 규칙이 없으면 '없음'), 누르면 규칙 화면
+//   `변이: 생존` (SCR-05 이동 경로). 준수 추이 그래프 = `verification.trend`의 점마다 통과율 · 변이 검증됨 두 선, 기간 선택 없이
+//   가로축 표기만(첫 점 · 마지막 점의 병합 시각). 분모가 0인 점은 그 선에서 비운다(가짜 점 없음) (JDG-04 · JDG-06, M3-15 · ADR-146)
 import type {
   CodeOpenReason,
   CodeOpenSummaryResult,
@@ -16,8 +19,10 @@ import type {
   VerificationBasis,
   VerificationRunLink,
   VerificationSummaryResult,
+  VerificationTrendPoint,
 } from '@bive/shared';
 
+import { formatCardTime } from '../../components/Card2Line/time.js';
 import { CODE_OPEN_REASON_LABELS } from '../../components/CodeLink/codeLinkView.js';
 import type { FilterState } from '../../components/ListView/filter.js';
 
@@ -42,6 +47,17 @@ export const TEXT = {
   traceability: '추적성 결함',
   traceabilityRequirements: '규칙 없는 요구사항',
   traceabilityRules: '부모 없는 규칙',
+  /** 변이 검증됨 카드 (SCR-05 지표 카드, JDG-04, ADR-146) */
+  mutation: '변이 검증됨',
+  mutationHint: '변이 검증됨 / 변이 기록 규칙',
+  /** 준수 추이 그래프 (SCR-05 그래프, JDG-06, ADR-146) */
+  trend: '준수 추이',
+  trendCompliance: '통과율',
+  trendMutation: '변이 검증됨',
+  trendNone: '추이 없음',
+  trendLoadFailed: '추이 불러오기 실패',
+  /** 점 상한으로 앞 점이 빠졌을 때 ("최근 30개") */
+  trendTruncatedPrefix: '최근',
   costPerRun: '실행당 비용',
   pipeline: '파이프라인',
   noRun: '실행 없음',
@@ -193,6 +209,21 @@ export const CONFIRMED_COMPLIANCE_FILTER: FilterState = Object.freeze({
   includeHidden: false,
 });
 
+/** 변이 검증됨 카드 값: "변이 검증됨 / 변이 기록 규칙". 변이 기록이 있는 규칙이 없으면 '없음'(0 / 0으로 보이지 않는다, ADR-146). */
+export const mutationText = ({
+  verified,
+  tested,
+}: VerificationSummaryResult['mutation']): string =>
+  tested === 0 ? TEXT.none : `${String(verified)} / ${String(tested)}`;
+
+/** 변이 검증됨 카드를 누르면 거는 필터: `변이: 생존`만 (SCR-05 이동 경로 "변이 카드 → 규칙 `변이: 생존`"). */
+export const MUTATION_SURVIVED_FILTER: FilterState = Object.freeze({
+  query: '',
+  selected: Object.freeze({ mutation: Object.freeze(['survived']) }),
+  problemOnly: false,
+  includeHidden: false,
+});
+
 /** 에이전트 폐기 규칙 카드를 누르면 거는 필터: [폐기 포함]만 켠다(폐기된 규칙이 목록에 함께 보인다, ADR-114 · ADR-117). */
 export const AGENT_RETIRED_FILTER: FilterState = Object.freeze({
   query: '',
@@ -266,3 +297,91 @@ export const codeOpenRows = (summary: CodeOpenSummaryResult): CodeOpenReasonRow[
         label: CODE_OPEN_REASON_LABELS[reason],
         count,
       }));
+
+/** 추이 그래프의 선 두 개 (순서 = 범례 순서). `dashed`면 점선: 색만으로 구분하지 않는다 (ADR-146). */
+export const TREND_SERIES = [
+  { key: 'compliance', label: TEXT.trendCompliance, dashed: false },
+  { key: 'mutation', label: TEXT.trendMutation, dashed: true },
+] as const;
+export type TrendSeriesKey = (typeof TREND_SERIES)[number]['key'];
+
+/** 점 하나의 선 값 (0 ~ 1). 분모가 0이면 `null`(그 선에서 비운다, 0%로 그리지 않는다). */
+export const trendRate = (point: VerificationTrendPoint, key: TrendSeriesKey): number | null => {
+  const [num, den] =
+    key === 'compliance'
+      ? [point.compliance.passed, point.compliance.judgeable]
+      : [point.mutation.verified, point.mutation.tested];
+  return den === 0 ? null : num / den;
+};
+
+/** 선의 끝 값 글자(범례): 마지막 점의 "통과 / 판정 가능" · "변이 검증됨 / 변이 기록 규칙". 마지막 점 분모가 0이면 '없음'. */
+export const trendLastText = (
+  points: readonly VerificationTrendPoint[],
+  key: TrendSeriesKey,
+): string => {
+  const last = points.at(-1);
+  if (last === undefined) return TEXT.none;
+  return key === 'compliance' ? complianceText(last.compliance) : mutationText(last.mutation);
+};
+
+/** 그래프 그리기 영역(SVG viewBox 단위). 가로는 화면 폭에 맞춰 늘어난다. */
+export const TREND_BOX = { width: 1000, height: 200 } as const;
+
+/** 세로축 눈금 (비율, 위에서 아래 순서로 그린다). */
+export const TREND_TICKS = [1, 0.5, 0] as const;
+
+/** 세로축 눈금 글자: 100% · 50% · 0%. */
+export const tickText = (rate: number): string => `${String(Math.round(rate * 100))}%`;
+
+/** 점의 가로 위치 (0 ~ 1). 점이 하나면 가운데. */
+export const trendX = (index: number, count: number): number =>
+  count <= 1 ? 0.5 : index / (count - 1);
+
+/** 선 하나의 조각들: 값이 이어지는 점끼리 한 조각(분모 0인 점에서 끊긴다). 조각마다 (가로, 세로) 비율 좌표 목록. */
+export const trendSegments = (
+  points: readonly VerificationTrendPoint[],
+  key: TrendSeriesKey,
+): { x: number; y: number }[][] => {
+  const segments: { x: number; y: number }[][] = [];
+  let current: { x: number; y: number }[] = [];
+  points.forEach((point, index) => {
+    const rate = trendRate(point, key);
+    if (rate === null) {
+      if (current.length > 0) segments.push(current);
+      current = [];
+      return;
+    }
+    current.push({ x: trendX(index, points.length), y: 1 - rate });
+  });
+  if (current.length > 0) segments.push(current);
+  return segments;
+};
+
+/** 비율 좌표 → SVG polyline `points` 글자. */
+export const polylinePoints = (segment: readonly { x: number; y: number }[]): string =>
+  segment
+    .map(({ x, y }) => `${String(x * TREND_BOX.width)},${String(y * TREND_BOX.height)}`)
+    .join(' ');
+
+/** 가로축 글자 하나: 병합 시각(카드 시각과 같은 로컬 `YYYY-MM-DD HH:mm`), 병합 시각 기록이 없으면 실행 표시 ID. */
+export const trendAxisText = (point: VerificationTrendPoint): string =>
+  (point.mergedAt === null ? null : formatCardTime(point.mergedAt)) ?? point.runDisplayId;
+
+/** 가로축 표기 (기간 선택 없이 표기만, SCR-05 그래프): 첫 점과 마지막 점. 점이 하나거나 두 글자가 같으면 하나. */
+export const trendAxisLabels = (points: readonly VerificationTrendPoint[]): string[] => {
+  const first = points[0];
+  const last = points.at(-1);
+  if (first === undefined || last === undefined) return [];
+  const labels = [trendAxisText(first), trendAxisText(last)];
+  return labels[0] === labels[1] || points.length === 1 ? [labels[0] as string] : labels;
+};
+
+/** 추이 영역 상태: 점 없음 · 점 하나 · 여러 점 (화면 속성 `data-state`). */
+export const trendState = (
+  points: readonly VerificationTrendPoint[],
+): 'none' | 'single' | 'series' =>
+  points.length === 0 ? 'none' : points.length === 1 ? 'single' : 'series';
+
+/** 잘림 표기 "최근 30개" (점 상한으로 앞 점이 빠졌을 때만, 아니면 `null`). */
+export const trendTruncatedText = (count: number, truncated: boolean): string | null =>
+  truncated ? `${TEXT.trendTruncatedPrefix} ${String(count)}개` : null;

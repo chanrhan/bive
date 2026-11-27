@@ -20,6 +20,9 @@
 //   불가' 요구사항 수 / 삭제되지 않은 요구사항 수. 같은 함수(`traceabilityOf`)를 `rule.list`도 쓴다
 // - 실행당 비용: 끝난 실행(병합 · 실패 · 예산 초과) 중 세션 비용을 모두 아는 실행(`usage.run.costUsd`가 있고
 //   값 모르는 세션 0개)의 비용 평균(1e-9 USD 반올림). 그런 실행이 없으면 `null`
+// - 변이 검증됨(JDG-04 · JDG-06, M3-15 #60 · ADR-146): 병합 커밋이 기록된 실행의 변이 기록 가운데 규칙마다 가장 나중 기록(기록 시각
+//   → ID, 미래 시각 기록 제외)을 보고, 효력 있는 규칙 중 기록이 있는 수와 그 기록이 '변이 검증됨'인 수. 준수 추이(`trend.ts`)의
+//   마지막 점과 같은 함수로 센다
 // - 실행 링크: 위 판정의 실행(= 기준 실행)과 그 실행의 비용 합계 · 턴(`runs.usage`, 값 없으면 `null`)
 // - 파이프라인: 보일 실행(`pipelineRunOf`)의 단계 계획(`RUN_STEP_PLANS`) 순서와 단계별 마지막 시도 상태, 그 밖의 실행 대기
 //   건수. 보일 실행은 자리를 차지한 실행(진행 중, 없으면 가장 먼저 만든 중단)이고 없으면 가장 최근에 만든 실행이다
@@ -28,6 +31,7 @@
 import {
   isTerminalRunStatus,
   type JudgmentResult,
+  type MutationResult,
   type NormChangeEntry,
   type NormChangeKind,
   RUN_STEP_PLANS,
@@ -41,6 +45,7 @@ import {
   type Ulid,
   type UsageTotals,
   type VerificationBasis,
+  type VerificationMutationTally,
   type VerificationPipeline,
   type VerificationRunLink,
   type VerificationSummaryResult,
@@ -229,22 +234,27 @@ const compareBasis = (
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 };
 
+/** 판정 기준 후보 하나: 병합 커밋이 기록된 실행과 그 병합 단계 기록. */
+export interface BasisCandidate {
+  run: Run & { mergeCommit: string };
+  merge: MergeRecord | null;
+}
+
 /**
- * 가장 나중에 병합된 실행의 판정 기준. 병합 커밋이 기록된 실행이 없으면 `null`.
- * 병합 커밋이 기록된 실행은 상태와 무관하게 후보다: 그 값은 병합 실행기가 기준 브랜치 갱신을 확인한 통과일 때만 채워진다
- * (ADR-091 · ADR-094 · ADR-096). 순서는 후보마다 혼자 정해지는 열쇠의 사전식 비교라 결과가 목록 순서와 무관하다.
+ * 판정 기준 후보(병합 커밋이 기록된 실행)를 판정 기준을 고르는 순서의 오름차순으로 (마지막이 판정 기준). 준수 추이의 점 순서도
+ * 이것이다(ADR-146). 순서는 후보마다 혼자 정해지는 열쇠의 사전식 비교라 결과가 목록 순서와 무관하다.
  */
-export const basisOf = (
+export const orderedBasisCandidates = (
   runs: readonly Run[],
   options: BasisOptions = {},
-): VerificationBasis | null => {
-  let latest: { run: Run & { mergeCommit: string }; key: BasisKey; id: string } | null = null;
+): BasisCandidate[] => {
+  const keyed: { candidate: BasisCandidate; key: BasisKey; id: string }[] = [];
   for (const run of runs) {
     if (run.mergeCommit === null) continue;
     const merge = options.mergeOf?.(run) ?? null;
     const order = merge?.order ?? null;
-    const candidate = {
-      run: { ...run, mergeCommit: run.mergeCommit },
+    keyed.push({
+      candidate: { run: { ...run, mergeCommit: run.mergeCommit }, merge },
       key: [
         options.branch != null && run.baseBranch === options.branch ? 1 : 0,
         order === null ? 0 : 1,
@@ -253,10 +263,22 @@ export const basisOf = (
         timeOf(run.createdAt),
       ] as const,
       id: run.id,
-    };
-    if (latest === null || compareBasis(candidate, latest) > 0) latest = candidate;
+    });
   }
-  return latest === null
+  return keyed.sort(compareBasis).map(({ candidate }) => candidate);
+};
+
+/**
+ * 가장 나중에 병합된 실행의 판정 기준. 병합 커밋이 기록된 실행이 없으면 `null`.
+ * 병합 커밋이 기록된 실행은 상태와 무관하게 후보다: 그 값은 병합 실행기가 기준 브랜치 갱신을 확인한 통과일 때만 채워진다
+ * (ADR-091 · ADR-094 · ADR-096). 후보 순서는 {@link orderedBasisCandidates}의 마지막이다.
+ */
+export const basisOf = (
+  runs: readonly Run[],
+  options: BasisOptions = {},
+): VerificationBasis | null => {
+  const latest = orderedBasisCandidates(runs, options).at(-1);
+  return latest === undefined
     ? null
     : { branch: latest.run.baseBranch, commit: latest.run.mergeCommit, runId: latest.run.id };
 };
@@ -292,23 +314,126 @@ export const basisJudgments = (
   basis: VerificationBasis | null,
   now: number,
 ): Map<Ulid, JudgmentResult> => {
-  const latest = new Map<Ulid, JudgmentResult>();
-  if (basis === null) return latest;
+  if (basis === null) return new Map();
   const run = store.runs.get(basis.runId);
-  if (run === null) return latest;
-  const kindOf = new Map(store.runs.steps(run.id).map((step) => [step.id, step.kind]));
-  const records = store.judgments
-    .listByRun(run.id)
-    .filter((record) => Date.parse(record.judgedAt) <= now + FUTURE_LIMIT_MS);
+  if (run === null) return new Map();
+  return judgmentsAtCommit(
+    run,
+    basis.commit,
+    store.runs.steps(run.id),
+    store.judgments.listByRun(run.id),
+    now,
+  );
+};
+
+/**
+ * 실행 하나의 판정 기록 가운데 그 병합 커밋에서 낸 규칙별 판정 (순수 함수): 병합 재검사(병합 커밋) 판정, 없으면 검사 단계
+ * (`headCommit`) 판정. 규칙별로 그중 최신. `records`는 판정 시각 → ID 순이어야 한다(뒤의 기록이 최신).
+ */
+export const judgmentsAtCommit = (
+  run: Run,
+  mergeCommit: string,
+  steps: readonly Step[],
+  records: readonly JudgmentResult[],
+  now: number,
+): Map<Ulid, JudgmentResult> => {
+  const latest = new Map<Ulid, JudgmentResult>();
+  const kindOf = new Map(steps.map((step) => [step.id, step.kind]));
+  const usable = records.filter((record) => Date.parse(record.judgedAt) <= now + FUTURE_LIMIT_MS);
   const from = (kind: StepKind, commit: string | null) =>
-    records.filter(
+    usable.filter(
       (record) =>
         record.stepId !== null && kindOf.get(record.stepId) === kind && record.commit === commit,
     );
-  const merged = from('merge', basis.commit);
+  const merged = from('merge', mergeCommit);
   const chosen = merged.length > 0 ? merged : from('check', run.headCommit);
-  // listByRun은 판정 시각 → ID 순이므로 뒤의 기록이 규칙별 최신이다
   for (const record of chosen) latest.set(record.ruleId, record);
+  return latest;
+};
+
+/**
+ * 여러 판정 기준 후보의 판정 기준 커밋 판정 (실행 ID → 규칙별 판정). 판정 기록은 질의 1회로 읽고 단계 시도는 받은 것을 쓴다
+ * (준수 추이가 점마다 따로 읽지 않게, ADR-146).
+ */
+export const candidateJudgments = (
+  store: ProjectStore,
+  candidates: readonly BasisCandidate[],
+  stepsByRun: ReadonlyMap<Ulid, readonly Step[]>,
+  now: number,
+): Map<Ulid, Map<Ulid, JudgmentResult>> => {
+  const byRun = new Map<Ulid, JudgmentResult[]>();
+  for (const record of store.judgments.listByRuns(candidates.map(({ run }) => run.id))) {
+    if (record.runId === null) continue;
+    const list = byRun.get(record.runId);
+    if (list === undefined) byRun.set(record.runId, [record]);
+    else list.push(record);
+  }
+  return new Map(
+    candidates.map(({ run }) => [
+      run.id,
+      judgmentsAtCommit(
+        run,
+        run.mergeCommit,
+        stepsByRun.get(run.id) ?? [],
+        byRun.get(run.id) ?? [],
+        now,
+      ),
+    ]),
+  );
+};
+
+/** 변이 기록 `a`가 `b`보다 나중인지: 기록 시각 → ID (저장소의 최신 순서와 같다, 시각은 밀리초 3자리 UTC 문자열). */
+const isLaterMutation = (a: MutationResult, b: MutationResult): boolean =>
+  a.recordedAt > b.recordedAt || (a.recordedAt === b.recordedAt && a.id > b.id);
+
+/** 규칙별 가장 나중 변이 기록 표에 기록들을 더한다 (미래 시각 기록은 쓰지 않는다, 판정 기록과 같은 기준). */
+export const foldLatestMutations = (
+  latest: Map<Ulid, MutationResult>,
+  records: readonly MutationResult[],
+  now: number,
+): void => {
+  for (const record of records) {
+    if (Date.parse(record.recordedAt) > now + FUTURE_LIMIT_MS) continue;
+    const current = latest.get(record.ruleId);
+    if (current === undefined || isLaterMutation(record, current)) {
+      latest.set(record.ruleId, record);
+    }
+  }
+};
+
+/**
+ * 변이 검증됨 집계 (ADR-146): `isEffective`인 규칙 가운데 가장 나중 변이 기록이 있는 수(`tested`)와 그 기록이 '변이 검증됨'인 수.
+ * 기록이 없는 규칙(변이 대상이 아니었거나 아직 주입하지 않은 규칙)은 두 수 어디에도 들지 않는다.
+ */
+export const mutationTally = (
+  rules: readonly Rule[],
+  latest: ReadonlyMap<Ulid, MutationResult>,
+  isEffective: (rule: Rule) => boolean,
+): VerificationMutationTally => {
+  let tested = 0;
+  let verified = 0;
+  for (const rule of rules) {
+    const record = latest.get(rule.id);
+    if (record === undefined || !isEffective(rule)) continue;
+    tested += 1;
+    if (record.status === 'verified') verified += 1;
+  }
+  return { verified, tested };
+};
+
+/** 병합 커밋이 기록된 실행의 변이 기록에서 규칙별 가장 나중 기록 (검증 요약의 변이 검증됨, 질의 1회). */
+const mergedRunMutations = (
+  store: ProjectStore,
+  runs: readonly Run[],
+  now: number,
+): Map<Ulid, MutationResult> => {
+  const merged = new Set(runs.filter((run) => run.mergeCommit !== null).map((run) => run.id));
+  const latest = new Map<Ulid, MutationResult>();
+  foldLatestMutations(
+    latest,
+    store.mutations.list().filter((record) => merged.has(record.runId)),
+    now,
+  );
   return latest;
 };
 
@@ -409,6 +534,11 @@ export const verificationSummary = (
     traceability: traceabilityOf(store),
     unrulable: unrulableCountOf(store.requirements.list()),
     costPerRunUsd: costPerRun(finished),
+    mutation: mutationTally(
+      rows.map(({ rule }) => rule),
+      mergedRunMutations(store, runs, now),
+      (rule) => isEffectiveRule(rule, retired),
+    ),
     rules: rows,
     pipeline: shown === undefined ? null : pipelineOf(shown, store.runs.steps(shown.id), queued),
   };

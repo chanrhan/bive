@@ -7,7 +7,9 @@
 // 이슈 #56(M3-11) 수용 기준 4: 규칙화 불가 비율 카드 · 추적성 결함 카드가 보이고 누르면 요구사항 화면이 그 상태 칩으로 열린다
 // (요구사항이 없으면 비율은 '없음', NRM-06 · NRM-08 · ADR-137). 규칙 작성 제안 0개 흐름(no-rules 시나리오)은 같은 상태(규칙 없는
 // 요구사항 1개)를 가짜 응답으로 보인다(시나리오 파일은 오케스트레이터 시험 traceability.test.ts가 지킨다)
-// 데이터는 가짜 브리지의 project.current · verification.summary · codeOpen.summary · rule.list 응답으로만 만든다.
+// 이슈 #60(M3-15) 수용 기준 2: 준수 추이 그래프(선 2개 · 기간은 가로축 표기만 · 점 0개 · 1개 · 잘림)와 변이 검증됨 카드, 카드를
+// 누르면 규칙 화면이 `변이: 생존`으로 열린다 (JDG-04 · JDG-06, ADR-146)
+// 데이터는 가짜 브리지의 project.current · verification.summary · verification.trend · codeOpen.summary · rule.list 응답으로만 만든다.
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -17,7 +19,9 @@ import {
   CODE_OPEN_SUMMARY,
   EMPTY_CODE_OPEN_SUMMARY,
   EMPTY_SUMMARY,
+  EMPTY_TREND,
   LINK_1,
+  MUTATION_RULES,
   REQUIREMENTS,
   NO_CONFIRMED_SUMMARY,
   PROJECT,
@@ -27,9 +31,13 @@ import {
   SKIPPED_SUMMARY,
   STAGE_LABELS,
   stages,
+  SERIES_TREND,
   SUMMARY,
   TOOLTIPS,
   TRACEABILITY,
+  TREND,
+  TRUNCATED_SUMMARY,
+  TRUNCATED_TREND,
   verificationScreenUpdateFailedChecklist,
   verificationSkippedChecklist,
 } from './checklists/scr-05.js';
@@ -54,6 +62,10 @@ const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInPro
 const SHOT = (width: number): string =>
   path.join(SCREENSHOT_DIR, 'SCR-05', `지표-카드-${String(width)}.png`);
 
+/** 준수 추이 스크린샷 (창 폭별). */
+const TREND_SHOT = (width: number): string =>
+  path.join(SCREENSHOT_DIR, 'SCR-05', `준수-추이-${String(width)}.png`);
+
 const openScreen = async (
   page: Page,
   responses: MockResponses = {},
@@ -64,6 +76,7 @@ const openScreen = async (
       'system.status': { result: STATUS },
       'project.current': { result: { project: project ? PROJECT : null } },
       'verification.summary': { result: SUMMARY },
+      'verification.trend': { result: TREND },
       'codeOpen.summary': { result: CODE_OPEN_SUMMARY },
       'rule.list': { result: { rules: RULES } },
       ...responses,
@@ -78,6 +91,7 @@ const openScreen = async (
 const METRIC_LABELS = [
   '준수',
   '에이전트 폐기 규칙',
+  '변이 검증됨',
   '규칙화 불가 비율',
   '추적성 결함',
   '실행당 비용',
@@ -106,6 +120,7 @@ test.describe('체크리스트 (수용 기준 2)', () => {
   test('빈: 실행이 없으면 "실행 없음", 판정 기준 · 실행당 비용은 없음', async ({ page }) => {
     await openScreen(page, {
       'verification.summary': { result: EMPTY_SUMMARY },
+      'verification.trend': { result: EMPTY_TREND },
       'codeOpen.summary': { result: EMPTY_CODE_OPEN_SUMMARY },
     });
     await expectScreen(page, 'SCR-05', '빈');
@@ -268,14 +283,12 @@ test.describe('파이프라인 · 목록 (수용 기준 2)', () => {
 });
 
 test.describe('미노출 · 값 없음 (수용 기준 3)', () => {
-  test('잠정 · 변이 카드가 없고 지표 카드는 준수 · 에이전트 폐기 규칙 · 규칙화 불가 비율 · 추적성 결함 · 실행당 비용 5개 (M3-11)', async ({
+  test('잠정 카드가 없고 지표 카드는 준수 · 에이전트 폐기 규칙 · 변이 검증됨 · 규칙화 불가 비율 · 추적성 결함 · 실행당 비용 6개 (M3-11 · M3-15)', async ({
     page,
   }) => {
     await openScreen(page);
     await expect(page.getByTestId('metric-label')).toHaveText(METRIC_LABELS);
-    for (const text of ['잠정', '변이']) {
-      await expect(page.getByTestId('metric-label').filter({ hasText: text })).toHaveCount(0);
-    }
+    await expect(page.getByTestId('metric-label').filter({ hasText: '잠정' })).toHaveCount(0);
   });
 
   test('실행 링크 비용 · 턴은 값이 없으면 "없음" (0이 아님)', async ({ page }) => {
@@ -361,12 +374,13 @@ test.describe('코드 열람 영역 (#44 수용 기준 1 · 2, MET-01 · ADR-088
     await expect(hint).toHaveRole('button');
     await expect(hint).toHaveAccessibleName('코드 열람');
     await expect(hint).not.toHaveAttribute('title');
-    // 지표 카드의 버튼(준수 두 기준 → 에이전트 폐기 규칙 → 규칙화 불가 비율 → 추적성 결함) 다음 Tab 한 번으로 닿는다
-    // (실행당 비용 카드는 초점을 받지 않는다)
+    // 지표 카드의 버튼(준수 두 기준 → 에이전트 폐기 규칙 → 변이 검증됨 → 규칙화 불가 비율 → 추적성 결함) 다음 Tab 한 번으로
+    // 닿는다 (실행당 비용 카드 · 준수 추이 영역은 초점을 받지 않는다)
     await page.getByTestId('metric-compliance-all').focus();
     for (const next of [
       'metric-compliance-confirmed',
       'metric-agent-retired',
+      'metric-mutation',
       'metric-unrulable',
       'metric-traceability',
     ]) {
@@ -381,13 +395,15 @@ test.describe('코드 열람 영역 (#44 수용 기준 1 · 2, MET-01 · ADR-088
     await expect(area(page).getByText('링크 경유 열기 시도 수', { exact: false })).toHaveCount(0);
   });
 
-  test('영역 순서: 지표 카드 → 코드 열람 → 파이프라인 → 규칙별 최신 판정', async ({ page }) => {
+  test('영역 순서: 지표 카드 → 준수 추이 → 코드 열람 → 파이프라인 → 규칙별 최신 판정', async ({
+    page,
+  }) => {
     await openScreen(page);
     await expect(area(page)).toBeVisible();
     const order = await page
       .locator('.verification-content > section')
       .evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')));
-    expect(order).toEqual(['지표', '코드 열람', '파이프라인', '규칙별 최신 판정']);
+    expect(order).toEqual(['지표', '준수 추이', '코드 열람', '파이프라인', '규칙별 최신 판정']);
   });
 
   test('영역 조회가 실패하면 영역에만 "코드 열람 불러오기 실패", 나머지 영역은 그대로', async ({
@@ -943,6 +959,267 @@ test.describe('이동 · 재개 (수용 기준 4)', () => {
   });
 });
 
+test.describe('준수 추이 그래프 · 변이 검증됨 카드 (#60 수용 기준 2, JDG-04 · JDG-06 · ADR-146)', () => {
+  const trendArea = (page: Page) => page.getByTestId('trend');
+  /** polyline `points` 글자 → 좌표 목록. */
+  const linePoints = async (page: Page, series: string): Promise<[number, number][][]> =>
+    trendArea(page)
+      .locator(`[data-testid="trend-line"][data-series="${series}"]`)
+      .evaluateAll((lines) =>
+        lines.map((line) =>
+          (line.getAttribute('points') ?? '')
+            .split(' ')
+            .map((pair) => pair.split(',').map(Number) as [number, number]),
+        ),
+      );
+  /** 점 가운데의 위치 (선을 그리는 SVG 영역의 폭 · 높이에 대한 비율). */
+  const dotRatios = async (page: Page, series: string): Promise<[number, number][]> =>
+    trendArea(page)
+      .getByTestId('trend-canvas')
+      .evaluate((canvas, key) => {
+        const box =
+          canvas.querySelector('svg')?.getBoundingClientRect() ?? canvas.getBoundingClientRect();
+        const dots = canvas.querySelectorAll<HTMLElement>(
+          `[data-testid="trend-dot"][data-series="${key}"]`,
+        );
+        return [...dots].map((dot) => {
+          const r = dot.getBoundingClientRect();
+          return [
+            Math.round(((r.left + r.width / 2 - box.left) / box.width) * 1000) / 1000,
+            Math.round(((r.top + r.height / 2 - box.top) / box.height) * 1000) / 1000,
+          ] as [number, number];
+        });
+      }, series);
+
+  const openSeries = (page: Page) =>
+    openScreen(page, {
+      'verification.summary': { result: SCREEN_UPDATE_FAILED_SUMMARY },
+      'verification.trend': { result: SERIES_TREND },
+    });
+
+  test('점 둘: 선 2개(통과율 실선 · 변이 검증됨 점선)가 점의 값 그대로 이어지고, 범례는 글자와 끝 값, 가로축은 첫 · 마지막 점 표기만', async ({
+    page,
+  }) => {
+    const bive = await openSeries(page);
+    await expect(trendArea(page)).toHaveAttribute('data-state', 'series');
+    const lines = trendArea(page).getByTestId('trend-line');
+    await expect(lines).toHaveCount(2);
+    expect(
+      await lines.evaluateAll((els) =>
+        els.map((el) => [el.getAttribute('data-series'), el.getAttribute('data-dashed')]),
+      ),
+    ).toEqual([
+      ['compliance', 'false'],
+      ['mutation', 'true'],
+    ]);
+    // 통과율 1 / 4 → 2 / 5, 변이 검증됨 1 / 2 → 2 / 3 (세로 = (1 - 비율) × 200, 가로 = 0 · 1000)
+    expect(await linePoints(page, 'compliance')).toEqual([
+      [
+        [0, 150],
+        [1000, 120],
+      ],
+    ]);
+    const [mutation] = await linePoints(page, 'mutation');
+    expect(mutation?.map(([x]) => x)).toEqual([0, 1000]);
+    expect(mutation?.[0]?.[1]).toBe(100);
+    expect(mutation?.[1]?.[1]).toBeCloseTo(200 / 3, 6);
+    // 점은 그리기 영역의 같은 비율 위치에 있다 (원이 늘어나지 않게 HTML)
+    expect(await dotRatios(page, 'compliance')).toEqual([
+      [0, 0.75],
+      [1, 0.6],
+    ]);
+    const dots = await dotRatios(page, 'mutation');
+    expect(dots.map(([x]) => x)).toEqual([0, 1]);
+    expect(dots[0]?.[1]).toBeCloseTo(0.5, 2);
+    expect(dots[1]?.[1]).toBeCloseTo(1 / 3, 2);
+    // 선마다 색만이 아니라 선 모양이 다르다 (계산된 스타일)
+    const dash = await lines.evaluateAll((els) =>
+      els.map((el) => getComputedStyle(el).strokeDasharray),
+    );
+    expect(dash[0]).toBe('none');
+    expect(dash[1]).not.toBe('none');
+    // 범례: 이름 + 마지막 점의 값 (= 요약 카드 값)
+    await expect(trendArea(page).getByTestId('trend-legend-item')).toHaveText([
+      '통과율 2 / 5',
+      '변이 검증됨 2 / 3',
+    ]);
+    await expect(page.getByTestId('metric-mutation').getByTestId('metric-value')).toHaveText(
+      '2 / 3',
+    );
+    // 세로축 눈금 3개, 가로축은 병합 시각 두 개(첫 점 · 마지막 점)만
+    await expect(trendArea(page).getByTestId('trend-tick')).toHaveText(['100%', '50%', '0%']);
+    const axis = trendArea(page).getByTestId('trend-axis-label');
+    await expect(axis).toHaveCount(2);
+    const labels = await axis.allTextContents();
+    for (const label of labels) expect(label).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    expect(labels[0] !== undefined && labels[1] !== undefined && labels[0] < labels[1]).toBe(true);
+    // 기간 선택 UI가 없다: 추이 영역에 입력 · 선택 · 버튼이 없다
+    await expect(trendArea(page).locator('input, select, button, [role="combobox"]')).toHaveCount(
+      0,
+    );
+    await expect(page.getByRole('combobox')).toHaveCount(0);
+    // 현재 프로젝트로 부른다 (요약과 같은 규칙: 개발 모드의 효과 두 번 실행으로 여러 번일 수 있다)
+    const calls = (await bive.calls()).filter((call) => call.method === 'verification.trend');
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) expect(call.params).toEqual({ projectId: PROJECT.id });
+  });
+
+  test('점 하나: 선 없이 점 2개(선마다), 가로축 표기 하나. 점 0개: "추이 없음"이고 그래프가 없다', async ({
+    page,
+  }) => {
+    const bive = await openScreen(page);
+    await expect(trendArea(page)).toHaveAttribute('data-state', 'single');
+    await expect(trendArea(page).getByTestId('trend-line')).toHaveCount(0);
+    expect(await dotRatios(page, 'compliance')).toEqual([[0.5, 0.6]]);
+    await expect(trendArea(page).getByTestId('trend-axis-label')).toHaveCount(1);
+
+    await bive.setResponse('verification.trend', { result: { points: [], truncated: false } });
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await page.getByRole('button', { name: '검증', exact: true }).click();
+    await expect(trendArea(page)).toHaveAttribute('data-state', 'none');
+    await expect(trendArea(page).getByTestId('empty-state')).toHaveText('추이 없음');
+    await expect(trendArea(page).getByTestId('trend-svg')).toHaveCount(0);
+    await expect(trendArea(page).getByTestId('trend-dot')).toHaveCount(0);
+  });
+
+  test('점 상한으로 잘리면 "최근 30개"이고, 분모가 0인 점에서 그 선만 끊긴다(가짜 점 없음)', async ({
+    page,
+  }) => {
+    await openScreen(page, {
+      'verification.summary': { result: TRUNCATED_SUMMARY },
+      'verification.trend': { result: TRUNCATED_TREND },
+    });
+    await expect(trendArea(page).getByTestId('trend-truncated')).toHaveText('최근 30개');
+    // 잘림 표기는 제목 밖이라 제목의 접근 이름은 "준수 추이" 그대로이고 같은 줄에 있다
+    const heading = trendArea(page).getByRole('heading', { level: 2 });
+    await expect(heading).toHaveAccessibleName('준수 추이');
+    await expect(heading.getByTestId('trend-truncated')).toHaveCount(0);
+    const [headBox, noteBox] = await Promise.all([
+      heading.boundingBox(),
+      trendArea(page).getByTestId('trend-truncated').boundingBox(),
+    ]);
+    expect(headBox !== null && noteBox !== null && noteBox.x > headBox.x + headBox.width).toBe(
+      true,
+    );
+    expect(
+      Math.abs(
+        (headBox?.y ?? 0) + (headBox?.height ?? 0) - ((noteBox?.y ?? 0) + (noteBox?.height ?? 0)),
+      ),
+    ).toBeLessThan(4);
+    const compliance = await linePoints(page, 'compliance');
+    expect(compliance).toHaveLength(1);
+    expect(compliance[0]).toHaveLength(30);
+    const mutation = await linePoints(page, 'mutation');
+    expect(mutation.map((segment) => segment.length)).toEqual([6, 23]);
+    await expect(
+      trendArea(page).locator('[data-testid="trend-dot"][data-series="mutation"]'),
+    ).toHaveCount(29);
+    await expect(
+      trendArea(page).locator('[data-testid="trend-dot"][data-series="compliance"]'),
+    ).toHaveCount(30);
+  });
+
+  test('추이 조회만 실패하면 그 영역에 "추이 불러오기 실패", 요약 카드는 그대로', async ({
+    page,
+  }) => {
+    await openScreen(page, {
+      'verification.trend': { error: { code: -32603, message: '내부 오류' } },
+    });
+    await expect(trendArea(page).getByTestId('trend-load-error')).toHaveText('추이 불러오기 실패');
+    await expect(trendArea(page)).toHaveAttribute('data-state', 'error');
+    await expect(page.getByTestId('metric-label')).toHaveText(METRIC_LABELS);
+    await expect(page.getByTestId('metric-mutation').getByTestId('metric-value')).toHaveText(
+      '2 / 3',
+    );
+  });
+
+  test('변이 검증됨 카드: 변이 기록 규칙이 없으면 "없음"(0 / 0이 아님)이고 상태 속성이 none', async ({
+    page,
+  }) => {
+    await openScreen(page, {
+      'verification.summary': { result: { ...SUMMARY, mutation: { verified: 0, tested: 0 } } },
+    });
+    const card = page.getByTestId('metric-mutation');
+    await expect(card.getByTestId('metric-value')).toHaveText('없음');
+    await expect(card).toHaveAttribute('data-state', 'none');
+  });
+
+  test('변이 검증됨 카드를 누르면 규칙 화면이 "변이: 생존" 필터로 열리고 변이 생존 규칙만 보인다. 앞 필터는 남지 않는다', async ({
+    page,
+  }) => {
+    await openScreen(page, { 'rule.list': { result: { rules: MUTATION_RULES } } });
+    // 앞 카드의 필터를 먼저 건다: 변이 카드는 그 필터 전체를 바꾼다
+    await page.getByTestId('metric-compliance-confirmed').click();
+    await page.getByRole('button', { name: '검증', exact: true }).click();
+    await page.getByTestId('metric-mutation').click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(
+      page.getByTestId('filter-chip-mutation').getByTestId('filter-chip-button'),
+    ).toHaveText('변이: 생존');
+    await expect(
+      page.getByTestId('filter-chip-confirmation').getByTestId('filter-chip-button'),
+    ).toHaveText('확인');
+    await expect(
+      page.getByTestId('filter-chip-compliance').getByTestId('filter-chip-button'),
+    ).toHaveText('준수 집계');
+    const survived = MUTATION_RULES.filter(
+      (item) => item.mutation === 'survived' && item.rule.deletedAt === null && !item.retirement,
+    ).map(({ rule }) => rule.displayId);
+    expect(survived).toEqual(['RULE-001', 'RULE-002']);
+    expect((await page.getByTestId('card-id').allTextContents()).sort()).toEqual(survived);
+    await expect(page.getByTestId('hidden-toggle')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  for (const width of [820, 1280]) {
+    test(`창 폭 ${String(width)}에서 추이 영역 · 범례 · 가로축이 넘치거나 겹치지 않는다`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await openScreen(page, {
+        'verification.summary': { result: TRUNCATED_SUMMARY },
+        'verification.trend': { result: TRUNCATED_TREND },
+      });
+      await expect(trendArea(page).getByTestId('trend-line').first()).toBeVisible();
+      const screen = page.getByTestId('verification-screen');
+      expect(await horizontalOverflow(screen, '[data-testid="trend"] *')).toEqual([]);
+      const problems = await trendArea(page).evaluate((area) => {
+        const out: string[] = [];
+        const box = area.getBoundingClientRect();
+        const items = [
+          ...area.querySelectorAll<HTMLElement>(
+            '[data-testid="trend-legend-item"], [data-testid="trend-axis-label"], [data-testid="trend-tick"], [data-testid="trend-canvas"]',
+          ),
+        ];
+        for (const el of items) {
+          const r = el.getBoundingClientRect();
+          if (r.left < box.left - 0.5 || r.right > box.right + 0.5)
+            out.push(`${el.textContent ?? ''}: 밖`);
+          if (el.scrollWidth > el.clientWidth + 0.5) out.push(`${el.textContent ?? ''}: 잘림`);
+        }
+        const axis = [
+          ...area.querySelectorAll<HTMLElement>('[data-testid="trend-axis-label"]'),
+        ].map((el) => el.getBoundingClientRect());
+        if (axis.length === 2 && (axis[0]?.right ?? 0) > (axis[1]?.left ?? 0))
+          out.push('가로축 겹침');
+        const canvas = area.querySelector('[data-testid="trend-canvas"]')?.getBoundingClientRect();
+        if (canvas === undefined || canvas.width < 200 || canvas.height < 100)
+          out.push('그리기 영역 작음');
+        return out;
+      });
+      expect(problems).toEqual([]);
+      await mkdir(path.dirname(TREND_SHOT(width)), { recursive: true });
+      await screen.screenshot({ path: TREND_SHOT(width) });
+    });
+  }
+
+  test('추이 영역의 글자에 금지 문구 · 코드 표기가 없다', async ({ page }) => {
+    await openSeries(page);
+    const text = (await trendArea(page).innerText()).trim();
+    expect(findForbiddenText([{ source: '추이', text }])).toEqual([]);
+    expect(text).not.toMatch(/EXE-|RULE-/);
+  });
+});
+
 test.describe('공통 툴팁: 준수 카드의 기준 · 코드 열람 한계 문구 (#201, ADR-124)', () => {
   type Target = keyof typeof TOOLTIPS;
   const TARGETS = Object.keys(TOOLTIPS) as Target[];
@@ -952,7 +1229,8 @@ test.describe('공통 툴팁: 준수 카드의 기준 · 코드 열람 한계 �
   const NEIGHBOR: Record<Target, { from: string; key: 'Tab' | 'Shift+Tab' }> = {
     'metric-compliance-all': { from: 'metric-compliance-confirmed', key: 'Shift+Tab' },
     'metric-compliance-confirmed': { from: 'metric-compliance-all', key: 'Tab' },
-    'metric-unrulable': { from: 'metric-agent-retired', key: 'Tab' },
+    'metric-mutation': { from: 'metric-agent-retired', key: 'Tab' },
+    'metric-unrulable': { from: 'metric-mutation', key: 'Tab' },
     'metric-traceability': { from: 'metric-unrulable', key: 'Tab' },
     'code-open-hint': { from: 'metric-traceability', key: 'Tab' },
   };

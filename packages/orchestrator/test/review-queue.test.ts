@@ -487,6 +487,7 @@ describe('변이 생존 액션 (M3-08 수용 기준 2, PRD TODO-02 · 미결 #7)
     const summaryBefore = await h.client.call('verification.summary', {
       projectId: h.project.id,
     });
+    const trendBefore = await h.client.call('verification.trend', { projectId: h.project.id });
 
     const changes: string[] = [];
     const stop = onReviewQueueChanged(h.biveHome, (projectId) => changes.push(projectId));
@@ -520,6 +521,12 @@ describe('변이 생존 액션 (M3-08 수용 기준 2, PRD TODO-02 · 미결 #7)
     expect(await h.client.call('verification.summary', { projectId: h.project.id })).toEqual(
       summaryBefore,
     );
+    // 준수 추이도 실행의 판정 기록만 읽으므로(실행 없는 격리 기록은 들지 않는다) 점 값이 그대로다
+    expect(await h.client.call('verification.trend', { projectId: h.project.id })).toEqual(
+      trendBefore,
+    );
+    // 변이 상태는 격리와 무관하게 가장 나중 변이 기록('변이 생존') 그대로다
+    expect(listed.rules[0]?.mutation).toBe('survived');
     const again = await rejection(
       h.client.call('reviewQueue.quarantine', {
         projectId: h.project.id,

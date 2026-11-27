@@ -4,17 +4,21 @@
 //   보이는 표기로 바꿔 그린다(visibleText)
 // - 예외: 판정 상태의 예외(실패 · 미판정 · 격리 · 재검증 필요, 1.4 상태 배지) 다음에 규범 예외(폐기 · 미확인). 미확인은 옛 '잠정'
 //   자리다(ADR-100 명세 변경 목록 SCR-03). 폐기된 규칙은 더 판정하지 않으므로(ADR-112) 판정 예외 없이 폐기 · 미확인만 보인다.
-//   변이 생존은 변이 데이터가 생기면(P1) 더한다. 값은 rule.list 결과(규칙 필드 · 최신 판정 · 폐기 사실)에서만 도출한다(NFR-03)
+//   변이 생존(SCR-03 카드 예외 "실패 · 재검증 필요 · 변이 생존 · 잠정" 순서)은 판정 예외 바로 뒤, 규범 예외 앞이다. 정상 변이 상태
+//   (변이 검증됨 · 변이 미검증)는 카드에 아무것도 더하지 않는다(1줄의 흐린 점은 판정 통과 하나, ADR-060 · ADR-146). 폐기된 규칙은
+//   판정 예외처럼 변이 예외도 없다. 값은 rule.list 결과(규칙 필드 · 최신 판정 · 폐기 사실 · 변이 상태)에서만 도출한다(NFR-03)
 // - 추적성 결함(부모 없는 규칙, SCR-03 "결함: 요구사항과 연결되지 않은 규칙 (내장 구조 규칙 제외)")은 규범 예외 맨 앞
 //   "추적성 결함"(danger, 요구사항 카드와 같은 낱말 · 색). 서버가 정한 목록(`rule.list`의 `traceability.parentlessRules`)에 든
 //   규칙만이고 화면은 다시 세지 않는다(내장 · 폐기 규칙은 서버가 뺀다, M3-11 #56 · ADR-137). 목록을 모르면 보이지 않는다
-// - 필터: 판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류. 변이는 지금 값이 없어 0건 비활성 (ADR-035). 블록 · 위험도는
+// - 필터: 판정 · 변이 · 준수 집계 · 확인 · 블록 · 위험도 · 종류. 변이 값은 서버가 준 규칙의 변이 상태(`mutation`, 가장 나중 변이
+//   기록, 없으면 변이 미검증)만 쓰고 다시 정하지 않는다. 그 칸이 없는 옛 응답 · 폐기된 규칙은 값이 없다 (M3-15 · ADR-146). 블록 · 위험도는
 //   규칙의 대상 블록 · 위험도에서 센다(블록 값은 목록 규칙이 가진 이름 전부, 이름 순. M3-19 #64 · ADR-126).
 //   폐기된 규칙은 기본 목록에서 빠지고 [폐기 포함]을 켜야 보인다(ListView `hidden`)
 import type {
   AuthorKind,
   ConfirmationState,
   JudgmentStatus,
+  MutationStatus,
   Risk,
   RuleKind,
   RuleWithJudgment,
@@ -147,7 +151,25 @@ export const whenCondition = (statement: string): string | null => {
   return condition.length > (when[1] ?? '').length ? condition : null;
 };
 
-/** 카드의 규범 예외 (판정 예외 다음, 이 순서로: 추적성 결함 · 폐기 · 미확인). */
+/** 카드의 변이 예외 (판정 예외 바로 뒤, 규범 예외 앞): 변이 생존만. 상태 배지의 변이 생존과 같은 낱말 · 색. */
+export const MUTATION_SURVIVED_MARK: ExceptionMark = {
+  key: 'mutation:survived',
+  label: MUTATION_LABELS.survived,
+  tone: 'danger',
+};
+
+/** 변이 칩의 값 이름: 상태 이름에서 칩 이름("변이")을 뺀 것 (화면 정의서 이동 경로 "`변이: 생존`"). */
+export const MUTATION_FILTER_LABELS = {
+  verified: '검증됨',
+  unverified: '미검증',
+  survived: '생존',
+} as const satisfies Record<MutationStatus, string>;
+
+/** 규칙의 변이 상태 (서버가 준 값). 폐기된 규칙 · 그 칸이 없는 옛 응답은 `null`(모름: 필터 값 · 예외 없음). */
+export const ruleMutationOf = (item: RuleWithJudgment): MutationStatus | null =>
+  isRetiredRule(item) ? null : (item.mutation ?? null);
+
+/** 카드의 규범 예외 (판정 · 변이 예외 다음, 이 순서로: 추적성 결함 · 폐기 · 미확인). */
 export const TRACEABILITY_MARK: ExceptionMark = {
   key: 'traceability',
   label: '추적성 결함',
@@ -188,6 +210,7 @@ export const ruleCard = (item: RuleWithJudgment, defects: RuleDefects = null): R
   const statuses: BadgeStatus[] = retired ? [] : [{ kind: 'judgment', status: judgment.status }];
   const note = whenCondition(rule.statement);
   const exceptions: ExceptionMark[] = [];
+  if (ruleMutationOf(item) === 'survived') exceptions.push(MUTATION_SURVIVED_MARK);
   if (defects?.has(rule.id) === true) exceptions.push(TRACEABILITY_MARK);
   if (retired) exceptions.push(RETIRED_MARK);
   if (rule.confirmation.state === 'unconfirmed') exceptions.push(UNCONFIRMED_MARK);
@@ -242,9 +265,13 @@ export const ruleCriteria = (
   {
     id: 'mutation',
     label: '변이',
-    // 변이 결과(변이 주입 단계, P1)가 아직 없다 → 값 없음 = 0건 비활성 (ADR-035)
-    options: options(MUTATION_LABELS),
-    values: () => [],
+    // 서버가 준 변이 상태 하나 (폐기 · 옛 응답은 값 없음, ADR-146). 값 글자는 칩 이름 "변이" 뒤에 붙는 짧은 이름이라
+    // 선택하면 "변이: 생존"(SCR-03 · SCR-05 이동 경로의 표기)이다
+    options: options<MutationStatus>(MUTATION_FILTER_LABELS),
+    values: (item) => {
+      const mutation = ruleMutationOf(item);
+      return mutation === null ? [] : [mutation];
+    },
   },
   {
     id: 'compliance',

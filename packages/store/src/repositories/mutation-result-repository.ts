@@ -77,6 +77,8 @@ export class MutationResultRepository {
   readonly #insert;
   readonly #latest;
   readonly #byRun;
+  readonly #all;
+  readonly #latestAll;
   readonly #byId;
   readonly #nextSeq;
   readonly #link;
@@ -116,6 +118,16 @@ export class MutationResultRepository {
     );
     this.#byRun = db.prepare<[string], MutationRow>(
       `SELECT ${COLUMNS} FROM mutation_results WHERE run_id = ? ORDER BY recorded_at, id`,
+    );
+    this.#all = db.prepare<[], MutationRow>(
+      `SELECT ${COLUMNS} FROM mutation_results ORDER BY recorded_at, id`,
+    );
+    // 규칙마다 가장 최근 1건: 같은 규칙에서 더 늦은 기록이 없는 행 (판정 기록의 latestForRules와 같은 방식)
+    this.#latestAll = db.prepare<[], MutationRow>(
+      `SELECT ${COLUMNS} FROM mutation_results AS m WHERE NOT EXISTS (
+         SELECT 1 FROM mutation_results AS later WHERE later.rule_id = m.rule_id
+           AND (later.recorded_at > m.recorded_at OR (later.recorded_at = m.recorded_at AND later.id > m.id))
+       ) ORDER BY rule_id`,
     );
   }
 
@@ -203,6 +215,16 @@ export class MutationResultRepository {
   reinforcementOfResult(mutationResultId: string): MutationReinforcement | null {
     const row = this.#linkByResult.get(mutationResultId);
     return row === undefined ? null : toReinforcement(row);
+  }
+
+  /** 규칙 ID → 가장 최근 기록 (기록이 있는 규칙만). 규칙 목록이 한 번에 읽는다 (M3-15 #60, ADR-146). */
+  latestForRules(): Map<string, MutationResult> {
+    return new Map(this.#latestAll.all().map((row) => [row.rule_id, toResult(row)]));
+  }
+
+  /** 모든 변이 기록 (기록 시각 → ID 순). 준수 추이 · 검증 요약이 한 번에 읽는다 (M3-15 #60, ADR-146). */
+  list(): MutationResult[] {
+    return this.#all.all().map(toResult);
   }
 
   /** 실행의 변이 기록 (기록 시각 순). */

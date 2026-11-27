@@ -276,6 +276,30 @@ describe('카드', () => {
     expect(ruleCard(PASS).exceptions).toEqual([]);
   });
 
+  it('변이 생존 (M3-15, ADR-146): 판정 예외 바로 뒤 · 추적성 결함 · 미확인 앞, 정상 변이 상태 · 폐기 규칙 · 옛 응답은 예외 없음', () => {
+    const defects = ruleDefectsOf({
+      parentlessRules: [{ id: UNCONFIRMED.rule.id, displayId: UNCONFIRMED.rule.displayId }],
+    });
+    const survived = { ...judged(UNCONFIRMED.rule, 'fail'), mutation: 'survived' as const };
+    const card = ruleCard(survived, defects);
+    expect(
+      [...card.statuses.flatMap(statusExceptions), ...card.exceptions].map((m) => m.label),
+    ).toEqual(['실패', '변이 생존', '추적성 결함', '미확인']);
+    expect(card.exceptions[0]).toEqual({
+      key: 'mutation:survived',
+      label: '변이 생존',
+      tone: 'danger',
+    });
+    for (const mutation of ['verified', 'unverified'] as const) {
+      expect(ruleCard({ ...PASS, mutation }).exceptions).toEqual([]);
+    }
+    expect(ruleCard(PASS).exceptions).toEqual([]);
+    expect(ruleCard({ ...RETIRED, mutation: 'survived' }).exceptions.map((m) => m.label)).toEqual([
+      '폐기',
+      '미확인',
+    ]);
+  });
+
   it('폐기된 규칙: 폐기 전 판정 예외 없이 폐기 · 미확인 (폐기 뒤 판정하지 않음, ADR-112)', () => {
     const card = ruleCard(RETIRED);
     expect(card.statuses).toEqual([]);
@@ -388,8 +412,9 @@ describe('필터 기준', () => {
     });
   });
 
-  it('변이: 값이 없어 전부 0건 (칩 비활성, ADR-035). 블록 · 위험도도 값이 없는 옛 규칙뿐이면 0건', () => {
-    expect(labels('mutation')).toEqual(['변이 검증됨', '변이 미검증', '변이 생존']);
+  it('변이: 변이 칸이 없는 옛 응답이면 전부 0건 (칩 비활성, ADR-035 · ADR-146). 블록 · 위험도도 값이 없는 옛 규칙뿐이면 0건', () => {
+    // 값 이름은 칩 이름 "변이" 뒤에 붙는 짧은 이름 (고르면 "변이: 생존", M3-15 · ADR-146)
+    expect(labels('mutation')).toEqual(['검증됨', '미검증', '생존']);
     expect(counts['mutation']).toEqual({ verified: 0, unverified: 0, survived: 0 });
     expect(labels('block')).toEqual([]);
     expect(counts['block']).toEqual({});
