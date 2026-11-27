@@ -12,8 +12,16 @@
 //     남긴다. 규칙의 판정은 가장 최근 기록이므로 그 뒤 실제 판정이 나오면 그것이 최신이다. 검사 단계 · 병합 재검사는 저장된 최신
 //     판정을 읽지 않고 그 실행에서 다시 판정하므로 격리가 통과로 세어지지 않는다
 //   - 이의 제기: 정의 전(PRD 미결 #7)이라 메서드가 없다
+// - 예산 초과 액션 (M3-56 #319, ADR-147, ADR-149):
+//   - 한도 상향 재개: 원 실행은 '예산 초과' 그대로 두고, 사람의 실행 RPC 처리기가 `run.create`와 같은 문(`createRun`)으로 원 실행과 같은
+//     유형 · 대상 규칙 · 기준 커밋의 이어받는 실행을 만든다. 이 모듈이 항목 · 원 실행 · 새 한도를 확인하고(`continuationTarget`), 같은 트랜잭션에서
+//     원 실행과의 연결(저장소 `runContinuations`, 0030)을 쓰고 항목을 처리한다(`recordContinuation`). 이어받는 실행의 연결을 쓰는 곳은 이 모듈 하나다
+//   - 허용 목록 축소 재개 · 규칙 분할: 뒤 이슈(M3-58 · M3-57)
 // - 값은 저장된 항목 · 실행 · 규칙 · 변이 기록에서만 만든다(NFR-03)
 import {
+  type AgentRole,
+  type BudgetLimits,
+  type BudgetSnapshot,
   DomainErrorReason,
   ErrorCode,
   type HumanAuthor,
@@ -25,12 +33,16 @@ import {
   type ReviewItemKind,
   type ReviewItemState,
   type ReviewQueueEntry,
+  type Run,
   type RunCreateResult,
+  subtractUsd,
 } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
+import { budgetValueUsages, limitReached } from '../engine/session-budget.js';
 import { RpcError } from '../ipc/server.js';
-import type { RunClock } from '../runs/run-service.js';
+import { lineageSessions } from '../runs/run-continuation.js';
+import type { RunClock, RunContinuationSeed } from '../runs/run-service.js';
 
 const conflict = (reason: ReviewConflictReason, message: string): RpcError =>
   new RpcError(ErrorCode.StateConflict, message, { reason });
@@ -199,3 +211,125 @@ export const quarantineReviewItem = (
     });
     return { entry: reviewQueueEntry(store, resolved), judgment };
   });
+
+// ── 예산 초과 액션: 한도 상향 재개 (M3-56 #319, ADR-147 ② ④ ⑤ ⑦, ADR-149) ─────────────
+
+/** 예산 값 하나의 이름 (`run.maxBudgetUsd` · `roles.implementer.maxTurns`). 검증 오류의 `data.fields`에 싣는다. */
+const budgetField = (role: AgentRole | null, measure: 'usd' | 'turns'): string =>
+  `${role === null ? 'run' : `roles.${role}`}.${measure === 'usd' ? 'maxBudgetUsd' : 'maxTurns'}`;
+
+const valueOf = (limits: BudgetLimits, measure: 'usd' | 'turns'): number =>
+  measure === 'usd' ? limits.maxBudgetUsd : limits.maxTurns;
+
+const budgetRejected = (reason: DomainErrorReason, message: string, fields: string[]): RpcError =>
+  new RpcError(ErrorCode.ValidationFailed, message, { reason, fields });
+
+/**
+ * 한도 상향 재개의 새 한도 검증 (ADR-147 ④, ADR-149). `previous`는 원 실행의 예산 값, `sessions`는 원 실행(사슬 전체)의 세션 기록이다.
+ * - 모양: 역할 집합이 원 실행과 같아야 한다(아니면 -32001 `BUDGET_SHAPE_MISMATCH`). 값의 형식(양수 · 정수)은 요청 스키마가 본다
+ * - 내리기 거부: 어느 값이든 원 실행의 같은 값보다 작으면 -32001 `BUDGET_LOWERED`(같은 값은 받는다)
+ * - 닿은 값: 원 실행이 쓴 양이 이미 닿은 값(남은 값이 0 이하, 엔진이 세션을 열지 않는 판정과 같은 계산)은 새 값에서 남은 값이 0보다 커야
+ *   한다(아니면 -32001 `BUDGET_NOT_ABOVE_SPENT`)
+ * 오류의 `data.fields`는 걸린 값의 이름(실행 전체 → 역할, USD → 턴 순)이다.
+ * @throws {RpcError} -32001
+ */
+export const assertRaisedBudget = (
+  previous: BudgetSnapshot,
+  next: BudgetSnapshot,
+  sessions: Parameters<typeof budgetValueUsages>[1],
+): void => {
+  const roles = (snapshot: BudgetSnapshot): string[] =>
+    Object.entries(snapshot.roles)
+      .flatMap(([role, limits]) => (limits === undefined ? [] : [role]))
+      .sort();
+  const [before, after] = [roles(previous), roles(next)];
+  if (before.length !== after.length || before.some((role, index) => role !== after[index])) {
+    throw budgetRejected(
+      DomainErrorReason.BudgetShapeMismatch,
+      '새 한도의 역할이 원 실행의 예산 값과 다릅니다',
+      [...new Set([...before, ...after])]
+        .filter((role) => !before.includes(role) || !after.includes(role))
+        .sort()
+        .map((role) => `roles.${role}`),
+    );
+  }
+  const nextLimits = (role: AgentRole | null): BudgetLimits =>
+    role === null ? next.run : (next.roles[role] as BudgetLimits);
+  const usages = budgetValueUsages(previous, sessions);
+  const lowered = usages.filter((usage) => {
+    const value = valueOf(nextLimits(usage.role), usage.measure);
+    return usage.measure === 'usd' ? subtractUsd(value, usage.limit) < 0 : value < usage.limit;
+  });
+  if (lowered.length > 0) {
+    throw budgetRejected(
+      DomainErrorReason.BudgetLowered,
+      '새 한도가 원 실행의 한도보다 작습니다',
+      lowered.map((usage) => budgetField(usage.role, usage.measure)),
+    );
+  }
+  const stuck = usages.filter(
+    (usage) =>
+      usage.reached &&
+      limitReached(usage.measure, valueOf(nextLimits(usage.role), usage.measure), usage.spent),
+  );
+  if (stuck.length > 0) {
+    throw budgetRejected(
+      DomainErrorReason.BudgetNotAboveSpent,
+      '원 실행이 이미 다 쓴 한도는 쓴 양보다 크게 올려야 합니다',
+      stuck.map((usage) => budgetField(usage.role, usage.measure)),
+    );
+  }
+};
+
+/** 한도 상향 재개할 열린 예산 초과 항목 · 원 실행 · 이어받는 실행을 만들 값. */
+export interface ContinuationTarget {
+  readonly item: ReviewItem;
+  readonly origin: Run;
+  readonly seed: RunContinuationSeed;
+}
+
+/**
+ * 한도 상향 재개를 받을 수 있는지 본다 (실행을 만들기 전, 같은 쓰기 트랜잭션 안에서 부른다). 새 한도는 원 실행의 사슬 전체 사용량으로
+ * 검증한다(`assertRaisedBudget`).
+ * @throws {RpcError} -32004 없는 항목 · -32009 이미 처리됨 · 예산 초과 항목이 아님 · -32001 새 한도
+ */
+export const continuationTarget = (
+  store: ProjectStore,
+  seq: number,
+  budget: BudgetSnapshot,
+): ContinuationTarget => {
+  const item = openItem(store, seq, 'budget_exceeded');
+  const origin = store.runs.getDetail(item.runId);
+  if (origin === null) {
+    throw new RpcError(ErrorCode.NotFound, `실행을 찾을 수 없습니다: ${item.runId}`);
+  }
+  assertRaisedBudget(origin.run.budgetSnapshot, budget, lineageSessions(store, origin.run.id));
+  return { item, origin: origin.run, seed: { budgetSnapshot: budget } };
+};
+
+/**
+ * 사람이 시작한 이어받는 실행(사람의 실행 생성 `createRun`으로 막 만든 것)을 원 실행과 잇고 예산 초과 항목을 처리됨(한도 상향 재개)으로
+ * 남긴다. 실행 생성과 같은 쓰기 트랜잭션 안에서 부른다(하나라도 실패하면 실행도 남지 않는다). 실행을 만드는 곳은 사람의 실행 RPC
+ * 처리기(`ipc/run-handlers.ts`)다.
+ */
+export const recordContinuation = (
+  store: ProjectStore,
+  target: ContinuationTarget,
+  created: RunCreateResult,
+  author: HumanAuthor,
+): ReviewQueueEntry => {
+  const at = created.run.createdAt;
+  store.runContinuations.link({
+    runId: created.run.id,
+    originRunId: target.origin.id,
+    createdAt: at,
+  });
+  const resolved = store.reviewQueue.resolve(target.item.seq, {
+    action: 'raise_limit_resume',
+    by: author,
+    at,
+    reason: null,
+    runId: created.run.id,
+  });
+  return reviewQueueEntry(store, resolved);
+};

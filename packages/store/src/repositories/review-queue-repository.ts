@@ -67,9 +67,9 @@ const toItem = (row: ItemRow): ReviewItem =>
 
 /** 처리 결과 칸 (`action` · `by` · `at` · `reason` 밖의 칸 = 액션마다 다른 결과). */
 const detailOf = (resolution: ReviewResolution): Record<string, unknown> =>
-  resolution.action === 'reinforce'
-    ? { runId: resolution.runId }
-    : { judgmentId: resolution.judgmentId };
+  resolution.action === 'quarantine'
+    ? { judgmentId: resolution.judgmentId }
+    : { runId: resolution.runId };
 
 export class ReviewQueueRepository {
   readonly #all;
@@ -133,7 +133,7 @@ export class ReviewQueueRepository {
    * 열린 항목의 처리를 한 번 기록한다. 처리 결과(테스트 보강의 연결 · 판정 격리의 판정 기록)는 같은 트랜잭션에서 먼저 써야 한다.
    * @throws {ZodError} 처리 형식 위반
    * @throws {ConflictError} 없거나 이미 처리된 항목
-   * @throws {SqliteError} 종류가 받지 않는 액션 · 처리 결과 없음 (CHECK · 트리거)
+   * @throws {SqliteError} 종류가 받지 않는 액션 · 처리 결과 없음 (CHECK · 트리거: 한도 상향 재개는 이어받는 실행의 연결, 0030)
    */
   resolve(seq: number, input: ReviewResolution): ReviewItem {
     const resolution = ReviewResolution.parse(input);

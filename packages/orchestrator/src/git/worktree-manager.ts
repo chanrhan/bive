@@ -63,7 +63,9 @@ export type GitWorktreeErrorCode =
   | 'worktree_missing'
   | 'worktree_branch_mismatch'
   /** 병합 검사 함수 안에서 같은 대기열을 다시 잡는 호출(교착)을 막았다 (ADR-065) */
-  | 'reentrant_call';
+  | 'reentrant_call'
+  /** 이어받는 실행의 시작 커밋이 원 실행 브랜치에 없거나 기준 커밋의 자손이 아니다 (ADR-149) */
+  | 'start_commit_unavailable';
 
 /** 실행 브랜치 · 워크트리를 만들거나 다룰 수 없을 때. `code`로 원인을 가른다. */
 export class GitWorktreeError extends Error {
@@ -100,6 +102,16 @@ export interface CreateRunInput {
   repoPath: string;
   /** 기준 브랜치 이름 (`Project.baseBranch`, ADR-054). `refs/heads/` 없이 */
   baseBranch: string;
+  /**
+   * 이어받는 실행의 시작 자리 (M3-56 #319, ADR-147 ②, ADR-149). 주면 기준 브랜치의 지금 커밋 대신 `commit`에서 실행 브랜치를 만들고 기준
+   * 커밋은 `baseCommit`(원 실행의 기준 커밋)이다. `commit`은 원 실행 브랜치(`fromBranch`)에 있는 커밋이어야 하고 `baseCommit`은 그
+   * 조상(같아도 됨)이어야 한다(git 객체로 확인, 아니면 `start_commit_unavailable`). 원 실행의 브랜치 · 워크트리는 읽기만 한다
+   */
+  start?: {
+    readonly baseCommit: string;
+    readonly commit: string;
+    readonly fromBranch: string;
+  };
 }
 
 /** 실행의 git 참조. `create`가 돌려주고, 실행 엔진은 같은 값을 `Run`에 저장했다가 다시 넘긴다. */
@@ -743,14 +755,59 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
 
     // 확인부터 생성까지 `git worktree` 잠금 안에서 한다: 같은 저장소의 다른 `worktree` 명령이 반쯤 만든 관리 폴더를
     // 읽지 않게 하고, 같은 실행 ID를 동시에 만들 때 늦은 쪽이 앞선 쪽의 브랜치를 지우지 않게 한다(ADR-065)
+    const start = input.start;
+    if (start !== undefined) {
+      if (
+        !CommitSha.safeParse(start.baseCommit).success ||
+        !CommitSha.safeParse(start.commit).success
+      ) {
+        throw new GitWorktreeError(
+          'invalid_input',
+          '이어받는 실행의 시작 커밋이 커밋 해시가 아닙니다',
+        );
+      }
+      const fromId = start.fromBranch.slice(RUN_BRANCH_PREFIX.length);
+      if (
+        !start.fromBranch.startsWith(RUN_BRANCH_PREFIX) ||
+        !RunDisplayId.safeParse(fromId).success
+      ) {
+        throw new GitWorktreeError(
+          'invalid_input',
+          `원 실행 브랜치 이름이 아닙니다: ${start.fromBranch}`,
+        );
+      }
+    }
     const baseCommit = await withWorktreeLock(repoKey, async () => {
-      const tipCommit = await resolveCommit(repoPath, `refs/heads/${input.baseBranch}`);
-      if (tipCommit === null) {
+      const tipCommit =
+        start === undefined
+          ? await resolveCommit(repoPath, `refs/heads/${input.baseBranch}`)
+          : await resolveCommit(repoPath, start.commit);
+      if (tipCommit === null && start === undefined) {
         throw new GitWorktreeError(
           'base_branch_missing',
           `기준 브랜치가 없거나 커밋이 없습니다: ${input.baseBranch}`,
         );
       }
+      // 이어받는 실행: 시작 커밋은 원 실행 브랜치에 있어야 하고(원 실행이 만든 커밋), 기준 커밋은 그 조상이어야 한다 (git 객체로 확인)
+      if (start !== undefined) {
+        const fromTip = await resolveCommit(repoPath, `refs/heads/${start.fromBranch}`);
+        const base = await resolveCommit(repoPath, start.baseCommit);
+        if (
+          tipCommit === null ||
+          fromTip === null ||
+          base === null ||
+          tipCommit !== start.commit ||
+          base !== start.baseCommit ||
+          !(await isAncestor(repoPath, tipCommit, fromTip)) ||
+          !(await isAncestor(repoPath, base, tipCommit))
+        ) {
+          throw new GitWorktreeError(
+            'start_commit_unavailable',
+            `이어받을 커밋이 원 실행 브랜치(${start.fromBranch})에 없거나 기준 커밋의 자손이 아닙니다: ${start.commit}`,
+          );
+        }
+      }
+      if (tipCommit === null) throw new GitWorktreeError('invalid_input', '시작 커밋이 없습니다');
       if ((await resolveCommit(repoPath, `refs/heads/${branch}`)) !== null) {
         throw new GitWorktreeError('branch_exists', `실행 브랜치가 이미 있습니다: ${branch}`);
       }
@@ -776,7 +833,8 @@ export const createWorktreeManager = (options: WorktreeManagerOptions): Worktree
         }).catch(() => undefined);
         throw error;
       }
-      return tipCommit;
+      // 이어받는 실행의 기준 커밋은 원 실행의 기준 커밋이다 (병합 때 기준 브랜치가 그 뒤 움직였는지 이 값과 비교한다)
+      return start === undefined ? tipCommit : start.baseCommit;
     });
 
     return {

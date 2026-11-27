@@ -156,6 +156,15 @@ export interface StepCompletion {
 
 const timestamp = (clock: RunClock): string => new Date(clock.now()).toISOString();
 
+/**
+ * 이어받는 실행을 만들 때만 쓰는 값 (M3-56 #319, ADR-147 ② ④, ADR-149). 검토 대기열의 한도 상향 재개 처리기만 넘긴다: 사람의 `run.create`
+ * RPC 인자(`RunCreateInput`)에는 없어 그 길로는 닿지 않는다. 설정은 바뀌지 않는다(모델 스냅샷 · 설정 확인은 설정 그대로).
+ */
+export interface RunContinuationSeed {
+  /** 새 실행의 예산 값 (설정의 한도 대신. 부른 쪽이 원 실행과 같은 모양 · 내리지 않음 · 쓴 양보다 큼을 검증했다) */
+  readonly budgetSnapshot: BudgetSnapshot;
+}
+
 /** 실행 시작 확인 주체는 사람뿐이다 (RUN-02, NFR-01). */
 export const assertHumanRunStarter = (author: Author): void => {
   if (author.kind !== 'human') {
@@ -197,6 +206,8 @@ export const saveNewRun = (
     readonly startedBy: RunStarter;
     /** 실행 유형 (생략하면 유형 A: 자동 시작 · 다시 시작 · 편집 뒤 시작) */
     readonly type?: RunType;
+    /** 이어받는 실행 (한도 상향 재개만, {@link RunContinuationSeed}) */
+    readonly continuation?: RunContinuationSeed;
   },
   at: string,
   newId: () => Ulid,
@@ -206,7 +217,10 @@ export const saveNewRun = (
   const type = input.type ?? M1_RUN_TYPE;
   const plan: readonly StepKind[] = RUN_STEP_PLANS[type];
   // 예산 · 모델 스냅샷은 그 유형이 실제로 쓰는 역할만 (생략 단계의 역할은 넣지 않는다, ADR-061 · ADR-136)
-  const { budgetSnapshot, modelSnapshot } = snapshotSettings(settings, runTypeRoles(type));
+  const snapshots = snapshotSettings(settings, runTypeRoles(type));
+  const { modelSnapshot } = snapshots;
+  // 이어받는 실행은 사람이 준 새 한도가 예산 값이다 (`runs_identity_immutable`을 풀지 않고 생성 때 정한다, ADR-147 ④)
+  const budgetSnapshot = input.continuation?.budgetSnapshot ?? snapshots.budgetSnapshot;
   return store.runs.create({
     id: input.runId,
     type,
@@ -313,6 +327,7 @@ export const resolveRunType = (
 /**
  * 실행을 만든다(실행 시작 확인): `saveNewRun`과 승인 기록 `run_start`(대상 규칙 포함)를 한 트랜잭션으로.
  * 판단 순서: 주체(-32020) → 설정(-32010) → 유형 · 대상 종류(`resolveRunType`, -32009) → 대상 규칙(없음 -32004 · 삭제됨 -32009).
+ * `continuation`은 검토 대기열의 한도 상향 재개만 넘긴다(이어받는 실행의 예산 값, M3-56 · ADR-149): 같은 문을 그대로 지난다.
  * @throws {RpcError} -32020 에이전트 주체 · -32010 설정 미비
  * @throws {NotFoundError} 대상 규칙이 없음
  * @throws {ConflictError} 대상 규칙이 삭제됨
@@ -322,6 +337,7 @@ export const createRun = (
   input: RunCreateInput,
   context: RunRequestContext,
   clock: RunClock,
+  continuation?: RunContinuationSeed,
 ): RunCreateResult => {
   assertHumanRunStarter(input.author);
   return store.transaction(() => {
@@ -333,7 +349,13 @@ export const createRun = (
     const detail = saveNewRun(
       store,
       settings,
-      { runId, ruleIds: input.ruleIds, startedBy: { kind: 'human' }, type },
+      {
+        runId,
+        ruleIds: input.ruleIds,
+        startedBy: { kind: 'human' },
+        type,
+        ...(continuation === undefined ? {} : { continuation }),
+      },
       at,
       clock.newId,
     );

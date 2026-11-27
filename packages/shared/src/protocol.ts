@@ -8,6 +8,7 @@ import {
   ApprovalLogEntry,
   Author,
   BlockDeclarationRecord,
+  BudgetSnapshot,
   CodeFilePath,
   CodeLine,
   CodeOpenRecord,
@@ -528,6 +529,12 @@ export const DomainErrorReason = {
   QuarantineReasonRequired: 'QUARANTINE_REASON_REQUIRED',
   /** 판정 격리 사유가 상한을 넘는다 (ADR-145) */
   QuarantineReasonInvalid: 'QUARANTINE_REASON_INVALID',
+  /** 한도 상향 재개의 새 한도가 원 실행의 예산 값과 모양이 다르다 (역할 집합이 다름, M3-56 · ADR-149) */
+  BudgetShapeMismatch: 'BUDGET_SHAPE_MISMATCH',
+  /** 새 한도의 어느 값이 원 실행의 같은 값보다 작다 (내리기, ADR-147 ④) */
+  BudgetLowered: 'BUDGET_LOWERED',
+  /** 원 실행(사슬 전체)이 쓴 양이 이미 닿은 값을 새 한도가 쓴 양보다 크게 올리지 않았다 (ADR-147 ④) */
+  BudgetNotAboveSpent: 'BUDGET_NOT_ABOVE_SPENT',
 } as const;
 export type DomainErrorReason = (typeof DomainErrorReason)[keyof typeof DomainErrorReason];
 
@@ -1645,6 +1652,29 @@ export const ReviewQueueQuarantineResult = z.strictObject({
 });
 export type ReviewQueueQuarantineResult = z.infer<typeof ReviewQueueQuarantineResult>;
 
+/**
+ * `reviewQueue.resumeWithBudget`: 예산 초과 항목의 한도 상향 재개 (M3-56 #319, ADR-147 ② ④ ⑤ ⑦, ADR-149). 원 실행은 '예산 초과'
+ * 그대로 두고, 원 실행과 같은 유형 · 대상 규칙 · 기준 커밋을 가진 이어받는 새 실행 1개를 사람의 `run.create`와 같은 문(설정 · 유형 ·
+ * 대상 규칙 · 승인 기록 `run_start`)으로 만든다. `budget`은 새 실행의 예산 값(`Run.budgetSnapshot`과 같은 모양)이다: 역할 집합이 원
+ * 실행과 다르면 -32001 `BUDGET_SHAPE_MISMATCH`, 어느 값이든 원 실행의 같은 값보다 작으면 -32001 `BUDGET_LOWERED`, 원 실행(사슬 전체)이
+ * 쓴 양이 이미 닿은 값은 쓴 양보다 커야 한다(아니면 -32001 `BUDGET_NOT_ABOVE_SPENT`). 새 실행의 사용량은 원 실행(사슬 전체)의
+ * 사용량부터 이어 센다.
+ */
+export const ReviewQueueResumeWithBudgetParams = z.strictObject({
+  projectId: Ulid,
+  seq: z.int().positive(),
+  budget: BudgetSnapshot,
+  author: Author,
+});
+export type ReviewQueueResumeWithBudgetParams = z.infer<typeof ReviewQueueResumeWithBudgetParams>;
+export const ReviewQueueResumeWithBudgetResult = z.strictObject({
+  entry: ReviewQueueEntry,
+  run: Run,
+  steps: z.array(Step),
+  approvalLog: ApprovalLogEntry,
+});
+export type ReviewQueueResumeWithBudgetResult = z.infer<typeof ReviewQueueResumeWithBudgetResult>;
+
 /** 처리 액션이 -32009로 거부하는 이유 (`error.data.reason`). */
 export const ReviewConflictReason = z.enum(['already_resolved', 'action_not_allowed']);
 export type ReviewConflictReason = z.infer<typeof ReviewConflictReason>;
@@ -1697,6 +1727,10 @@ export const METHODS = {
   'reviewQueue.quarantine': {
     params: ReviewQueueQuarantineParams,
     result: ReviewQueueQuarantineResult,
+  },
+  'reviewQueue.resumeWithBudget': {
+    params: ReviewQueueResumeWithBudgetParams,
+    result: ReviewQueueResumeWithBudgetResult,
   },
   'settings.get': { params: SettingsGetParams, result: SettingsResult },
   'settings.update': { params: SettingsUpdateParams, result: SettingsResult },

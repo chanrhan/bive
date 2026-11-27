@@ -21,6 +21,7 @@ import { ProjectRepository } from './repositories/project-repository.js';
 import { ProposalRepository } from './repositories/proposal-repository.js';
 import { RequirementRepository } from './repositories/requirement-repository.js';
 import { ReviewQueueRepository } from './repositories/review-queue-repository.js';
+import { RunContinuationRepository } from './repositories/run-continuation-repository.js';
 import { RuleRepository } from './repositories/rule-repository.js';
 import { RuleRetirementRepository } from './repositories/rule-retirement-repository.js';
 import { RuleWriterRequestRepository } from './repositories/rule-writer-request-repository.js';
@@ -95,6 +96,11 @@ export class ProjectStore {
    * 사람이 시작한 테스트 보강 연결은 오케스트레이터의 검토 대기열 모듈만 쓴다.
    */
   readonly reviewQueue: ReviewQueueRepository;
+  /**
+   * 이어받는 실행의 연결 (TODO-02 · COST-01, M3-56 #319, ADR-149). 예산 초과로 끝난 원 실행과 그것을 이어받는 새 실행. 추가 전용이고
+   * 쓰기는 오케스트레이터의 검토 대기열 모듈만 한다(한도 상향 재개).
+   */
+  readonly runContinuations: RunContinuationRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -122,6 +128,7 @@ export class ProjectStore {
     this.contracts = new ContractRepository(db, this.sequences);
     this.mutations = new MutationResultRepository(db);
     this.reviewQueue = new ReviewQueueRepository(db);
+    this.runContinuations = new RunContinuationRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */
