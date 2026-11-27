@@ -15,12 +15,9 @@ const STILL_SURVIVED = (resultId: string): string => `(
   ORDER BY latest.recorded_at DESC, latest.id DESC LIMIT 1
 ) = 'survived'`;
 
-/** 실행의 변이 보강 연결 (자동 보강 0027 · 사람이 시작한 보강 이 마이그레이션). */
-const REINFORCEMENT_LINKS = (runId: string): string => `(
-  SELECT mutation_result_id FROM mutation_reinforcements WHERE run_id = ${runId}
-  UNION ALL
-  SELECT mutation_result_id FROM review_reinforcements WHERE run_id = ${runId}
-)`;
+/** 실행의 보강 원인 변이 기록 (뷰 `run_reinforcement_causes` 한 곳에서 판별한다). */
+const REINFORCEMENT_LINKS = (runId: string): string =>
+  `(SELECT mutation_result_id FROM run_reinforcement_causes WHERE run_id = ${runId})`;
 
 /**
  * 검토 대기열 (TODO-02 · COST-01 · JDG-04, M3-08 #53, ADR-100 B④ · A17, ADR-145). 새 표 둘과 트리거만 더한다(기존 표를 다시 만들지
@@ -37,7 +34,12 @@ const REINFORCEMENT_LINKS = (runId: string): string => `(
  *   판정 기록). 넣을 때는 열림이어야 하고 종류의 조건이 맞아야 한다(직접 넣는 행도). 수정 · 삭제 거부
  * - `review_reinforcements`: 사람이 시작한 테스트 보강 실행과 원인 변이 기록(항목마다 하나 · 실행마다 하나). 0027
  *   `mutation_reinforcements`(자동 보강, 변이 기록마다 하나)를 넓히지 않고 따로 둔다: 자동 보강의 "같은 기록으로 다시 만들지 않음"과
- *   원인 = 유형 A 기록 트리거가 그대로다. 잇는 실행은 사람이 시작한 유형 C이고 원인 규칙을 대상으로 해야 한다. 추가 전용
+ *   원인 = 유형 A 기록 트리거가 그대로다. 잇는 실행은 사람이 시작한 유형 C이고 원인 규칙을 대상으로 해야 한다. 추가 전용.
+ *   한 실행은 두 연결 가운데 하나만 가진다(양쪽 넣기 트리거): 둘 다면 변이 생존 항목이 두 번 들어가려다 부분 UNIQUE에 걸려 실행
+ *   종료 저장이 롤백된다
+ * - 뷰 `run_reinforcement_causes(run_id, mutation_result_id, link_kind)`: 보강 실행의 원인 변이 기록(자동 `auto` · 사람 `review`).
+ *   자동 등록 트리거와 저장소의 보강 판별(`reinforcementCauseOfRun`)이 이 뷰 하나를 읽는다(판별 규칙을 바꿀 자리가 하나)
+ * - 이 마이그레이션 전에 끝난 실행은 되채우지 않는다(항목이 없다, ADR-145)
  * 머지된 0016 · 0021 · 0026 · 0027은 고치지 않는다.
  */
 export const migration: Migration = {
@@ -79,6 +81,17 @@ CREATE TABLE review_reinforcements (
   mutation_result_id TEXT NOT NULL REFERENCES mutation_results (id),
   created_at TEXT NOT NULL CHECK (created_at GLOB ${TIMESTAMP_GLOB})
 ) STRICT;
+
+CREATE VIEW run_reinforcement_causes (run_id, mutation_result_id, link_kind) AS
+SELECT run_id, mutation_result_id, 'auto' FROM mutation_reinforcements
+UNION ALL
+SELECT run_id, mutation_result_id, 'review' FROM review_reinforcements;
+
+CREATE TRIGGER mutation_reinforcements_review_link BEFORE INSERT ON mutation_reinforcements
+WHEN EXISTS (SELECT 1 FROM review_reinforcements WHERE run_id = NEW.run_id)
+BEGIN
+  SELECT RAISE(ABORT, 'mutation_reinforcements: 사람 보강 연결이 있는 실행에는 자동 보강 연결을 더할 수 없습니다');
+END;
 
 CREATE TRIGGER review_items_insert BEFORE INSERT ON review_items
 WHEN NEW.resolved_at IS NOT NULL OR NOT coalesce(CASE NEW.kind

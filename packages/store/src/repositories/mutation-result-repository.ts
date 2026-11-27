@@ -86,10 +86,10 @@ export class MutationResultRepository {
   readonly #causeOfRun;
 
   constructor(db: SqliteDatabase) {
-    // 보강 실행의 원인 변이 기록: 자동 보강(0027) 또는 사람이 시작한 보강(0028 `review_reinforcements`, M3-08 #53 · ADR-145)
-    this.#causeOfRun = db.prepare<[string, string], { mutation_result_id: string }>(
-      `SELECT mutation_result_id FROM mutation_reinforcements WHERE run_id = ?
-       UNION ALL SELECT mutation_result_id FROM review_reinforcements WHERE run_id = ?`,
+    // 보강 실행의 원인 변이 기록: 뷰 `run_reinforcement_causes`(0028, 자동 보강 0027 · 사람 보강, M3-08 #53 · ADR-145).
+    // 자동 등록 트리거와 같은 뷰를 읽어 판별 규칙이 한 곳이다
+    this.#causeOfRun = db.prepare<[string], { mutation_result_id: string }>(
+      'SELECT mutation_result_id FROM run_reinforcement_causes WHERE run_id = ?',
     );
     this.#byId = db.prepare<[string], MutationRow>(
       `SELECT ${COLUMNS} FROM mutation_results WHERE id = ?`,
@@ -196,7 +196,7 @@ export class MutationResultRepository {
    * 보강 실행 판별 · 재주입 · 변이 자료 · "더하기만"은 이것으로 두 시작 길을 똑같이 본다.
    */
   reinforcementCauseOfRun(runId: string): string | null {
-    return this.#causeOfRun.get(runId, runId)?.mutation_result_id ?? null;
+    return this.#causeOfRun.get(runId)?.mutation_result_id ?? null;
   }
 
   /** 변이 기록을 원인으로 한 보강 연결. 없으면 `null`. */

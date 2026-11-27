@@ -22,10 +22,10 @@ import { checkRunStartBasis } from '../src/engine/start-basis.js';
 import type { StepExecutor } from '../src/engine/types.js';
 import { onReviewQueueChanged } from '../src/ipc/project-store-access.js';
 import type { PipeServer } from '../src/ipc/server.js';
+import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { reinforceSurvivedMutants } from '../src/runs/auto-start.js';
 import { createRun, evaluateApprovalStep } from '../src/runs/run-service.js';
 import { isReinforcementRun } from '../src/steps/run-type.js';
-import { isJudgeable } from '../src/verification/summary.js';
 import { RpcCallError, type TestClient } from './helpers/client.js';
 import {
   COMPLETE_SETTINGS,
@@ -484,14 +484,22 @@ describe('변이 생존 액션 (M3-08 수용 기준 2, PRD TODO-02 · 미결 #7)
     ).toEqual([null, ['pass']]);
     const before = await h.client.call('rule.list', { projectId: h.project.id });
     expect(before.rules[0]?.judgment.status).toBe('pass');
-    expect(isJudgeable(before.rules[0]!.rule, before.rules[0]!.judgment, new Set())).toBe(true);
-
-    const result = await h.client.call('reviewQueue.quarantine', {
+    const summaryBefore = await h.client.call('verification.summary', {
       projectId: h.project.id,
-      seq: h.mutant.seq,
-      reason: '불안정한 검사',
-      author: human,
     });
+
+    const changes: string[] = [];
+    const stop = onReviewQueueChanged(h.biveHome, (projectId) => changes.push(projectId));
+    const result = await h.client
+      .call('reviewQueue.quarantine', {
+        projectId: h.project.id,
+        seq: h.mutant.seq,
+        reason: '불안정한 검사',
+        author: human,
+      })
+      .finally(stop);
+    // 처리도 검토 대기열 알림을 한 번 낸다 (변경 표지의 처리된 수)
+    expect(changes).toEqual([h.project.id]);
     expect(result.judgment).toMatchObject({
       ruleId: h.ruleId,
       runId: null,
@@ -507,8 +515,11 @@ describe('변이 생존 액션 (M3-08 수용 기준 2, PRD TODO-02 · 미결 #7)
     });
     const listed = await h.client.call('rule.list', { projectId: h.project.id });
     expect(listed.rules[0]?.judgment).toEqual({ status: 'quarantined', latest: result.judgment });
-    // 격리는 통과로 세지 않는다: 통과였던 규칙이 준수 지표의 판정 가능 · 통과에서 빠진다 (판정에서 일시 제외, 기획서 3.4)
-    expect(isJudgeable(listed.rules[0]!.rule, listed.rules[0]!.judgment, new Set())).toBe(false);
+    // 한계 (ADR-145): 격리는 규칙 목록 · 상세의 최신 판정에만 보이고, 판정 기준 실행의 단계 판정만 읽는 준수 지표에는 들지 않는다
+    // (격리 전이와 지표 반영은 M3-14 #59)
+    expect(await h.client.call('verification.summary', { projectId: h.project.id })).toEqual(
+      summaryBefore,
+    );
     const again = await rejection(
       h.client.call('reviewQueue.quarantine', {
         projectId: h.project.id,
@@ -572,5 +583,88 @@ describe('변이 생존 액션 (M3-08 수용 기준 2, PRD TODO-02 · 미결 #7)
       expect(response).toMatchObject({ id: method, error: { code: ErrorCode.MethodNotFound } });
     }
     expect(h.read((store) => store.reviewQueue.get(h.mutant.seq)?.resolution)).toBeNull();
+  }, 60_000);
+
+  it('테스트 보강: 실행을 만든 뒤 연결 쓰기가 실패하면 실행 · 승인 기록 · 연결 · 처리 어느 것도 남지 않는다 (트랜잭션 1개)', async () => {
+    const h = await rpcHarness();
+    const counts = () =>
+      h.read((store) => ({
+        runs: store.runs.list().length,
+        runStarts: store.approvalLog.list().filter((entry) => entry.action === 'run_start').length,
+        resolution: store.reviewQueue.get(h.mutant.seq)?.resolution ?? null,
+      }));
+    const before = counts();
+    // 시험에서만: 사람 보강 연결 넣기를 실패시킨다 (실행 생성 뒤의 실패)
+    h.read((store) =>
+      store.db.exec(`CREATE TRIGGER test_fail_review_link BEFORE INSERT ON review_reinforcements
+        BEGIN SELECT RAISE(ABORT, '시험이 넣은 실패'); END;`),
+    );
+    const failed = await rejection(
+      h.client.call('reviewQueue.reinforce', {
+        projectId: h.project.id,
+        seq: h.mutant.seq,
+        author: human,
+      }),
+    );
+    expect(failed.code).toBe(ErrorCode.InternalError);
+    expect(counts()).toEqual(before);
+    expect(before.resolution).toBeNull();
+  }, 60_000);
+
+  it('사람 보강 실행이 끝나지 않은 동안 같은 규칙의 새 유형 A 생존에서는 자동 보강을 만들지 않는다', async () => {
+    const h = await rpcHarness();
+    const result = await h.client.call('reviewQueue.reinforce', {
+      projectId: h.project.id,
+      seq: h.mutant.seq,
+      author: human,
+    });
+    expect(result.run.status).toBe('waiting_approval');
+    const outcome = h.read((store) => {
+      const survived = mergedSurvival(store, h.ruleId);
+      return reinforceSurvivedMutants(store, { runId: survived.runId }, clock);
+    });
+    expect(outcome).toEqual({ status: 'none' });
+  }, 60_000);
+
+  it('폐기된 규칙의 변이 생존 항목: 테스트 보강은 실행을 만들고 항목을 처리하지만, 그 실행은 승인 단계(효력 확인)에서 끝나고 원인이 아직 생존이라 새 변이 생존 항목이 열린다', async () => {
+    const h = await rpcHarness();
+    h.read((store) => {
+      const rule = store.rules.get(h.ruleId)!;
+      retireAgentRule(
+        store,
+        {
+          ruleId: rule.id,
+          grounds: `진술 "${rule.statement}"이 새 요구사항과 모순`,
+          author: { kind: 'agent', role: 'rule-writer' },
+          sessionId: newId(),
+        },
+        { now: Date.now },
+      );
+    });
+    const result = await h.client.call('reviewQueue.reinforce', {
+      projectId: h.project.id,
+      seq: h.mutant.seq,
+      author: human,
+    });
+    expect(result.entry.item.resolution).toMatchObject({ action: 'reinforce' });
+    const engine = new PipelineEngine({
+      biveHome: h.biveHome,
+      agent: selectAgent({ BIVE_AGENT: 'scripted' }, { biveHome: h.biveHome }).adapter,
+      executors: testExecutors(),
+    });
+    engines.push(engine);
+    expect(engine.evaluateApproval(h.project.id, result.run.id)).toBe(false);
+    h.read((store) => {
+      expect(store.runs.get(result.run.id)).toMatchObject({
+        status: 'failed',
+        failureReason: 'target_rule_unavailable',
+      });
+      expect(
+        store.reviewQueue.list({ state: 'open' }).map((item) => [item.kind, item.runId]),
+      ).toEqual([
+        ['budget_exceeded', h.budgetRunId],
+        ['mutant_survived', result.run.id],
+      ]);
+    });
   }, 60_000);
 });

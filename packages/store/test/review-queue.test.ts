@@ -9,6 +9,11 @@ import {
 } from '@bive/shared';
 import { describe, expect, it } from 'vitest';
 
+import { join } from 'node:path';
+
+import { openDatabase } from '../src/database.js';
+import { migrate } from '../src/migrate.js';
+import { PROJECT_MIGRATIONS } from '../src/migrations/project/index.js';
 import { openProjectStore, type ProjectStore } from '../src/project-store.js';
 import { newId, useTempHome } from './support/temp-home.js';
 
@@ -326,6 +331,18 @@ describe('review_items: 처리는 사람만 · 한 번만 · 결과가 있어야
           judgmentId: passed.id,
         }),
       ).toThrow(/격리 판정 기록/);
+      // 같은 사유라도 다른 규칙의 격리 판정으로는 처리되지 않는다
+      const otherRule = seedRule(store);
+      const elsewhere = quarantineJudgment(store, otherRule.id, '불안정한 검사');
+      expect(() =>
+        store.reviewQueue.resolve(item.seq, {
+          action: 'quarantine',
+          by: human,
+          at: T3,
+          reason: '불안정한 검사',
+          judgmentId: elsewhere.id,
+        }),
+      ).toThrow(/격리 판정 기록/);
       const judgment = quarantineJudgment(store, rule.id, '불안정한 검사');
       const resolved = store.reviewQueue.resolve(item.seq, {
         action: 'quarantine',
@@ -481,5 +498,100 @@ describe('review_items: 처리는 사람만 · 한 번만 · 결과가 있어야
       });
       expect(store.reviewQueue.version()).toBe(2);
     });
+  });
+
+  it('한 실행은 보강 연결을 하나만 가진다: 사람 연결이 있는 실행에 자동 연결을 더할 수 없고, 보강 원인은 뷰 하나(연결 종류 포함)로 읽힌다', () => {
+    withStore((store) => {
+      const { reinforcing, rule, survived, origin, step } = seedReinforcement(store);
+      endRun(store, reinforcing.run.id, 'failed');
+      const [item] = store.reviewQueue.list();
+      const humanRun = createRun(store, rule.id, 'C');
+      store.reviewQueue.linkReinforcement({
+        reviewSeq: item!.seq,
+        runId: humanRun.run.id,
+        mutationResultId: survived.id,
+        createdAt: T3,
+      });
+      // 같은 유형 A 실행의 다른 생존 기록(자동 연결의 다른 조건은 모두 맞는다)
+      const another = store.mutations.record({
+        id: newId(),
+        ruleId: rule.id,
+        runId: origin.run.id,
+        stepId: step.id,
+        sessionId: newId(),
+        commit: COMMIT,
+        status: 'survived',
+        outcome: 'survived',
+        mutant: MUTANT,
+        recordedAt: T2,
+      });
+      expect(() =>
+        store.mutations.linkReinforcement({
+          seq: store.mutations.nextReinforcementSeq(),
+          runId: humanRun.run.id,
+          mutationResultId: another.id,
+          createdAt: T3,
+        }),
+      ).toThrow(/사람 보강 연결이 있는 실행/);
+      expect(
+        store.db
+          .prepare(
+            'SELECT run_id AS runId, mutation_result_id AS resultId, link_kind AS kind FROM run_reinforcement_causes ORDER BY kind',
+          )
+          .all(),
+      ).toEqual([
+        { runId: reinforcing.run.id, resultId: survived.id, kind: 'auto' },
+        { runId: humanRun.run.id, resultId: survived.id, kind: 'review' },
+      ]);
+      // 사람 보강 실행이 끝나도 항목은 하나 (자동 연결이 더해지지 않아 종료 저장이 막히지 않는다)
+      endRun(store, humanRun.run.id, 'failed', T3);
+      expect(store.runs.get(humanRun.run.id)?.status).toBe('failed');
+      expect(
+        store.reviewQueue.list().filter((entry) => entry.runId === humanRun.run.id),
+      ).toHaveLength(1);
+    });
+  });
+});
+
+describe('0028 적용: 이미 끝난 실행은 되채우지 않는다', () => {
+  it('0027까지의 DB에 예산 초과 · 실패로 끝난 실행이 있어도 0028을 적용하면 항목이 없고, 적용 뒤의 종료부터 등록된다', () => {
+    const db = openDatabase(join(home(), 'v27.db'));
+    try {
+      migrate(db, PROJECT_MIGRATIONS.slice(0, 27), { now: () => T0 });
+      const insertRun = (seq: number, status: string): string => {
+        const id = newId();
+        db.prepare(
+          `INSERT INTO runs (id, display_id, type, status, current_step, last_completed_step, regression_count,
+           failure_reason, branch, worktree_path, base_branch, base_commit, head_commit, merge_commit, budget_snapshot,
+           model_snapshot, cost_usd, turns, tool_manifest, started_by, created_at, started_at, ended_at)
+           VALUES (?, ?, 'A', ?, NULL, NULL, 0, ?, NULL, NULL, 'main', NULL, NULL, NULL,
+           '{"run":{"maxBudgetUsd":5,"maxTurns":200},"roles":{}}', '{}', NULL, NULL, '[]', '{"kind":"human"}', ?, ?, ?)`,
+        ).run(
+          id,
+          `EXE-${String(seq).padStart(3, '0')}`,
+          status,
+          status === 'running' ? null : 'test_end',
+          T0,
+          T0,
+          status === 'running' ? null : T1,
+        );
+        return id;
+      };
+      insertRun(1, 'budget_exceeded');
+      insertRun(2, 'failed');
+      const running = insertRun(3, 'running');
+      migrate(db, PROJECT_MIGRATIONS, { now: () => T2 });
+      const count = () =>
+        db.prepare<[], { n: number }>('SELECT count(*) AS n FROM review_items').get()?.n;
+      expect(count()).toBe(0);
+      db.prepare(
+        "UPDATE runs SET status = 'budget_exceeded', failure_reason = 'test_end', ended_at = ? WHERE id = ?",
+      ).run(T2, running);
+      expect(
+        db.prepare('SELECT kind, run_id AS runId, created_at AS createdAt FROM review_items').all(),
+      ).toEqual([{ kind: 'budget_exceeded', runId: running, createdAt: T2 }]);
+    } finally {
+      db.close();
+    }
   });
 });
