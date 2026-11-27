@@ -72,6 +72,7 @@ import {
   QUEUED_TARGET_UNAVAILABLE,
   startNextQueuedRun,
 } from '../runs/run-service.js';
+import { continuationWorktreeStart, lineageSessions } from '../runs/run-continuation.js';
 import { createCheckExecutor } from '../steps/check.js';
 import { createGreenCheckExecutor } from '../steps/green-check.js';
 import { createImplementationExecutor } from '../steps/implementation.js';
@@ -984,6 +985,10 @@ export class PipelineEngine {
         },
       };
     }
+    // 이어받는 실행 (ADR-147 ②, ADR-149): 기준 커밋은 원 실행과 같고 가지는 원 실행 브랜치에 있는 커밋에서 만든다. 원 실행이 워크트리를
+    // 만들기 전에 끝났으면 보통 실행처럼 기준 브랜치의 지금 커밋에서
+    const start =
+      this.#store(projectId, (store) => continuationWorktreeStart(store, run.id)) ?? undefined;
     let git: RunGitRef;
     try {
       git = await this.#worktrees.create({
@@ -991,6 +996,7 @@ export class PipelineEngine {
         runDisplayId: run.displayId,
         repoPath: project.rootPath,
         baseBranch: run.baseBranch,
+        ...(start === undefined ? {} : { start }),
       });
     } catch (error) {
       return {
@@ -1318,11 +1324,17 @@ export class PipelineEngine {
     if (role === null) throw new Error(`에이전트 역할이 없는 단계입니다: ${step.kind}`);
     const model = run.modelSnapshot[role];
     // 프로젝트 하루 한도(ADR-104)는 실행 스냅샷이 아니라 지금 설정과 저장된 오늘의 세션 기록에서 읽는다
+    // 사용량은 이어받는 실행이면 사슬 전체(원 실행들의 세션부터)를 센다 (ADR-147 ④, 이어받는 실행이 아니면 이 실행의 세션 그대로)
     const { limits, index, daily } = this.#store(projectId, (store) => {
       const sessions = store.sessions.listByRun(run.id);
       const daily = projectDailyBudget(store, store.settings.get(), this.#now());
       return {
-        limits: sessionLimits(run.budgetSnapshot, role, sessions, daily?.remaining),
+        limits: sessionLimits(
+          run.budgetSnapshot,
+          role,
+          lineageSessions(store, run.id),
+          daily?.remaining,
+        ),
         index: sessions.filter((session) => session.role === role).length,
         daily,
       };
@@ -1462,7 +1474,7 @@ export class PipelineEngine {
     }
     // 집계 초과 (ADR-067): 한도 subtype이 아니어도 끝난 세션까지의 역할 · 실행 합계가 한도를 넘었으면 실행을 끝낸다
     const overrun = this.#store(projectId, (store) =>
-      budgetOverrun(run.budgetSnapshot, role, store.sessions.listByRun(run.id)),
+      budgetOverrun(run.budgetSnapshot, role, lineageSessions(store, run.id)),
     );
     if (overrun !== null) {
       throw new StepHaltError('budget_exceeded', 'budget_aggregate_exceeded', {
@@ -1500,7 +1512,7 @@ export class PipelineEngine {
       return { status: 'not_opened', reason: 'not_configured', detail: '판단 세션 배선 없음' };
     }
     const runBudget = this.#store(projectId, (store) =>
-      runRemaining(run.budgetSnapshot, store.sessions.listByRun(run.id)),
+      runRemaining(run.budgetSnapshot, lineageSessions(store, run.id)),
     );
     if (runBudget === null) {
       return { status: 'not_opened', reason: 'budget_exhausted', detail: '실행 예산 소진' };

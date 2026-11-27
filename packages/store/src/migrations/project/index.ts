@@ -30,6 +30,8 @@ import { migration as m0025 } from './0025_contract_judge_runner.js';
 import { migration as m0026 } from './0026_mutation_results.js';
 import { migration as m0027 } from './0027_mutation_reinforcements.js';
 import { migration as m0028 } from './0028_review_queue.js';
+import { migration as m0029 } from './0029_asyncapi_judge_runner.js';
+import { migration as m0030 } from './0030_run_continuations.js';
 
 export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0001,
@@ -60,4 +62,6 @@ export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0026,
   m0027,
   m0028,
+  m0029,
+  m0030,
 ];

@@ -8,6 +8,9 @@
 //   파이프에서 상태를 바꾸는 RPC는 `run.create`와 `run.resume`(사람만, `interrupted`만)뿐이다
 // - `reviewQueue.reinforce`(M3-08 #53, ADR-145)는 검토 대기열의 테스트 보강이다: 사람만, `run.create`와 같은 문으로 유형 C 실행 1개를
 //   만들고 같은 트랜잭션에서 검토 대기열 항목을 처리한다
+// - `reviewQueue.resumeWithBudget`(M3-56 #319, ADR-147, ADR-149)는 검토 대기열의 한도 상향 재개다: 사람만, `run.create`와 같은 문으로 예산
+//   초과로 끝난 원 실행을 이어받는 실행 1개(원 실행과 같은 유형 · 대상 규칙, 예산 값 = 새 한도)를 만들고 같은 트랜잭션에서 원 실행과 잇고
+//   항목을 처리한다. 유형 · 대상 규칙은 원 실행에서 정해진다(요청이 바꿔 넣을 수 없다)
 import {
   type Author,
   createUlidGenerator,
@@ -18,7 +21,12 @@ import {
 } from '@bive/shared';
 import type { ProjectStore, RunDetail } from '@bive/store';
 
-import { recordReinforcement, reinforcementTarget } from '../review/review-queue.js';
+import {
+  continuationTarget,
+  recordContinuation,
+  recordReinforcement,
+  reinforcementTarget,
+} from '../review/review-queue.js';
 import { runFailureNotes } from '../runs/failure-notes.js';
 import { assertHumanRunStarter, createRun, type RunClock } from '../runs/run-service.js';
 import { withProjectStore } from './project-store-access.js';
@@ -45,7 +53,12 @@ export interface RunHandlerDeps {
 
 type RunMethods = Pick<
   MethodHandlers,
-  'run.create' | 'run.get' | 'run.list' | 'run.resume' | 'reviewQueue.reinforce'
+  | 'run.create'
+  | 'run.get'
+  | 'run.list'
+  | 'run.resume'
+  | 'reviewQueue.reinforce'
+  | 'reviewQueue.resumeWithBudget'
 >;
 
 /** ULID 또는 표시 ID(`EXE-001`)로 실행을 찾는다. 없으면 -32004. */
@@ -129,6 +142,27 @@ export const createRunHandlers = ({ biveHome, now, engine }: RunHandlerDeps): Ru
             clock,
           );
           return { ...created, entry: recordReinforcement(store, target, created, human) };
+        }),
+      );
+      engine?.onRunCreated(projectId, outcome.run.id);
+      return outcome;
+    },
+    // 검토 대기열의 한도 상향 재개 (M3-56 #319, ADR-149): 검토 대기열 모듈이 항목 · 원 실행 · 새 한도를 확인하고, 사람의 [실행]과 같은 문
+    // (`createRun`)으로 원 실행과 같은 유형 · 대상 규칙의 이어받는 실행을 만든 뒤 같은 트랜잭션에서 원 실행과 잇고 항목을 처리한다
+    'reviewQueue.resumeWithBudget': ({ projectId, seq, budget, author }, context) => {
+      assertHumanRunStarter(author);
+      const human = { kind: 'human' } as const;
+      const outcome = withProjectStore(biveHome, projectId, (store) =>
+        store.transaction(() => {
+          const target = continuationTarget(store, seq, budget);
+          const created = createRun(
+            store,
+            { ruleIds: target.origin.targetRuleIds, author: human, type: target.origin.type },
+            { clientId: `pipe-${String(context.connectionId)}` },
+            clock,
+            target.seed,
+          );
+          return { ...created, entry: recordContinuation(store, target, created, human) };
         }),
       );
       engine?.onRunCreated(projectId, outcome.run.id);

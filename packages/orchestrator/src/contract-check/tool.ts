@@ -25,6 +25,14 @@ export const REDOCLY_ENTRY = path.join(packageDir('@redocly/cli'), 'bin', 'cli.j
 export const PRISM_ENTRY = path.join(packageDir('@stoplight/prism-cli'), 'dist', 'index.js');
 
 /**
+ * AsyncAPI 유효성 검사의 진입 파일 (M3-49 #294, ADR-148): BIVE의 스크립트가 오케스트레이터 패키지의 `@asyncapi/parser`를 부른다. 소스 ·
+ * 빌드 어느 쪽에서도 패키지 루트의 `runner/`다.
+ */
+export const ASYNCAPI_ENTRY = fileURLToPath(
+  new URL('../../runner/asyncapi-validate.mjs', import.meta.url),
+);
+
+/**
  * 도구 자식 프로세스의 환경 변수: 부모 값을 넘기지 않고 고정 값만 둔다.
  * - `HOME`: 도구 임시 폴더(도구가 홈 폴더에 알림 · 캐시 파일을 쓴다: 사용자 홈에 남기지 않는다)
  * - 사용 기록 · 갱신 알림 끔(`REDOCLY_TELEMETRY` · `REDOCLY_SUPPRESS_UPDATE_NOTICE` · `DO_NOT_TRACK`), 색 끔(출력 형식 확인)

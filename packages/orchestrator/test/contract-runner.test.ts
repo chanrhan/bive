@@ -9,6 +9,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
+import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,6 +17,12 @@ import path from 'node:path';
 import { type Contract, createUlidGenerator, type JudgmentResult, type Rule } from '@bive/shared';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
+import { runAsyncApiValidate, validateAsyncApiContract } from '../src/contract-check/asyncapi.js';
+import {
+  ASYNCAPI_SPEC_VERSIONS,
+  readAsyncApiDocument,
+  SUPPORTED_SCHEMA_FORMATS,
+} from '../src/contract-check/asyncapi-document.js';
 import {
   disposePrepared,
   prepareOpenApiContract,
@@ -32,6 +39,7 @@ import {
 import { ExchangeRecorder, type RecordedExchange } from '../src/contract-check/recorder.js';
 import { lintArgs, lintOpenApi, REDOCLY_CONFIG } from '../src/contract-check/redocly.js';
 import {
+  ASYNCAPI_ENTRY,
   ContractToolError,
   PRISM_ENTRY,
   REDOCLY_ENTRY,
@@ -45,6 +53,9 @@ import { createGreenCheckExecutor } from '../src/steps/green-check.js';
 import { createRun } from '../src/runs/run-service.js';
 import { createMergeExecutor } from '../src/steps/merge.js';
 import {
+  asyncApiVerdict,
+  contractJudgmentsFrom,
+  contractRunnerOf,
   disposeContracts,
   finishContracts,
   missingContractVerdicts,
@@ -844,7 +855,7 @@ channels: {}
 `;
 
 describe('검사 단계가 계약 검사 규칙을 종류별 실행기로 판정한다 (수용 기준 1 · 2)', () => {
-  it('실행기가 없는 종류(DB 스키마 · AsyncAPI)의 규칙은 판정 없음으로 남아 통과로 세지 않고 다른 규칙을 막지 않는다: 실행은 병합되고, 기록 프록시도 끼우지 않는다 (ADR-130 ⑤)', async () => {
+  it('실행기가 없는 종류(DB 스키마)의 규칙은 판정 없음으로 남아 통과로 세지 않고 다른 규칙을 막지 않는다: 실행은 병합되고, 기록 프록시도 끼우지 않는다 (ADR-130 ⑤). AsyncAPI는 실행기(asyncapi-parser)로 판정된다 (M3-49, ADR-148)', async () => {
     const proxied: boolean[] = [];
     const { h, rules, checkCalls } = await contractPipeline(
       [
@@ -870,25 +881,43 @@ describe('검사 단계가 계약 검사 규칙을 종류별 실행기로 판정
           ruleId: rules[1]!.displayId,
           contractId: 'CON-002',
           kind: 'asyncapi',
-          outcome: 'unjudged',
-          reason: 'no_runner',
+          outcome: 'pass',
+          reason: 'verified',
         },
       ],
     });
-    // 계약 검사 규칙은 인수 테스트 대상이 아니고 판정 기록도 없다
+    // 계약 검사 규칙은 인수 테스트 대상이 아니다. 실행기 없는 종류는 판정 기록도 없다
     expect(checkCalls.map((call) => call.input.ruleIds)).toEqual([['RULE-001']]);
-    for (const rule of rules) expect(judgmentsOfRule(h, rule.id)).toEqual([]);
-    // 기본: 트래픽 검증이 필요 없으면 프록시 자리를 쓰지 않는다 (판정 입력에 칸이 없다)
+    expect(judgmentsOfRule(h, rules[0]!.id)).toEqual([]);
+    // AsyncAPI: 등록 문서의 유효성만 판정한 기록 (실행기 asyncapi-parser)
+    expect(judgmentsOfRule(h, rules[1]!.id)).toMatchObject([
+      {
+        status: 'pass',
+        runner: 'asyncapi-parser',
+        exitCode: null,
+        reporterPath: null,
+        cases: [
+          {
+            name: '계약 검사 · CON-002 (AsyncAPI)',
+            file: 'asyncapi.yaml',
+            line: null,
+            status: 'passed',
+            message:
+              '문서 형식 오류 0건 · 구현 일치는 검사하지 않음 (문서 유효성만) · 판정 커밋의 원본 파일은 등록 때와 같음',
+          },
+        ],
+      },
+    ]);
+    // 기본: 트래픽 검증이 필요 없으면 프록시 자리를 쓰지 않는다 (판정 입력에 칸이 없다. AsyncAPI도 트래픽을 보지 않는다)
     expect(proxied).toEqual([false]);
-    // 준수 지표: 판정 가능 분모에 들고 통과로 세지 않는다
+    // 준수 지표: 실행기 없는 종류는 판정 가능 분모에 들고 통과로 세지 않는다
     const summary = withProject(h.biveHome, h.project.id, (store) => verificationSummary(store));
     expect(summary.denominator).toEqual(expect.arrayContaining(rules.map((rule) => rule.id)));
-    for (const rule of rules) {
-      expect(summary.rules.find((row) => row.rule.id === rule.id)?.judgment.status).not.toBe(
-        'pass',
-      );
-    }
-    expect(summary.compliance).toEqual({ passed: 1, judgeable: 3 });
+    expect(summary.rules.find((row) => row.rule.id === rules[0]!.id)?.judgment.status).not.toBe(
+      'pass',
+    );
+    expect(summary.rules.find((row) => row.rule.id === rules[1]!.id)?.judgment.status).toBe('pass');
+    expect(summary.compliance).toEqual({ passed: 2, judgeable: 3 });
   }, 120_000);
 
   it('OpenAPI 계약: 맞는 응답이면 pass(실행기 redocly-prism · 검증한 요청 수), 실행은 병합된다. 실행기 없는 종류가 섞여도 같다', async () => {
@@ -2180,4 +2209,729 @@ describe('실제 판정 서버 앞에서: 픽스처 원본은 pass, contract-mis
       ['/api/auth/session', 'ok'],
     ]);
   }, 600_000);
+});
+
+// ── AsyncAPI 계약 검사 실행기: 문서 유효성만 (M3-49 #294 수용 기준 1, ADR-148) ─────────────────
+
+const ORCHESTRATOR_DIR = path.join(REPO_ROOT, 'packages', 'orchestrator');
+/** 오케스트레이터 패키지의 `@asyncapi/parser` (대조군 · 라이브러리 값 대조에만 쓴다). */
+const asyncApiLibrary = createRequire(path.join(ORCHESTRATOR_DIR, 'package.json'));
+const ASYNCAPI_PARSER_PATH = asyncApiLibrary.resolve('@asyncapi/parser');
+
+/** 오른쪽에서 왼쪽 덮어쓰기 글자 (U+202E). 소스에 숨은 글자를 글자 그대로 두지 않는다. */
+const RLO = String.fromCodePoint(0x202e);
+
+const asyncDoc = (body: string, version = '3.0.0'): string =>
+  `asyncapi: ${version}\ninfo:\n  title: 이벤트\n  version: 1.0.0\n${body}`;
+
+/** 유효한 3.0 문서 (채널 · 메시지 · 작업, 문서 안 참조). */
+const ASYNC_VALID = asyncDoc(`channels:
+  signup:
+    address: user/signedup
+    messages:
+      signedUp:
+        payload:
+          type: object
+          properties:
+            id:
+              type: string
+operations:
+  onSignup:
+    action: receive
+    channel:
+      $ref: '#/channels/signup'
+    messages:
+      - $ref: '#/channels/signup/messages/signedUp'
+`);
+
+/** 유효한 2.6 문서. */
+const ASYNC_VALID_V2 = asyncDoc(
+  `channels:
+  user/signedup:
+    subscribe:
+      message:
+        payload:
+          type: object
+          properties:
+            id:
+              type: string
+`,
+  '2.6.0',
+);
+
+/** 메시지 payload의 스키마를 바꿔 넣은 3.0 문서. */
+const asyncWithPayload = (payload: string): string =>
+  asyncDoc(`channels:
+  c:
+    address: a
+    messages:
+      m:
+        payload:
+${payload
+  .split('\n')
+  .map((line) => `          ${line}`)
+  .join('\n')}
+`);
+
+describe('AsyncAPI 문서 사전 검사: 바깥 참조 · 도구가 검사하지 못하는 스키마 형식은 도구를 부르기 전에 막는다 (ADR-148)', () => {
+  it('원격 · 파일 $ref, $dynamicRef · $recursiveRef의 바깥 값, 글이 아닌 $ref는 바깥 참조이고 문서 안 참조(#)는 받는다. 자리는 가리지 않는다 (채널 · 작업 · 메시지 · 스키마 · 확장 칸)', () => {
+    expect(readAsyncApiDocument(ASYNC_VALID)).toEqual({ kind: 'ok' });
+    expect(readAsyncApiDocument(ASYNC_VALID_V2)).toEqual({ kind: 'ok' });
+    const cases: [string, string][] = [
+      [
+        asyncWithPayload("$ref: 'https://example.invalid/p.json'"),
+        '/channels/c/messages/m/payload/$ref',
+      ],
+      [asyncWithPayload("$ref: './parts/p.yaml'"), '/channels/c/messages/m/payload/$ref'],
+      [asyncWithPayload("$ref: 'p.yaml#/x'"), '/channels/c/messages/m/payload/$ref'],
+      [asyncWithPayload('$ref: 42'), '/channels/c/messages/m/payload/$ref'],
+      [
+        asyncWithPayload("$dynamicRef: 'https://example.invalid/d'"),
+        '/channels/c/messages/m/payload/$dynamicRef',
+      ],
+      [asyncWithPayload("$recursiveRef: 'x.json'"), '/channels/c/messages/m/payload/$recursiveRef'],
+      [
+        asyncDoc("channels:\n  c:\n    $ref: 'https://example.invalid/channel.yaml'\n"),
+        '/channels/c/$ref',
+      ],
+      [asyncDoc("x-extra:\n  a/b:\n    $ref: 'file:///etc/passwd'\n"), '/x-extra/a~1b/$ref'],
+    ];
+    for (const [text, pointer] of cases) {
+      expect(readAsyncApiDocument(text)).toEqual({
+        kind: 'external',
+        references: [{ pointer, key: pointer.split('/').at(-1) }],
+        total: 1,
+      });
+    }
+    // 상한 20건까지만 싣고 전체 수를 센다
+    const many = asyncDoc(
+      `components:\n  schemas:\n${Array.from({ length: 25 }, (_, i) => `    s${String(i)}:\n      $ref: 'https://example.invalid/${String(i)}'\n`).join('')}`,
+    );
+    const read = readAsyncApiDocument(many);
+    expect(read).toMatchObject({ kind: 'external', total: 25 });
+    expect(read.kind === 'external' ? read.references.length : -1).toBe(20);
+  });
+
+  it('schemaFormat이 도구에 등록된 형식(AsyncAPI 스키마 · JSON Schema draft-07) 밖이면(Avro · RAML · OpenAPI) 판정하지 않는다. 등록된 형식 · 글이 아닌 값 · schemaFormat 없음은 도구에 넘긴다. 바깥 참조가 먼저다', () => {
+    const multi = (format: string) =>
+      asyncWithPayload(`schemaFormat: '${format}'\nschema:\n  type: string`);
+    for (const format of [
+      'application/vnd.apache.avro;version=1.9.0',
+      'application/raml+yaml;version=1.0',
+      'application/vnd.oai.openapi;version=3.0.0',
+      'application/vnd.aai.asyncapi;version=9.9.9',
+      'application/schema+json;version=draft-04',
+    ]) {
+      expect(readAsyncApiDocument(multi(format))).toEqual({
+        kind: 'unsupported_schema_format',
+        formats: [{ pointer: '/channels/c/messages/m/payload/schemaFormat', key: 'schemaFormat' }],
+        total: 1,
+      });
+    }
+    // 2.x는 메시지의 schemaFormat
+    expect(
+      readAsyncApiDocument(
+        asyncDoc(
+          "channels:\n  c:\n    subscribe:\n      message:\n        schemaFormat: 'application/vnd.apache.avro;version=1.9.0'\n        payload:\n          type: record\n",
+          '2.6.0',
+        ),
+      ),
+    ).toMatchObject({ kind: 'unsupported_schema_format', total: 1 });
+    for (const format of [
+      'application/schema+json;version=draft-07',
+      'application/vnd.aai.asyncapi+yaml;version=3.0.0',
+      'application/vnd.aai.asyncapi;version=2.6.0',
+    ]) {
+      expect(readAsyncApiDocument(multi(format))).toEqual({ kind: 'ok' });
+    }
+    expect(
+      readAsyncApiDocument(asyncWithPayload('schemaFormat: 42\nschema:\n  type: string')),
+    ).toEqual({ kind: 'ok' });
+    expect(
+      readAsyncApiDocument(
+        asyncWithPayload(
+          "schemaFormat: 'application/vnd.apache.avro;version=1.9.0'\nschema:\n  $ref: 'https://example.invalid/a.avsc'",
+        ),
+      ),
+    ).toMatchObject({ kind: 'external', total: 1 });
+  });
+
+  it('사전 검사의 판 · 스키마 형식 목록은 라이브러리(@asyncapi/parser 3.6.3)의 값과 같다', () => {
+    const { specVersions } = asyncApiLibrary(
+      path.join(path.dirname(ASYNCAPI_PARSER_PATH), 'constants.js'),
+    ) as { specVersions: string[] };
+    expect([...ASYNCAPI_SPEC_VERSIONS]).toEqual(specVersions);
+    const { Parser } = asyncApiLibrary(ASYNCAPI_PARSER_PATH) as {
+      Parser: new () => { parserRegistry: Map<string, unknown> };
+    };
+    expect([...SUPPORTED_SCHEMA_FORMATS].sort()).toEqual(
+      [...new Parser().parserRegistry.keys()].sort(),
+    );
+    expect(
+      (
+        asyncApiLibrary(
+          path.join(ORCHESTRATOR_DIR, 'node_modules', '@asyncapi', 'parser', 'package.json'),
+        ) as {
+          version: string;
+        }
+      ).version,
+    ).toBe('3.6.3');
+  });
+
+  it('읽지 못하는 문서(문법 · 중복 키 · 별칭 · 여러 문서 · 객체가 아닌 최상위)는 문서 형식 오류다 (도구를 부르지 않는다)', () => {
+    for (const text of [
+      'asyncapi: 3.0.0\ninfo: [\n',
+      'asyncapi: 3.0.0\nasyncapi: 2.6.0\n',
+      'a: &x {k: 1}\nb: *x\n',
+      'asyncapi: 3.0.0\n---\nasyncapi: 2.6.0\n',
+      '- asyncapi\n',
+    ]) {
+      expect(readAsyncApiDocument(text).kind).toBe('unreadable');
+    }
+  });
+});
+
+describe('AsyncAPI 유효성 검사 (실제 @asyncapi/parser, 수용 기준 1)', () => {
+  it('유효한 문서(3.0 · 3.1 · 2.6 · JSON)는 valid, 유효하지 않은 문서(필수 칸 없음 · 형식 오류 · 지원하지 않는 판 · AsyncAPI가 아닌 문서 · 없는 문서 안 참조 · 깨진 YAML)는 document_invalid이다. 도구 폴더는 남지 않는다', async () => {
+    const parent = tempDir('bive-cr-async-');
+    const check = (text: string, sourceFile = 'asyncapi.yaml') =>
+      validateAsyncApiContract(text, { sourceFile, signal: never, tempDir: parent });
+    const [v3, v31, v2, json, noInfo, badType, v1, v9, openapi, dangling, broken, hidden] =
+      await Promise.all([
+        check(ASYNC_VALID),
+        check(asyncDoc('channels: {}\n', '3.1.0')),
+        check(ASYNC_VALID_V2),
+        check(JSON.stringify({ asyncapi: '3.0.0', info: { title: 't', version: '1' } }), 'a.json'),
+        check('asyncapi: 3.0.0\nchannels: {}\n'),
+        check(asyncWithPayload('type: 42')),
+        check(asyncDoc('topics: {}\n', '1.2.0')),
+        check(asyncDoc('', '9.9.9')),
+        check(FIXTURE_OPENAPI),
+        check(
+          asyncDoc(
+            "channels:\n  c:\n    address: a\n    messages:\n      m:\n        $ref: '#/components/messages/none'\n",
+          ),
+        ),
+        check('asyncapi: 3.0.0\ninfo: [\n'),
+        check(asyncDoc('channels:\n  "c\\u202e\\n x":\n    address: 1\n')),
+      ]);
+    expect(v3).toEqual({ kind: 'valid', warnings: 0 });
+    expect(v31).toEqual({ kind: 'valid', warnings: 0 });
+    // 2.x 문서에는 권장 칸(서버 · id 등)의 경고가 있다: 경고는 통과를 막지 않고 수만 센다
+    expect(v2).toMatchObject({ kind: 'valid' });
+    expect(v2.kind === 'valid' ? v2.warnings : 0).toBeGreaterThan(0);
+    expect(json).toEqual({ kind: 'valid', warnings: 0 });
+    expect(noInfo).toMatchObject({
+      kind: 'document_invalid',
+      reason: 'invalid',
+      message: '문서 형식 오류 1건',
+      errors: 1,
+      problems: [
+        {
+          code: 'asyncapi-document-resolved',
+          message: 'Object must have required property "info"',
+          pointer: '',
+        },
+      ],
+    });
+    expect(badType).toMatchObject({ kind: 'document_invalid', reason: 'invalid' });
+    expect(
+      badType.kind === 'document_invalid' ? badType.problems.map((p) => p.pointer) : [],
+    ).toContain('/channels/c/messages/m/payload/type');
+    for (const [result, message] of [
+      [v1, 'Version "1.2.0" is not supported'],
+      [v9, 'Version "9.9.9" is not supported'],
+      [openapi, 'This is not an AsyncAPI document'],
+    ] as const) {
+      expect(result).toMatchObject({
+        kind: 'document_invalid',
+        reason: 'invalid',
+        errors: 1,
+        problems: [{ code: 'asyncapi-is-asyncapi', message: expect.stringContaining(message) }],
+      });
+    }
+    expect(dangling).toMatchObject({
+      kind: 'document_invalid',
+      problems: [{ code: 'invalid-ref', line: 10 }],
+    });
+    expect(broken).toMatchObject({ kind: 'document_invalid', reason: 'unreadable', errors: 1 });
+    // 문서 안 키(숨은 글자 · 줄 나눔)가 위치에 실린다: 기록 전에 표시 값으로 바꾼다 (asyncApiVerdict 시험)
+    expect(hidden.kind === 'document_invalid' ? hidden.problems[0]?.pointer : '').toBe(
+      `/channels/c${RLO}\n x/address`,
+    );
+    expect(fs.readdirSync(parent)).toEqual([]);
+  }, 60_000);
+
+  it('도구의 오류는 통과로 읽히지 않는다: 예상 밖 종료 코드 · JSON 아님 · 다른 모양 · 내부 오류 보고 · 오류 수와 문제 불일치 · 오류 없이 문서 없음 · 오류가 있는데 문서 있음 · 출력 상한 · 시간 초과 · 중단. 어느 경우든 도구 폴더 · 프로세스가 남지 않는다', async () => {
+    const parent = tempDir('bive-cr-async-err-');
+    const output = (fields: Record<string, unknown>) =>
+      `process.stdout.write(${JSON.stringify(
+        JSON.stringify({
+          tool: 'asyncapi-parser',
+          parsed: true,
+          errors: 0,
+          warnings: 0,
+          uncaught: false,
+          externalReads: 0,
+          problems: [],
+          ...fields,
+        }),
+      )});\n`;
+    const problem = { code: 'x', message: 'm', path: [], line: null };
+    const run = (source: string, timeoutMs?: number, signal = never) =>
+      validateAsyncApiContract(ASYNC_VALID, {
+        sourceFile: 'asyncapi.yaml',
+        signal,
+        tempDir: parent,
+        entry: fakeTool(source),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      });
+    // 가짜 도구가 맞는 출력을 내면 그대로 읽는다 (대조)
+    expect(await run(output({}))).toEqual({ kind: 'valid', warnings: 0 });
+    const cases: [string, ContractToolError['code']][] = [
+      [`${output({})}process.exitCode = 3;\n`, 'unexpected_exit'],
+      ['process.stdout.write("ok");\n', 'output_invalid'],
+      [output({ tool: 'other' }), 'output_invalid'],
+      [output({ extra: 1 }), 'output_invalid'],
+      [output({ uncaught: true }), 'output_invalid'],
+      [output({ errors: 1, parsed: false }), 'output_invalid'],
+      [output({ errors: 0, problems: [problem] }), 'output_invalid'],
+      [output({ parsed: false }), 'output_invalid'],
+      [output({ errors: 1, problems: [problem] }), 'output_invalid'],
+      ['process.stdout.write("x".repeat(9 * 1024 * 1024));\n', 'output_too_large'],
+      ['setInterval(() => {}, 1000);\n', 'timeout'],
+    ];
+    for (const [source, code] of cases) {
+      const error = await run(source, code === 'timeout' ? 500 : undefined).catch(
+        (caught: unknown) => caught,
+      );
+      expect(error, source.slice(0, 80)).toBeInstanceOf(ContractToolError);
+      expect((error as ContractToolError).code, source.slice(0, 80)).toBe(code);
+    }
+    // 둘째 겹: 사전 검사를 지났는데 도구가 바깥을 읽으려 했으면 판정하지 않는다
+    expect(await run(output({ externalReads: 1 }))).toEqual({
+      kind: 'external',
+      references: [],
+      total: 1,
+    });
+    const controller = new AbortController();
+    const running = run('setInterval(() => {}, 1000);\n', 30_000, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    controller.abort(new Error('중단 사유'));
+    await expect(running).rejects.toThrow('중단 사유');
+    expect(await waitGone(parent)).toEqual([]);
+    expect(fs.readdirSync(parent)).toEqual([]);
+  }, 60_000);
+});
+
+/** 실행되면 표식 파일을 남기는 라이브러리 사본 · 설정 · 규칙 묶음 · 스키마 파서를 심은 프로젝트(git 저장소)와 그 커밋. */
+const plantedAsyncProject = () => {
+  const markers = tempDir('bive-cr-markers-');
+  const root = tempDir('bive-cr-project-');
+  const mark = (name: string) =>
+    `require('node:fs').writeFileSync(${JSON.stringify(path.join(markers, name))}, 'ran');\n`;
+  const files: Record<string, string> = {
+    'asyncapi.yaml': ASYNC_VALID,
+    // 프로젝트의 node_modules에 둔 같은 이름의 가짜 라이브러리
+    'node_modules/@asyncapi/parser/package.json':
+      '{"name":"@asyncapi/parser","version":"9.9.9","main":"index.js"}\n',
+    'node_modules/@asyncapi/parser/index.js': `${mark('project-library')}class Parser { async parse() { return { document: {}, diagnostics: [] }; } }\nmodule.exports = { Parser };\n`,
+    // spectral · asyncapi 도구가 쓰는 이름의 설정 · 규칙 묶음 · 함수
+    '.spectral.yaml':
+      'extends: [spectral:asyncapi]\nfunctionsDir: ./functions\nfunctions: [evil]\n',
+    '.spectral.js': mark('spectral-js'),
+    'functions/evil.js': mark('spectral-function'),
+    '.asyncapi-cli': '{"current":"x"}\n',
+    'asyncapi.config.js': mark('asyncapi-config'),
+  };
+  for (const [rel, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), text);
+  }
+  const git = (...args: string[]) =>
+    execFileSync(
+      'git',
+      ['-c', 'user.name=t', '-c', 'user.email=t@t.invalid', '-c', 'commit.gpgsign=false', ...args],
+      { cwd: root, encoding: 'utf8' },
+    ).trim();
+  git('init', '-q', '-b', 'main');
+  git('add', '--all', '--force');
+  git('commit', '-q', '-m', 'init');
+  return { root, markers, commit: git('rev-parse', 'HEAD') };
+};
+
+/** 방어 없이 라이브러리를 부르는 대조군 스크립트 (`library` = 불러올 라이브러리 경로 또는 이름). */
+const asyncControl = (library: string, document: string): string => {
+  const file = path.join(tempDir('bive-cr-control-'), 'control.cjs');
+  fs.writeFileSync(
+    file,
+    `const { Parser } = require(${JSON.stringify(library)});\nnew Parser().parse(require('node:fs').readFileSync(${JSON.stringify(document)}, 'utf8')).then((r) => process.stdout.write(JSON.stringify(r.diagnostics.map((d) => d.message))));\n`,
+  );
+  return file;
+};
+
+describe('AsyncAPI 실행기는 대상 프로젝트의 코드를 실행하지 않고 네트워크로 나가지 않는다 (대조군, ADR-148)', () => {
+  it('진입 파일은 오케스트레이터 패키지의 BIVE 스크립트이고 라이브러리는 오케스트레이터 패키지의 의존성에서 불러온다', () => {
+    expect(ASYNCAPI_ENTRY).toBe(path.join(ORCHESTRATOR_DIR, 'runner', 'asyncapi-validate.mjs'));
+    const entryRequire = createRequire(ASYNCAPI_ENTRY);
+    expect(fs.realpathSync(entryRequire.resolve('@asyncapi/parser'))).toBe(
+      fs.realpathSync(ASYNCAPI_PARSER_PATH),
+    );
+  });
+
+  it('대조군: 작업 폴더가 프로젝트면 그 폴더의 node_modules에 심은 같은 이름의 라이브러리가 실행된다. 실행기(등록 커밋의 git 객체 → 빈 도구 폴더의 사본)로는 아무것도 실행되지 않고 판정한다', async () => {
+    const { root, markers, commit } = plantedAsyncProject();
+    await runDirect(asyncControl('@asyncapi/parser', path.join(root, 'asyncapi.yaml')), [], {
+      cwd: root,
+      env: {},
+    });
+    // 대조 스크립트를 프로젝트 폴더에 두지 않아도, 프로젝트 기준으로 이름을 풀면 심은 라이브러리가 실행된다
+    const inProject = path.join(root, 'control.cjs');
+    fs.copyFileSync(asyncControl('@asyncapi/parser', 'asyncapi.yaml'), inProject);
+    await runDirect(inProject, [], { cwd: root, env: {} });
+    expect(markersIn(markers)).toEqual(['project-library']);
+    fs.rmSync(path.join(markers, 'project-library'));
+    fs.rmSync(inProject);
+
+    const source = await readContractSource(root, 'main', 'asyncapi.yaml');
+    if (!source.ok) throw new Error(source.code);
+    const item = {
+      ...planItem({
+        kind: 'asyncapi',
+        sourceFile: 'asyncapi.yaml',
+        contentHash: source.contentHash,
+        sourceCommit: commit,
+      }),
+      runner: 'asyncapi' as const,
+    };
+    const prepared = await prepareContracts(root, commit, { items: [item] }, { signal: never });
+    if (prepared.kind !== 'prepared') throw new Error(prepared.code);
+    expect(prepared.prepared).toMatchObject({
+      needsTraffic: false,
+      items: [{ kind: 'asyncapi', sourceAtCommit: 'same', result: { kind: 'valid' } }],
+    });
+    const run = await finishContracts(prepared.prepared, null, { signal: never });
+    expect(run).toMatchObject({ kind: 'judged', verdicts: [{ kind: 'judged', status: 'pass' }] });
+    expect(markersIn(markers)).toEqual([]);
+  }, 60_000);
+
+  it('부모의 NODE_OPTIONS · 프록시 환경 변수는 도구에 넘어가지 않는다 (대조군: 넘기면 --require가 실행됨)', async () => {
+    const markers = tempDir('bive-cr-markers-');
+    const preload = path.join(tempDir(), 'preload.cjs');
+    fs.writeFileSync(
+      preload,
+      `require('node:fs').writeFileSync(${JSON.stringify(path.join(markers, 'node-options'))}, 'ran');\n`,
+    );
+    const saved = { ...process.env };
+    const planted = {
+      NODE_OPTIONS: `--require ${preload}`,
+      HTTPS_PROXY: 'http://127.0.0.1:9',
+      HTTP_PROXY: 'http://127.0.0.1:9',
+      https_proxy: 'http://127.0.0.1:9',
+      http_proxy: 'http://127.0.0.1:9',
+    };
+    Object.assign(process.env, planted);
+    try {
+      // 대조군: 부모 환경을 그대로 넘겨 같은 진입 스크립트를 부르면 실행된다
+      const toolDir = tempDir();
+      fs.writeFileSync(path.join(toolDir, 'contract.yaml'), ASYNC_VALID);
+      await runDirect(ASYNCAPI_ENTRY, ['contract.yaml'], { cwd: toolDir, env: process.env });
+      expect(markersIn(markers)).toEqual(['node-options']);
+      fs.rmSync(path.join(markers, 'node-options'));
+      // 실행기: 실행되지 않는다
+      expect(
+        await validateAsyncApiContract(ASYNC_VALID, { sourceFile: 'asyncapi.yaml', signal: never }),
+      ).toEqual({ kind: 'valid', warnings: 0 });
+      expect(markersIn(markers)).toEqual([]);
+    } finally {
+      for (const key of Object.keys(planted)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  }, 60_000);
+
+  it('대조군: 방어 없이 라이브러리를 부르면 원격 $ref를 127.0.0.1 시험 서버에서 받고 파일 $ref를 읽는다. 실행기는 사전 검사로 도구를 부르지 않고(요청 0건), 사전 검사를 건너뛰어 진입 스크립트를 불러도 가로채는 리졸버가 읽지 않는다(요청 0건, 바깥 읽기 수로 셈)', async () => {
+    const remote = await listen((_req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end('{"type":"string"}');
+    });
+    const doc = asyncDoc(`channels:
+  c:
+    address: a
+    messages:
+      remote:
+        payload:
+          $ref: '${remote.url}/payload.json'
+      local:
+        payload:
+          $ref: './part.yaml'
+`);
+    const toolDir = tempDir();
+    fs.writeFileSync(path.join(toolDir, 'contract.yaml'), doc);
+    // 파일 참조가 읽히면 그 스키마 오류가 보인다 (type: 42)
+    fs.writeFileSync(path.join(toolDir, 'part.yaml'), 'type: 42\n');
+    let stdout = '';
+    await new Promise<void>((resolve) => {
+      const child = spawn(process.execPath, [asyncControl(ASYNCAPI_PARSER_PATH, 'contract.yaml')], {
+        cwd: toolDir,
+        env: {},
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
+      child.on('close', () => resolve());
+    });
+    expect(remote.hits).toEqual(['/payload.json']);
+    expect(stdout).toContain('must be equal to one of the allowed values');
+    remote.hits.length = 0;
+
+    // 실행기: 사전 검사가 막는다
+    expect(
+      await validateAsyncApiContract(doc, { sourceFile: 'asyncapi.yaml', signal: never }),
+    ).toEqual({
+      kind: 'external',
+      references: [
+        { pointer: '/channels/c/messages/remote/payload/$ref', key: '$ref' },
+        { pointer: '/channels/c/messages/local/payload/$ref', key: '$ref' },
+      ],
+      total: 2,
+    });
+    // 둘째 겹: 사전 검사를 건너뛰고 진입 스크립트를 직접 불러도 읽지 않는다
+    const output = await runAsyncApiValidate({
+      toolDir,
+      documentFile: 'contract.yaml',
+      signal: never,
+    });
+    expect(output.externalReads).toBe(2);
+    expect(JSON.stringify(output.problems)).not.toContain(
+      'must be equal to one of the allowed values',
+    );
+    expect(remote.hits).toEqual([]);
+  }, 60_000);
+});
+
+describe('검사 단계 · 병합 재검사의 AsyncAPI 계약 판정 (M3-49, ADR-148)', () => {
+  it('asyncApiVerdict: 유효 = pass, 형식 오류 = 막지 않는 fail(케이스는 표시 값, 20건 상한), 바깥 참조 · 검사하지 못하는 형식 = 판정 없음. 판정 기록의 실행기는 종류별이다', () => {
+    const item = {
+      ...planItem({ kind: 'asyncapi', sourceFile: 'events.yaml' }),
+      runner: 'asyncapi' as const,
+    };
+    expect(contractRunnerOf({ kind: 'asyncapi' })).toBe('asyncapi');
+    expect(contractRunnerOf({ kind: 'openapi' })).toBe('openapi');
+    expect(contractRunnerOf({ kind: 'db-schema' })).toBeNull();
+    const pass = asyncApiVerdict(item, { kind: 'valid', warnings: 2 }, 'changed');
+    expect(pass).toMatchObject({
+      kind: 'judged',
+      status: 'pass',
+      reason: 'verified',
+      cases: [
+        {
+          name: '계약 검사 · CON-001 (AsyncAPI)',
+          file: 'events.yaml',
+          status: 'passed',
+          message:
+            '문서 형식 오류 0건 · 문서 경고 2건 · 구현 일치는 검사하지 않음 (문서 유효성만) · 판정 커밋의 원본 파일은 등록 때와 다름 (등록 내용으로 판정)',
+        },
+      ],
+    });
+    const problems = Array.from({ length: 25 }, (_, i) => ({
+      code: 'asyncapi-document-resolved',
+      message: `"${RLO}\n${'긴'.repeat(400)}" ${String(i)}`,
+      pointer: `/channels/c${RLO}\n x/${String(i)}`,
+      line: i + 1,
+    }));
+    const fail = asyncApiVerdict(
+      item,
+      {
+        kind: 'document_invalid',
+        reason: 'invalid',
+        message: '문서 형식 오류 25건',
+        problems,
+        errors: 25,
+      },
+      'same',
+    );
+    expect(fail).toMatchObject({
+      kind: 'judged',
+      status: 'fail',
+      reason: 'document_invalid',
+      blocking: false,
+    });
+    const cases = fail.kind === 'judged' ? fail.cases : [];
+    expect(cases).toHaveLength(21);
+    expect(cases[0]).toMatchObject({
+      status: 'failed',
+      message:
+        '문서 형식 오류 25건 · 앞 20건만 실음 · 등록된 문서의 문제라 구현 회귀 없음 · 판정 커밋의 원본 파일은 등록 때와 같음',
+    });
+    expect(cases[1]?.name).toBe('문서 형식 오류 · asyncapi-document-resolved');
+    // 문서 글(키 · 메시지)은 표시 값으로: 숨은 글자 · 줄 나눔이 그대로 가지 않고 300자 안이다
+    for (const problemCase of cases.slice(1)) {
+      expect(problemCase.message).not.toMatch(/[\u202e\n]/u);
+      expect(problemCase.message?.length).toBeLessThanOrEqual(300);
+      expect(problemCase.line).toBeNull();
+    }
+    expect(cases[1]?.message).toContain('위치 /channels/c');
+    expect(cases[1]?.message).toContain('줄 1');
+    expect(
+      asyncApiVerdict(
+        item,
+        {
+          kind: 'document_invalid',
+          reason: 'unreadable',
+          message: 'YAML · JSON 문법 오류',
+          problems: [],
+          errors: 1,
+        },
+        'same',
+      ),
+    ).toMatchObject({
+      status: 'fail',
+      blocking: false,
+      cases: [{ message: expect.stringContaining('문서 형식 오류 (YAML · JSON 문법 오류)') }],
+    });
+    expect(asyncApiVerdict(item, { kind: 'external', references: [], total: 1 }, 'same')).toEqual({
+      kind: 'unjudged',
+      item,
+      reason: 'external_reference',
+    });
+    expect(
+      asyncApiVerdict(item, { kind: 'unsupported_schema_format', formats: [], total: 1 }, 'same'),
+    ).toEqual({ kind: 'unjudged', item, reason: 'unsupported_schema_format' });
+    const openapiItem = planItem();
+    const meta = {
+      runId: newId(),
+      stepId: newId(),
+      commit: 'c'.repeat(40),
+      judgedAt: new Date().toISOString(),
+    };
+    const records = contractJudgmentsFrom(
+      {
+        kind: 'judged',
+        verdicts: [
+          pass,
+          fail,
+          trafficVerdict(openapiItem, { exchanges: [verdictOf('ok')] }, 'same', {
+            overflow: 0,
+            warnings: 0,
+          }),
+          { kind: 'unjudged', item, reason: 'external_reference' },
+        ],
+      },
+      meta,
+    );
+    expect(records.map((record) => [record.status, record.runner])).toEqual([
+      ['pass', 'asyncapi-parser'],
+      ['fail', 'asyncapi-parser'],
+      ['pass', 'redocly-prism'],
+    ]);
+  });
+
+  it('유효하지 않은 문서는 fail로 기록되지만 OpenAPI의 형식 오류처럼 회귀하지 않고(병합 재검사도 같은 기록, 실행은 병합), 바깥 참조 · 검사하지 못하는 스키마 형식은 판정 없음이다. AsyncAPI 계약 검사 규칙은 유형 B의 대상이 된다', async () => {
+    const { h, rules } = await contractPipeline(
+      [
+        { file: 'invalid.yaml', kind: 'asyncapi', text: 'asyncapi: 3.0.0\nchannels: {}\n' },
+        {
+          file: 'external.yaml',
+          kind: 'asyncapi',
+          text: asyncWithPayload("$ref: 'https://example.invalid/p.json'"),
+        },
+        {
+          file: 'avro.yaml',
+          kind: 'asyncapi',
+          text: asyncWithPayload(
+            "schemaFormat: 'application/vnd.apache.avro;version=1.9.0'\nschema:\n  type: record",
+          ),
+        },
+      ],
+      (calls) => trafficJudge(calls),
+      {},
+      true,
+    );
+    const detail = await runToEnd(h);
+    expect(detail.run.status).toBe('merged');
+    const checkStep = detail.steps.find((step) => step.kind === 'check')?.id;
+    const mergeStep = detail.steps.find((step) => step.kind === 'merge')?.id;
+    const invalid = judgmentsOfRule(h, rules[0]!.id);
+    expect(invalid.map((judgment) => [judgment.stepId, judgment.status, judgment.runner])).toEqual([
+      [checkStep, 'fail', 'asyncapi-parser'],
+      [mergeStep, 'fail', 'asyncapi-parser'],
+    ]);
+    expect(invalid[0]?.cases).toEqual([
+      {
+        name: '계약 검사 · CON-001 (AsyncAPI)',
+        file: 'invalid.yaml',
+        line: null,
+        status: 'failed',
+        message:
+          '문서 형식 오류 1건 · 등록된 문서의 문제라 구현 회귀 없음 · 판정 커밋의 원본 파일은 등록 때와 같음',
+      },
+      {
+        name: '문서 형식 오류 · asyncapi-document-resolved',
+        file: 'invalid.yaml',
+        line: null,
+        status: 'failed',
+        message: '줄 1 · Object must have required property "info"',
+      },
+    ]);
+    for (const rule of rules.slice(1)) expect(judgmentsOfRule(h, rule.id)).toEqual([]);
+    const contracts = [
+      { outcome: 'fail', reason: 'document_invalid', blocking: false },
+      { outcome: 'unjudged', reason: 'external_reference' },
+      { outcome: 'unjudged', reason: 'unsupported_schema_format' },
+    ];
+    expect(exitOf(detail, 'check')).toMatchObject({ contracts });
+    expect(exitOf(detail, 'merge')).toMatchObject({ rechecked: true, recheck: { contracts } });
+    // 실행기가 있는 종류라 유형 B 실행의 대상으로 받는다 (실행기 없는 종류는 거부, ADR-136)
+    const created = withProject(h.biveHome, h.project.id, (store) =>
+      createRun(
+        store,
+        { ruleIds: [rules[0]!.id], author: human },
+        { clientId: null },
+        { now: Date.now, newId },
+      ),
+    );
+    expect(created.run).toMatchObject({ type: 'B', targetRuleIds: [rules[0]!.id] });
+  }, 180_000);
+
+  it('판정 커밋의 원본 파일이 등록 뒤 바뀌어도 등록 때 커밋의 내용으로 판정한다: 유효하지 않게 등록하고 고쳐도 fail, 유효하게 등록하고 깨뜨려도 pass (바뀐 파일로 판정하면 반대)', async () => {
+    const invalidText = 'asyncapi: 3.0.0\nchannels: {}\n';
+    const { h, rules } = await contractPipeline(
+      [
+        { file: 'registered-invalid.yaml', kind: 'asyncapi', text: invalidText },
+        { file: 'registered-valid.yaml', kind: 'asyncapi', text: ASYNC_VALID },
+      ],
+      (calls) => trafficJudge(calls),
+    );
+    // 등록 뒤 기준 브랜치의 계약 파일이 바뀐다: 앞 것은 유효하게 고치고, 뒤 것은 필수 칸을 지워 깨뜨린다
+    fs.writeFileSync(path.join(h.repo, 'registered-invalid.yaml'), ASYNC_VALID);
+    fs.writeFileSync(path.join(h.repo, 'registered-valid.yaml'), invalidText);
+    userGit(h.repo, 'commit', '-q', '-am', '계약 파일 고침');
+    const detail = await runToEnd(h);
+    expect(detail.run.status).toBe('merged');
+    const [fixed] = judgmentsOfRule(h, rules[0]!.id);
+    expect(fixed).toMatchObject({ status: 'fail', runner: 'asyncapi-parser' });
+    expect(fixed?.cases[0]?.message).toBe(
+      '문서 형식 오류 1건 · 등록된 문서의 문제라 구현 회귀 없음 · 판정 커밋의 원본 파일은 등록 때와 다름 (등록 내용으로 판정)',
+    );
+    const [broken] = judgmentsOfRule(h, rules[1]!.id);
+    expect(broken).toMatchObject({ status: 'pass', runner: 'asyncapi-parser' });
+    expect(broken?.cases[0]?.message).toBe(
+      '문서 형식 오류 0건 · 구현 일치는 검사하지 않음 (문서 유효성만) · 판정 커밋의 원본 파일은 등록 때와 다름 (등록 내용으로 판정)',
+    );
+  }, 120_000);
+
+  it('도구를 끝까지 못 돌리면(시간 초과) 판정하지 않고 judge_runner_error(단계 contract)로 끝나며 판정 기록이 없다', async () => {
+    const { h, rules } = await contractPipeline(
+      [{ file: 'asyncapi.yaml', kind: 'asyncapi', text: ASYNC_VALID }],
+      (calls) => trafficJudge(calls),
+      { contractAsyncApiTimeoutMs: 1 },
+    );
+    const detail = await runToEnd(h);
+    expect(detail.run).toMatchObject({ status: 'failed', failureReason: 'judge_runner_error' });
+    expect(exitOf(detail, 'check').detail).toMatchObject({
+      stage: 'contract',
+      code: 'timeout',
+      ruleId: rules[0]!.displayId,
+    });
+    expect(judgmentsOfRule(h, rules[0]!.id)).toEqual([]);
+  }, 120_000);
 });

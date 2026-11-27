@@ -2131,6 +2131,7 @@ export const QUARANTINE_REASON_MAX = 4000;
  * 검토 대기열 항목의 처리 기록 (사람만, 한 번만). 액션마다 결과가 다르다.
  * - `reinforce`: 사람이 시작한 유형 C 테스트 보강 실행(`runId`). 사유 없음
  * - `quarantine`: 그 규칙의 판정 격리 기록(`judgmentId`, 판정 상태 '격리'). 사유 필수
+ * - `raise_limit_resume`: 예산 초과 항목의 한도 상향 재개. 그 항목의 실행을 이어받는 새 실행(`runId`, M3-56 #319, ADR-149). 사유 없음
  */
 export const ReviewResolution = z.discriminatedUnion('action', [
   z.strictObject({
@@ -2146,6 +2147,13 @@ export const ReviewResolution = z.discriminatedUnion('action', [
     at: Timestamp,
     reason: NonEmptyString.max(QUARANTINE_REASON_MAX),
     judgmentId: Ulid,
+  }),
+  z.strictObject({
+    action: z.literal('raise_limit_resume'),
+    by: HumanAuthor,
+    at: Timestamp,
+    reason: z.null(),
+    runId: Ulid,
   }),
 ]);
 export type ReviewResolution = z.infer<typeof ReviewResolution>;

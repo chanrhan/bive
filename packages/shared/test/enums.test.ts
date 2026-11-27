@@ -296,7 +296,8 @@ describe('규범 · 제안 (NRM-02, NRM-04, TODO-01)', () => {
 describe('판정 실행기 · P1 이후 열거형', () => {
   it('판정 실행기 · 테스트 케이스 상태', () => {
     // 내장 구조 규칙(구조 검사)의 판정 실행기 (M3-03 #48)
-    expectEnum(JudgeRunner, ['vitest', 'dependency-cruiser', 'redocly-prism']);
+    // OpenAPI 계약 검사(M3-47 #292) · AsyncAPI 계약 검사(M3-49 #294)
+    expectEnum(JudgeRunner, ['vitest', 'dependency-cruiser', 'redocly-prism', 'asyncapi-parser']);
     expectEnum(TestCaseStatus, ['passed', 'failed', 'skipped', 'pending', 'todo', 'disabled']);
   });
 

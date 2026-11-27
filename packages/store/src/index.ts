@@ -29,6 +29,7 @@ export * from './repositories/registry-repository.js';
 export * from './repositories/requirement-repository.js';
 export * from './repositories/review-queue-repository.js';
 export * from './repositories/rule-repository.js';
+export * from './repositories/run-continuation-repository.js';
 export * from './repositories/rule-retirement-repository.js';
 export * from './repositories/rule-writer-request-repository.js';
 export * from './repositories/auto-start-skip-repository.js';
