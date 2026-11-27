@@ -1,26 +1,31 @@
-// 계약 검사: `contract` 검사 규칙의 판정 (NRM-03 · JDG-01 · RUN-02, ADR-033 · ADR-129 · ADR-130 ⑤, M3-47 #292 · ADR-132).
+// 계약 검사: `contract` 검사 규칙의 판정 (NRM-03 · JDG-01 · RUN-02, ADR-033 · ADR-129 · ADR-130 ⑤, M3-47 #292 · ADR-132,
+// M3-49 #294 · ADR-148).
 // 검사 단계와 병합 재검사가 판정 절차(`judging.ts`의 `judgeCommit`) 안에서 같이 쓴다(구조 검사와 같은 자리).
 // - 대상: 판정 대상(효력 있는 규칙) 가운데 계약 검사 규칙(`builtin` · `contractId` 있음). 인수 테스트로는 판정하지 않는다
-// - 실행기는 계약 종류별이다. 지금 있는 것은 OpenAPI 하나(`contract-check/openapi.ts`). 실행기가 없는 종류(DB 스키마 · AsyncAPI)의
-//   규칙은 판정 없음으로 남는다: 판정 기록을 남기지 않고(통과로 세지 않는다), 단계의 통과 · 회귀에 끼지 않는다(다른 규칙을 막지 않는다)
+// - 실행기는 계약 종류별이다. 지금 있는 것은 OpenAPI(`contract-check/openapi.ts`)와 AsyncAPI(`contract-check/asyncapi.ts`, 문서 유효성만)다.
+//   실행기가 없는 종류(DB 스키마)의 규칙은 판정 없음으로 남는다: 판정 기록을 남기지 않고(통과로 세지 않는다), 단계의 통과 · 회귀에 끼지
+//   않는다(다른 규칙을 막지 않는다)
 // - 판정하는 문서: 등록 때 기록한 커밋(`Contract.sourceCommit`)의 원본 파일을 git 객체에서 읽고 등록 해시와 대조한다(작업 트리 ·
 //   실행 워크트리 · 판정 커밋의 파일이 아니다). 구현 역할은 실행 워크트리에서 계약 파일을 쓸 수 있으므로 판정 커밋의 파일로 판정하면 자기
 //   채점 기준을 바꿀 수 있다. 판정 커밋의 같은 파일이 등록 때와 같은지는 요약에만 남긴다
 // - 판정 규칙 (근거는 도구 출력뿐, ADR-033):
-//   - 문서 형식 오류(데이터로 읽지 못함 · lint 오류): `fail`. 등록된 문서의 문제라 구현이 고칠 수 없어 회귀하지 않는다(단계 통과를 막지
+//   - 문서 형식 오류(데이터로 읽지 못함 · lint 오류 · AsyncAPI 유효성 오류): `fail`. 등록된 문서의 문제라 구현이 고칠 수 없어 회귀하지 않는다(단계 통과를 막지
 //     않는다: 막으면 그 프로젝트의 모든 실행이 회귀 상한으로 끝난다)
 //   - 트래픽 검증에서 계약과 다른 응답이 하나라도 있음: `fail`, 구현 회귀(구조 검사 실패와 같다)
 //   - 검증하지 못한 요청(계약 안이거나 계약 안인지 가릴 수 없는 교환: prism이 다루지 못한 응답 · 넘기지 않은 요청 · 불완전한 기록 ·
 //     기록 건수 상한 초과): `fail`, 구현 회귀. 판정받는 구현이 응답 모양 · 크기로 만들 수 있는 사유라 판정 없음으로 두지 않는다
-//   - 계약 밖을 가리키는 값(원격 · 파일 참조) · 경로 없는 문서 · 등록 원본을 읽지 못함 · 계약 안 요청이 없음: 판정 없음(기록 없음,
-//     통과로 세지 않음, 다른 규칙을 막지 않음). 모두 등록 문서 · 인수 테스트 쪽 사유라 구현 코드가 고를 수 없다
-//   - 통과: 문서 형식 오류 0건이고, 계약 안 요청이 1건 이상이며 모두 검증되었고 위반이 0건일 때뿐
+//   - 계약 밖을 가리키는 값(원격 · 파일 참조) · 경로 없는 문서 · 등록 원본을 읽지 못함 · 계약 안 요청이 없음 · 도구가 검사하지 못하는
+//     스키마 형식(AsyncAPI): 판정 없음(기록 없음, 통과로 세지 않음, 다른 규칙을 막지 않음). 모두 등록 문서 · 인수 테스트 쪽 사유라 구현
+//     코드가 고를 수 없다
+//   - 통과: OpenAPI는 문서 형식 오류 0건이고, 계약 안 요청이 1건 이상이며 모두 검증되었고 위반이 0건일 때뿐. AsyncAPI는 문서 유효성
+//     오류 0건일 때(구현 일치는 검사하지 않는다, ADR-033)
 // - 도구를 끝까지 못 돌림(띄우지 못함 · 시간 초과 · 출력 초과 · 예상 밖 종료 코드 · 출력 모양): 판정하지 않고 실행을 끝낸다
 //   (`judge_runner_error`, 단계 이름 `contract`). 통과로 읽히는 길이 없다. 중단 신호는 도구까지 이어지고 신호의 사유로 던진다
 // - 판정 기록의 케이스: 첫 케이스는 요약, 그 뒤 문서 형식 오류 · 계약과 다른 응답 한 건씩(상한). 경로 · 메시지는 표시 값으로 바꾼다
-import type { Contract, JudgmentCase, JudgmentResult, Rule } from '@bive/shared';
+import type { Contract, JudgeRunner, JudgmentCase, JudgmentResult, Rule } from '@bive/shared';
 import { createUlidGenerator } from '@bive/shared';
 
+import { type AsyncApiResult, validateAsyncApiContract } from '../contract-check/asyncapi.js';
 import {
   disposePrepared,
   type OpenApiPrepared,
@@ -42,18 +47,27 @@ export const CONTRACT_STAGE = 'contract';
 /** 판정 기록 한 건에 싣는 문제 · 위반 케이스 상한. */
 export const MAX_CONTRACT_CASES = 20;
 
-/** 판정 기록의 실행기 값 (shared `JudgeRunner`). */
-export const CONTRACT_JUDGE_RUNNER = 'redocly-prism';
+/** 실행기가 있는 계약 종류. */
+export type ContractRunnerKind = 'openapi' | 'asyncapi';
+
+/** 계약 종류별 판정 기록의 실행기 값 (shared `JudgeRunner`). */
+export const CONTRACT_JUDGE_RUNNERS = {
+  openapi: 'redocly-prism',
+  asyncapi: 'asyncapi-parser',
+} as const satisfies Record<ContractRunnerKind, JudgeRunner>;
+
+/** 요약 케이스 이름의 종류 표기. */
+const RUNNER_KIND_TEXT: Readonly<Record<ContractRunnerKind, string>> = {
+  openapi: 'OpenAPI',
+  asyncapi: 'AsyncAPI',
+};
 
 const MAX_TEXT_CHARS = 300;
 const shown = (value: string): string => displayText(value, MAX_TEXT_CHARS, 'ends').text;
 
-/** 실행기가 있는 계약 종류. */
-export type ContractRunnerKind = 'openapi';
-
 /** 계약 종류의 실행기 (없으면 `null`). 유형 B 실행의 대상 검증(`runs/run-service.ts`)도 이 표를 쓴다. */
 export const contractRunnerOf = (contract: Pick<Contract, 'kind'>): ContractRunnerKind | null =>
-  contract.kind === 'openapi' ? 'openapi' : null;
+  contract.kind === 'openapi' ? 'openapi' : contract.kind === 'asyncapi' ? 'asyncapi' : null;
 
 /** 단계를 열 때 읽은 계약 검사 계획의 한 줄: 계약 검사 규칙과 그 계약. */
 export interface ContractPlanItem {
@@ -115,7 +129,12 @@ export const contractRuleIds = (plan: ContractPlan | null): string[] =>
 
 /** 판정 없음의 사유. */
 export type ContractUnjudgedReason =
-  'no_runner' | 'source_unreadable' | 'external_reference' | 'no_operations' | 'no_traffic';
+  | 'no_runner'
+  | 'source_unreadable'
+  | 'external_reference'
+  | 'no_operations'
+  | 'no_traffic'
+  | 'unsupported_schema_format';
 
 /**
  * 판정 사유 (기록 · 단계 결과). `response_unverified`: 계약 안이거나 계약 안인지 가릴 수 없는 교환을 검증하지 못함(판정받는 구현이 응답
@@ -190,6 +209,13 @@ type PreparedItem =
       readonly item: ContractPlanItem;
       readonly prepared: OpenApiPrepared;
       readonly sourceAtCommit: SourceAtCommit;
+    }
+  /** AsyncAPI: 유효성 검사는 준비에서 끝난다 (트래픽 검증 없음) */
+  | {
+      readonly kind: 'asyncapi';
+      readonly item: ContractPlanItem;
+      readonly result: AsyncApiResult;
+      readonly sourceAtCommit: SourceAtCommit;
     };
 
 /** 준비 결과 (판정 서버를 띄우기 전). 도구 폴더가 남을 수 있어 {@link disposeContracts}로 정리한다. */
@@ -215,6 +241,7 @@ export interface ContractCheckOptions {
   readonly git?: GitRunner;
   readonly lintTimeoutMs?: number;
   readonly prismTimeoutMs?: number;
+  readonly asyncApiTimeoutMs?: number;
   /** 도구 폴더의 상위 (기본 시스템 임시 폴더) */
   readonly tempDir?: string;
 }
@@ -283,6 +310,18 @@ export const prepareContracts = async (
         : atCommit.contentHash === contract.contentHash
           ? 'same'
           : 'changed';
+      if (item.runner === 'asyncapi') {
+        const result = await validateAsyncApiContract(registered.text, {
+          sourceFile: contract.sourceFile,
+          signal: options.signal,
+          ...(options.asyncApiTimeoutMs === undefined
+            ? {}
+            : { timeoutMs: options.asyncApiTimeoutMs }),
+          ...(options.tempDir === undefined ? {} : { tempDir: options.tempDir }),
+        });
+        items.push({ kind: 'asyncapi', item, result, sourceAtCommit });
+        continue;
+      }
       const prepared = await prepareOpenApiContract(registered.text, {
         sourceFile: contract.sourceFile,
         signal: options.signal,
@@ -301,21 +340,64 @@ export const prepareContracts = async (
   return { kind: 'prepared', prepared: done() };
 };
 
+/** 판정한 계약의 실행기 (판정은 실행기가 있는 계약에만 생긴다: 없으면 프로그램 오류). */
+const runnerOf = (item: ContractPlanItem): ContractRunnerKind => {
+  if (item.runner === null) throw new Error('실행기가 없는 계약을 판정했습니다');
+  return item.runner;
+};
+
 const summaryCase = (
   item: ContractPlanItem,
   status: 'passed' | 'failed',
   notes: readonly string[],
 ): JudgmentCase => ({
-  name: `계약 검사 · ${item.contract.displayId} (OpenAPI)`,
+  name: `계약 검사 · ${item.contract.displayId} (${RUNNER_KIND_TEXT[runnerOf(item)]})`,
   file: shown(item.contract.sourceFile),
   line: null,
   status,
   message: notes.join(' · '),
 });
 
+/** 문서 형식 오류 (OpenAPI 준비 결과 · AsyncAPI 검사 결과를 같은 모양으로). */
+interface DocumentInvalid {
+  /** 도구가 센 오류인지 (아니면 문서를 데이터로 읽지 못함) */
+  readonly counted: boolean;
+  readonly message: string;
+  readonly errors: number;
+  readonly problems: readonly {
+    readonly ruleId: string;
+    readonly message: string;
+    readonly pointer: string | null;
+    readonly line: number | null;
+  }[];
+}
+
+const openApiInvalid = (
+  prepared: Extract<OpenApiPrepared, { kind: 'document_invalid' }>,
+): DocumentInvalid => ({
+  counted: prepared.reason === 'lint',
+  message: prepared.message,
+  errors: prepared.errors,
+  problems: prepared.problems,
+});
+
+const asyncApiInvalid = (
+  result: Extract<AsyncApiResult, { kind: 'document_invalid' }>,
+): DocumentInvalid => ({
+  counted: result.reason === 'invalid',
+  message: result.message,
+  errors: result.errors,
+  problems: result.problems.map((problem) => ({
+    ruleId: problem.code,
+    message: problem.message,
+    pointer: problem.pointer === '' ? null : problem.pointer,
+    line: problem.line,
+  })),
+});
+
 const documentVerdict = (
   item: ContractPlanItem,
-  prepared: Extract<OpenApiPrepared, { kind: 'document_invalid' }>,
+  prepared: DocumentInvalid,
   sourceAtCommit: SourceAtCommit,
 ): ContractVerdict => ({
   kind: 'judged',
@@ -325,7 +407,7 @@ const documentVerdict = (
   blocking: false,
   cases: [
     summaryCase(item, 'failed', [
-      prepared.reason === 'lint'
+      prepared.counted
         ? `문서 형식 오류 ${String(prepared.errors)}건`
         : `문서 형식 오류 (${prepared.message})`,
       ...(prepared.problems.length > MAX_CONTRACT_CASES
@@ -422,6 +504,38 @@ export const trafficVerdict = (
   };
 };
 
+/** AsyncAPI 검사 결과 → 계약 하나의 판정 (유효성만: 트래픽은 보지 않는다). */
+export const asyncApiVerdict = (
+  item: ContractPlanItem,
+  result: AsyncApiResult,
+  sourceAtCommit: SourceAtCommit,
+): ContractVerdict => {
+  switch (result.kind) {
+    case 'document_invalid':
+      return documentVerdict(item, asyncApiInvalid(result), sourceAtCommit);
+    case 'external':
+      return { kind: 'unjudged', item, reason: 'external_reference' };
+    case 'unsupported_schema_format':
+      return { kind: 'unjudged', item, reason: 'unsupported_schema_format' };
+    case 'valid':
+      return {
+        kind: 'judged',
+        item,
+        status: 'pass',
+        reason: 'verified',
+        blocking: false,
+        cases: [
+          summaryCase(item, 'passed', [
+            '문서 형식 오류 0건',
+            ...(result.warnings > 0 ? [`문서 경고 ${String(result.warnings)}건`] : []),
+            '구현 일치는 검사하지 않음 (문서 유효성만)',
+            SOURCE_AT_COMMIT_TEXT[sourceAtCommit],
+          ]),
+        ],
+      };
+  }
+};
+
 /**
  * ② 판정 (판정 러너가 케이스 결과를 낸 뒤): 준비 결과와 기록된 교환으로 계약마다 판정한다. 도구 오류면 `halt`, 중단이면 신호의 사유로
  * 던진다. 도구 폴더는 호출자가 {@link disposeContracts}로 지운다.
@@ -438,10 +552,14 @@ export const finishContracts = async (
       verdicts.push({ kind: 'unjudged', item: entry.item, reason: entry.reason });
       continue;
     }
+    if (entry.kind === 'asyncapi') {
+      verdicts.push(asyncApiVerdict(entry.item, entry.result, entry.sourceAtCommit));
+      continue;
+    }
     const { item, prepared: doc, sourceAtCommit } = entry;
     switch (doc.kind) {
       case 'document_invalid':
-        verdicts.push(documentVerdict(item, doc, sourceAtCommit));
+        verdicts.push(documentVerdict(item, openApiInvalid(doc), sourceAtCommit));
         continue;
       case 'external':
         verdicts.push({ kind: 'unjudged', item, reason: 'external_reference' });
@@ -497,7 +615,7 @@ export const missingContractVerdicts = (
 
 const newId = createUlidGenerator();
 
-/** 계약 검사 결과 → 판정 기록 (실행기 `redocly-prism`). 판정 없음은 기록하지 않는다. */
+/** 계약 검사 결과 → 판정 기록 (실행기는 계약 종류별 {@link CONTRACT_JUDGE_RUNNERS}). 판정 없음은 기록하지 않는다. */
 export const contractJudgmentsFrom = (
   run: ContractRun | undefined,
   meta: { runId: string; stepId: string; commit: string; judgedAt: string },
@@ -516,7 +634,7 @@ export const contractJudgmentsFrom = (
                 commit: meta.commit,
                 judgedAt: meta.judgedAt,
                 status: verdict.status,
-                runner: CONTRACT_JUDGE_RUNNER,
+                runner: CONTRACT_JUDGE_RUNNERS[runnerOf(verdict.item)],
                 exitCode: null,
                 reporterPath: null,
                 cases: verdict.cases,
