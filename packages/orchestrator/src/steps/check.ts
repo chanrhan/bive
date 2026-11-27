@@ -63,6 +63,7 @@ import {
   normHalt,
   recordJudgments,
 } from './judging.js';
+import { basisSteps } from '../runs/run-continuation.js';
 import {
   acceptanceBaselineOf,
   changedPathsBetween,
@@ -102,7 +103,9 @@ export const createCheckExecutor =
     // 판정할 커밋 = 마지막 완료 단계(구현, 유형 C는 테스트 작성) 커밋
     const commit = context.run.headCommit;
     const headKind = headStepKindOf(context.run.type);
-    if (commit === null || lastPassed(context.steps, headKind)?.commit !== commit) {
+    // 판정 근거는 이어받는 실행이면 이어받은 단계가 가리키는 원 실행의 시도까지 읽는다 (ADR-152)
+    const basis = basisSteps(context);
+    if (commit === null || lastPassed(basis, headKind)?.commit !== commit) {
       return halt('state_inconsistent', {
         message:
           headKind === 'implementation'
@@ -111,7 +114,7 @@ export const createCheckExecutor =
         commit,
       });
     }
-    const baseline = acceptanceBaselineOf(context.run, context.steps);
+    const baseline = acceptanceBaselineOf(context.run, basis);
     if (baseline === null) {
       return halt('state_inconsistent', { message: missingBaselineMessage(context.run.type) });
     }

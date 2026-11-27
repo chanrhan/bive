@@ -58,6 +58,7 @@ import {
   normHalt,
   recordJudgments,
 } from './judging.js';
+import { basisSteps } from '../runs/run-continuation.js';
 import { acceptanceBaselineOf, missingBaselineMessage } from './run-type.js';
 import { structureRuleDisplayIds } from './structure-check.js';
 
@@ -372,7 +373,7 @@ export const createImplementationExecutor =
       return halt('target_rule_unavailable', { ruleIds: context.run.targetRuleIds });
     }
     const ruleIds = rules.map((rule) => rule.displayId);
-    const baseline = acceptanceBaselineOf(context.run, context.steps);
+    const baseline = acceptanceBaselineOf(context.run, basisSteps(context));
     if (baseline === null) {
       return halt('state_inconsistent', { message: missingBaselineMessage(context.run.type) });
     }

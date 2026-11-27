@@ -37,6 +37,7 @@ import {
   MAX_LISTED,
   normHalt,
 } from './judging.js';
+import { basisSteps } from '../runs/run-continuation.js';
 import { JUDGE_RUNNER_ERROR_REASON, NO_CASES_MESSAGE } from './red-check.js';
 import { existingTestViolations, isReinforcementRun, testOnlyViolations } from './run-type.js';
 import {
@@ -139,7 +140,7 @@ const greenNewTests = async (
   options: GreenCheckOptions,
 ): Promise<StepOutcome> => {
   const commit = context.run.headCommit;
-  if (commit === null || lastPassed(context.steps, 'test_writing')?.commit !== commit) {
+  if (commit === null || lastPassed(basisSteps(context), 'test_writing')?.commit !== commit) {
     return halt('state_inconsistent', {
       message: '테스트 작성 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다',
       commit,

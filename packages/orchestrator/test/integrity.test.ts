@@ -2875,6 +2875,37 @@ describe('검토 대기열 항목을 쓰는 곳은 검토 대기열 모듈 하�
   });
 });
 
+describe('단계 실행기는 판정 근거를 한 함수(basisSteps)로 읽는다 (M3-60 #325, ADR-152, 코드 구조)', () => {
+  it('단계 실행기 폴더에서 lastPassed · acceptanceBaselineOf · 인수 테스트 해시 읽기가 실행의 단계 목록(context.steps)을 직접 받지 않고, basisSteps를 쓰는 실행기는 정해져 있다', () => {
+    const files = sourceFiles(path.join(SRC_DIR, 'steps')).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+    expect(files.length).toBeGreaterThan(5);
+    for (const { rel, text } of files) {
+      expect(
+        /lastPassed\(\s*context\.steps|acceptanceBaselineOf\([^)]*context\.steps|AcceptanceHashes\(\s*context\.steps/.test(
+          text,
+        ),
+        rel,
+      ).toBe(false);
+    }
+    expect(
+      files
+        .filter((f) => /\bbasisSteps\(context\)/.test(f.text))
+        .map((f) => f.rel)
+        .sort(),
+    ).toEqual([
+      'steps/check.ts',
+      'steps/green-check.ts',
+      'steps/implementation.ts',
+      'steps/merge.ts',
+      'steps/mutation.ts',
+      'steps/red-check.ts',
+    ]);
+  });
+});
+
 describe('이어받는 실행의 연결을 쓰는 곳은 검토 대기열 모듈 하나 (M3-56 #319, TODO-02 · COST-01, ADR-149, 코드 구조)', () => {
   it('연결 쓰기는 review/review-queue.ts 하나, 연결 표를 아는 파일은 정해져 있고(날 SQL 없음), 확인 · 연결 · 처리를 부르는 곳은 사람 주체를 먼저 보는 실행 처리기 하나이며, 사람의 run.create는 이어받는 실행의 값을 넘기지 않는다', () => {
     const files = sourceFiles(SRC_DIR).map((file) => ({

@@ -50,6 +50,7 @@ import {
   type NormGuard,
   normHalt,
 } from './judging.js';
+import { basisSteps } from '../runs/run-continuation.js';
 import { acceptanceBaselineOf, headStepKindOf, missingBaselineMessage } from './run-type.js';
 import { JUDGE_RUNNER_ERROR_REASON } from './red-check.js';
 
@@ -267,16 +268,14 @@ const reinject = async (
   git: ReturnType<typeof createGitRunner>,
 ): Promise<StepOutcome> => {
   const commit = context.run.headCommit;
-  if (
-    commit === null ||
-    lastPassed(context.steps, headStepKindOf(context.run.type))?.commit !== commit
-  ) {
+  const basis = basisSteps(context);
+  if (commit === null || lastPassed(basis, headStepKindOf(context.run.type))?.commit !== commit) {
     return halt('state_inconsistent', {
       message: '판정 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다',
       commit,
     });
   }
-  const baseline = acceptanceBaselineOf(context.run, context.steps);
+  const baseline = acceptanceBaselineOf(context.run, basis);
   if (baseline === null || baseline.kind !== 'hashes') {
     return halt('state_inconsistent', { message: missingBaselineMessage(context.run.type) });
   }
@@ -406,13 +405,14 @@ export const createMutationExecutor =
     // 판정할 커밋 = 마지막 완료 단계 커밋 (검사 단계가 판정한 커밋)
     const commit = context.run.headCommit;
     const headKind = headStepKindOf(context.run.type);
-    if (commit === null || lastPassed(context.steps, headKind)?.commit !== commit) {
+    const basis = basisSteps(context);
+    if (commit === null || lastPassed(basis, headKind)?.commit !== commit) {
       return halt('state_inconsistent', {
         message: '판정 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다',
         commit,
       });
     }
-    const baseline = acceptanceBaselineOf(context.run, context.steps);
+    const baseline = acceptanceBaselineOf(context.run, basis);
     if (baseline === null || baseline.kind !== 'hashes') {
       return halt('state_inconsistent', { message: missingBaselineMessage(context.run.type) });
     }
