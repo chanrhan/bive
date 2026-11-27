@@ -5,7 +5,9 @@
 //   (M1-19, ADR-076). 이때 `alsoRefresh`(코드 열람
 //   영역의 조회, ADR-088)도 함께 부른다: 구독은 화면당 1개
 // - 늦게 온 이전 요청의 결과는 버린다(마지막으로 보낸 요청의 결과만 쓴다)
-import type { VerificationSummaryResult } from '@bive/shared';
+// - 준수 추이(`verification.trend`, M3-15 · ADR-146)는 요약과 같은 때 함께 부른다. 추이만 실패하면 요약은 그대로 보이고 추이 영역만
+//   실패(`trend: null`)다. 요약이 실패하면 화면 전체가 실패다
+import type { VerificationSummaryResult, VerificationTrendResult } from '@bive/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { NORM_VIEW_EVENT_NAMES } from '../../runs/refreshCoalescer.js';
@@ -13,7 +15,7 @@ import { useEventRefresh } from '../../runs/useEventRefresh.js';
 
 export type VerificationLoad =
   | { state: 'loading' }
-  | { state: 'ready'; summary: VerificationSummaryResult }
+  | { state: 'ready'; summary: VerificationSummaryResult; trend: VerificationTrendResult | null }
   | { state: 'error' };
 
 const LOADING: VerificationLoad = { state: 'loading' };
@@ -29,9 +31,15 @@ export const useVerification = (
   const fetchSummary = useCallback((): Promise<void> => {
     seq.current += 1;
     const mine = seq.current;
-    return window.bive.invoke('verification.summary', { projectId }).then(
-      (summary) => {
-        if (seq.current === mine) setLoaded({ projectId, load: { state: 'ready', summary } });
+    const trend = window.bive.invoke('verification.trend', { projectId }).then(
+      (result) => result,
+      () => null,
+    );
+    return Promise.all([window.bive.invoke('verification.summary', { projectId }), trend]).then(
+      ([summary, trendResult]) => {
+        if (seq.current === mine) {
+          setLoaded({ projectId, load: { state: 'ready', summary, trend: trendResult } });
+        }
       },
       () => {
         if (seq.current === mine) setLoaded({ projectId, load: { state: 'error' } });

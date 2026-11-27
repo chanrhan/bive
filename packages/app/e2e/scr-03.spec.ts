@@ -7,6 +7,8 @@
 // 보이며 그 카드의 예외는 "폐기" (ADR-100 I3 · D7 · 명세 변경 목록 SCR-03, ADR-114)
 // 이슈 #218(M7-06): [실행]으로 만든 실행이 프로젝트의 진행 중 실행 때문에 실행 대기면 [실행] 옆에 "표시 ID · 실행 대기"
 // (run.create · run.get 응답과 event.run.updated 알림으로만, ADR-105)
+// 이슈 #60(M3-15) 수용 기준 3: 서버가 실은 변이 상태로 변이 칩이 활성이 되고, 카드 예외 "변이 생존"(판정 예외 바로 뒤)이 보인다.
+// 검증 화면 변이 카드에서 넘어오면 "변이: 생존"이 걸려 있다 (ADR-146). 변이 칸이 없는 옛 응답(RULES)은 칩 0건 비활성 그대로
 // 데이터는 가짜 브리지의 project.current · rule.list 응답과 project.opened 알림(PROJECT_OPENED_EVENT)으로만 만든다.
 import path from 'node:path';
 
@@ -24,7 +26,14 @@ import type {
 
 import { PROJECT_OPENED_EVENT } from '../src/common/bridge.js';
 import { CHIPS, PROJECT, RETIRED_RULE, RULES, VISIBLE_ORDER } from './checklists/scr-03.js';
-import { run as summaryRun } from './checklists/scr-05.js';
+import {
+  CODE_OPEN_SUMMARY,
+  MUTATION_RULES,
+  MUTATION_TRACEABILITY,
+  run as summaryRun,
+  SUMMARY,
+  TREND,
+} from './checklists/scr-05.js';
 import { type BiveMock, type MockCall, mockBive, type MockResponses } from './support/bive-mock.js';
 import {
   collectVisibleText,
@@ -498,6 +507,150 @@ test.describe('필터 칩 (수용 기준 3)', () => {
     await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
     await expect(page.getByTestId('list-result')).toHaveCount(0);
   });
+});
+
+test.describe('변이 상태: 필터 칩 · 카드 예외 "변이 생존" (#60 수용 기준 3, JDG-04 · ADR-146)', () => {
+  const openMutation = (page: Page) =>
+    openScreen(page, { 'rule.list': { result: { rules: MUTATION_RULES } } });
+  const exceptionsOf = (page: Page, displayId: string) =>
+    page.getByTestId('card').filter({ hasText: displayId }).getByTestId('card-exception');
+
+  test('서버가 변이 상태를 실으면 변이 칩이 활성이고 값별 개수는 그 값에서 센다(폐기 규칙은 값 없음)', async ({
+    page,
+  }) => {
+    await openMutation(page);
+    await expect(chipButton(page, 'mutation')).toBeEnabled();
+    await chipButton(page, 'mutation').click();
+    // 값 이름은 칩 이름 "변이" 뒤에 붙는 짧은 이름 (검증됨 · 미검증 · 생존)
+    expect(await menuOptions(page)).toEqual([
+      ['검증됨', '2', false],
+      ['미검증', '1', false],
+      ['생존', '2', false],
+    ]);
+    await page.keyboard.press('Escape');
+    // [폐기 포함]: 폐기된 RULE-007(생존 기록)은 변이 값을 갖지 않는다
+    await page.getByTestId('hidden-toggle').click();
+    await chipButton(page, 'mutation').click();
+    expect((await menuOptions(page)).find(([label]) => label === '생존')).toEqual([
+      '생존',
+      '2',
+      false,
+    ]);
+  });
+
+  test('변이 생존을 고르면 칩에 값이 보이고 변이 생존 규칙만 남는다. ×로 풀린다', async ({
+    page,
+  }) => {
+    await openMutation(page);
+    await chipButton(page, 'mutation').click();
+    await page.getByTestId('filter-option').filter({ hasText: '생존' }).click();
+    await page.keyboard.press('Escape');
+    await expect(chipButton(page, 'mutation')).toHaveText('변이: 생존');
+    expect(await cardIds(page)).toEqual(['RULE-001', 'RULE-002']);
+    await expect(page.getByTestId('list-result')).toHaveText('5개 중 2개 · 초기화');
+    await page.getByTestId('filter-chip-mutation').getByTestId('filter-chip-clear').click();
+    await expect(page.getByTestId('card')).toHaveCount(LIVE.length);
+  });
+
+  test('카드 예외 "변이 생존"(위험 색)은 판정 예외 바로 뒤 · 규범 예외 앞이고, 정상 변이 상태는 아무것도 더하지 않는다', async ({
+    page,
+  }) => {
+    await openMutation(page);
+    // 실패 → 변이 생존 → 미확인 (SCR-03 카드 예외 순서 "실패 · 재검증 필요 · 변이 생존 · 잠정")
+    await expect(exceptionsOf(page, 'RULE-002')).toHaveText(['실패', '변이 생존', '미확인']);
+    const survived = exceptionsOf(page, 'RULE-002').filter({ hasText: '변이 생존' });
+    await expect(survived).toHaveAttribute('data-tone', 'danger');
+    // 통과 + 생존: 1줄 흐린 점(통과)은 그대로이고 2줄에 변이 생존 하나
+    const passCard = page.getByTestId('card').filter({ hasText: 'RULE-001' });
+    await expect(exceptionsOf(page, 'RULE-001')).toHaveText(['변이 생존']);
+    await expect(passCard.getByTestId('status-badge')).toHaveCount(1);
+    await expect(passCard.getByTestId('status-badge')).toHaveAttribute('aria-label', '통과');
+    // 검증됨 · 미검증: 변이 예외 · 점이 더해지지 않는다
+    await expect(exceptionsOf(page, 'RULE-005')).toHaveText(['재검증 필요']);
+    await expect(exceptionsOf(page, 'RULE-003')).toHaveText(['미판정']);
+    await expect(exceptionsOf(page, 'RULE-006')).toHaveText(['미확인']);
+    await expect(
+      page.getByTestId('card').filter({ hasText: 'RULE-006' }).getByTestId('status-badge'),
+    ).toHaveCount(1);
+    await expect(page.getByTestId('card-exception').filter({ hasText: '변이 생존' })).toHaveCount(
+      2,
+    );
+    // 폐기된 규칙은 생존 기록이 있어도 변이 예외가 없다 (판정 예외와 같다)
+    await page.getByTestId('hidden-toggle').click();
+    await expect(exceptionsOf(page, 'RULE-007')).toHaveText(['폐기', '미확인']);
+    // [문제만]: 통과 · 확인됨이던 RULE-001도 변이 생존으로 문제 항목이다
+    await page.getByTestId('hidden-toggle').click();
+    await page.getByTestId('problem-toggle').click();
+    expect(await cardIds(page)).toContain('RULE-001');
+  });
+
+  test('변이 생존과 추적성 결함을 함께 가진 카드: 실패 → 변이 생존 → 추적성 결함 → 미확인 순서', async ({
+    page,
+  }) => {
+    await openScreen(page, {
+      'rule.list': { result: { rules: MUTATION_RULES, traceability: MUTATION_TRACEABILITY } },
+    });
+    await expect(exceptionsOf(page, 'RULE-002')).toHaveText([
+      '실패',
+      '변이 생존',
+      '추적성 결함',
+      '미확인',
+    ]);
+    // 추적성 결함이 없는 생존 카드는 그대로
+    await expect(exceptionsOf(page, 'RULE-001')).toHaveText(['변이 생존']);
+  });
+
+  test('변이 상태 칸이 없는 옛 응답이면 칩은 0건 비활성이고 어느 카드에도 "변이 생존"이 없다', async ({
+    page,
+  }) => {
+    await openScreen(page);
+    await expect(chipButton(page, 'mutation')).toBeDisabled();
+    await expect(page.getByText('변이 생존')).toHaveCount(0);
+  });
+
+  test('검증 화면의 변이 검증됨 카드에서 넘어오면 "변이: 생존"이 걸린 채 열리고 다른 화면에 갔다 와도 유지된다', async ({
+    page,
+  }) => {
+    await mockBive(page, {
+      responses: {
+        'system.status': { result: STATUS },
+        'project.current': { result: { project: PROJECT } },
+        'rule.list': { result: { rules: MUTATION_RULES } },
+        'verification.summary': { result: SUMMARY },
+        'verification.trend': { result: TREND },
+        'codeOpen.summary': { result: CODE_OPEN_SUMMARY },
+      },
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: '검증', exact: true }).click();
+    await page.getByTestId('metric-mutation').click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await expect(chipButton(page, 'mutation')).toHaveText('변이: 생존');
+    expect(await cardIds(page)).toEqual(['RULE-001', 'RULE-002']);
+    await page.getByRole('button', { name: '계약', exact: true }).click();
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await expect(chipButton(page, 'mutation')).toHaveText('변이: 생존');
+    expect(await cardIds(page)).toEqual(['RULE-001', 'RULE-002']);
+  });
+
+  for (const width of [820, 1280]) {
+    test(`창 폭 ${String(width)}: 변이 칩 · 예외가 있는 카드가 목록 밖으로 넘치지 않는다`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await openMutation(page);
+      await chipButton(page, 'mutation').click();
+      await page.getByTestId('filter-option').filter({ hasText: '생존' }).click();
+      await page.keyboard.press('Escape');
+      await expect(chipButton(page, 'mutation')).toHaveText('변이: 생존');
+      const list = page.getByTestId('list-view');
+      expect(await horizontalOverflow(list, '[data-testid="card"]')).toEqual([]);
+      expect(await horizontalOverflow(list, '[data-testid^="filter-chip-"]')).toEqual([]);
+      await page.screenshot({
+        path: path.join(SCREENSHOT_DIR, `scr-03-mutation-${String(width)}.png`),
+      });
+    });
+  }
 });
 
 test.describe('프로젝트 전환 (ADR-034 · ADR-060)', () => {

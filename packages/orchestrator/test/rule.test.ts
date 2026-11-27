@@ -114,9 +114,10 @@ describe('rule.list: 승인된 규칙만, 최신 판정(없으면 미판정)과 
     const second = await approveRule(req.id, '비밀번호 5회 실패 시 잠금');
 
     const rules = await listRules();
+    // 변이 기록이 없는 규칙의 변이 상태는 변이 미검증 (M3-15 #60, ADR-146)
     expect(rules).toEqual([
-      { rule: first, judgment: UNJUDGED },
-      { rule: second, judgment: UNJUDGED },
+      { rule: first, judgment: UNJUDGED, mutation: 'unverified' },
+      { rule: second, judgment: UNJUDGED, mutation: 'unverified' },
     ]);
     expect(rules.map(({ rule }) => rule.displayId)).toEqual(['RULE-001', 'RULE-002']);
     // 제안은 그대로 제안 목록에만 있다
@@ -305,8 +306,8 @@ describe('최신 판정 결합 지점', () => {
     clients.push(client);
 
     expect((await client.call('rule.list', { projectId: h.project.id })).rules).toEqual([
-      { rule: judged, judgment: { status: 'needs_recheck', latest } },
-      { rule: fresh, judgment: UNJUDGED },
+      { rule: judged, judgment: { status: 'needs_recheck', latest }, mutation: 'unverified' },
+      { rule: fresh, judgment: UNJUDGED, mutation: 'unverified' },
     ]);
     expect(await client.call('rule.get', { projectId: h.project.id, id: judged.id })).toEqual({
       rule: judged,
@@ -698,7 +699,7 @@ describe('rule.get: 최신 실행 링크의 비용 · 턴 (M3-16 #61, COST-02 ·
     const { run, steps } = createRun([rule.id]);
     addSession(run, stepOf(steps, 'test_writing'), { costUsd: 0.1, turns: 1 });
     const [item] = await listRules();
-    expect(item).toEqual({ rule, judgment: UNJUDGED });
+    expect(item).toEqual({ rule, judgment: UNJUDGED, mutation: 'unverified' });
     expect(item).not.toHaveProperty('latestRun');
   });
 });

@@ -21,6 +21,41 @@ export const retiredRuleSet = (store: ProjectStore): ReadonlySet<string> =>
 export const isEffectiveRule = (rule: Rule, retired: ReadonlySet<string>): boolean =>
   rule.deletedAt === null && rule.normState === 'approved' && !retired.has(rule.id);
 
+/**
+ * 폐기된 규칙 ID → 폐기 시각(밀리초). 형식이 깨져 시각을 읽을 수 없는 폐기 기록은 `-Infinity`(늘 폐기였던 것으로 본다: 효력을
+ * 잃은 쪽으로 닫음). 지난 시점의 효력을 되짚는 준수 추이가 쓴다 (M3-15 #60, ADR-146).
+ */
+export const retirementTimesOf = (store: ProjectStore): ReadonlyMap<string, number> => {
+  const times = new Map<string, number>();
+  for (const ruleId of store.ruleRetirements.retiredRuleIds()) times.set(ruleId, -Infinity);
+  for (const record of store.ruleRetirements.list()) {
+    const at = Date.parse(record.retiredAt);
+    if (!Number.isNaN(at)) times.set(record.ruleId, at);
+  }
+  return times;
+};
+
+/**
+ * 규칙이 시각 `at`(밀리초, 그 시각은 들지 않음) 바로 앞에 효력을 가졌는지 (ADR-146): 그때 이미 만들어졌고, 삭제 · 폐기 시각이
+ * `at` 이후이거나 없고, 규범 상태가 효력이다. 규범 상태는 지금 값이다(상태 변경 이력을 따로 남기지 않는다: 한계).
+ * `at = Infinity`이면 지금의 {@link isEffectiveRule}과 같다(삭제 · 폐기된 규칙은 모두 빠진다).
+ */
+export const isEffectiveRuleBefore = (
+  rule: Rule,
+  retiredAt: ReadonlyMap<string, number>,
+  at: number,
+): boolean => {
+  if (rule.normState !== 'approved') return false;
+  const created = Date.parse(rule.createdAt);
+  if (!Number.isNaN(created) && created >= at) return false;
+  if (rule.deletedAt !== null) {
+    const deleted = Date.parse(rule.deletedAt);
+    if (Number.isNaN(deleted) || deleted < at) return false;
+  }
+  const retired = retiredAt.get(rule.id);
+  return retired === undefined || retired >= at;
+};
+
 /** 효력 있는 요구사항 (표시 ID 순). */
 export const effectiveRequirements = (store: ProjectStore): Requirement[] =>
   store.requirements
