@@ -777,6 +777,66 @@ describe('규범', () => {
     ).toBe(false);
   });
 
+  it('동작 선언(behavior)은 규칙의 신규 기록에만 new · existing 가운데 하나로 있고, 없는 신규 기록(옛 기록)도 읽힌다 (M3-30 #245 · ADR-151)', () => {
+    const created = {
+      seq: 1,
+      at: AT,
+      kind: 'created',
+      actor: { kind: 'agent', role: 'rule-writer' },
+      targetRef: { entity: 'Rule', id: ID.rule },
+      sessionId: ID.run,
+      runId: null,
+      reason: '근거',
+      detail: { after: {}, behavior: 'existing' },
+      prevHash: APPROVAL_LOG_GENESIS_HASH,
+      hash: 'f'.repeat(64),
+    };
+    expect(NormChangeEntry.parse(created)).toEqual(created);
+    expect(
+      NormChangeEntry.parse({ ...created, detail: { after: {}, behavior: 'new' } }).detail.behavior,
+    ).toBe('new');
+    expect(NormChangeEntry.parse({ ...created, detail: { after: {} } }).detail.behavior).toBe(
+      undefined,
+    );
+    for (const broken of [
+      { ...created, detail: { after: {}, behavior: 'unknown' } },
+      { ...created, detail: { after: {}, behavior: null } },
+      // 규칙이 아닌 대상의 신규 기록(요구사항 · 계약)에는 없다
+      { ...created, targetRef: { entity: 'Requirement', id: ID.req } },
+      // 신규가 아닌 기록에는 없다
+      {
+        ...created,
+        kind: 'auto_start',
+        actor: { kind: 'orchestrator' },
+        targetRef: { entity: 'Run', id: ID.run },
+        sessionId: null,
+        runId: ID.run,
+        detail: { causeSeqs: [1], ruleIds: [ID.rule], behavior: 'new' },
+      },
+    ]) {
+      expect(NormChangeEntry.safeParse(broken).success, JSON.stringify(broken.detail)).toBe(false);
+    }
+    // 같은 자동 시작 기록에서 선언만 빼면 통과한다 (거부의 원인이 선언임)
+    expect(
+      NormChangeEntry.safeParse({
+        ...created,
+        kind: 'auto_start',
+        actor: { kind: 'orchestrator' },
+        targetRef: { entity: 'Run', id: ID.run },
+        sessionId: null,
+        runId: ID.run,
+        detail: { causeSeqs: [1], ruleIds: [ID.rule] },
+      }).success,
+    ).toBe(true);
+    expect(
+      NormChangeEntry.safeParse({
+        ...created,
+        targetRef: { entity: 'Requirement', id: ID.req },
+        detail: { after: {} },
+      }).success,
+    ).toBe(true);
+  });
+
   it('자동 시작의 셋째 원인: 변이 기록 ID(mutationResultIds)도 셋 가운데 하나만, 대상 규칙과 같은 수, 자동 시작에만 (M3-54 #311 · ADR-143)', () => {
     const entry = {
       seq: 2,
