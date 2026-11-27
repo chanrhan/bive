@@ -36,6 +36,7 @@ import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
 import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { runPaths } from '../src/run-paths.js';
 import { AutoStarter, autoStartRun } from '../src/runs/auto-start.js';
+import { autoStartRuleEditRun } from '../src/runs/rule-edit-start.js';
 import { createRun, saveNewRun } from '../src/runs/run-service.js';
 import { connect, RpcCallError, type TestClient } from './helpers/client.js';
 import { contentJudge, setupPipeline } from './helpers/pipeline-harness.js';
@@ -2702,6 +2703,51 @@ describe('동작 선언과 실제가 다른 경우: 그 유형의 기존 실패 
       expect(declaredBehaviorOf(store, titled.rule.id)).toBe('existing');
     });
     expect((await runToEnd(titled)).run).toMatchObject({ type: 'C', status: 'merged' });
+  }, 120_000);
+
+  it('대기 중인 유형 C 실행 + 진술 편집: 편집 뒤 자동 시작이 새 유형 A 실행을 만들고, 엔진에 둘 다 알리면 C는 시작하는 순간 type_mismatch로 끝나 자리를 비우고 A가 이어 시작해 병합된다 (자리 · 대기열이 막히지 않음, M3-30 검토 2회차)', async () => {
+    const h = setup({
+      settings: SETTINGS,
+      executors: { green_check: scripted(['passed']), check: scripted(['passed']) },
+    });
+    // 하네스가 만든 사람의 대기 실행(같은 규칙, 대조가 맞음)은 편집 뒤 시작을 pending으로 만들므로 먼저 끝까지 돌린다
+    expect((await runToEnd(h)).run.status).toBe('merged');
+    const c = autoStarted(h, 'existing').runId;
+    const a = withProject(h.biveHome, h.project.id, (store) => {
+      const rule = store.rules.get(h.rule.id);
+      if (rule === null) throw new Error('규칙 없음');
+      editRule(store, h.rule.id, {
+        title: rule.title,
+        statement: `${rule.statement} 그리고 응답 헤더에도 담는다`,
+      });
+      const seq = store.approvalLog.list().at(-1)?.seq ?? 0;
+      const outcome = autoStartRuleEditRun(store, { approvalSeq: seq }, clock);
+      if (outcome.status !== 'started') throw new Error(`편집 뒤 시작 안 됨: ${outcome.status}`);
+      return outcome.detail.run.id;
+    });
+    // 자동 시작 창구와 같이 만든 순서대로 엔진에 알린다
+    h.engine.onRunCreated(h.project.id, c);
+    h.engine.onRunCreated(h.project.id, a);
+    await h.engine.settled();
+    const runs = withProject(h.biveHome, h.project.id, (store) => store.runs.list());
+    expect(runs.map((run) => [run.displayId, run.type, run.status, run.failureReason])).toEqual([
+      ['EXE-001', 'A', 'merged', null],
+      ['EXE-002', 'C', 'failed', 'run_without_log'],
+      // 고친 진술로 테스트를 다시 쓰는 실행이 실제로 시작해 끝까지 돌았다. 시험의 각본 세션은 EXE-001과 같은 내용을 써서 바뀐
+      // 파일이 없어 no_changes로 끝난다(이 시험이 보는 것은 대기열이 막히지 않고 A가 시작했다는 것이다)
+      ['EXE-003', 'A', 'failed', 'no_changes'],
+    ]);
+    const failed = withProject(h.biveHome, h.project.id, (store) => store.runs.getDetail(c));
+    const started = withProject(h.biveHome, h.project.id, (store) => store.runs.getDetail(a));
+    if (failed === null || started === null) throw new Error('실행 없음');
+    expect(stepOf(failed, 'test_writing').exitDetail).toMatchObject({
+      reason: 'run_without_log',
+      detail: { mismatch: 'type_mismatch' },
+    });
+    // C는 워크트리 · 세션 없이 끝났고, A는 그 뒤에 시작해 테스트 작성 세션을 열었다
+    expect(failed.run.worktreePath).toBeNull();
+    expect(String(started.run.startedAt) >= String(failed.run.endedAt)).toBe(true);
+    expect(attempts(started, 'test_writing')[0]).not.toBe('test_writing#1:pending');
   }, 120_000);
 
   it('runDeclarationOf: 선언으로 유형을 고른 실행(오케스트레이터 · 규범 변경 기록 원인 · 대상 1개)만 선언을 돌려준다. 편집 뒤 시작 · 변이 보강 · 사람의 [실행] · 이어받는 실행(사람의 한도 상향 재개)은 대상 규칙에 선언이 있어도 null이고, 이어받는 실행은 원 실행의 유형 C 그대로 시작 근거 대조를 지난다', () => {

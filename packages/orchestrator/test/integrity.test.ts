@@ -1372,6 +1372,32 @@ describe('실행 자동 시작의 코드 경로 (M7-05 #217, ADR-100 C2 · D4, A
         /detail\??\.behavior\b|\[\s*['"`]behavior['"`]\s*\]|\{[^}]*\bbehavior\b[^}]*\}\s*=\s*[\w.?]*detail\b/,
       ),
     ).toEqual(['engine/start-basis.ts']);
+    // 낱말 `behavior` 자체가 나오는 파일은 고정이다 (검토 2회차: 구조 분해의 우변 모양과 무관하게 막는다). 읽는 곳 = 시작 근거 모듈,
+    // 쓰는 곳 = 반영 모듈, 도구 인자 = 도구 정의 · 규칙 작성 서비스(인자를 반영 모듈에 넘김), 고정 문장 = 프롬프트, SDK 권한 응답의
+    // 같은 낱말(`behavior: 'allow' | 'deny'`, 동작 선언과 무관) = SDK 어댑터
+    expect(using(/\bbehavior\b/)).toEqual([
+      'agent/claude-sdk-adapter.ts',
+      'engine/start-basis.ts',
+      'norms/agent-rule.ts',
+      'rule-writer/prompts.ts',
+      'rule-writer/rule-writer-service.ts',
+      'tools/definitions.ts',
+    ]);
+    // 그 파일들 안에서도 `behavior`를 구조 분해로 꺼내는 곳은 도구 인자(`input`)뿐이다 (기록 상세를 구조 분해로 읽지 않는다)
+    expect(
+      files().flatMap((f) =>
+        [...f.text.matchAll(/\{[^{}]*\bbehavior\b[^{}]*\}\s*=\s*([^;\n]+)/g)].map(
+          (m) => `${f.rel}:${String(m[1]).trim()}`,
+        ),
+      ),
+    ).toEqual([
+      'rule-writer/rule-writer-service.ts:input',
+      'rule-writer/rule-writer-service.ts:input',
+      'rule-writer/rule-writer-service.ts:input',
+      'rule-writer/rule-writer-service.ts:input',
+    ]);
+    const sdk = files().find((f) => f.rel === 'agent/claude-sdk-adapter.ts')?.text ?? '';
+    expect(sdk.match(/\bbehavior\b[^,\n]*/g)).toEqual(["behavior: 'allow'", "behavior: 'deny'"]);
     // 그 밖의 파일이 쓰는 `.behavior`는 반영 모듈이 받은 입력(도구 인자)을 검증해 기록에 쓰는 자리뿐이다
     expect(
       files()

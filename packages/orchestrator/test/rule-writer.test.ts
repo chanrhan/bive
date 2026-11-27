@@ -71,7 +71,13 @@ import {
   type RuleWriterSessionRecord,
   RuleWriterService,
 } from '../src/rule-writer/rule-writer-service.js';
-import { MIN_QUOTE_LENGTH, toolDefinitions } from '../src/tools/definitions.js';
+import {
+  COMMAND_TOOL_NAMES,
+  FILE_TOOL_NAMES,
+  MIN_QUOTE_LENGTH,
+  roleToolNames,
+  toolDefinitions,
+} from '../src/tools/definitions.js';
 import { earsStatementProblem, isEarsStatement } from '../src/tools/ears.js';
 // 규칙 화면의 WHEN 조건 표시와 교차 확인한다 (DOM · React에 의존하지 않는 순수 함수, ADR-060 · ADR-062)
 import { whenCondition } from '../../app/src/renderer/src/screens/rules/rulesView.js';
@@ -1631,36 +1637,30 @@ describe('사후 확인 전환: 프롬프트 · 대기 중이던 제안 (M7-02 #
       '동작 선언(behavior): 새 규칙(propose_rule · supersede_rule)마다 new 또는 existing 가운데 하나를 반드시 적는다.',
       '- new(새 동작): 지금 코드가 이 진술을 아직 지키지 않아 구현이 필요하다. 그 규칙의 실행은 인수 테스트가 구현 전에 실패해야(Red) 구현으로 넘어간다.',
       '- existing(기존 동작 유지): 이미 구현돼 지금 코드가 이 진술을 지킨다. 그 규칙의 실행은 코드를 바꾸지 않고, 새 인수 테스트가 지금 코드에서 통과하기만 하면(Green) 병합한다. 그 테스트가 실제로 무엇을 검사하는지는 어떤 단계도 다시 보지 않는다.',
-      '- 너는 프로젝트 코드를 볼 수 없다. 작업 지시의 자료에는 요구사항 본문과 효력 있는 규칙의 진술 · 최근 판정의 케이스 이름이 있고, 판정의 통과 · 실패는 없다.',
+      '- 너는 프로젝트 코드를 볼 수 없고(파일 · 명령 도구가 없다), 작업 지시로 받은 자료만으로는 지금 코드가 이 진술을 지키는지 확인할 수 없다.',
       '- existing은 요구사항 본문이 지금 동작을 바꾸지 말고 그대로 지키라고 밝힐 때만 고른다(예: 기존 응답이 깨지지 않아야 한다). 그 밖에는, 판단할 근거가 없을 때를 포함해 모두 new다.',
       '- 선언이 실제와 다르면(new인데 테스트가 이미 통과, existing인데 통과하지 않음) 그 실행은 실패로 끝나고 다른 쪽으로 다시 시작되지 않는다.',
     ]);
-    // 자료에 판정의 통과 · 실패가 실리지 않는다는 문장은 사실이다: 규범 자료의 규칙 줄에는 케이스 이름만 있다
-    const rendered = renderNormInput(
-      {
-        requirements: [],
-        rules: [
-          {
-            id: 'r',
-            displayId: 'RULE-001',
-            title: '제목',
-            statement: '진술',
-            parent: { kind: 'requirement', displayId: 'REQ-001' },
-            cases: ['케이스 하나'],
-            casesOmitted: 0,
-            focus: false,
-          },
-        ],
-        summary: {
-          requirements: { total: 0, included: 0, omitted: 0 },
-          rules: { total: 1, included: 1, omitted: 0 },
-          truncated: false,
-        },
-      } as never,
-      '초점',
-    );
-    expect(rendered).toContain('케이스: 케이스 하나');
-    expect(rendered).not.toMatch(/passed|failed|통과|실패/);
+    // 그 문장은 이 시스템 프롬프트를 쓰는 모든 세션(요구사항 · 이의 판단 · 검사 실패 판단 · 요구사항 수정 재판단)에서 참이다:
+    // 모두 규칙 작성 역할이고 그 역할의 도구는 규범 도구뿐이다(파일 · 명령 도구 없음). 세션마다 다른 자료 목록은 적지 않는다
+    expect(roleToolNames('rule-writer')).toEqual([
+      'propose_rule',
+      'retire_rule',
+      'supersede_rule',
+      'uphold_rule',
+    ]);
+    for (const tool of [...FILE_TOOL_NAMES, ...COMMAND_TOOL_NAMES]) {
+      expect(roleToolNames('rule-writer')).not.toContain(tool);
+    }
+    for (const prompt of [
+      RULE_WRITER_SYSTEM_PROMPT,
+      RULE_WRITER_JUDGMENT_SYSTEM_PROMPT,
+      RULE_WRITER_CHECK_JUDGMENT_SYSTEM_PROMPT,
+      RULE_WRITER_REQUIREMENT_UPDATED_SYSTEM_PROMPT,
+    ]) {
+      expect(prompt).not.toContain('판정의 통과 · 실패는 없다');
+      expect(prompt).not.toMatch(/자료에는 요구사항 본문과/);
+    }
     // 규칙 칸 목록에도 동작 선언이 있고, 판단 · 재판단 세션의 시스템 프롬프트도 같은 고정 문장을 싣는다
     expect(RULE_WRITER_SYSTEM_PROMPT).toContain(
       '- 동작 선언: new(새 동작) · existing(기존 동작 유지) 중 하나 (아래 동작 선언)',
@@ -3960,7 +3960,7 @@ describe('요구사항 수정 · 삭제 뒤 자식 규칙의 재판단 (M7-10 #2
       동작 선언(behavior): 새 규칙(propose_rule · supersede_rule)마다 new 또는 existing 가운데 하나를 반드시 적는다.
       - new(새 동작): 지금 코드가 이 진술을 아직 지키지 않아 구현이 필요하다. 그 규칙의 실행은 인수 테스트가 구현 전에 실패해야(Red) 구현으로 넘어간다.
       - existing(기존 동작 유지): 이미 구현돼 지금 코드가 이 진술을 지킨다. 그 규칙의 실행은 코드를 바꾸지 않고, 새 인수 테스트가 지금 코드에서 통과하기만 하면(Green) 병합한다. 그 테스트가 실제로 무엇을 검사하는지는 어떤 단계도 다시 보지 않는다.
-      - 너는 프로젝트 코드를 볼 수 없다. 작업 지시의 자료에는 요구사항 본문과 효력 있는 규칙의 진술 · 최근 판정의 케이스 이름이 있고, 판정의 통과 · 실패는 없다.
+      - 너는 프로젝트 코드를 볼 수 없고(파일 · 명령 도구가 없다), 작업 지시로 받은 자료만으로는 지금 코드가 이 진술을 지키는지 확인할 수 없다.
       - existing은 요구사항 본문이 지금 동작을 바꾸지 말고 그대로 지키라고 밝힐 때만 고른다(예: 기존 응답이 깨지지 않아야 한다). 그 밖에는, 판단할 근거가 없을 때를 포함해 모두 new다.
       - 선언이 실제와 다르면(new인데 테스트가 이미 통과, existing인데 통과하지 않음) 그 실행은 실패로 끝나고 다른 쪽으로 다시 시작되지 않는다."
     `);
