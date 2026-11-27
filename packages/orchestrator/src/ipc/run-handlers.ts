@@ -6,6 +6,8 @@
 //   블록 선언 겹침 · 내장 구조 규칙 없음으로 끝난 실행이 있으면 종료 사유 보조 표시(`failureNotes`)를 함께 싣는다(ADR-144)
 // - 승인 단계 판정 · 이후 단계 진행은 엔진(M1-14, ADR-066)이 한다: `run.create` 응답 뒤 승인 단계를 판정한다.
 //   파이프에서 상태를 바꾸는 RPC는 `run.create`와 `run.resume`(사람만, `interrupted`만)뿐이다
+// - `reviewQueue.reinforce`(M3-08 #53, ADR-145)는 검토 대기열의 테스트 보강이다: 사람만, `run.create`와 같은 문으로 유형 C 실행 1개를
+//   만들고 같은 트랜잭션에서 검토 대기열 항목을 처리한다
 import {
   type Author,
   createUlidGenerator,
@@ -16,6 +18,7 @@ import {
 } from '@bive/shared';
 import type { ProjectStore, RunDetail } from '@bive/store';
 
+import { recordReinforcement, reinforcementTarget } from '../review/review-queue.js';
 import { runFailureNotes } from '../runs/failure-notes.js';
 import { assertHumanRunStarter, createRun, type RunClock } from '../runs/run-service.js';
 import { withProjectStore } from './project-store-access.js';
@@ -40,7 +43,10 @@ export interface RunHandlerDeps {
   engine?: RunEngineHooks;
 }
 
-type RunMethods = Pick<MethodHandlers, 'run.create' | 'run.get' | 'run.list' | 'run.resume'>;
+type RunMethods = Pick<
+  MethodHandlers,
+  'run.create' | 'run.get' | 'run.list' | 'run.resume' | 'reviewQueue.reinforce'
+>;
 
 /** ULID 또는 표시 ID(`EXE-001`)로 실행을 찾는다. 없으면 -32004. */
 const findRun = (store: ProjectStore, id: string): RunDetail => {
@@ -108,6 +114,26 @@ export const createRunHandlers = ({ biveHome, now, engine }: RunHandlerDeps): Ru
         const failureNotes = runFailureNotes(store, runs);
         return failureNotes.length === 0 ? { runs } : { runs, failureNotes };
       }),
+    // 검토 대기열의 테스트 보강 (M3-08 #53, ADR-145): 사람의 [실행]과 같은 문(`createRun`)으로 유형 C 실행을 만들고, 같은 트랜잭션에서
+    // 검토 대기열 모듈이 원인 변이 기록과 잇고 항목을 처리한다. 실행을 만드는 사람 RPC는 이 파일에만 있다
+    'reviewQueue.reinforce': ({ projectId, seq, author }, context) => {
+      assertHumanRunStarter(author);
+      const human = { kind: 'human' } as const;
+      const outcome = withProjectStore(biveHome, projectId, (store) =>
+        store.transaction(() => {
+          const target = reinforcementTarget(store, seq);
+          const created = createRun(
+            store,
+            { ruleIds: [target.cause.ruleId], author: human, type: 'C' },
+            { clientId: `pipe-${String(context.connectionId)}` },
+            clock,
+          );
+          return { ...created, entry: recordReinforcement(store, target, created, human) };
+        }),
+      );
+      engine?.onRunCreated(projectId, outcome.run.id);
+      return outcome;
+    },
     'run.resume': ({ projectId, id, author }) => {
       if (engine === undefined) {
         throw new RpcError(ErrorCode.InternalError, '실행 엔진이 없습니다');
