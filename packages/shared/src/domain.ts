@@ -1868,6 +1868,22 @@ export const Step = z.strictObject({
 });
 export type Step = z.infer<typeof Step>;
 
+/** 이어받은 단계 시도의 생략 사유 (`exitDetail.reason`, M3-60 #325, ADR-152). 화면은 단계의 종료 조건 결과를 보이지 않아 표시명이 없다. */
+export const INHERITED_STEP_REASON = 'inherited';
+
+/**
+ * 이어받은 단계 시도의 종료 조건 결과 (`skipped`, M3-60 #325, ADR-147 ③, ADR-150 ③ⓐ, ADR-152). 이어받는 실행은 원 실행이 끝낸 앞 단계를 다시
+ * 돌지 않고 `passed` 행도 만들지 않는다. 이 기록은 그 단계를 실제로 돈 실행의 시도(`fromRunId` · `fromStepId`, 그 시도의 상태 `fromStatus`)를
+ * 가리킨다(사슬이면 거슬러 올라간 시도). 판정 근거는 복사하지 않고 그 시도에서 읽는다.
+ */
+export const InheritedStepDetail = z.strictObject({
+  reason: z.literal(INHERITED_STEP_REASON),
+  fromRunId: Ulid,
+  fromStepId: Ulid,
+  fromStatus: z.enum(['passed', 'skipped']),
+});
+export type InheritedStepDetail = z.infer<typeof InheritedStepDetail>;
+
 /** 모델별 사용량 (SDK `modelUsage`, 기획서 4.5). */
 export const ModelUsage = z.strictObject({
   inputTokens: NonNegativeInt,
