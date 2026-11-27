@@ -2889,6 +2889,33 @@ describe('검사 단계 · 병합 재검사의 AsyncAPI 계약 판정 (M3-49, AD
     expect(created.run).toMatchObject({ type: 'B', targetRuleIds: [rules[0]!.id] });
   }, 180_000);
 
+  it('판정 커밋의 원본 파일이 등록 뒤 바뀌어도 등록 때 커밋의 내용으로 판정한다: 유효하지 않게 등록하고 고쳐도 fail, 유효하게 등록하고 깨뜨려도 pass (바뀐 파일로 판정하면 반대)', async () => {
+    const invalidText = 'asyncapi: 3.0.0\nchannels: {}\n';
+    const { h, rules } = await contractPipeline(
+      [
+        { file: 'registered-invalid.yaml', kind: 'asyncapi', text: invalidText },
+        { file: 'registered-valid.yaml', kind: 'asyncapi', text: ASYNC_VALID },
+      ],
+      (calls) => trafficJudge(calls),
+    );
+    // 등록 뒤 기준 브랜치의 계약 파일이 바뀐다: 앞 것은 유효하게 고치고, 뒤 것은 필수 칸을 지워 깨뜨린다
+    fs.writeFileSync(path.join(h.repo, 'registered-invalid.yaml'), ASYNC_VALID);
+    fs.writeFileSync(path.join(h.repo, 'registered-valid.yaml'), invalidText);
+    userGit(h.repo, 'commit', '-q', '-am', '계약 파일 고침');
+    const detail = await runToEnd(h);
+    expect(detail.run.status).toBe('merged');
+    const [fixed] = judgmentsOfRule(h, rules[0]!.id);
+    expect(fixed).toMatchObject({ status: 'fail', runner: 'asyncapi-parser' });
+    expect(fixed?.cases[0]?.message).toBe(
+      '문서 형식 오류 1건 · 등록된 문서의 문제라 구현 회귀 없음 · 판정 커밋의 원본 파일은 등록 때와 다름 (등록 내용으로 판정)',
+    );
+    const [broken] = judgmentsOfRule(h, rules[1]!.id);
+    expect(broken).toMatchObject({ status: 'pass', runner: 'asyncapi-parser' });
+    expect(broken?.cases[0]?.message).toBe(
+      '문서 형식 오류 0건 · 구현 일치는 검사하지 않음 (문서 유효성만) · 판정 커밋의 원본 파일은 등록 때와 다름 (등록 내용으로 판정)',
+    );
+  }, 120_000);
+
   it('도구를 끝까지 못 돌리면(시간 초과) 판정하지 않고 judge_runner_error(단계 contract)로 끝나며 판정 기록이 없다', async () => {
     const { h, rules } = await contractPipeline(
       [{ file: 'asyncapi.yaml', kind: 'asyncapi', text: ASYNC_VALID }],
