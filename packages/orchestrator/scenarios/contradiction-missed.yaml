@@ -27,6 +27,7 @@ roles:
               checkKinds: [test]
               targetBlocks: [health]
               risk: medium
+              behavior: new
               rationale: 요구사항의 '서버 시각 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
               contradiction: { verdict: none }
           - message: 규칙 1건을 반영했습니다.
@@ -54,6 +55,7 @@ roles:
               checkKinds: [test]
               targetBlocks: [health]
               risk: medium
+              behavior: new
               rationale: 요구사항의 '서버 시각 제거'를 응답 본문의 time 필드 부재로 옮김
               contradiction: { verdict: none }
           - message: 규칙 1건을 반영했습니다.
@@ -83,6 +85,7 @@ roles:
               checkKinds: [test]
               targetBlocks: [health]
               risk: medium
+              behavior: new
               rationale: REQ-001의 '서버 시각 포함'을 RULE-002(본문에 time 없음)와 부딪히지 않는 응답 헤더로 옮김
               contradiction: { verdict: none }
           - message: RULE-001을 RULE-003으로 대체했습니다.

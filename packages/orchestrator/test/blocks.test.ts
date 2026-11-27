@@ -472,6 +472,7 @@ const PROPOSAL = {
   checkKinds: ['test'],
   targetBlocks: ['health'],
   risk: 'medium',
+  behavior: 'new',
   rationale: '검사 가능한 형태',
   contradiction: { verdict: 'none' },
 } as const;
@@ -573,6 +574,7 @@ describe('반영 모듈: 대상 블록 · 위험도 저장과 블록 선언 대�
       {
         payload: payload(over),
         rationale: '근거',
+        behavior: 'new',
         author: agent,
         sessionId: newId(),
         contradiction: { verdict: 'none' },
@@ -647,6 +649,7 @@ describe('반영 모듈: 대상 블록 · 위험도 저장과 블록 선언 대�
           {
             payload: noBlocks,
             rationale: '근거',
+            behavior: 'new',
             author: agent,
             sessionId: newId(),
             contradiction: { verdict: 'none' },
@@ -682,6 +685,7 @@ describe('반영 모듈: 대상 블록 · 위험도 저장과 블록 선언 대�
           {
             payload: payload({ targetBlocks, title: '헬스 체크 응답의 서버 시각 (UTC)' }),
             rationale: '근거',
+            behavior: 'new',
             author: agent,
             sessionId: newId(),
             contradiction: { verdict: 'none' },
@@ -763,13 +767,14 @@ describe('반영 모듈: 대상 블록 · 위험도 저장과 블록 선언 대�
       hooks: {
         // 규칙 작성 서비스와 같은 길: 반영 모듈을 부르고 모르는 오류는 다시 던진다
         proposeRule: (input) => {
-          const { rationale, contradiction, ...rest } = input;
+          const { rationale, contradiction, behavior, ...rest } = input;
           withStore((store) =>
             createAgentRule(
               store,
               {
                 payload: { ...rest, parentRequirementId: requirement.id },
                 rationale,
+                behavior,
                 author: agent,
                 sessionId: newId(),
                 contradiction,

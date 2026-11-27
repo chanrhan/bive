@@ -7,8 +7,9 @@
 // - 저장(트랜잭션 1개): 실행 + 규범 변경 기록 `auto_start` 1건(주체 오케스트레이터, `ruleEditSeqs` = 그 승인 기록 순번,
 //   `ruleIds` = 그 규칙). 사람 행동(편집)은 승인 기록에, 그로 인한 오케스트레이터 행동(자동 시작)은 규범 변경 기록에 남는다(C2).
 //   실행의 시작 주체는 `{kind: 'orchestrator', causeSeqs: [편집 순번], causeLog: 'approval_log'}`다. 승인 기록에는 쓰지 않는다
-// - 만들지 않는 경우: 같은 편집으로 이미 시작함(멱등), 그 규칙이 대상인 시작 전 실행(승인 대기 · 실행 대기)이 있음(그 실행이
-//   시작할 때 새 진술을 읽는다), 편집 뒤 진술이 또 바뀜(뒤 편집이 원인), 규칙이 효력을 잃음, 하루 한도 비움 · 설정 미비 ·
+// - 만들지 않는 경우: 같은 편집으로 이미 시작함(멱등), 그 규칙이 대상인 시작 전 실행(승인 대기 · 실행 대기)이 있고 그 실행의 시작
+//   근거 대조가 맞음(그 실행이 시작할 때 새 진술을 읽는다. 대조가 더는 맞지 않는 실행, 곧 진술 편집으로 선언이 모름이 된 기존 동작
+//   선언의 유형 C 실행은 시작하는 순간 `type_mismatch`로 끝나므로 세지 않고 새 실행을 만든다, M3-30 · ADR-151), 편집 뒤 진술이 또 바뀜(뒤 편집이 원인), 규칙이 효력을 잃음, 하루 한도 비움 · 설정 미비 ·
 //   오늘 지출이 한도에 이름(규칙 작성 뒤 자동 시작과 같은 문. 생략은 기록하지 않고 응답으로만 알린다)
 // - 이 모듈을 가져오는 곳은 오케스트레이터 배선(`orchestrator.ts`)뿐이다. 에이전트 세션 · 도구에는 실행을 만드는 길이 없다
 import {
@@ -22,6 +23,7 @@ import {
 } from '@bive/shared';
 import type { ProjectStore, RunDetail } from '@bive/store';
 
+import { checkRunStartBasis } from '../engine/start-basis.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { isEffectiveRule, retiredRuleSet } from '../norms/effective.js';
 import { autoStartBlock } from '../settings/auto-start-gate.js';
@@ -86,8 +88,11 @@ export const autoStartRuleEditRun = (
     ) {
       return { status: 'not_applicable' };
     }
-    const pending = NOT_STARTED.flatMap((status) => store.runs.list({ status })).find((run) =>
-      run.targetRuleIds.includes(rule.id),
+    // 시작 근거 대조가 더는 맞지 않는 실행은 시작하는 순간 끝나므로 새 진술을 돌릴 실행으로 세지 않는다 (M3-30 검토 2회차,
+    // ADR-151: 기존 동작 선언의 유형 C 실행은 진술 편집 뒤 `type_mismatch`가 된다). 판단은 엔진과 같은 대조 함수 하나다
+    const pending = NOT_STARTED.flatMap((status) => store.runs.list({ status })).find(
+      (run) =>
+        run.targetRuleIds.includes(rule.id) && checkRunStartBasis(store, run).mismatch === null,
     );
     if (pending !== undefined) {
       return { status: 'pending', runId: pending.id, runDisplayId: pending.displayId };

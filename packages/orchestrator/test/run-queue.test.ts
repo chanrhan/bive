@@ -849,6 +849,7 @@ const autoRun = (h: QueueHarness, engine: PipelineEngine | null = h.engine): str
           parentRequirementId: h.rule.parentRequirementId,
         },
         rationale: '시험 근거',
+        behavior: 'new',
         author: { kind: 'agent', role: 'rule-writer' },
         sessionId,
         contradiction: { verdict: 'none' },

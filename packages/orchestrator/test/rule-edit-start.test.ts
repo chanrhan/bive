@@ -22,7 +22,7 @@ import type { ProjectStore } from '@bive/store';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { selectAgent } from '../src/agent/select.js';
-import { checkRunStartBasis } from '../src/engine/start-basis.js';
+import { checkRunStartBasis, declaredBehaviorOf } from '../src/engine/start-basis.js';
 import type { StepExecutor } from '../src/engine/types.js';
 import { createAgentRule, retireAgentRule } from '../src/norms/agent-rule.js';
 import { type Orchestrator, startOrchestrator } from '../src/orchestrator.js';
@@ -223,16 +223,26 @@ describe('autoStartRuleEditRun: 진술이 바뀐 사람 편집 1건 → 그 규�
 
   it('그 규칙이 대상인 시작 전 실행(승인 대기 · 실행 대기)이 있으면 만들지 않고 그 실행을 알린다. 진행 중 실행만 있으면 새 실행을 만든다', () => {
     const h = storeHarness();
-    // 사람의 [실행]으로 만든 승인 대기 실행 (엔진 판정 전)
-    const waiting = h.read((store) =>
-      saveNewRun(
+    // 사람의 [실행]으로 만든 승인 대기 실행 (엔진 판정 전). 사람의 [실행]과 같이 승인 기록 run_start도 남긴다: 시작 근거 대조가
+    // 맞지 않는 실행은 대기 실행으로 세지 않는다 (M3-30 검토 2회차, ADR-151)
+    const waiting = h.read((store) => {
+      const made = saveNewRun(
         store,
         store.settings.get(),
         { runId: newId(), ruleIds: [h.ruleId], startedBy: { kind: 'human' } },
         new Date().toISOString(),
         newId,
-      ),
-    );
+      );
+      store.approvalLog.append({
+        at: new Date().toISOString(),
+        action: 'run_start',
+        actor: { kind: 'human' },
+        targetRef: { entity: 'Run', id: made.run.id },
+        clientId: null,
+        detail: { ruleIds: [h.ruleId] },
+      });
+      return made;
+    });
     const edit = humanEdit(h, { statement: NEW_STATEMENT });
     expect(startEdit(h, edit.seq)).toEqual({
       status: 'pending',
@@ -254,6 +264,103 @@ describe('autoStartRuleEditRun: 진술이 바뀐 사람 편집 1건 → 그 규�
     const outcome = startEdit(h, edit.seq);
     expect(outcome.status).toBe('started');
     expect(h.read(counts)).toEqual({ runs: 2, autoStarts: 1, exe: 2 });
+  });
+
+  /** 규칙 작성 세션이 그 규칙을 선언과 함께 만든 신규 기록과 그 세션 뒤 자동 시작(유형은 선언으로)의 실행 1개. */
+  const declaredAutoStart = (h: StoreHarness, behavior: 'new' | 'existing') =>
+    h.read((store) => {
+      const sessionId = newId();
+      store.normChanges.append({
+        at: new Date().toISOString(),
+        kind: 'created',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        targetRef: { entity: 'Rule', id: h.ruleId },
+        sessionId,
+        runId: null,
+        reason: '시험 근거',
+        detail: { after: { ruleId: h.ruleId }, behavior },
+      });
+      const outcome = autoStartRun(store, { sessionId }, clock);
+      if (outcome.status !== 'started') throw new Error(`자동 시작 안 됨: ${outcome.status}`);
+      const [only] = outcome.runs;
+      if (only === undefined) throw new Error('실행 없음');
+      return only.detail.run;
+    });
+
+  it('기존 동작 선언의 유형 C 실행이 승인 대기 · 실행 대기인 동안 진술을 고치면, 그 실행은 시작 근거 대조가 더는 맞지 않아(type_mismatch) 대기 실행으로 세지 않고 새 유형 A 실행을 만든다: 고친 진술을 검사할 실행이 남는다 (M3-30 검토 2회차, ADR-151)', () => {
+    for (const status of ['waiting_approval', 'queued'] as const) {
+      const h = storeHarness();
+      const c = declaredAutoStart(h, 'existing');
+      expect(c.type).toBe('C');
+      if (status === 'queued') {
+        h.read((store) =>
+          store.db.prepare("UPDATE runs SET status = 'queued' WHERE id = ?").run(c.id),
+        );
+      }
+      const edit = humanEdit(h, { statement: NEW_STATEMENT });
+      const outcome = startEdit(h, edit.seq);
+      if (outcome.status !== 'started') throw new Error(`${status}: ${outcome.status}`);
+      expect(outcome.detail.run, status).toMatchObject({
+        type: 'A',
+        targetRuleIds: [h.ruleId],
+        startedBy: { kind: 'orchestrator', causeSeqs: [edit.seq], causeLog: 'approval_log' },
+      });
+      h.read((store) => {
+        const stale = store.runs.get(c.id);
+        if (stale === null) throw new Error('실행 없음');
+        expect(checkRunStartBasis(store, stale).mismatch, status).toBe('type_mismatch');
+        expect(checkRunStartBasis(store, outcome.detail.run).mismatch, status).toBeNull();
+      });
+      expect(h.read(counts), status).toEqual({ runs: 2, autoStarts: 2, exe: 2 });
+    }
+  });
+
+  it('대조가 맞는 대기 실행은 지금처럼 pending: 새 동작 선언의 유형 A 대기 실행은 진술 편집 뒤에도(선언이 모름 → A로 맞음) 새 실행을 만들지 않고, 다른 규칙만 고친 편집은 이 규칙의 선언을 바꾸지 않는다. 제목만 고친 편집은 원인이 아니라 유형 C 대기 실행이 그대로 맞는다', () => {
+    const h = storeHarness();
+    const a = declaredAutoStart(h, 'new');
+    const edit = humanEdit(h, { statement: NEW_STATEMENT });
+    expect(startEdit(h, edit.seq)).toEqual({
+      status: 'pending',
+      runId: a.id,
+      runDisplayId: a.displayId,
+    });
+    expect(h.read(counts)).toEqual({ runs: 1, autoStarts: 1, exe: 1 });
+
+    const titled = storeHarness();
+    const c = declaredAutoStart(titled, 'existing');
+    // 다른 규칙의 진술 편집: 이 규칙의 선언은 그대로 기존 동작 (편집 판별은 그 규칙의 승인 기록만 본다)
+    const other = titled.read((store) => {
+      const base = store.rules.get(titled.ruleId);
+      if (base === null) throw new Error('규칙 없음');
+      return store.rules.create({
+        id: newId(),
+        title: '다른 규칙',
+        statement: base.statement,
+        kind: base.kind,
+        checkKinds: base.checkKinds,
+        parentRequirementId: base.parentRequirementId,
+        builtin: false,
+        targetBlockIds: [],
+        risk: null,
+        contractId: null,
+        author: human,
+        normState: 'approved',
+        createdAt: new Date().toISOString(),
+      }).id;
+    });
+    humanEdit(titled, { statement: NEW_STATEMENT }, other);
+    titled.read((store) => {
+      expect(declaredBehaviorOf(store, titled.ruleId)).toBe('existing');
+      expect(checkRunStartBasis(store, c).mismatch).toBeNull();
+    });
+    // 제목만 고친 편집: 원인이 아니다(실행을 만들지 않는다). 선언 그대로라 유형 C 대기 실행은 대조가 맞는다
+    const titleEdit = humanEdit(titled, { title: '헬스 체크 응답의 서버 시각 (고침)' });
+    expect(startEdit(titled, titleEdit.seq)).toEqual({ status: 'not_applicable' });
+    titled.read((store) => {
+      expect(declaredBehaviorOf(store, titled.ruleId)).toBe('existing');
+      expect(checkRunStartBasis(store, c).mismatch).toBeNull();
+    });
+    expect(titled.read(counts)).toEqual({ runs: 1, autoStarts: 1, exe: 1 });
   });
 
   it('하루 한도 비움 · 설정 미비 · 오늘 지출이 하루 한도에 이름이면 만들지 않고 기록도 남기지 않는다 (규칙 작성 뒤 자동 시작과 같은 문)', () => {
@@ -325,6 +432,7 @@ describe('autoStartRuleEditRun: 진술이 바뀐 사람 편집 1건 → 그 규�
               parentRequirementId: h.requirementId,
             },
             rationale: '시험 근거',
+            behavior: 'new',
             author: { kind: 'agent', role: 'rule-writer' },
             sessionId: session,
             contradiction: { verdict: 'none' },

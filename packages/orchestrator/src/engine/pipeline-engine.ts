@@ -33,6 +33,7 @@ import {
   type ModelUsage,
   parseDisplayId,
   type Project,
+  type RuleBehavior,
   type Run,
   RUN_STEP_PLANS,
   type Step,
@@ -88,7 +89,7 @@ import { dailyBudgetReached, projectDailyBudget } from '../settings/project-budg
 import { createRoleTools, type ToolCallRecord } from '../tools/executor.js';
 import { budgetOverrun, runRemaining, sessionLimits } from './session-budget.js';
 import { runEnding } from './run-ending.js';
-import { checkRunStartBasis } from './start-basis.js';
+import { checkRunStartBasis, runDeclarationOf } from './start-basis.js';
 import {
   COMMIT_STEP_KINDS,
   type EngineEvent,
@@ -1197,7 +1198,23 @@ export class PipelineEngine {
     } else {
       const used = inherited.testWritingAttempts + countedTestWritingAttempts(steps).length - 1;
       if (used >= MAX_TEST_RETRY_COUNT) {
-        await this.#halt(projectId, run, step, 'failed', 'test_retry_limit', exitDetail, git);
+        // 동작 선언으로 유형을 고른 실행(M3-30, ADR-151)이 Red · Green 확인을 넘지 못하고 끝나면 그 선언을 종료 상세에 싣는다:
+        // 선언과 실제가 달랐는지(새 동작인데 이미 통과 · 기존 동작인데 실패)를 사람이 실행 기록에서 본다. 유형 · 대상은 바꾸지 않는다.
+        // 테스트 재시도로 테스트 작성에 돌려보내는 판정 단계(유형 A의 Red 확인 · 유형 C의 Green 확인)만이다 (테스트 작성 자신의 미충족은 아님)
+        const declared =
+          step.kind !== policy.to
+            ? this.#store(projectId, (store) => runDeclarationOf(store, run))
+            : null;
+        await this.#halt(
+          projectId,
+          run,
+          step,
+          'failed',
+          'test_retry_limit',
+          exitDetail,
+          git,
+          declared === null ? undefined : { declaredBehavior: declared },
+        );
         return;
       }
     }
@@ -1252,6 +1269,8 @@ export class PipelineEngine {
     reason: string,
     exitDetail: unknown,
     git: RunGitRef | null,
+    /** 종료 상세의 덧붙임 (`reason` · `detail` 옆, 지금은 동작 선언 `declaredBehavior`만, ADR-151) */
+    extra?: { readonly declaredBehavior: RuleBehavior },
   ): Promise<void> {
     const at = this.#timestamp();
     const ending = runEnding(run, runStatus, reason);
@@ -1262,7 +1281,7 @@ export class PipelineEngine {
           {
             id: step.id,
             status: 'failed',
-            exitDetail: { reason, detail: exitDetail ?? null },
+            exitDetail: { reason, detail: exitDetail ?? null, ...extra },
             startedAt: step.startedAt ?? at,
             endedAt: at,
           },

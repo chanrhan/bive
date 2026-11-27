@@ -18,6 +18,7 @@ roles:
               checkKinds: [test]
               targetBlocks: [health]
               risk: medium
+              behavior: new
               rationale: 요구사항의 '서버 시각 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
               contradiction: { verdict: none }
           - tool: propose_rule
@@ -29,6 +30,7 @@ roles:
               checkKinds: [test]
               targetBlocks: [health]
               risk: medium
+              behavior: existing
               rationale: 시각 필드를 더해도 기존 상태 확인 응답이 깨지지 않아야 함
               contradiction: { verdict: none }
           - tool: proposal.approve

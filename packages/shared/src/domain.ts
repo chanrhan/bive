@@ -26,6 +26,7 @@ import {
   REVIEW_ACTIONS_BY_KIND,
   ReviewItemKind,
   Risk,
+  RuleBehavior,
   RuleKind,
   RunStatus,
   RunType,
@@ -1308,6 +1309,11 @@ export type NormObjectionDetail = z.infer<typeof NormObjectionDetail>;
 export const NormChangeDetail = z.strictObject({
   before: z.unknown().optional(),
   after: z.unknown().optional(),
+  /**
+   * 동작 선언 (종류 `created`에만, 규칙 작성 역할이 만든 규칙, M3-30 #245 · ADR-151). 선언을 읽는 자리는 이 칸 하나다(다른 곳에
+   * 복사하지 않는다). 이 칸이 없는 신규 기록(이 변경 전의 기록 · 사람 · 오케스트레이터가 만든 규칙)은 "모름"이다
+   */
+  behavior: RuleBehavior.optional(),
   causeSeqs: NormChangeSeqList.optional(),
   /** 원인 승인 기록(사람의 규칙 진술 편집 `rule_edit`)의 순번 (종류 `auto_start`에만, M7-03) */
   ruleEditSeqs: NormChangeSeqList.optional(),
@@ -1375,6 +1381,17 @@ export const NormChangeEntry = z
           path: ['reason'],
         });
       }
+    }
+    // 동작 선언은 규칙의 신규 기록에만 (M3-30, ADR-151)
+    if (
+      entry.detail.behavior !== undefined &&
+      (entry.kind !== 'created' || entry.targetRef.entity !== 'Rule')
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: '동작 선언(behavior)은 규칙의 신규 기록에만 있습니다',
+        path: ['detail', 'behavior'],
+      });
     }
     if (entry.kind === 'created') {
       if (entry.detail.after === undefined) {

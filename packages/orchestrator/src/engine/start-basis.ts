@@ -13,7 +13,15 @@
 // 기존 규칙 모순 · 이의 반영으로 끝난 실행의 대상 규칙을 다시 시작한 실행(M7-12 #224, ADR-118)은 원인이 그 끝난 실행의 첫 모순 판단
 // (검사 실패 판단) · 첫 폐기 · 대체 판단(이의 판단)이고 대상 규칙이 그 끝난 실행의 대상 규칙이어야 한다. 원인은 끝난 실행마다 하나라
 // 재사용은 "같은 원인 · 같은 대상 규칙" = "같은 끝난 실행 · 같은 대상 규칙"을 다른 항목이 쓸 때다.
-import { type NormChangeEntry, type Run, ruleStatementEditOf } from '@bive/shared';
+// 위 두 갈래(신규 기록 · 다시 시작 원인)의 실행은 유형도 대조한다(M3-30 #245, ADR-151): 대상 규칙의 동작 선언이 기존 동작이면 유형 C,
+// 새 동작 · 모름(선언 없는 옛 기록)이면 유형 A여야 한다(`type_mismatch`). 선언을 읽는 자리는 {@link declaredBehaviorOf} 하나다.
+import {
+  type NormChangeEntry,
+  type Run,
+  type RuleBehavior,
+  type RunType,
+  ruleStatementEditOf,
+} from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
 import { restartCauseOf } from '../norms/check-contradiction.js';
@@ -38,7 +46,9 @@ export type StartBasisMismatch =
    */
   | 'cause_mismatch'
   /** 같은 원인 순번을 다른 실행의 자동 시작 항목도 씀 */
-  | 'cause_reused';
+  | 'cause_reused'
+  /** 신규 기록 · 다시 시작 원인으로 시작한 실행의 유형이 대상 규칙의 동작 선언으로 고른 유형과 다름 (M3-30, ADR-151) */
+  | 'type_mismatch';
 
 export interface StartBasisCheck {
   /** 근거가 정확히 1건이고 실행과 맞으면 `null` */
@@ -46,6 +56,51 @@ export interface StartBasisCheck {
   readonly runStartEntries: number;
   readonly autoStartEntries: number;
 }
+
+/**
+ * 규칙의 동작 선언 (M3-30 #245, ADR-151): 그 규칙을 만든 신규 기록(`created`)의 `detail.behavior`. 선언을 읽는 자리는 이 함수
+ * 하나다(실행 · 다른 기록에 복사하지 않는다). 신규 기록이 없거나 선언 칸이 없으면(이 변경 전의 기록, 사람 · 오케스트레이터가 만든
+ * 규칙) `null` = 모름.
+ * 사람이 그 규칙의 진술을 고친 적이 있으면(승인 기록 `rule_edit` 가운데 진술이 바뀐 것, `ruleStatementEditOf`, 제목만 고친 편집은 아님,
+ * ADR-109) 선언은 옛 진술에 대한 판단이므로 모름으로 읽는다(조율자 결정, 유형 A: Red 확인을 거친다).
+ */
+export const declaredBehaviorOf = (
+  store: ProjectStore,
+  ruleId: string,
+  changes: readonly NormChangeEntry[] = store.normChanges.list(),
+): RuleBehavior | null => {
+  const edited = store.approvalLog
+    .list({ entity: 'Rule', id: ruleId })
+    .some((entry) => ruleStatementEditOf(entry) !== null);
+  if (edited) return null;
+  return (
+    changes.find(
+      (entry) =>
+        entry.kind === 'created' &&
+        entry.targetRef.entity === 'Rule' &&
+        entry.targetRef.id === ruleId,
+    )?.detail.behavior ?? null
+  );
+};
+
+/**
+ * 오케스트레이터가 규칙 하나로 시작하는 실행(규칙 작성 세션 뒤 자동 시작 · 기존 규칙 모순 뒤 다시 시작)의 유형 (ADR-110 · ADR-151):
+ * 기존 동작 → 유형 C(Green 확인, 구현 생략), 새 동작 · 모름 → 유형 A(지금까지와 같다).
+ */
+export const declaredRunTypeOf = (behavior: RuleBehavior | null): Extract<RunType, 'A' | 'C'> =>
+  behavior === 'existing' ? 'C' : 'A';
+
+/**
+ * 실행이 동작 선언으로 유형을 고른 실행이면 그 대상 규칙의 선언 (M3-30, ADR-151): 시작 주체가 오케스트레이터이고 원인이 규범 변경 기록
+ * (`causeLog` 없음: 신규 기록 · 다시 시작 원인)이며 대상 규칙이 1개일 때. 그 밖(사람의 [실행] · 편집 뒤 시작 · 변이 보강)이나 선언이
+ * 없으면 `null`. 엔진이 Red · Green 확인 미충족으로 실행을 끝낼 때 종료 상세에 싣는다(선언과 실제가 달랐음을 사람이 보게).
+ */
+export const runDeclarationOf = (store: ProjectStore, run: Run): RuleBehavior | null => {
+  if (run.startedBy.kind !== 'orchestrator' || run.startedBy.causeLog !== undefined) return null;
+  const [ruleId] = run.targetRuleIds;
+  if (ruleId === undefined || run.targetRuleIds.length !== 1) return null;
+  return declaredBehaviorOf(store, ruleId);
+};
 
 const sameList = <T>(a: readonly T[] | undefined, b: readonly T[]): boolean =>
   a !== undefined && a.length === b.length && a.every((value, index) => value === b[index]);
@@ -90,9 +145,13 @@ const autoStartMismatch = (
   const cause = causeSeq === undefined ? undefined : bySeq.get(causeSeq);
   if (cause === undefined) return 'cause_mismatch';
   const [ruleId] = run.targetRuleIds;
+  // 유형은 대상 규칙의 동작 선언으로 정해진다 (M3-30, ADR-151): 원인을 확인한 뒤 · 재사용을 보기 전에 본다
+  const typeMatches =
+    ruleId !== undefined && run.type === declaredRunTypeOf(declaredBehaviorOf(store, ruleId, all));
   if (cause.kind === 'judgment') {
     // 기존 규칙 모순으로 끝난 실행의 대상 규칙 다시 시작: 같은 원인 · 같은 대상 규칙을 다른 항목이 쓰면 재사용
     if (!isRestartCause(store, run, cause, ruleId)) return 'cause_mismatch';
+    if (!typeMatches) return 'type_mismatch';
     const reused = all.some(
       (other) =>
         other.kind === 'auto_start' &&
@@ -105,6 +164,7 @@ const autoStartMismatch = (
   const isCreation =
     cause.kind === 'created' && cause.targetRef.entity === 'Rule' && cause.targetRef.id === ruleId;
   if (!isCreation) return 'cause_mismatch';
+  if (!typeMatches) return 'type_mismatch';
   const reused = all.some(
     (other) =>
       other.kind === 'auto_start' &&

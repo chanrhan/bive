@@ -1337,7 +1337,7 @@ export class RuleWriterService implements RuleWriterLauncher {
         `propose_rule 인자 오류: parentRequirementId는 이 세션의 요구사항 ${record.requirementId}만 쓸 수 있음`,
       );
     }
-    const { rationale, contradiction, ...payload } = input;
+    const { rationale, contradiction, behavior, ...payload } = input;
     try {
       const { rule, judgment } = withRegisteredProjectStore(
         this.#biveHome,
@@ -1348,6 +1348,7 @@ export class RuleWriterService implements RuleWriterLauncher {
             {
               payload,
               rationale,
+              behavior,
               author: { kind: 'agent', role: RULE_WRITER_ROLE },
               sessionId: record.id,
               contradiction,
@@ -1453,7 +1454,7 @@ export class RuleWriterService implements RuleWriterLauncher {
         `supersede_rule 인자 오류: parentRequirementId는 이 세션의 요구사항 ${record.requirementId}만 쓸 수 있음`,
       );
     }
-    const { rationale, contradiction, ruleId, grounds, ...payload } = input;
+    const { rationale, contradiction, behavior, ruleId, grounds, ...payload } = input;
     try {
       const { rule, superseded } = withRegisteredProjectStore(
         this.#biveHome,
@@ -1464,6 +1465,7 @@ export class RuleWriterService implements RuleWriterLauncher {
             {
               payload,
               rationale,
+              behavior,
               author: { kind: 'agent', role: RULE_WRITER_ROLE },
               sessionId: record.id,
               contradiction,
@@ -1629,7 +1631,7 @@ export class RuleWriterService implements RuleWriterLauncher {
         `supersede_rule 인자 오류: parentRequirementId는 이 세션의 요구사항 ${record.requirementId}만 쓸 수 있음`,
       );
     }
-    const { rationale, contradiction, ruleId, grounds, ...payload } = input;
+    const { rationale, contradiction, behavior, ruleId, grounds, ...payload } = input;
     let created;
     try {
       created = withRegisteredProjectStore(this.#biveHome, record.projectId, (store) =>
@@ -1638,6 +1640,7 @@ export class RuleWriterService implements RuleWriterLauncher {
           {
             payload,
             rationale,
+            behavior,
             author: { kind: 'agent', role: RULE_WRITER_ROLE },
             sessionId: record.id,
             contradiction,
@@ -2091,7 +2094,7 @@ export class RuleWriterService implements RuleWriterLauncher {
           : `supersede_rule 인자 오류: parentRequirementId는 대상 규칙의 부모 요구사항 ${rule.parentRequirementId}만 쓸 수 있음`,
       );
     }
-    const { rationale, contradiction, ruleId, grounds, ...payload } = input;
+    const { rationale, contradiction, behavior, ruleId, grounds, ...payload } = input;
     let created;
     try {
       created = withRegisteredProjectStore(this.#biveHome, session.projectId, (store) =>
@@ -2100,6 +2103,7 @@ export class RuleWriterService implements RuleWriterLauncher {
           {
             payload,
             rationale,
+            behavior,
             author: { kind: 'agent', role: RULE_WRITER_ROLE },
             sessionId: session.id,
             contradiction,

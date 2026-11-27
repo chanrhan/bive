@@ -12,6 +12,7 @@ import {
   type NormChangeEntry,
   type Requirement,
   type Rule,
+  RUN_STEP_PLANS,
   type RuleWriterStatusEntry,
   type RunStatus,
   type SettingsPatch,
@@ -110,6 +111,8 @@ const gatedExecutors = (gates: Gates | null): StepExecutors => {
   return {
     test_writing: testWriting,
     red_check: pass,
+    // 기존 동작 규칙의 자동 시작 실행(유형 C)의 Green 확인 (M3-30, ADR-151)
+    green_check: pass,
     implementation: pass,
     check: pass,
     merge: mergeStep,
@@ -211,10 +214,12 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
     const [ruleA, ruleB] = rules;
     if (ruleA === undefined || ruleB === undefined) throw new Error('규칙 없음');
 
-    // 실행 2개: 실행마다 대상 = 규칙 1개(만든 순서), 시작 주체 = 오케스트레이터(그 규칙의 신규 기록 순번 1개)
+    // 실행 2개: 실행마다 대상 = 규칙 1개(만든 순서), 시작 주체 = 오케스트레이터(그 규칙의 신규 기록 순번 1개).
+    // 유형은 그 규칙의 동작 선언으로 고른다 (M3-30 #245, ADR-151): 첫 규칙은 새 동작 → A, 둘째(응답 형식 유지)는 기존 동작 → C
     const list = async () =>
       (await h.client.call('run.list', { projectId: h.projectId })).runs.map((run) => ({
         displayId: run.displayId,
+        type: run.type,
         status: run.status,
         targetRuleIds: run.targetRuleIds,
         startedBy: run.startedBy,
@@ -229,12 +234,14 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
     expect(await list()).toEqual([
       {
         displayId: 'EXE-001',
+        type: 'A',
         status: 'running',
         targetRuleIds: [ruleA.id],
         startedBy: { kind: 'orchestrator', causeSeqs: [1] },
       },
       {
         displayId: 'EXE-002',
+        type: 'C',
         status: 'queued',
         targetRuleIds: [ruleB.id],
         startedBy: { kind: 'orchestrator', causeSeqs: [3] },
@@ -265,6 +272,24 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
       'mutation:skipped',
       'merge:passed',
       'screen_update:passed',
+    ]);
+    // 둘째(기존 동작)는 유형 C 그대로: Red 확인이 아니라 Green 확인, 구현 생략. 보강 실행이 아니므로 변이 주입도 생략(run_type)
+    const secondDone = await h.client.call('run.get', { projectId: h.projectId, id: second.id });
+    expect(secondDone.steps.map((step) => `${step.kind}:${step.status}`)).toEqual([
+      'approval:passed',
+      'test_writing:passed',
+      'green_check:passed',
+      'implementation:skipped',
+      'check:passed',
+      'mutation:skipped',
+      'merge:passed',
+      'screen_update:passed',
+    ]);
+    expect(
+      secondDone.steps.filter((step) => step.status === 'skipped').map((step) => step.exitDetail),
+    ).toEqual([
+      { reason: 'run_type', runType: 'C' },
+      { reason: 'run_type', runType: 'C' },
     ]);
     // 둘째 실행은 첫 실행이 끝난 뒤 시작했다 (병합 위에서 돈다)
     expect(String(second.startedAt) >= String(first.endedAt)).toBe(true);
@@ -367,6 +392,7 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
       checkKinds: ['test'],
       targetBlocks: ['health'],
       risk: 'medium',
+      behavior: 'new',
       rationale: '요구사항의 그 부분',
       contradiction: { verdict: 'none' },
     });
@@ -393,6 +419,8 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
                   tool: 'supersede_rule',
                   args: {
                     ...proposal('서버 시각(UTC)', 'time', 'UTC 기준 서버 시각'),
+                    // 재판단의 대체로 생긴 규칙도 같은 규칙으로 유형을 고른다 (M3-30, ADR-151): 기존 동작 → C
+                    behavior: 'existing',
                     ruleId: '{{ruleId}}',
                     grounds:
                       '고친 본문이 UTC를 요구해 "time 필드에 응답 시점의 서버 시각을"을 바꾼다',
@@ -416,6 +444,7 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
     const list = async () =>
       (await h.client.call('run.list', { projectId: h.projectId })).runs.map((run) => ({
         displayId: run.displayId,
+        type: run.type,
         status: run.status,
         targetRuleIds: run.targetRuleIds,
         startedBy: run.startedBy,
@@ -470,8 +499,10 @@ describe('규칙 작성 세션 뒤 실행 자동 시작 (수용 기준 1)', () =
       requirementChange: { change: 'updated' },
     });
     const runs = await list();
+    expect(runs[0]?.type).toBe('A');
     expect(runs[1]).toEqual({
       displayId: 'EXE-002',
+      type: 'C',
       status: 'merged',
       targetRuleIds: [rule2.id],
       startedBy: { kind: 'orchestrator', causeSeqs: [4] },
@@ -584,7 +615,12 @@ const storeHarness = (settings: SettingsPatch = DAILY): StoreHarness => {
 const clock = { now: Date.now, newId };
 
 /** 규칙 작성 역할이 세션 `sessionId`에서 규칙 하나를 만든 것과 같은 기록 (바로 반영 모듈 그대로). */
-const makeRule = (h: StoreHarness, sessionId: string, title: string): NormChangeEntry =>
+const makeRule = (
+  h: StoreHarness,
+  sessionId: string,
+  title: string,
+  behavior: 'new' | 'existing' = 'new',
+): NormChangeEntry =>
   h.read(
     (store) =>
       createAgentRule(
@@ -600,6 +636,7 @@ const makeRule = (h: StoreHarness, sessionId: string, title: string): NormChange
             parentRequirementId: h.requirementId,
           },
           rationale: '시험 근거',
+          behavior,
           author: { kind: 'agent', role: 'rule-writer' },
           sessionId,
           contradiction: { verdict: 'none' },
@@ -967,6 +1004,7 @@ const supersedeRule = (
             parentRequirementId: h.requirementId,
           },
           rationale: '시험 근거',
+          behavior: 'new',
           author: { kind: 'agent', role: 'rule-writer' },
           sessionId,
           contradiction: { verdict: 'none' },
@@ -977,6 +1015,105 @@ const supersedeRule = (
         clock,
       ).normChange,
   );
+
+describe('autoStartRun: 동작 선언으로 실행 유형을 고른다 (M3-30 #245 수용 기준 2, ADR-110 · ADR-151)', () => {
+  it('새 동작 → 유형 A, 기존 동작 → 유형 C(Green 확인 · 구현 생략 계획), 실행마다 대상 규칙 1개 · 원인 1건이고 엔진의 시작 근거 대조를 지난다. 기존 동작 실행은 보강 실행이 아니다', () => {
+    const h = storeHarness();
+    const session = newId();
+    const made = [
+      makeRule(h, session, '서버 시각', 'new'),
+      makeRule(h, session, '응답 형식', 'existing'),
+      makeRule(h, session, '버전', 'new'),
+    ];
+    const outcome = h.read((store) => autoStartRun(store, { sessionId: session }, clock));
+    if (outcome.status !== 'started') throw new Error(`시작 안 됨: ${outcome.status}`);
+    expect(
+      outcome.runs.map(({ detail }) => ({
+        type: detail.run.type,
+        targetRuleIds: detail.run.targetRuleIds,
+        startedBy: detail.run.startedBy,
+        steps: detail.steps.map((step) => step.kind),
+      })),
+    ).toEqual(
+      made.map((cause, index) => ({
+        type: index === 1 ? 'C' : 'A',
+        targetRuleIds: [cause.targetRef.id],
+        startedBy: { kind: 'orchestrator', causeSeqs: [cause.seq] },
+        steps: [...RUN_STEP_PLANS[index === 1 ? 'C' : 'A']],
+      })),
+    );
+    // 선언은 신규 기록에만 있고 자동 시작 항목 · 실행에는 복사하지 않는다
+    expect(outcome.runs.map(({ normChange }) => normChange.detail)).toEqual(
+      made.map((cause) => ({ causeSeqs: [cause.seq], ruleIds: [cause.targetRef.id] })),
+    );
+    h.read((store) => {
+      for (const { detail } of outcome.runs) {
+        expect(checkRunStartBasis(store, detail.run).mismatch).toBeNull();
+        expect(store.mutations.reinforcementCauseOfRun(detail.run.id)).toBeNull();
+      }
+    });
+  });
+
+  it('선언 칸이 없는 옛 신규 기록(이 변경 전에 만든 규칙)의 규칙은 유형 A로 자동 시작한다 (지금까지와 같다)', () => {
+    const h = storeHarness();
+    const session = newId();
+    const legacy = h.read((store) => {
+      const rule = store.rules.get(makeRule(h, newId(), '다른 세션의 규칙').targetRef.id);
+      if (rule === null) throw new Error('규칙 없음');
+      // 같은 모양의 규칙과 선언 없는 신규 기록 (이 변경 전의 바로 반영 모듈이 남긴 것)
+      const old = store.rules.create({
+        ...rule,
+        id: newId(),
+        title: '옛 규칙',
+        createdAt: new Date().toISOString(),
+      });
+      return store.normChanges.append({
+        at: old.createdAt,
+        kind: 'created',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        targetRef: { entity: 'Rule', id: old.id },
+        sessionId: session,
+        runId: null,
+        reason: '시험 근거',
+        detail: { after: { displayId: old.displayId } },
+      });
+    });
+    expect(legacy.detail.behavior).toBeUndefined();
+    const outcome = h.read((store) => autoStartRun(store, { sessionId: session }, clock));
+    if (outcome.status !== 'started') throw new Error(`시작 안 됨: ${outcome.status}`);
+    expect(outcome.runs.map(({ detail }) => [detail.run.type, detail.run.targetRuleIds])).toEqual([
+      ['A', [legacy.targetRef.id]],
+    ]);
+    h.read((store) => {
+      const [run] = outcome.runs;
+      if (run === undefined) throw new Error('실행 없음');
+      expect(checkRunStartBasis(store, run.detail.run).mismatch).toBeNull();
+    });
+  });
+
+  it('생략 · 멱등의 문은 유형과 무관하게 그대로다: 하루 한도가 비면 기존 동작 규칙도 만들지 않고 생략 기록 1건, 두 번 불러도 실행 수가 늘지 않는다', () => {
+    const unset = storeHarness(COMPLETE_SETTINGS);
+    const skipped = newId();
+    makeRule(unset, skipped, '응답 형식', 'existing');
+    expect(unset.read((store) => autoStartRun(store, { sessionId: skipped }, clock))).toEqual({
+      status: 'skipped',
+      reason: 'project_daily_budget_unset',
+      missing: [],
+    });
+    expect(unset.read(counts)).toEqual({ runs: 0, autoStarts: 0, approvals: 0 });
+
+    const h = storeHarness();
+    const session = newId();
+    makeRule(h, session, '응답 형식', 'existing');
+    const first = h.read((store) => autoStartRun(store, { sessionId: session }, clock));
+    if (first.status !== 'started') throw new Error(`시작 안 됨: ${first.status}`);
+    expect(h.read((store) => autoStartRun(store, { sessionId: session }, clock))).toEqual({
+      status: 'duplicate',
+      runIds: first.runs.map(({ detail }) => detail.run.id),
+    });
+    expect(h.read(counts)).toEqual({ runs: 1, autoStarts: 1, approvals: 0 });
+  });
+});
 
 describe('autoStartRun: 폐기 · 대체 뒤 (M7-09 #221 수용 기준 4, ADR-100 A4, ADR-112)', () => {
   it('대체한 세션: 새 규칙의 신규 기록이 원인이 되어 새 규칙의 실행 1개가 생기고(옛 규칙의 실행은 없음), 엔진의 시작 근거 대조 · 승인 단계 자리를 통과한다', () => {

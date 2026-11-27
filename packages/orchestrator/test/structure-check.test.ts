@@ -405,6 +405,7 @@ describe('규칙 작성 역할의 폐기 · 대체 도구와 구현 역할의 �
       parentRequirementId: '{{requirementId}}',
       targetBlocks: ['health'],
       risk: 'low',
+      behavior: 'new',
       rationale: '구조 검사를 없앰',
       contradiction: { verdict: 'none' },
     });
