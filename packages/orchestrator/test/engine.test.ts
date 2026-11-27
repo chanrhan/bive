@@ -26,9 +26,11 @@ import type { AgentAdapter, SessionEvent } from '../src/agent/adapter.js';
 import { loadScenario } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { INTERRUPTED_EXIT_DETAIL, PipelineEngine } from '../src/engine/pipeline-engine.js';
+import { checkRunStartBasis } from '../src/engine/start-basis.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
 import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { runPaths } from '../src/run-paths.js';
+import { AutoStarter, autoStartRun } from '../src/runs/auto-start.js';
 import { createRun, saveNewRun } from '../src/runs/run-service.js';
 import { connect, RpcCallError, type TestClient } from './helpers/client.js';
 import {
@@ -580,9 +582,31 @@ describe('시작 근거 대조: 사람 run_start 1건 또는 자동 시작 항�
   const AUTO_START_SETTINGS: SettingsPatch = { ...COMPLETE_SETTINGS, dailyBudgetUsd: 10 };
   const at = () => new Date().toISOString();
   /** 시작 근거 없이 실행만 저장한다 (파이프 밖 경로의 흉내). 근거는 경우마다 따로 남긴다. */
-  const forgeRun = (store: ProjectStore, ruleIds: string[], startedBy: Starter): string =>
-    saveNewRun(store, store.settings.get(), { runId: newId(), ruleIds, startedBy }, at(), newId).run
-      .id;
+  const forgeRun = (
+    store: ProjectStore,
+    ruleIds: string[],
+    startedBy: Starter,
+    type?: RunType,
+  ): string =>
+    saveNewRun(
+      store,
+      store.settings.get(),
+      { runId: newId(), ruleIds, startedBy, ...(type === undefined ? {} : { type }) },
+      at(),
+      newId,
+    ).run.id;
+  /** 규칙 작성 역할이 동작 선언과 함께 남긴 신규 기록 (M3-30, ADR-151). */
+  const declared = (store: ProjectStore, ruleId: string, behavior: 'new' | 'existing'): number =>
+    store.normChanges.append({
+      at: at(),
+      kind: 'created',
+      actor: { kind: 'agent', role: 'rule-writer' },
+      targetRef: { entity: 'Rule', id: ruleId },
+      sessionId: newId(),
+      runId: null,
+      reason: '시험 근거',
+      detail: { after: { ruleId }, behavior },
+    }).seq;
   const created = (store: ProjectStore, ruleId: string): number =>
     store.normChanges.append({
       at: at(),
@@ -877,7 +901,65 @@ describe('시작 근거 대조: 사람 run_start 1건 또는 자동 시작 항�
       mismatch: 'cause_reused',
       counts: [0, 1],
     },
+    // 유형은 대상 규칙의 동작 선언으로 정해진다 (M3-30 #245, ADR-151): 기존 동작 → C, 새 동작 · 모름 → A.
+    // 규칙의 선언은 그 규칙의 첫 신규 기록이라, 앞 경우들이 쓴 규칙과 겹치지 않게 새 규칙으로 만든다
+    {
+      name: '오케스트레이터: 기존 동작 선언의 규칙인데 유형 A',
+      build: (store, rule) => {
+        const target = anotherRule(store, rule);
+        const cause = declared(store, target, 'existing');
+        const id = forgeRun(store, [target], { kind: 'orchestrator', causeSeqs: [cause] });
+        autoStart(store, id, [cause], [target]);
+        return id;
+      },
+      mismatch: 'type_mismatch',
+      counts: [0, 1],
+    },
+    {
+      name: '오케스트레이터: 새 동작 선언의 규칙인데 유형 C',
+      build: (store, rule) => {
+        const target = anotherRule(store, rule);
+        const cause = declared(store, target, 'new');
+        const id = forgeRun(store, [target], { kind: 'orchestrator', causeSeqs: [cause] }, 'C');
+        autoStart(store, id, [cause], [target]);
+        return id;
+      },
+      mismatch: 'type_mismatch',
+      counts: [0, 1],
+    },
+    {
+      name: '오케스트레이터: 선언 없는 옛 신규 기록의 규칙인데 유형 C',
+      build: (store, rule) => {
+        const target = anotherRule(store, rule);
+        const cause = created(store, target);
+        const id = forgeRun(store, [target], { kind: 'orchestrator', causeSeqs: [cause] }, 'C');
+        autoStart(store, id, [cause], [target]);
+        return id;
+      },
+      mismatch: 'type_mismatch',
+      counts: [0, 1],
+    },
   ];
+
+  it('동작 선언과 맞는 유형이면 대조를 지난다: 기존 동작 → 유형 C, 새 동작 → 유형 A (M3-30 #245, ADR-151)', async () => {
+    const h = setup({ settings: AUTO_START_SETTINGS });
+    withProject(h.biveHome, h.project.id, (store) =>
+      store.transaction(() => {
+        for (const [behavior, type] of [
+          ['existing', 'C'],
+          ['new', 'A'],
+        ] as const) {
+          const target = anotherRule(store, h.rule.id);
+          const cause = declared(store, target, behavior);
+          const id = forgeRun(store, [target], { kind: 'orchestrator', causeSeqs: [cause] }, type);
+          autoStart(store, id, [cause], [target]);
+          const run = store.runs.get(id);
+          if (run === null) throw new Error('실행 없음');
+          expect(checkRunStartBasis(store, run).mismatch, behavior).toBeNull();
+        }
+      }),
+    );
+  });
 
   it('근거가 정확히 1건이 아니거나 실행과 맞지 않으면 run_without_log: 워크트리 · 세션 없이 실패로 끝난다', async () => {
     // 하루 한도를 채운다: 자동 시작 실행은 시작 때 하루 한도 문을 먼저 지난다(비어 있으면 그 사유로 끝남, ADR-111)
@@ -2343,4 +2425,257 @@ describe('실행 유형 B · C · D 단계 계획 · 상태 기계 (M3-06 #51 �
     },
     90_000,
   );
+});
+
+describe('동작 선언과 실제가 다른 경우: 그 유형의 기존 실패 그대로 · 유형 · 대상 규칙 불변 · 반대 유형의 실행 없음 (M3-30 #245 수용 기준 3, ADR-110 · ADR-151)', () => {
+  /** 자동 시작이 가능한 설정 (하루 한도 채움) */
+  const SETTINGS: SettingsPatch = { ...COMPLETE_SETTINGS, dailyBudgetUsd: 10 };
+  const clock = { now: Date.now, newId };
+
+  /** 규칙 작성 세션이 대상 규칙을 선언과 함께(`null` = 선언 없는 옛 기록) 만든 신규 기록. */
+  const created = (h: Harness, behavior: 'new' | 'existing' | null, sessionId = newId()) =>
+    withProject(h.biveHome, h.project.id, (store) =>
+      store.normChanges.append({
+        at: new Date().toISOString(),
+        kind: 'created',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        targetRef: { entity: 'Rule', id: h.rule.id },
+        sessionId,
+        runId: null,
+        reason: '시험 근거',
+        detail: { after: { ruleId: h.rule.id }, ...(behavior === null ? {} : { behavior }) },
+      }),
+    );
+
+  /** 신규 기록을 남기고 제품의 자동 시작(`autoStartRun`)으로 그 규칙의 실행 1개를 만든다. 유형은 자동 시작이 선언으로 고른다. */
+  const autoStarted = (
+    h: Harness,
+    behavior: 'new' | 'existing' | null,
+  ): { runId: string; sessionId: string } => {
+    const sessionId = newId();
+    created(h, behavior, sessionId);
+    return withProject(h.biveHome, h.project.id, (store) => {
+      const outcome = autoStartRun(store, { sessionId }, clock);
+      if (outcome.status !== 'started') throw new Error(`자동 시작 안 됨: ${outcome.status}`);
+      const [only] = outcome.runs;
+      if (only === undefined || outcome.runs.length !== 1) throw new Error('실행 1개가 아님');
+      return { runId: only.detail.run.id, sessionId };
+    });
+  };
+
+  /** 실행 종료 저장 이벤트를 제품의 자동 시작 창구에 넘기고, 그 뒤에 생긴(엔진에 알린) 실행을 돌려준다. */
+  const afterEnd = async (h: Harness, done: RunDetail): Promise<string[]> => {
+    const announced: string[] = [];
+    const starter = new AutoStarter({
+      biveHome: h.biveHome,
+      engine: { onRunCreated: (_projectId, runId) => announced.push(runId) },
+    });
+    starter.observe({ type: 'run.saved', projectId: h.project.id, detail: done });
+    await starter.idle();
+    // 다시 시작의 원인은 기존 규칙 모순 · 이의 반영뿐이고 보강은 병합된 유형 A뿐이다: 선언과 실제가 달라 끝난 실행은 어느 쪽도 아니다
+    expect(starter.afterContradiction(h.project.id, done.run.id)).toEqual({
+      status: 'not_applicable',
+    });
+    expect(starter.afterMerge(h.project.id, done.run.id)).toEqual({ status: 'not_applicable' });
+    return announced;
+  };
+
+  /** 실행의 유형 · 대상 규칙은 저장소가 바꾸지 못한다 (유형 변경 · 대상 규칙 행 삭제 거부). */
+  const expectFrozen = (h: Harness, runId: string): void => {
+    withProject(h.biveHome, h.project.id, (store) => {
+      expect(() => store.db.prepare("UPDATE runs SET type = 'C' WHERE id = ?").run(runId)).toThrow(
+        /바꿀 수 없습니다/,
+      );
+      expect(() =>
+        store.db.prepare('DELETE FROM run_target_rules WHERE run_id = ?').run(runId),
+      ).toThrow(/대상 규칙은 지울 수 없습니다/);
+    });
+  };
+
+  it('(가) 새 동작이라 선언했는데 Red 확인에서 이미 통과: 유형 A 그대로 테스트 작성 재시도 상한 뒤 failed(test_retry_limit)이고 마지막 Red 확인의 종료 상세에 선언(new)이 실린다. 유형 · 대상 규칙 1개는 그대로, 구현 · Green 확인 없음, 반대 유형(C)의 실행 · 다시 시작은 생기지 않는다', async () => {
+    const h = setup({ settings: SETTINGS, executors: { red_check: scripted(['unmet']) } });
+    const before = mainTip(h);
+    const { runId, sessionId } = autoStarted(h, 'new');
+    h.runId = runId;
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      displayId: 'EXE-002',
+      type: 'A',
+      status: 'failed',
+      failureReason: 'test_retry_limit',
+      currentStep: 'red_check',
+      targetRuleIds: [h.rule.id],
+      mergeCommit: null,
+    });
+    expect([...attempts(done, 'test_writing'), ...attempts(done, 'red_check')]).toEqual([
+      'test_writing#1:passed',
+      'test_writing#2:passed',
+      'test_writing#3:passed',
+      'red_check#1:failed',
+      'red_check#2:failed',
+      'red_check#3:failed',
+    ]);
+    expect(attempts(done, 'implementation')).toEqual(['implementation#1:pending']);
+    expect(done.steps.some((step) => step.kind === 'green_check')).toBe(false);
+    expect(sessionsOf(h, 'implementer')).toHaveLength(0);
+    // 선언은 실행을 끝낸 시도의 종료 상세에만 실린다 (재시도로 이어진 앞 시도에는 없다)
+    expect(stepOf(done, 'red_check', 3).exitDetail).toEqual({
+      reason: 'test_retry_limit',
+      detail: { scripted: 3 },
+      declaredBehavior: 'new',
+    });
+    expect(stepOf(done, 'red_check', 1).exitDetail).toEqual({ scripted: 1 });
+    expect(mainTip(h)).toBe(before);
+    expectFrozen(h, runId);
+
+    expect(await afterEnd(h, done)).toEqual([]);
+    withProject(h.biveHome, h.project.id, (store) => {
+      // 같은 세션으로 자동 시작을 다시 불러도 같은 선언의 실행을 되풀이하지 않는다 (원인은 한 번만 쓴다)
+      expect(autoStartRun(store, { sessionId }, clock)).toEqual({
+        status: 'duplicate',
+        runIds: [runId],
+      });
+      expect(store.runs.list().map((run) => [run.displayId, run.type, run.status])).toEqual([
+        ['EXE-001', 'A', 'waiting_approval'],
+        ['EXE-002', 'A', 'failed'],
+      ]);
+    });
+  }, 90_000);
+
+  it('(나) 기존 동작이라 선언했는데 Green 확인에서 실패: 유형 C 그대로 테스트 작성 재시도 상한 뒤 failed(test_retry_limit)이고 마지막 Green 확인의 종료 상세에 선언(existing)이 실린다. Red 확인 · 구현 세션 없음, 유형 · 대상 규칙 1개는 그대로, 반대 유형(A)의 실행 · 다시 시작은 생기지 않는다', async () => {
+    const h = setup({
+      settings: SETTINGS,
+      executors: { green_check: scripted(['unmet']), check: scripted(['passed']) },
+    });
+    const before = mainTip(h);
+    const { runId } = autoStarted(h, 'existing');
+    h.runId = runId;
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      displayId: 'EXE-002',
+      type: 'C',
+      status: 'failed',
+      failureReason: 'test_retry_limit',
+      currentStep: 'green_check',
+      targetRuleIds: [h.rule.id],
+      mergeCommit: null,
+    });
+    expect([...attempts(done, 'test_writing'), ...attempts(done, 'green_check')]).toEqual([
+      'test_writing#1:passed',
+      'test_writing#2:passed',
+      'test_writing#3:passed',
+      'green_check#1:failed',
+      'green_check#2:failed',
+      'green_check#3:failed',
+    ]);
+    expect(done.steps.some((step) => step.kind === 'red_check')).toBe(false);
+    expect(attempts(done, 'implementation')).toEqual(['implementation#1:pending']);
+    expect(sessionsOf(h, 'implementer')).toHaveLength(0);
+    expect(stepOf(done, 'green_check', 3).exitDetail).toEqual({
+      reason: 'test_retry_limit',
+      detail: { scripted: 3 },
+      declaredBehavior: 'existing',
+    });
+    expect(mainTip(h)).toBe(before);
+    expectFrozen(h, runId);
+
+    expect(await afterEnd(h, done)).toEqual([]);
+    expect(
+      withProject(h.biveHome, h.project.id, (store) =>
+        store.runs.list().map((run) => [run.displayId, run.type, run.status]),
+      ),
+    ).toEqual([
+      ['EXE-001', 'A', 'waiting_approval'],
+      ['EXE-002', 'C', 'failed'],
+    ]);
+  }, 90_000);
+
+  it('선언 없는 옛 신규 기록의 규칙은 유형 A로 자동 시작되고 Red 확인 미충족으로 끝나도 종료 상세에 선언이 없다. 사람의 [실행]은 대상 규칙에 기존 동작 선언이 있어도 유도 유형(A)이고 선언을 싣지 않는다', async () => {
+    const h = setup({ settings: SETTINGS, executors: { red_check: scripted(['unmet']) } });
+    const { runId } = autoStarted(h, null);
+    h.runId = runId;
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      type: 'A',
+      status: 'failed',
+      failureReason: 'test_retry_limit',
+    });
+    expect(stepOf(done, 'red_check', 3).exitDetail).toEqual({
+      reason: 'test_retry_limit',
+      detail: { scripted: 3 },
+    });
+
+    const byHuman = setup({ settings: SETTINGS, executors: { red_check: scripted(['unmet']) } });
+    created(byHuman, 'existing');
+    const humanDone = await runToEnd(byHuman);
+    expect(humanDone.run).toMatchObject({
+      type: 'A',
+      startedBy: { kind: 'human' },
+      failureReason: 'test_retry_limit',
+    });
+    expect(stepOf(humanDone, 'red_check', 3).exitDetail).toEqual({
+      reason: 'test_retry_limit',
+      detail: { scripted: 3 },
+    });
+  }, 120_000);
+
+  it('선언은 Red · Green 확인이 테스트 작성으로 돌려보내다 끝난 실패에만 싣는다: 테스트 작성 자체의 미충족으로 재시도 상한에 닿으면 선언이 없다', async () => {
+    const h = setup({ settings: SETTINGS, executors: { test_writing: scripted(['unmet']) } });
+    h.runId = autoStarted(h, 'new').runId;
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      type: 'A',
+      status: 'failed',
+      failureReason: 'test_retry_limit',
+      currentStep: 'test_writing',
+    });
+    expect(stepOf(done, 'test_writing', 3).exitDetail).toEqual({
+      reason: 'test_retry_limit',
+      detail: { scripted: 3 },
+    });
+  }, 90_000);
+
+  it('어느 경우에도 실행의 대상 규칙 수가 줄지 않는다: 대상 규칙 2개 중 하나가 이미 통과해 Red 확인을 넘지 못해도 두 규칙 그대로 실패로 끝나고(통과하는 규칙을 빼고 진행하지 않음), 저장소는 대상 규칙 행의 삭제 · 유형 변경을 거부한다', async () => {
+    const h = setup({ executors: { red_check: scripted(['unmet']) } });
+    const second = withProject(h.biveHome, h.project.id, (store) => {
+      const base = store.rules.get(h.rule.id);
+      if (base === null) throw new Error('규칙 없음');
+      return store.rules.create({
+        id: newId(),
+        title: '헬스 체크 응답 형식 유지',
+        statement: base.statement,
+        kind: 'business',
+        checkKinds: ['test'],
+        parentRequirementId: base.parentRequirementId,
+        builtin: false,
+        targetBlockIds: [],
+        risk: null,
+        contractId: null,
+        author: { kind: 'agent', role: 'rule-writer' },
+        normState: 'approved',
+        createdAt: new Date().toISOString(),
+      }).id;
+    });
+    const targets = [h.rule.id, second];
+    h.runId = withProject(h.biveHome, h.project.id, (store) =>
+      createRun(
+        store,
+        { ruleIds: targets, author: human },
+        { clientId: null },
+        { now: Date.now, newId },
+      ),
+    ).run.id;
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'test_retry_limit',
+      targetRuleIds: targets,
+    });
+    expect(attempts(done, 'red_check')).toHaveLength(3);
+    expect(attempts(done, 'implementation')).toEqual(['implementation#1:pending']);
+    expectFrozen(h, h.runId);
+    expect(
+      withProject(h.biveHome, h.project.id, (store) => store.runs.get(h.runId)?.targetRuleIds),
+    ).toEqual(targets);
+  }, 90_000);
 });

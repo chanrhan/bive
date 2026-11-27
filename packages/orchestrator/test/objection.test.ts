@@ -628,6 +628,7 @@ describe('판단이 폐기 · 대체면 그 실행은 병합 없이 끝난다 (�
             checkKinds: ['test'],
             targetBlocks: ['health'],
             risk: 'medium',
+            behavior: 'new',
             rationale: '이의를 받아 서버 시각의 형식을 요구사항대로 좁힘',
             contradiction: { verdict: 'none' },
           },
@@ -996,6 +997,7 @@ describe('판단 세션의 도구: 대상 규칙마다 한 번, 대상 밖 · �
             checkKinds: ['test'],
             targetBlocks: ['health'],
             risk: 'medium',
+            behavior: 'new',
             rationale: '판단 세션의 새 규칙',
             contradiction: { verdict: 'none' },
           },
@@ -1072,7 +1074,13 @@ describe('판단 세션의 작업 지시: 이의 글은 구현 역할의 주장�
       - retire_rule(폐기): 규칙이 더는 효력을 가지면 안 되고 바꿀 내용도 없으면 폐기만 한다. 지금 실행은 병합 없이 끝나고 새 실행은 생기지 않는다.
       - 폐기 · 대체의 grounds에는 대상 규칙의 진술이나 최근 판정의 인수 테스트 케이스 이름의 일부를 글자 그대로(EARS 틀 글자 · 공백을 뺀 연속 10자 이상, 다른 효력 있는 규칙과 겹치지 않는 부분) 옮겨 적는다. 인용이 없으면 거부된다.
       - 판단 대상이 아닌 규칙은 폐기 · 대체 · 유지할 수 없다. 이 세션에서는 propose_rule로 새 규칙을 만들지 않는다.
-      - 판단하지 않고 끝내면 그 규칙은 유지로 본다. 폐기 · 대체는 근거와 함께 규범 변경 기록에 남고 사람이 나중에 본다."
+      - 판단하지 않고 끝내면 그 규칙은 유지로 본다. 폐기 · 대체는 근거와 함께 규범 변경 기록에 남고 사람이 나중에 본다.
+
+      동작 선언(behavior): 새 규칙(propose_rule · supersede_rule)마다 new 또는 existing 가운데 하나를 반드시 적는다.
+      - new(새 동작): 지금 코드가 이 진술을 아직 지키지 않아 구현이 필요하다. 그 규칙의 실행은 인수 테스트가 구현 전에 실패해야(Red) 구현으로 넘어간다.
+      - existing(기존 동작 유지): 이미 구현돼 지금 코드가 이 진술을 지킨다. 그 규칙의 실행은 구현 없이 인수 테스트가 지금 코드에서 통과하는지(Green) 확인하고 병합한다.
+      - 고르는 기준은 "이미 구현돼 지금 코드가 이 진술을 지키는가"다. 너는 프로젝트 코드를 볼 수 없으니 요구사항 본문(바꾸라는 것인지 지키라는 것인지)과 자료의 기존 규칙 · 최근 판정으로 판단하고, 판단할 근거가 없으면 new를 적는다.
+      - 선언이 실제와 다르면(new인데 테스트가 이미 통과, existing인데 통과하지 않음) 그 실행은 실패로 끝나고 다른 쪽으로 다시 시작되지 않는다."
     `);
   });
 
@@ -1657,6 +1665,7 @@ describe('확인됨 규칙의 이의 판단 폐기 · 대체 (검토 1회차 N2,
           parentRequirementId: other.parentRequirementId,
         },
         rationale: '이의를 받아 상태 코드를 바꿈',
+        behavior: 'new',
         author,
         sessionId,
         contradiction: { verdict: 'none' },

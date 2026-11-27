@@ -152,6 +152,7 @@ const supersede = (
     {
       payload: { ...NEW_RULE, parentRequirementId: overrides.parent ?? s.second.id },
       rationale: "요구사항의 '서버 시각 제거'를 응답 본문의 time 필드 부재로 옮김",
+      behavior: 'new',
       author: AGENT,
       sessionId: SESSION,
       contradiction: overrides.contradiction ?? { verdict: 'none' },
@@ -474,6 +475,7 @@ describe('근거 인용 검사 (수용 기준 2, ADR-100 A6 · R3)', () => {
           {
             payload: { ...NEW_RULE, parentRequirementId: s.second.id },
             rationale: '대조',
+            behavior: 'new',
             author: AGENT,
             sessionId: SESSION,
             contradiction: { verdict: 'none' },
@@ -703,6 +705,7 @@ describe('규칙 작성 세션의 도구 결과 (수용 기준 2, 실제 서비�
         args: {
           ...NEW_RULE,
           parentRequirementId: '{{otherRequirementId}}',
+          behavior: 'new',
           rationale: '옮김',
           contradiction: { verdict: 'none' },
           ruleId: 'RULE-001',
@@ -716,6 +719,7 @@ describe('규칙 작성 세션의 도구 결과 (수용 기준 2, 실제 서비�
         args: {
           ...NEW_RULE,
           parentRequirementId: '{{requirementId}}',
+          behavior: 'new',
           rationale: '옮김',
           contradiction: { verdict: 'none' },
           ruleId: 'RULE-001',

@@ -325,6 +325,7 @@ describe('autoStartRuleEditRun: 진술이 바뀐 사람 편집 1건 → 그 규�
               parentRequirementId: h.requirementId,
             },
             rationale: '시험 근거',
+            behavior: 'new',
             author: { kind: 'agent', role: 'rule-writer' },
             sessionId: session,
             contradiction: { verdict: 'none' },

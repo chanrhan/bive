@@ -706,6 +706,7 @@ describe('모순: 폐기 · 대체를 반영하고 그 실행은 병합 없이 �
           checkKinds: ['test'],
           targetBlocks: ['health'],
           risk: 'medium',
+          behavior: 'new',
           rationale: '요구사항의 상태 확인을 status 필드로 옮김',
           contradiction: { verdict: 'none' },
         },
@@ -1021,7 +1022,13 @@ describe('판단 입력은 실패한 규칙 ID와 인수 테스트 파일에 적
       - retire_rule(모순, 폐기): 기존 규칙이 새 규칙과 모순이고 더는 효력을 가지면 안 되면 폐기만 한다. 이 실행은 병합 없이 끝나고 이 실행의 대상 규칙의 실행이 다시 시작된다.
       - 폐기 · 대체의 grounds에는 기존 규칙의 진술이나 최근 판정의 인수 테스트 케이스 이름의 일부를 글자 그대로(EARS 틀 글자 · 공백을 뺀 연속 10자 이상, 다른 효력 있는 규칙과 겹치지 않는 부분) 옮겨 적는다. 인용이 없으면 거부된다.
       - 이 실행의 대상 규칙(새 규칙)과 판단 대상이 아닌 규칙은 폐기 · 대체 · 유지할 수 없다. 새 규칙이 틀렸다고 보더라도 여기서는 바꿀 수 없으니 uphold_rule로 그 판단을 grounds에 적는다. 이 세션에서는 propose_rule로 새 규칙을 만들지 않는다.
-      - 판단하지 않고 끝내면 모순이 아닌 것으로 본다. 판단은 근거와 함께 규범 변경 기록에 남고 사람이 나중에 본다."
+      - 판단하지 않고 끝내면 모순이 아닌 것으로 본다. 판단은 근거와 함께 규범 변경 기록에 남고 사람이 나중에 본다.
+
+      동작 선언(behavior): 새 규칙(propose_rule · supersede_rule)마다 new 또는 existing 가운데 하나를 반드시 적는다.
+      - new(새 동작): 지금 코드가 이 진술을 아직 지키지 않아 구현이 필요하다. 그 규칙의 실행은 인수 테스트가 구현 전에 실패해야(Red) 구현으로 넘어간다.
+      - existing(기존 동작 유지): 이미 구현돼 지금 코드가 이 진술을 지킨다. 그 규칙의 실행은 구현 없이 인수 테스트가 지금 코드에서 통과하는지(Green) 확인하고 병합한다.
+      - 고르는 기준은 "이미 구현돼 지금 코드가 이 진술을 지키는가"다. 너는 프로젝트 코드를 볼 수 없으니 요구사항 본문(바꾸라는 것인지 지키라는 것인지)과 자료의 기존 규칙 · 최근 판정으로 판단하고, 판단할 근거가 없으면 new를 적는다.
+      - 선언이 실제와 다르면(new인데 테스트가 이미 통과, existing인데 통과하지 않음) 그 실행은 실패로 끝나고 다른 쪽으로 다시 시작되지 않는다."
     `);
     const rule = (displayId: string) => ({
       id: displayId,
@@ -1345,6 +1352,55 @@ describe('다시 시작의 하루 한도 문: 비었거나 한도에 이르면 �
     { tool: 'retire_rule', args: { ruleId: '{{ruleId}}', grounds: RETIRE_GROUNDS } },
   ] as ScenarioTurn[];
 
+  it('다시 시작도 첫 자동 시작과 같은 규칙으로 유형을 고른다: 대상 규칙의 신규 기록에 선언이 없으면(옛 기록) 유형 A, 기존 동작 선언이면 유형 C이고 둘 다 시작 근거 대조를 지난다 (M3-30 #245, ADR-151)', async () => {
+    const h = setup({
+      ...scenarioWith('restart-declared', retireTurn),
+      dailyBudgetUsd: 100,
+      restarts: false,
+    });
+    const first = await runToEnd(h);
+    expect(first.run).toMatchObject({
+      type: 'A',
+      status: 'failed',
+      failureReason: EXISTING_RULE_CONTRADICTION,
+    });
+    class Rollback extends Error {}
+    withProject(h.biveHome, h.project.id, (store) => {
+      // 시드 규칙에는 신규 기록이 없다(선언 모름) → 유형 A. 되돌려 같은 원인을 다시 쓸 수 있게 둔다
+      expect(() =>
+        store.transaction(() => {
+          const outcome = restartAfterContradiction(store, { runId: h.runId }, RESTART_CLOCK);
+          if (outcome.status !== 'started') throw new Error(`다시 시작 안 됨: ${outcome.status}`);
+          expect(outcome.runs.map(({ detail }) => detail.run.type)).toEqual(['A']);
+          const [restarted] = outcome.runs;
+          if (restarted === undefined) throw new Error('실행 없음');
+          expect(checkRunStartBasis(store, restarted.detail.run).mismatch).toBeNull();
+          throw new Rollback();
+        }),
+      ).toThrow(Rollback);
+      expect(store.runs.list()).toHaveLength(1);
+      // 대상 규칙이 기존 동작 선언과 함께 만들어졌으면 다시 시작은 유형 C (끝난 실행의 유형 A를 따르지 않는다)
+      store.normChanges.append({
+        at: new Date().toISOString(),
+        kind: 'created',
+        actor: { kind: 'agent', role: 'rule-writer' },
+        targetRef: { entity: 'Rule', id: h.rule.id },
+        sessionId: harnessId(),
+        runId: null,
+        reason: '시험 근거',
+        detail: { after: { ruleId: h.rule.id }, behavior: 'existing' },
+      });
+      const outcome = restartAfterContradiction(store, { runId: h.runId }, RESTART_CLOCK);
+      if (outcome.status !== 'started') throw new Error(`다시 시작 안 됨: ${outcome.status}`);
+      expect(outcome.runs.map(({ detail }) => [detail.run.type, detail.run.targetRuleIds])).toEqual(
+        [['C', [h.rule.id]]],
+      );
+      const [restarted] = outcome.runs;
+      if (restarted === undefined) throw new Error('실행 없음');
+      expect(checkRunStartBasis(store, restarted.detail.run).mismatch).toBeNull();
+    });
+  }, 120_000);
+
   it('하루 한도가 비어 있으면 실행 종료 뒤 다시 시작을 생략하고(로그 한 줄, 실행 · 자동 시작 기록 0건), 한도를 채운 뒤 같은 끝난 실행을 다시 부르면 시작되어 병합된다', async () => {
     const h = setup(scenarioWith('restart-unset', retireTurn));
     const first = await runToEnd(h);
@@ -1613,6 +1669,7 @@ describe('확인됨 기존 규칙의 검사 실패 판단 폐기 · 대체 (검�
           parentRequirementId: req.id,
         },
         rationale: '서버 시각을 헤더로 옮김',
+        behavior: 'new' as const,
         author: { kind: 'agent', role: 'rule-writer' } as const,
         sessionId: harnessId(),
         contradiction: { verdict: 'none' } as const,

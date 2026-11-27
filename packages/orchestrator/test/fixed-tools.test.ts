@@ -197,6 +197,7 @@ describe('propose_rule', () => {
     checkKinds: ['test'],
     targetBlocks: ['health'],
     risk: 'medium',
+    behavior: 'new',
     rationale: '검사 가능한 형태',
     contradiction: { verdict: 'none' },
   };
@@ -231,11 +232,18 @@ describe('propose_rule', () => {
       hooks: { proposeRule: () => String(++called) },
     });
 
+    const undeclared = Object.fromEntries(
+      Object.entries(proposal).filter(([key]) => key !== 'behavior'),
+    );
     for (const args of [
       { ...proposal, kind: 'approved-rule' },
       { ...proposal, checkKinds: [] },
       { ...proposal, state: 'approved' },
       { title: '부모 없음' },
+      // 동작 선언은 필수이고 new · existing만 받는다 (M3-30 #245, ADR-151)
+      undeclared,
+      { ...proposal, behavior: 'unknown' },
+      { ...proposal, behavior: null },
     ]) {
       expect(await tools.execute('propose_rule', args)).toMatchObject({
         status: 'denied',

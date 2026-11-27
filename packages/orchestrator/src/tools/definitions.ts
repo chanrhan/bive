@@ -9,6 +9,7 @@ import {
   CheckKind,
   MUTANT_LIMITS,
   Risk,
+  RuleBehavior,
   RuleKind,
   RuleTargetBlocks,
 } from '@bive/shared';
@@ -177,7 +178,8 @@ export type RuleContradictionInput = z.infer<typeof RuleContradictionInput>;
 
 /**
  * 규칙 생성 입력 (NRM-02, ADR-062, M7-02). 제목(한 줄) · EARS 진술 · 종류 · 검사 종류(1개 이상, 중복 없음) ·
- * 부모 요구사항 · 대상 블록(1개 이상)과 위험도(NRM-09, M3-01 #46 · ADR-122, 필수) · 근거 · 모순 판단(M7-07, 필수). 부모 요구사항이
+ * 부모 요구사항 · 대상 블록(1개 이상)과 위험도(NRM-09, M3-01 #46 · ADR-122, 필수) · 동작 선언(M3-30 #245 · ADR-151, 필수: 대체 도구도
+ * 이 칸을 물려받는다) · 근거 · 모순 판단(M7-07, 필수). 부모 요구사항이
  * 세션의 요구사항인지 · 살아 있는지, 대상 블록이 블록 선언에 있는지(선언이 있을 때)는 반영 모듈이 확인한다.
  */
 export const ProposeRuleInput = z.strictObject({
@@ -208,6 +210,9 @@ export const ProposeRuleInput = z.strictObject({
     '대상 블록 이름 1개 이상 (중복 없이). 작업 지시에 블록 선언이 있으면 거기 있는 이름만 쓴다',
   ),
   risk: Risk.describe('위험도: low · medium · high'),
+  behavior: RuleBehavior.describe(
+    '동작 선언: new = 새 동작(지금 코드가 이 진술을 아직 지키지 않아 구현이 필요), existing = 기존 동작 유지(이미 구현돼 지금 코드가 이 진술을 지킨다)',
+  ),
   rationale: NonBlank(z.string().min(1).max(4000)).describe('요구사항의 어느 부분을 옮겼는지'),
   contradiction: RuleContradictionInput,
 });
