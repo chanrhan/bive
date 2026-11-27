@@ -2218,6 +2218,9 @@ const ORCHESTRATOR_DIR = path.join(REPO_ROOT, 'packages', 'orchestrator');
 const asyncApiLibrary = createRequire(path.join(ORCHESTRATOR_DIR, 'package.json'));
 const ASYNCAPI_PARSER_PATH = asyncApiLibrary.resolve('@asyncapi/parser');
 
+/** 오른쪽에서 왼쪽 덮어쓰기 글자 (U+202E). 소스에 숨은 글자를 글자 그대로 두지 않는다. */
+const RLO = String.fromCodePoint(0x202e);
+
 const asyncDoc = (body: string, version = '3.0.0'): string =>
   `asyncapi: ${version}\ninfo:\n  title: 이벤트\n  version: 1.0.0\n${body}`;
 
@@ -2454,7 +2457,7 @@ describe('AsyncAPI 유효성 검사 (실제 @asyncapi/parser, 수용 기준 1)',
     expect(broken).toMatchObject({ kind: 'document_invalid', reason: 'unreadable', errors: 1 });
     // 문서 안 키(숨은 글자 · 줄 나눔)가 위치에 실린다: 기록 전에 표시 값으로 바꾼다 (asyncApiVerdict 시험)
     expect(hidden.kind === 'document_invalid' ? hidden.problems[0]?.pointer : '').toBe(
-      '/channels/c‮\n x/address',
+      `/channels/c${RLO}\n x/address`,
     );
     expect(fs.readdirSync(parent)).toEqual([]);
   }, 60_000);
@@ -2731,8 +2734,8 @@ describe('검사 단계 · 병합 재검사의 AsyncAPI 계약 판정 (M3-49, AD
     });
     const problems = Array.from({ length: 25 }, (_, i) => ({
       code: 'asyncapi-document-resolved',
-      message: `"‮\n${'긴'.repeat(400)}" ${String(i)}`,
-      pointer: `/channels/c‮\n x/${String(i)}`,
+      message: `"${RLO}\n${'긴'.repeat(400)}" ${String(i)}`,
+      pointer: `/channels/c${RLO}\n x/${String(i)}`,
       line: i + 1,
     }));
     const fail = asyncApiVerdict(
