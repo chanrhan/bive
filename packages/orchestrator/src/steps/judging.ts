@@ -72,6 +72,8 @@ export interface JudgingOptions {
   /** 계약 검사 lint · prism 제한 시간 (기본 실행기 기본값, M3-47) */
   contractLintTimeoutMs?: number;
   contractPrismTimeoutMs?: number;
+  /** AsyncAPI 계약 검사 제한 시간 (기본 실행기 기본값, M3-49) */
+  contractAsyncApiTimeoutMs?: number;
   /** 계약 검사 도구 폴더의 상위 (기본 시스템 임시 폴더) */
   contractTempDir?: string;
 }
@@ -315,6 +317,9 @@ export const judgeCommit = async (
       ...(options.contractPrismTimeoutMs === undefined
         ? {}
         : { prismTimeoutMs: options.contractPrismTimeoutMs }),
+      ...(options.contractAsyncApiTimeoutMs === undefined
+        ? {}
+        : { asyncApiTimeoutMs: options.contractAsyncApiTimeoutMs }),
       ...(options.contractTempDir === undefined ? {} : { tempDir: options.contractTempDir }),
     };
     if (input.contracts !== undefined) {
