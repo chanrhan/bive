@@ -490,9 +490,11 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
     });
 
     it('검사 실행기가 없는 계약 종류의 계약 검사 규칙은 유형 B의 대상으로도 받지 않는다 (판정 없음, -32009)', async () => {
-      const kinds = ['db-schema', 'asyncapi', 'external-api', 'cache', 'json-schema'] as const;
+      // AsyncAPI는 실행기(asyncapi-parser)가 있어 받는다 (M3-49, ADR-148)
+      const kinds = ['db-schema', 'external-api', 'cache', 'json-schema'] as const;
       const rules = h.read((store) => kinds.map((kind) => contractRule(store, kind)));
       const openapi = h.read((store) => contractRule(store, 'openapi'));
+      const asyncapi = h.read((store) => contractRule(store, 'asyncapi'));
       await saveSettings(COMPLETE);
       for (const rule of rules) {
         await expectRejected([rule.id]);
@@ -501,6 +503,7 @@ describe('파이프 RPC (실제 처리기 · 고정 시계)', () => {
         await expectRejected([openapi.id, rule.id], 'B');
       }
       expect((await createTyped([openapi.id], 'B')).run.type).toBe('B');
+      expect((await createTyped([asyncapi.id], 'B')).run.type).toBe('B');
     });
 
     it('형식이 틀린 type은 -32602, 에이전트 주체는 유형과 무관하게 -32020이고 아무것도 남지 않는다', async () => {
