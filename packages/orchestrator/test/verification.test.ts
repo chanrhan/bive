@@ -1100,6 +1100,7 @@ describe('준수 두 기준 · 에이전트 폐기 수 (M7-16 #228, ADR-100 D7 �
             parentRequirementId: rule.parentRequirementId ?? '',
           },
           rationale: '새 요구사항을 옮김',
+          behavior: 'new',
           author: agent,
           sessionId: newId(),
           contradiction: { verdict: 'none' },

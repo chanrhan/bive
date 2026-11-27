@@ -1,10 +1,10 @@
 // 파이프라인 e2e: 규칙마다 실행 1개 자동 시작 (M7-19 #244 수용 기준 4, RUN-01 · RUN-03 · RUN-05, ADR-100 B⑥, ADR-105 · ADR-110 ·
-// ADR-111).
-// 요구사항 저장 → rule-writer가 규칙 2개를 바로 반영(시나리오 `happy-path`: 둘째 규칙 "응답 형식 유지"는 이미 통과하는 동작) →
-// 세션이 끝나면 오케스트레이터가 규칙마다 실행 1개씩 2개를 자동 시작 → 첫 실행은 진행 중, 둘째는 실행 대기 → 첫 실행 병합 →
-// 둘째 실행이 그 병합 위에서 시작한다. 둘째의 테스트 작성 세션은 그 실행의 대상 규칙(`{{ruleId}}`) 폴더에 쓰고, 이미 통과하는
-// 동작이라 Red 확인이 `not_red`로 테스트 작성에 돌려보내 재시도 상한 뒤 `test_retry_limit`으로 끝난다(Red 확인은 그대로,
-// 통과하는 테스트를 대상에서 빼지 않는다, ADR-110). 실행 내내 실행 목록을 폴링해 두 실행이 함께 `running`인 조회가 없음을 본다.
+// ADR-111) · 동작 선언으로 고르는 실행 유형 (M3-30 #245, RUN-07, ADR-151).
+// 요구사항 저장 → rule-writer가 규칙 2개를 바로 반영(시나리오 `happy-path`: 첫 규칙은 새 동작, 둘째 규칙 "응답 형식 유지"는 이미
+// 통과하는 동작이라 기존 동작으로 선언) → 세션이 끝나면 오케스트레이터가 규칙마다 실행 1개씩 2개를 자동 시작(첫째 유형 A, 둘째 유형 C)
+// → 첫 실행은 진행 중, 둘째는 실행 대기 → 첫 실행 병합 → 둘째 실행이 그 병합 위에서 시작한다. 둘째는 Red 확인 대신 Green 확인(구현
+// 생략)이라 이미 통과하는 인수 테스트가 그대로 병합된다(ADR-110 맥락의 `test_retry_limit` 실패가 풀림. Red 확인은 바꾸지 않았고 통과하는
+// 테스트를 대상에서 빼지도 않는다). 실행 내내 실행 목록을 폴링해 두 실행이 함께 `running`인 조회가 없음을 본다.
 // 사람의 조작은 설정 저장과 요구사항 저장뿐이다. 판정은 실제 판정 러너로만 정한다.
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -24,7 +24,7 @@ afterEach(cleanupPipeline);
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('auto-start-per-rule: 규칙 2개 → 실행 2개, 진행 중은 늘 1개', () => {
-  it('첫 규칙의 실행은 merged, 이미 통과하는 둘째 규칙의 실행은 Red 확인을 넘지 못해 failed(test_retry_limit)이고, 두 실행이 함께 running인 조회 결과가 없다', async () => {
+  it('첫 규칙(새 동작)의 실행은 유형 A로 merged, 이미 통과하는 둘째 규칙(기존 동작)의 실행은 유형 C(Green 확인 · 구현 생략)로 그 병합 위에서 merged이고, 두 실행이 함께 running인 조회 결과가 없다', async () => {
     const e = await startPipeline('happy-path');
     // 하루 한도를 채운다 (비어 있으면 자동 시작 없음, ADR-100 B⑤)
     await e.client.call('settings.update', {
@@ -62,7 +62,7 @@ describe('auto-start-per-rule: 규칙 2개 → 실행 2개, 진행 중은 늘 1�
         runs.map((run) => [run.displayId, run.targetRuleIds, run.startedBy, run.type]),
       ).toEqual([
         ['EXE-001', [ruleA.id], { kind: 'orchestrator', causeSeqs: [1] }, 'A'],
-        ['EXE-002', [ruleB.id], { kind: 'orchestrator', causeSeqs: [3] }, 'A'],
+        ['EXE-002', [ruleB.id], { kind: 'orchestrator', causeSeqs: [3] }, 'C'],
       ]);
       const [firstRun, secondRun] = runs;
       if (firstRun === undefined || secondRun === undefined) throw new Error('실행 없음');
@@ -93,36 +93,39 @@ describe('auto-start-per-rule: 규칙 2개 → 실행 2개, 진행 중은 늘 1�
       ]);
 
       const second = await waitForRunEnd(e, secondRun.id, 600_000);
-      // 둘째는 첫 실행의 병합 위에서 시작해(실행 대기 뒤), Red 확인이 not_red로 테스트 작성에 돌려보내 재시도 상한으로 끝난다
+      // 둘째는 첫 실행의 병합 위에서 시작해(실행 대기 뒤) Green 확인이 통과하고 구현 없이 병합된다 (유형 C, ADR-151)
       expect(second.run).toMatchObject({
-        status: 'failed',
-        failureReason: 'test_retry_limit',
+        type: 'C',
+        status: 'merged',
+        failureReason: null,
         baseCommit: first.run.mergeCommit,
         targetRuleIds: [ruleB.id],
-        mergeCommit: null,
       });
       expect(String(second.run.startedAt) >= String(first.run.endedAt)).toBe(true);
-      expect(attempts(second, 'test_writing', 'red_check')).toEqual([
+      expect(attempts(second)).toEqual([
+        'approval#1:passed',
         'test_writing#1:passed',
-        'test_writing#2:passed',
-        'test_writing#3:passed',
-        'red_check#1:failed',
-        'red_check#2:failed',
-        'red_check#3:failed',
+        'green_check#1:passed',
+        'implementation#1:skipped',
+        'check#1:passed',
+        'mutation#1:skipped',
+        'merge#1:passed',
+        'screen_update#1:passed',
       ]);
-      // Red 확인 3회 모두 not_red(이미 통과). 마지막은 재시도 상한으로 실행을 끝낸 시도라 사유가 그 안에 감싸인다
-      const redChecks = second.steps.filter((step) => step.kind === 'red_check');
-      expect(redChecks.map((step) => step.exitDetail)).toMatchObject([
-        { reason: 'not_red' },
-        { reason: 'not_red' },
-        { reason: 'test_retry_limit', detail: { reason: 'not_red' } },
+      // 구현 세션은 열리지 않았고(구현 생략), 변이 주입은 보강 실행이 아니라 유형 생략이다
+      expect(second.sessions.map((session) => session.role)).toEqual(['test-writer']);
+      expect(
+        second.steps
+          .filter((step) => step.status === 'skipped')
+          .map((step) => [step.kind, step.exitDetail]),
+      ).toEqual([
+        ['implementation', { reason: 'run_type', runType: 'C' }],
+        ['mutation', { reason: 'run_type', runType: 'C' }],
       ]);
-      // 구현 단계로 가지 않았다
-      expect(attempts(second, 'implementation')).toEqual(['implementation#1:pending']);
 
-      // 기준 브랜치에는 첫 실행의 병합 커밋 1개뿐이다
-      expect(mainTip(e)).toBe(first.run.mergeCommit);
-      expect(mergeCount(e)).toBe(1);
+      // 기준 브랜치에는 두 실행의 병합 커밋 2개가 차례로 쌓인다
+      expect(mainTip(e)).toBe(second.run.mergeCommit);
+      expect(mergeCount(e)).toBe(2);
 
       // 규범 변경 기록: 규칙마다 신규 · 모순 판단 1쌍 뒤 실행마다 자동 시작 1건, 체인 정상. 승인 기록은 비어 있다
       const changes = await e.client.call('normChange.list', { projectId: e.projectId });
@@ -134,6 +137,13 @@ describe('auto-start-per-rule: 규칙 2개 → 실행 2개, 진행 중은 늘 1�
         [4, 'judgment', ruleB.id],
         [5, 'auto_start', firstRun.id],
         [6, 'auto_start', secondRun.id],
+      ]);
+      // 동작 선언은 두 규칙의 신규 기록에만 있다 (자동 시작 항목에는 복사하지 않는다)
+      expect(changes.entries.slice(0, 4).map((entry) => entry.detail.behavior)).toEqual([
+        'new',
+        undefined,
+        'existing',
+        undefined,
       ]);
       expect(changes.entries.slice(4).map((entry) => entry.detail)).toEqual([
         { causeSeqs: [1], ruleIds: [ruleA.id] },

@@ -493,6 +493,7 @@ const supersedeAt = (norms: Norms, ruleId: string, grounds: string, at: number) 
       {
         payload: { ...NEW_RULE, parentRequirementId: norms.requirement.id },
         rationale: RATIONALE,
+        behavior: 'new',
         author: AGENT_RW,
         sessionId: SESSION,
         contradiction: { verdict: 'none' },

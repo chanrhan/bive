@@ -40,6 +40,7 @@ import {
   type NormJudgmentRuleRef,
   Risk,
   type Rule,
+  RuleBehavior,
   RuleNewPayload,
   type RuleRetirement,
   RuleTargetBlocks,
@@ -123,6 +124,11 @@ export interface AgentRuleInput {
   readonly rationale: string;
   /** 규칙을 만든 에이전트 역할 */
   readonly author: AgentAuthor;
+  /**
+   * 동작 선언 (M3-30 #245, ADR-151): 새 동작 · 기존 동작 유지. 신규 기록 상세의 선언 칸에 남고, 오케스트레이터가 시작하는 그 규칙의
+   * 실행 유형을 고른다(`engine/start-basis.ts`의 `declaredBehaviorOf`가 읽는 유일한 자리)
+   */
+  readonly behavior: RuleBehavior;
   /** 그 행동을 한 세션 (BIVE 세션 기록 ID) */
   readonly sessionId: Ulid;
   /** 효력 있는 기존 규칙과의 모순 판단 (M7-07) */
@@ -209,6 +215,7 @@ export const createAgentRule = (
 ): AgentRuleResult => {
   const payload = AgentRulePayload.parse(input.payload);
   const author = AgentAuthorSchema.parse(input.author);
+  const behavior = RuleBehavior.parse(input.behavior);
   return store.transaction(() => {
     const at = new Date(clock.now()).toISOString();
     // 대상은 새 규칙을 만들기 전에 고른다 (새 규칙 자신을 가리킬 수 없다)
@@ -216,6 +223,7 @@ export const createAgentRule = (
     return writeAgentRule(store, {
       payload,
       author,
+      behavior,
       at,
       id: clock.newId(),
       sessionId: input.sessionId,
@@ -240,6 +248,7 @@ const writeAgentRule = (
   input: {
     readonly payload: AgentRulePayload;
     readonly author: AgentAuthor;
+    readonly behavior: RuleBehavior;
     readonly at: string;
     readonly id: Ulid;
     readonly sessionId: Ulid;
@@ -281,8 +290,9 @@ const writeAgentRule = (
     sessionId: input.sessionId,
     runId: input.runId,
     reason: input.rationale,
-    // 대조한 블록 선언의 판 (`null` = 블록 선언 없음: 대상 블록 이름을 대조하지 않고 받은 그대로 둠, ADR-122)
-    detail: { after: { ...ruleContent(rule), blockDeclarationVersion } },
+    // 대조한 블록 선언의 판 (`null` = 블록 선언 없음: 대상 블록 이름을 대조하지 않고 받은 그대로 둠, ADR-122).
+    // 동작 선언은 규칙 내용(`after`) 밖의 칸이다: 규칙의 칸이 아니라 만든 역할의 판단이다 (M3-30, ADR-151)
+    detail: { after: { ...ruleContent(rule), blockDeclarationVersion }, behavior: input.behavior },
   });
   const { requirements, rules } = input.normInput;
   const judgment = store.normChanges.append({
@@ -893,6 +903,7 @@ export const supersedeAgentRule = (
 ): AgentSupersedeResult => {
   const payload = AgentRulePayload.parse(input.payload);
   const author = AgentAuthorSchema.parse(input.author);
+  const behavior = RuleBehavior.parse(input.behavior);
   assertOneCause(input);
   return store.transaction(() => {
     // 대상 · 인용 · 모순 대상은 새 규칙을 만들기 전에 확인한다 (같은 호출이 만들 규칙은 대상이 될 수 없다)
@@ -905,6 +916,7 @@ export const supersedeAgentRule = (
     const created = writeAgentRule(store, {
       payload,
       author,
+      behavior,
       at,
       id: clock.newId(),
       sessionId: input.sessionId,

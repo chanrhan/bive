@@ -23,6 +23,10 @@
 //   1개). 이의 판단이 대상 밖 규칙을 폐기 · 대체해 이의 반영으로 끝난 실행도 같다(원인 = 첫 폐기 · 대체 판단, 검토 1회차 N6).
 //   대체로 생긴 규칙의 실행은 판단 세션 종료 뒤 위의 기존 경로가 만든다(신규 기록이 원인). 하루 한도 문 · 멱등(같은 원인 ·
 //   같은 대상 규칙은 한 번)은 같고, 생략은 기록하지 않는다(로그만). 실행 종료 저장 이벤트를 받는 오케스트레이터 배선이 부른다
+// - 실행 유형(M3-30 #245, ADR-110 · ADR-151): 위 두 길은 대상 규칙의 신규 기록에 남은 동작 선언으로 유형을 고른다. 기존 동작 → 유형 C
+//   (Green 확인, 구현 생략), 새 동작 · 모름(선언 없는 옛 기록) → 유형 A. 선언이 실제와 달라도(새 동작인데 이미 통과 · 기존 동작인데
+//   실패) 실행은 그 유형의 기존 실패로 끝나고, 반대 유형의 실행을 자동으로 만들지 않는다(다시 시작의 원인은 기존 규칙 모순 · 이의 반영뿐).
+//   변이 보강은 늘 유형 C 보강이고 선언을 보지 않는다
 import {
   type AutoStartSkipReason,
   createUlidGenerator,
@@ -33,6 +37,7 @@ import {
 } from '@bive/shared';
 import type { ProjectStore, RunDetail } from '@bive/store';
 
+import { declaredBehaviorOf, declaredRunTypeOf } from '../engine/start-basis.js';
 import type { EngineEvent } from '../engine/types.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
 import { RESTART_FAILURE_REASONS, restartCauseOf } from '../norms/check-contradiction.js';
@@ -123,7 +128,8 @@ export const autoStartRun = (
       });
       return { status: 'skipped', reason: block.reason, missing: block.missing };
     }
-    // 규칙마다 실행 1개 (ADR-110): 대상 규칙 1개 · 원인 = 그 규칙의 신규 기록 1건. 만든 순서 = 표시 ID 순 = 실행 대기 순
+    // 규칙마다 실행 1개 (ADR-110): 대상 규칙 1개 · 원인 = 그 규칙의 신규 기록 1건. 만든 순서 = 표시 ID 순 = 실행 대기 순.
+    // 유형은 그 신규 기록의 동작 선언으로 고른다 (M3-30, ADR-151): 기존 동작 → C, 새 동작 · 모름 → A
     const runs = causes.map((cause): AutoStartedRun => {
       const runId = clock.newId();
       const detail = saveNewRun(
@@ -132,6 +138,7 @@ export const autoStartRun = (
         {
           runId,
           ruleIds: [cause.targetRef.id],
+          type: declaredRunTypeOf(declaredBehaviorOf(store, cause.targetRef.id, changes)),
           startedBy: { kind: 'orchestrator', causeSeqs: [cause.seq] },
         },
         at,
@@ -206,10 +213,16 @@ export const restartAfterContradiction = (
     const at = new Date(now).toISOString();
     const runs = pending.map((ruleId): AutoStartedRun => {
       const runId = clock.newId();
+      // 유형은 첫 자동 시작과 같은 규칙으로 고른다 (M3-30, ADR-151): 끝난 실행의 유형이 아니라 그 규칙의 동작 선언
       const detail = saveNewRun(
         store,
         settings,
-        { runId, ruleIds: [ruleId], startedBy: { kind: 'orchestrator', causeSeqs: [cause.seq] } },
+        {
+          runId,
+          ruleIds: [ruleId],
+          type: declaredRunTypeOf(declaredBehaviorOf(store, ruleId, changes)),
+          startedBy: { kind: 'orchestrator', causeSeqs: [cause.seq] },
+        },
         at,
         clock.newId,
       );

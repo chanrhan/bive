@@ -197,6 +197,7 @@ describe('propose_rule', () => {
     checkKinds: ['test'],
     targetBlocks: ['health'],
     risk: 'medium',
+    behavior: 'new',
     rationale: '검사 가능한 형태',
     contradiction: { verdict: 'none' },
   };
@@ -231,11 +232,18 @@ describe('propose_rule', () => {
       hooks: { proposeRule: () => String(++called) },
     });
 
+    const undeclared = Object.fromEntries(
+      Object.entries(proposal).filter(([key]) => key !== 'behavior'),
+    );
     for (const args of [
       { ...proposal, kind: 'approved-rule' },
       { ...proposal, checkKinds: [] },
       { ...proposal, state: 'approved' },
       { title: '부모 없음' },
+      // 동작 선언은 필수이고 new · existing만 받는다 (M3-30 #245, ADR-151)
+      undeclared,
+      { ...proposal, behavior: 'unknown' },
+      { ...proposal, behavior: null },
     ]) {
       expect(await tools.execute('propose_rule', args)).toMatchObject({
         status: 'denied',
@@ -243,6 +251,41 @@ describe('propose_rule', () => {
       });
     }
     expect(called).toBe(0);
+  });
+
+  it('대체 도구 supersede_rule도 동작 선언이 필수다: 빠지거나 모르는 값이면 콜백을 부르지 않고 denied(invalid_args), 갖추면 콜백이 그 선언을 받는다 (M3-30 #245, ADR-151)', async () => {
+    const received: unknown[] = [];
+    const tools = createRoleTools({
+      role: 'rule-writer',
+      sessionRoot: session,
+      biveHome: home,
+      hooks: {
+        supersedeRule: (input) => {
+          received.push(input);
+          return 'ok';
+        },
+      },
+    });
+    const supersede = { ...proposal, ruleId: 'RULE-001', grounds: '진술 "time을 담는다"는 바뀐다' };
+    const undeclared = Object.fromEntries(
+      Object.entries(supersede).filter(([key]) => key !== 'behavior'),
+    );
+    for (const args of [
+      undeclared,
+      { ...supersede, behavior: 'unknown' },
+      { ...supersede, behavior: null },
+    ]) {
+      expect(await tools.execute('supersede_rule', args)).toMatchObject({
+        status: 'denied',
+        reason: 'invalid_args',
+      });
+    }
+    expect(received).toEqual([]);
+    expect(await tools.execute('supersede_rule', { ...supersede, behavior: 'existing' })).toEqual({
+      status: 'ok',
+      content: 'ok',
+    });
+    expect(received).toEqual([{ ...supersede, behavior: 'existing' }]);
   });
 
   it('콜백이 돌려준 거부 · 오류 결과는 그대로 모델에게 간다 (ADR-062)', async () => {

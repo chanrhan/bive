@@ -23,6 +23,7 @@ roles:
               checkKinds: [test]
               targetBlocks: [health]
               risk: medium
+              behavior: new
               rationale: 요구사항의 '서버 시각 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
               contradiction: { verdict: none }
           - message: 규칙 1건을 반영했습니다.
@@ -50,6 +51,7 @@ roles:
               checkKinds: [test]
               targetBlocks: [health]
               risk: medium
+              behavior: new
               rationale: 요구사항의 '버전 포함'을 HTTP 응답 본문으로 검사할 수 있는 형태로 옮김
               contradiction: { verdict: none }
           - message: 규칙 1건을 반영했습니다.

@@ -275,6 +275,14 @@ export const RISK_LABELS = {
 } as const satisfies Record<Risk, string>;
 
 /**
+ * 규칙 작성 역할이 만든 규칙의 동작 선언 (M3-30 #245, RUN-07, ADR-110 · ADR-151): `new` = 새 동작(지금 코드가 아직 그 진술을 지키지
+ * 않아 구현이 필요하다), `existing` = 기존 동작 유지(이미 구현돼 지금 코드가 그 진술을 지킨다). 규칙의 신규 기록(`created`)의
+ * `detail.behavior`에만 남고, 오케스트레이터가 시작하는 실행의 유형을 고른다(새 동작 → A, 기존 동작 → C). 화면에는 보이지 않는다.
+ */
+export const RuleBehavior = z.enum(['new', 'existing']);
+export type RuleBehavior = z.infer<typeof RuleBehavior>;
+
+/**
  * 에이전트 세션 종료 사유 (기획서 4.5, COST-01). `objection_raised`는 구현 역할이 이의 제기 도구를 불러 오케스트레이터가 그
  * 세션을 끝냈음이다(M7-11 #223, ADR-100 D4, ADR-115).
  */

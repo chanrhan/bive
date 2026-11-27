@@ -1364,6 +1364,57 @@ describe('실행 자동 시작의 코드 경로 (M7-05 #217, ADR-100 C2 · D4, A
       }
     }
   });
+
+  it('동작 선언을 읽는 자리는 시작 근거 모듈의 declaredBehaviorOf 하나다: 신규 기록의 선언 칸을 읽는 다른 파일이 없고, 유형을 고르는 곳 · 종료 상세에 싣는 곳은 그 함수를 거친다 (M3-30 #245, ADR-151, 코드 구조)', () => {
+    // 기록 상세의 선언 칸 읽기(점 · 선택 점 · 대괄호 · 구조 분해): 시작 근거 모듈 한 곳
+    expect(
+      using(
+        /detail\??\.behavior\b|\[\s*['"`]behavior['"`]\s*\]|\{[^}]*\bbehavior\b[^}]*\}\s*=\s*[\w.?]*detail\b/,
+      ),
+    ).toEqual(['engine/start-basis.ts']);
+    // 낱말 `behavior` 자체가 나오는 파일은 고정이다 (검토 2회차: 구조 분해의 우변 모양과 무관하게 막는다). 읽는 곳 = 시작 근거 모듈,
+    // 쓰는 곳 = 반영 모듈, 도구 인자 = 도구 정의 · 규칙 작성 서비스(인자를 반영 모듈에 넘김), 고정 문장 = 프롬프트, SDK 권한 응답의
+    // 같은 낱말(`behavior: 'allow' | 'deny'`, 동작 선언과 무관) = SDK 어댑터
+    expect(using(/\bbehavior\b/)).toEqual([
+      'agent/claude-sdk-adapter.ts',
+      'engine/start-basis.ts',
+      'norms/agent-rule.ts',
+      'rule-writer/prompts.ts',
+      'rule-writer/rule-writer-service.ts',
+      'tools/definitions.ts',
+    ]);
+    // 그 파일들 안에서도 `behavior`를 구조 분해로 꺼내는 곳은 도구 인자(`input`)뿐이다 (기록 상세를 구조 분해로 읽지 않는다)
+    expect(
+      files().flatMap((f) =>
+        [...f.text.matchAll(/\{[^{}]*\bbehavior\b[^{}]*\}\s*=\s*([^;\n]+)/g)].map(
+          (m) => `${f.rel}:${String(m[1]).trim()}`,
+        ),
+      ),
+    ).toEqual([
+      'rule-writer/rule-writer-service.ts:input',
+      'rule-writer/rule-writer-service.ts:input',
+      'rule-writer/rule-writer-service.ts:input',
+      'rule-writer/rule-writer-service.ts:input',
+    ]);
+    const sdk = files().find((f) => f.rel === 'agent/claude-sdk-adapter.ts')?.text ?? '';
+    expect(sdk.match(/\bbehavior\b[^,\n]*/g)).toEqual(["behavior: 'allow'", "behavior: 'deny'"]);
+    // 그 밖의 파일이 쓰는 `.behavior`는 반영 모듈이 받은 입력(도구 인자)을 검증해 기록에 쓰는 자리뿐이다
+    expect(
+      files()
+        .filter((f) => f.rel !== 'engine/start-basis.ts')
+        .flatMap((f) => (f.text.match(/[\w?]+\.behavior\b/g) ?? []).map((m) => `${f.rel}:${m}`)),
+    ).toEqual([
+      'norms/agent-rule.ts:input.behavior',
+      'norms/agent-rule.ts:input.behavior',
+      'norms/agent-rule.ts:input.behavior',
+    ]);
+    // 선언으로 유형을 고르는 곳 · 대조하는 곳 · 종료 상세에 싣는 곳은 모두 그 함수를 부른다
+    expect(using(/\bdeclaredBehaviorOf\(/)).toEqual([
+      'engine/start-basis.ts',
+      'runs/auto-start.ts',
+    ]);
+    expect(using(/\brunDeclarationOf\(/)).toEqual(['engine/pipeline-engine.ts']);
+  });
 });
 
 describe('규칙 폐기 · 대체와 효력 판정의 코드 경로 (M7-09 #221, ADR-100 D4 · D6 · B⑨, ADR-112, 코드 구조)', () => {
