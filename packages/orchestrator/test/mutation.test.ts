@@ -21,7 +21,10 @@ import { EXISTING_MODIFIED_REASON } from '../src/steps/test-writing.js';
 import { roleToolNames } from '../src/tools/definitions.js';
 import { COMPLETE_SETTINGS, human, newId, userGit, withProject } from './helpers/engine-harness.js';
 import { reinforceSurvivedMutants } from '../src/runs/auto-start.js';
-import { createRun } from '../src/runs/run-service.js';
+import { createRun, evaluateApprovalStep } from '../src/runs/run-service.js';
+import { runEnding } from '../src/engine/run-ending.js';
+import { createRunHandlers } from '../src/ipc/run-handlers.js';
+import { MUTANT_MATERIAL_START } from '../src/test-writer/prompts.js';
 import { type JudgeCall, type JudgeDecision, setupPipeline } from './helpers/pipeline-harness.js';
 import {
   AUTH,
@@ -1057,5 +1060,136 @@ describe('서버 생존 필수의 범위 (M3-54 #311, ADR-143 ④)', () => {
     expect(seen).toContainEqual(['green_check', null]);
     expect(seen.filter(([kind]) => kind === 'mutation').length).toBeGreaterThanOrEqual(2);
     expect(seen.filter(([kind, alive]) => (kind === 'mutation') !== (alive === true))).toEqual([]);
+  }, 90_000);
+});
+
+describe('검토 대기열의 사람 테스트 보강도 같은 보강 실행이다 (M3-08 #53, ADR-145 ④ · ADR-143 ⑨ · ⑫ · ⑮)', () => {
+  const clock = { now: Date.now, newId };
+  /** 유형 A 생존 → 자동 보강 실행 1개 → 그 실행을 실패로 저장 = 변이 생존 항목 1건 (자동 보강의 엔진 진행 없이). */
+  const failedAutoReinforcement = (h: ReturnType<typeof setup>) =>
+    withProject(h.biveHome, h.projectId, (store) => {
+      const outcome = reinforceSurvivedMutants(store, { runId: h.runId }, clock);
+      if (outcome.status !== 'started') throw new Error(`보강 실행 없음: ${outcome.status}`);
+      const auto = outcome.runs[0]!.detail.run;
+      evaluateApprovalStep(store, auto.id, clock);
+      store.runs.transition(auto.id, {
+        expectedStatus: 'running',
+        run: {
+          ...runEnding(auto, 'failed', 'regression_limit').run,
+          endedAt: new Date().toISOString(),
+        },
+      });
+      const [item] = store.reviewQueue.list();
+      if (item?.kind !== 'mutant_survived') throw new Error('변이 생존 항목 없음');
+      return item;
+    });
+  /** 사람의 `reviewQueue.reinforce` 처리기(실제 처리기 · 엔진)로 보강 실행을 만들고 끝까지 돌린다. */
+  const humanReinforce = async (h: ReturnType<typeof setup>, seq: number) => {
+    const handlers = createRunHandlers({ biveHome: h.biveHome, now: Date.now, engine: h.engine });
+    const reinforce = handlers['reviewQueue.reinforce']!;
+    const result = await reinforce({ projectId: h.projectId, seq, author: human }, {
+      connectionId: 1,
+    } as Parameters<typeof reinforce>[1]);
+    await settleAll(h);
+    return withProject(h.biveHome, h.projectId, (store) => store.runs.getDetail(result.run.id)!);
+  };
+  const base = {
+    rules: [{ blocks: ['health'], risk: 'medium' as const }],
+    sessions: { 'RULE-001': [{ tool: 'propose_mutant', args: VALID_MUTANT }] },
+    settings: AUTO_SETTINGS,
+    noAutoStart: true,
+  };
+
+  it('재주입이 검출하면 사람 보강 실행은 새 변이 세션 없이 변이 검증됨 · 병합된다 (변이 주입 단계는 생략이 아니다)', async () => {
+    const h = setup({ ...base, decide: killedByReinforcement });
+    expect((await runToEnd(h)).run.status).toBe('merged');
+    const item = failedAutoReinforcement(h);
+    const reinforcing = await humanReinforce(h, item.seq);
+    expect(reinforcing.run).toMatchObject({
+      type: 'C',
+      status: 'merged',
+      startedBy: { kind: 'human' },
+    });
+    expect(reinforcing.steps.find((step) => step.kind === 'mutation')).toMatchObject({
+      status: 'passed',
+      exitDetail: { reinjected: item.mutationResultId },
+    });
+    expect(h.sessions.map((spec) => spec.role)).toEqual(['mutator']);
+    const reinjection = h.judgeCalls.at(-1)!;
+    expect(reinjection.input.runId).toBe(reinforcing.run.id);
+    expect(reinjection.status).toContain(`M ${HEALTH}`);
+    expect(
+      withProject(h.biveHome, h.projectId, (store) =>
+        store.mutations
+          .listByRun(reinforcing.run.id)
+          .map((result) => [result.status, result.sessionId]),
+      ),
+    ).toEqual([['verified', null]]);
+    expect(statusOf(h, h.rules[0] as Rule)).toBe('verified');
+  }, 90_000);
+
+  it('재주입에서도 살아남으면 테스트 작성으로 회귀하고 상한 뒤 실패하며, 그 실패가 새 변이 생존 항목이 된다', async () => {
+    const h = setup({ ...base, decide: allPass });
+    await runToEnd(h);
+    const item = failedAutoReinforcement(h);
+    const reinforcing = await humanReinforce(h, item.seq);
+    expect(reinforcing.run).toMatchObject({ status: 'failed', failureReason: 'regression_limit' });
+    expect(
+      reinforcing.steps
+        .filter((step) => step.kind === 'mutation')
+        .map((step) => `${step.kind}#${String(step.attempt)}:${step.status}`),
+    ).toEqual(['mutation#1:failed', 'mutation#2:failed', 'mutation#3:failed']);
+    expect(
+      withProject(h.biveHome, h.projectId, (store) =>
+        store.reviewQueue
+          .list({ state: 'open' })
+          .map((entry) => [entry.kind, entry.runId, entry.mutationResultId]),
+      ),
+    ).toEqual([['mutant_survived', reinforcing.run.id, item.mutationResultId]]);
+  }, 90_000);
+
+  it('테스트 작성 세션은 틀 안의 변이 자료를 받고, 기존 인수 테스트 변경은 Green 확인 전 대조가 막는다 (더하기만)', async () => {
+    const existing = 'bive-acceptance/RULE-001/mutation.acc.ts';
+    const h = setup({
+      ...base,
+      decide: allPass,
+      testWriter: [
+        [
+          {
+            tool: 'write_file',
+            args: {
+              path: 'bive-acceptance/RULE-001/reinforce-added.acc.ts',
+              content: "import { it } from 'vitest';\nit('보강', () => undefined);\n",
+            },
+          },
+          { message: '보강.' },
+        ],
+      ],
+      executors: (current) => ({
+        ...current,
+        test_writing: async (context) => {
+          const outcome = await current.test_writing!(context);
+          if (context.run.type === 'C') {
+            fs.appendFileSync(path.join(context.git.worktreePath, existing), '// 직접 고침\n');
+          }
+          return outcome;
+        },
+      }),
+    });
+    await runToEnd(h);
+    const item = failedAutoReinforcement(h);
+    const reinforcing = await humanReinforce(h, item.seq);
+    const writer = h.sessions.find((spec) => spec.role === 'test-writer');
+    const prompt = writer?.prompt ?? '';
+    const start = prompt.indexOf(MUTANT_MATERIAL_START);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(prompt.indexOf(VALID_MUTANT.replace, start)).toBeGreaterThan(start);
+    expect(reinforcing.run).toMatchObject({ status: 'failed', failureReason: 'guard_violation' });
+    expect(reinforcing.steps.find((step) => step.kind === 'green_check')?.exitDetail).toMatchObject(
+      {
+        reason: 'guard_violation',
+        detail: { stage: TEST_ONLY_STAGE, message: EXISTING_TEST_CHANGED_MESSAGE },
+      },
+    );
   }, 90_000);
 });

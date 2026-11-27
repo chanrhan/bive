@@ -274,7 +274,7 @@ export const reinforceSurvivedMutants = (
         .filter(
           (run) =>
             OPEN_RUN_STATUSES.includes(run.status) &&
-            store.mutations.reinforcementOfRun(run.id) !== null,
+            store.mutations.reinforcementCauseOfRun(run.id) !== null,
         )
         .flatMap((run) => run.targetRuleIds),
     );

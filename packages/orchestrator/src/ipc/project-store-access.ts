@@ -78,6 +78,43 @@ export const onNormChangeAppended = (
   };
 };
 
+/** 검토 대기열 항목이 생기거나 처리된 저장소 사용이 끝났을 때(닫은 뒤) 부르는 함수 (M3-08 #53, ADR-145). 던지지 않아야 한다. */
+export type ReviewQueueChangedListener = (projectId: string) => void;
+
+const reviewQueueListeners = new Map<string, Set<ReviewQueueChangedListener>>();
+
+/**
+ * 이 `$BIVE_HOME`의 저장소 사용에서 검토 대기열이 바뀌면(항목이 생김 · 처리됨) `listener`를 부르게 한다. 해제 함수를 돌려준다.
+ * 항목은 실행 종료 저장과 같은 문장에서 DB가 넣으므로, 규범 변경 알림처럼 여기 한 곳에서 사용 전후의 변경 표지를 비교한다.
+ */
+export const onReviewQueueChanged = (
+  biveHome: string,
+  listener: ReviewQueueChangedListener,
+): (() => void) => {
+  let set = reviewQueueListeners.get(biveHome);
+  if (set === undefined) {
+    set = new Set();
+    reviewQueueListeners.set(biveHome, set);
+  }
+  const entry: ReviewQueueChangedListener = (projectId) => listener(projectId);
+  set.add(entry);
+  return () => {
+    const current = reviewQueueListeners.get(biveHome);
+    if (current === undefined) return;
+    current.delete(entry);
+    if (current.size === 0) reviewQueueListeners.delete(biveHome);
+  };
+};
+
+/** 검토 대기열의 변경 표지. 읽지 못하면 `null`(알림만 건너뛴다). */
+const reviewQueueVersion = (store: ProjectStore): number | null => {
+  try {
+    return store.reviewQueue.version();
+  } catch {
+    return null;
+  }
+};
+
 /** 마지막 규범 변경 순번. 읽지 못하면 `null`(알림만 건너뛴다. 저장소 사용의 결과를 바꾸지 않는다). */
 const lastNormChangeSeq = (store: ProjectStore): number | null => {
   try {
@@ -108,15 +145,31 @@ export const withRegisteredProjectStore = <T>(
     throw error;
   }
   const listeners = normChangeListeners.get(biveHome);
+  const reviewListeners = reviewQueueListeners.get(biveHome);
   let before: number | null = null;
   let after: number | null = null;
+  let reviewBefore: number | null = null;
+  let reviewAfter: number | null = null;
   try {
     if (store.getProject() === null) throw projectNotFound(projectId);
     if (listeners !== undefined) before = lastNormChangeSeq(store);
+    if (reviewListeners !== undefined) reviewBefore = reviewQueueVersion(store);
     return fn(store);
   } finally {
     if (before !== null) after = lastNormChangeSeq(store);
+    if (reviewBefore !== null) reviewAfter = reviewQueueVersion(store);
     store.close();
+    if (reviewListeners !== undefined && reviewBefore !== null && reviewAfter !== null) {
+      if (reviewAfter > reviewBefore) {
+        for (const listener of [...reviewListeners]) {
+          try {
+            listener(projectId);
+          } catch {
+            // 알림 실패는 저장소 사용의 결과를 바꾸지 않는다
+          }
+        }
+      }
+    }
     if (listeners !== undefined && before !== null && after !== null && after > before) {
       for (const listener of [...listeners]) {
         try {

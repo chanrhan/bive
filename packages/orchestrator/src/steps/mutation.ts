@@ -262,7 +262,7 @@ const judgeMutant = async (
  */
 const reinject = async (
   context: StepContext,
-  link: MutationReinforcement,
+  link: Pick<MutationReinforcement, 'mutationResultId'>,
   options: MutationStepOptions,
   git: ReturnType<typeof createGitRunner>,
 ): Promise<StepOutcome> => {
@@ -370,8 +370,11 @@ export const createMutationExecutor =
     // 유형 A만 새 변이를 낸다. 유형 C는 보강 실행(변이 보강 연결이 있음)일 때만 재주입한다 (ADR-020: 변이 주입은 A · C(보강)만,
     // 유형 B는 계획에서 생략, D는 계획에 없음)
     if (context.run.type === 'C') {
-      const link = context.read((store) => store.mutations.reinforcementOfRun(context.run.id));
-      if (link !== null) return reinject(context, link, options, git);
+      // 자동 보강 · 사람이 시작한 보강(검토 대기열의 테스트 보강, M3-08 #53 · ADR-145)이 같은 재주입을 탄다
+      const causeId = context.read((store) =>
+        store.mutations.reinforcementCauseOfRun(context.run.id),
+      );
+      if (causeId !== null) return reinject(context, { mutationResultId: causeId }, options, git);
     }
     if (context.run.type !== 'A') {
       return { status: 'skipped', exitDetail: { reason: 'run_type', runType: context.run.type } };

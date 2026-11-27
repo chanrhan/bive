@@ -125,10 +125,13 @@ export const testOnlyViolations = async (
     (file) => !isTestOnlyPath(file, ruleDisplayIds),
   );
 
-/** 보강 실행(유형 C + 변이 보강 연결)인지 (M3-54 #311, ADR-143). */
+/**
+ * 보강 실행(유형 C + 변이 보강 연결)인지 (M3-54 #311, ADR-143). 연결은 자동 보강 또는 검토 대기열의 사람 테스트 보강(M3-08 #53,
+ * ADR-145)이다.
+ */
 export const isReinforcementRun = (context: Pick<StepContext, 'run' | 'read'>): boolean =>
   context.run.type === 'C' &&
-  context.read((store) => store.mutations.reinforcementOfRun(context.run.id) !== null);
+  context.read((store) => store.mutations.reinforcementCauseOfRun(context.run.id) !== null);
 
 /**
  * 커밋의 대상 규칙 폴더(`bive-acceptance/<표시 ID>/`) 안 파일 (git 트리, 작업 트리와 무관, 정렬).
