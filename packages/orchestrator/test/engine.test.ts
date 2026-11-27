@@ -13,6 +13,7 @@ import {
   RUN_STATUS_TRANSITIONS,
   RUN_STEP_PLANS,
   type RunStatus,
+  type Run,
   type RunType,
   STEP_ROLES,
   type SettingsPatch,
@@ -26,13 +27,18 @@ import type { AgentAdapter, SessionEvent } from '../src/agent/adapter.js';
 import { loadScenario } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { INTERRUPTED_EXIT_DETAIL, PipelineEngine } from '../src/engine/pipeline-engine.js';
-import { checkRunStartBasis } from '../src/engine/start-basis.js';
+import {
+  checkRunStartBasis,
+  declaredBehaviorOf,
+  runDeclarationOf,
+} from '../src/engine/start-basis.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
 import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { runPaths } from '../src/run-paths.js';
 import { AutoStarter, autoStartRun } from '../src/runs/auto-start.js';
 import { createRun, saveNewRun } from '../src/runs/run-service.js';
 import { connect, RpcCallError, type TestClient } from './helpers/client.js';
+import { contentJudge, setupPipeline } from './helpers/pipeline-harness.js';
 import {
   COMPLETE_SETTINGS,
   copyFixture,
@@ -2481,7 +2487,7 @@ describe('동작 선언과 실제가 다른 경우: 그 유형의 기존 실패 
   };
 
   /** 실행의 유형 · 대상 규칙은 저장소가 바꾸지 못한다 (유형 변경 · 대상 규칙 행 삭제 거부). */
-  const expectFrozen = (h: Harness, runId: string): void => {
+  const expectFrozen = (h: { biveHome: string; project: { id: string } }, runId: string): void => {
     withProject(h.biveHome, h.project.id, (store) => {
       expect(() => store.db.prepare("UPDATE runs SET type = 'C' WHERE id = ?").run(runId)).toThrow(
         /바꿀 수 없습니다/,
@@ -2635,29 +2641,121 @@ describe('동작 선언과 실제가 다른 경우: 그 유형의 기존 실패 
     });
   }, 90_000);
 
-  it('어느 경우에도 실행의 대상 규칙 수가 줄지 않는다: 대상 규칙 2개 중 하나가 이미 통과해 Red 확인을 넘지 못해도 두 규칙 그대로 실패로 끝나고(통과하는 규칙을 빼고 진행하지 않음), 저장소는 대상 규칙 행의 삭제 · 유형 변경을 거부한다', async () => {
-    const h = setup({ executors: { red_check: scripted(['unmet']) } });
-    const second = withProject(h.biveHome, h.project.id, (store) => {
-      const base = store.rules.get(h.rule.id);
-      if (base === null) throw new Error('규칙 없음');
-      return store.rules.create({
-        id: newId(),
-        title: '헬스 체크 응답 형식 유지',
-        statement: base.statement,
-        kind: 'business',
-        checkKinds: ['test'],
-        parentRequirementId: base.parentRequirementId,
-        builtin: false,
-        targetBlockIds: [],
-        risk: null,
-        contractId: null,
-        author: { kind: 'agent', role: 'rule-writer' },
-        normState: 'approved',
-        createdAt: new Date().toISOString(),
-      }).id;
+  /** 사람의 규칙 편집 1건 (규칙 행 · 승인 기록 `rule_edit`, 사람의 `rule.update`가 남기는 것과 같은 모양). */
+  const editRule = (
+    store: ProjectStore,
+    ruleId: string,
+    after: { title: string; statement: string },
+  ): void => {
+    const before = store.rules.get(ruleId);
+    if (before === null) throw new Error('규칙 없음');
+    store.rules.update(ruleId, after, new Date().toISOString());
+    store.approvalLog.append({
+      at: new Date().toISOString(),
+      action: 'rule_edit',
+      actor: human,
+      targetRef: { entity: 'Rule', id: ruleId },
+      clientId: null,
+      detail: { diff: { before: { title: before.title, statement: before.statement }, after } },
     });
-    const targets = [h.rule.id, second];
-    h.runId = withProject(h.biveHome, h.project.id, (store) =>
+  };
+
+  it('편집 전에 기존 동작 선언으로 만들어져 대기 중이던 유형 C 실행은, 사람이 진술을 고친 뒤 시작 근거 대조에서 type_mismatch로 워크트리 · 세션 없이 끝난다(닫힌 쪽: 고친 진술을 Red 확인 없이 병합하지 않는다). 제목만 고친 편집이면 그대로 진행한다', async () => {
+    const h = setup({
+      settings: SETTINGS,
+      executors: { green_check: scripted(['passed']), check: scripted(['passed']) },
+    });
+    const { runId } = autoStarted(h, 'existing');
+    h.runId = runId;
+    withProject(h.biveHome, h.project.id, (store) => {
+      const rule = store.rules.get(h.rule.id);
+      if (rule === null) throw new Error('규칙 없음');
+      editRule(store, h.rule.id, {
+        title: rule.title,
+        statement: `${rule.statement} 그리고 응답 헤더에도 담는다`,
+      });
+      expect(declaredBehaviorOf(store, h.rule.id)).toBeNull();
+    });
+    const done = await runToEnd(h);
+    expect(done.run).toMatchObject({
+      type: 'C',
+      status: 'failed',
+      failureReason: 'run_without_log',
+      branch: null,
+    });
+    expect(stepOf(done, 'test_writing').exitDetail).toEqual({
+      reason: 'run_without_log',
+      detail: { runStartEntries: 0, autoStartEntries: 1, mismatch: 'type_mismatch' },
+    });
+    expect(sessionsOf(h)).toEqual([]);
+
+    // 대조군: 제목만 고친 편집은 진술 편집이 아니다 (선언 그대로, 유형 C가 병합까지 간다)
+    const titled = setup({
+      settings: SETTINGS,
+      executors: { green_check: scripted(['passed']), check: scripted(['passed']) },
+    });
+    titled.runId = autoStarted(titled, 'existing').runId;
+    withProject(titled.biveHome, titled.project.id, (store) => {
+      const rule = store.rules.get(titled.rule.id);
+      if (rule === null) throw new Error('규칙 없음');
+      editRule(store, titled.rule.id, { title: `${rule.title} (고침)`, statement: rule.statement });
+      expect(declaredBehaviorOf(store, titled.rule.id)).toBe('existing');
+    });
+    expect((await runToEnd(titled)).run).toMatchObject({ type: 'C', status: 'merged' });
+  }, 120_000);
+
+  it('runDeclarationOf: 선언으로 유형을 고른 실행(오케스트레이터 · 규범 변경 기록 원인 · 대상 1개)만 선언을 돌려준다. 편집 뒤 시작 · 변이 보강 · 사람의 [실행] · 이어받는 실행(사람의 한도 상향 재개)은 대상 규칙에 선언이 있어도 null이고, 이어받는 실행은 원 실행의 유형 C 그대로 시작 근거 대조를 지난다', () => {
+    const h = setup({ settings: SETTINGS });
+    const seq = created(h, 'existing').seq;
+    withProject(h.biveHome, h.project.id, (store) => {
+      const at = new Date().toISOString();
+      const make = (startedBy: Run['startedBy'], type: RunType): Run =>
+        saveNewRun(
+          store,
+          store.settings.get(),
+          { runId: newId(), ruleIds: [h.rule.id], startedBy, type },
+          at,
+          newId,
+        ).run;
+      const original = make({ kind: 'orchestrator', causeSeqs: [seq] }, 'C');
+      expect(runDeclarationOf(store, original)).toBe('existing');
+      const starters: Run['startedBy'][] = [
+        { kind: 'orchestrator', causeSeqs: [seq], causeLog: 'approval_log' },
+        { kind: 'orchestrator', causeSeqs: [seq], causeLog: 'mutation_reinforcements' },
+        { kind: 'human' },
+      ];
+      for (const starter of starters) {
+        expect(runDeclarationOf(store, make(starter, 'C')), JSON.stringify(starter)).toBeNull();
+      }
+      // 이어받는 실행: 사람이 원 실행의 유형 · 대상 그대로 만든다 (run.create와 같은 생성, 시작 근거 = 사람 run_start)
+      const continued = createRun(
+        store,
+        { ruleIds: [...original.targetRuleIds], author: human, type: original.type },
+        { clientId: null },
+        { now: Date.now, newId },
+        { budgetSnapshot: original.budgetSnapshot },
+      ).run;
+      expect(continued).toMatchObject({ type: 'C', startedBy: { kind: 'human' } });
+      expect(checkRunStartBasis(store, continued).mismatch).toBeNull();
+      expect(runDeclarationOf(store, continued)).toBeNull();
+    });
+  });
+
+  it('어느 경우에도 실행의 대상 규칙 수가 줄지 않는다 (제품 Red 확인 실행기): 대상 규칙 2개 중 한 규칙은 케이스 전부 실패(Red)이고 다른 규칙에 이미 통과하는 케이스가 있으면 Red 확인은 not_red이고 그 케이스를 싣는다. 판정은 늘 두 규칙을 돌리고, 테스트 작성 재시도 상한 뒤 두 규칙 그대로 실패로 끝나며(통과하는 규칙을 빼고 구현으로 가지 않음), 저장소는 대상 규칙 행의 삭제 · 유형 변경을 거부한다', async () => {
+    const p = setupPipeline({
+      secondRule: true,
+      temps,
+      engines,
+      // 테스트 작성은 시험용(세션 + 첫 대상 규칙의 인수 테스트 파일): 제품 실행기는 대상 규칙마다 파일을 요구한다. Red 확인은 제품 실행기다
+      executors: (defaults) => ({ ...defaults, test_writing: testExecutors().test_writing }),
+      decide: (call) =>
+        call.kind === 'red_check'
+          ? { 'RULE-001': ['failed', 'failed'], 'RULE-002': ['passed', 'failed'] }
+          : contentJudge(call),
+    });
+    const targets = p.rules.map((rule) => rule.id);
+    expect(targets).toHaveLength(2);
+    const runId = withProject(p.biveHome, p.project.id, (store) =>
       createRun(
         store,
         { ruleIds: targets, author: human },
@@ -2665,17 +2763,48 @@ describe('동작 선언과 실제가 다른 경우: 그 유형의 기존 실패 
         { now: Date.now, newId },
       ),
     ).run.id;
-    const done = await runToEnd(h);
+    expect(p.engine.evaluateApproval(p.project.id, runId)).toBe(true);
+    await p.engine.settled();
+    const done = withProject(p.biveHome, p.project.id, (store) => store.runs.getDetail(runId));
+    if (done === null) throw new Error('실행 없음');
     expect(done.run).toMatchObject({
       status: 'failed',
       failureReason: 'test_retry_limit',
+      currentStep: 'red_check',
       targetRuleIds: targets,
+      mergeCommit: null,
     });
-    expect(attempts(done, 'red_check')).toHaveLength(3);
+    expect(attempts(done, 'red_check')).toEqual([
+      'red_check#1:failed',
+      'red_check#2:failed',
+      'red_check#3:failed',
+    ]);
     expect(attempts(done, 'implementation')).toEqual(['implementation#1:pending']);
-    expectFrozen(h, h.runId);
+    // 판정 러너는 매번 대상 규칙 둘 다를 돌렸다 (이미 통과하는 규칙을 판정 대상에서 빼지 않는다)
     expect(
-      withProject(h.biveHome, h.project.id, (store) => store.runs.get(h.runId)?.targetRuleIds),
+      p.judgeCalls.filter((call) => call.kind === 'red_check').map((call) => call.input.ruleIds),
+    ).toEqual([
+      ['RULE-001', 'RULE-002'],
+      ['RULE-001', 'RULE-002'],
+      ['RULE-001', 'RULE-002'],
+    ]);
+    // 제품 판단: 한 규칙이 Red여도 다른 규칙에 통과 케이스가 있으면 not_red이고 그 케이스만 싣는다
+    const first = stepOf(done, 'red_check', 1).exitDetail as {
+      reason: string;
+      notFailedCases: { name: string; status: string }[];
+    };
+    expect(first.reason).toBe('not_red');
+    expect(first.notFailedCases.map((item) => [item.name, item.status])).toEqual([
+      ['RULE-002 > 케이스 1', 'passed'],
+    ]);
+    expect(stepOf(done, 'red_check', 3).exitDetail).toMatchObject({
+      reason: 'test_retry_limit',
+      detail: { reason: 'not_red' },
+    });
+    expect(p.sessions.filter((spec) => spec.role === 'implementer')).toEqual([]);
+    expectFrozen(p, runId);
+    expect(
+      withProject(p.biveHome, p.project.id, (store) => store.runs.get(runId)?.targetRuleIds),
     ).toEqual(targets);
-  }, 90_000);
+  }, 120_000);
 });

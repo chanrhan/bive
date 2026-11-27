@@ -61,17 +61,27 @@ export interface StartBasisCheck {
  * 규칙의 동작 선언 (M3-30 #245, ADR-151): 그 규칙을 만든 신규 기록(`created`)의 `detail.behavior`. 선언을 읽는 자리는 이 함수
  * 하나다(실행 · 다른 기록에 복사하지 않는다). 신규 기록이 없거나 선언 칸이 없으면(이 변경 전의 기록, 사람 · 오케스트레이터가 만든
  * 규칙) `null` = 모름.
+ * 사람이 그 규칙의 진술을 고친 적이 있으면(승인 기록 `rule_edit` 가운데 진술이 바뀐 것, `ruleStatementEditOf`, 제목만 고친 편집은 아님,
+ * ADR-109) 선언은 옛 진술에 대한 판단이므로 모름으로 읽는다(조율자 결정, 유형 A: Red 확인을 거친다).
  */
 export const declaredBehaviorOf = (
-  changes: readonly NormChangeEntry[],
+  store: ProjectStore,
   ruleId: string,
-): RuleBehavior | null =>
-  changes.find(
-    (entry) =>
-      entry.kind === 'created' &&
-      entry.targetRef.entity === 'Rule' &&
-      entry.targetRef.id === ruleId,
-  )?.detail.behavior ?? null;
+  changes: readonly NormChangeEntry[] = store.normChanges.list(),
+): RuleBehavior | null => {
+  const edited = store.approvalLog
+    .list({ entity: 'Rule', id: ruleId })
+    .some((entry) => ruleStatementEditOf(entry) !== null);
+  if (edited) return null;
+  return (
+    changes.find(
+      (entry) =>
+        entry.kind === 'created' &&
+        entry.targetRef.entity === 'Rule' &&
+        entry.targetRef.id === ruleId,
+    )?.detail.behavior ?? null
+  );
+};
 
 /**
  * 오케스트레이터가 규칙 하나로 시작하는 실행(규칙 작성 세션 뒤 자동 시작 · 기존 규칙 모순 뒤 다시 시작)의 유형 (ADR-110 · ADR-151):
@@ -89,7 +99,7 @@ export const runDeclarationOf = (store: ProjectStore, run: Run): RuleBehavior | 
   if (run.startedBy.kind !== 'orchestrator' || run.startedBy.causeLog !== undefined) return null;
   const [ruleId] = run.targetRuleIds;
   if (ruleId === undefined || run.targetRuleIds.length !== 1) return null;
-  return declaredBehaviorOf(store.normChanges.list(), ruleId);
+  return declaredBehaviorOf(store, ruleId);
 };
 
 const sameList = <T>(a: readonly T[] | undefined, b: readonly T[]): boolean =>
@@ -137,7 +147,7 @@ const autoStartMismatch = (
   const [ruleId] = run.targetRuleIds;
   // 유형은 대상 규칙의 동작 선언으로 정해진다 (M3-30, ADR-151): 원인을 확인한 뒤 · 재사용을 보기 전에 본다
   const typeMatches =
-    ruleId !== undefined && run.type === declaredRunTypeOf(declaredBehaviorOf(all, ruleId));
+    ruleId !== undefined && run.type === declaredRunTypeOf(declaredBehaviorOf(store, ruleId, all));
   if (cause.kind === 'judgment') {
     // 기존 규칙 모순으로 끝난 실행의 대상 규칙 다시 시작: 같은 원인 · 같은 대상 규칙을 다른 항목이 쓰면 재사용
     if (!isRestartCause(store, run, cause, ruleId)) return 'cause_mismatch';

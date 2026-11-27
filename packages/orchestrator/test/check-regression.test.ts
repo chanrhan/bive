@@ -15,6 +15,7 @@ import {
   createUlidGenerator,
   type NormChangeEntry,
   type Rule,
+  type Run,
   type Session,
   type SessionEndReason,
 } from '@bive/shared';
@@ -25,7 +26,7 @@ import type { SessionSpec } from '../src/agent/adapter.js';
 import { loadScenario, type Scenario } from '../src/agent/scenario.js';
 import type { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import { chargeSessions } from '../src/engine/session-budget.js';
-import { checkRunStartBasis } from '../src/engine/start-basis.js';
+import { checkRunStartBasis, runDeclarationOf } from '../src/engine/start-basis.js';
 import { openProjectStore } from '@bive/store';
 import type { NormJudgeLauncher, NormJudgeOutcome, NormJudgeRequest } from '../src/engine/types.js';
 import { readNormChanges } from '../src/ipc/norm-change-handlers.js';
@@ -1026,9 +1027,11 @@ describe('판단 입력은 실패한 규칙 ID와 인수 테스트 파일에 적
 
       동작 선언(behavior): 새 규칙(propose_rule · supersede_rule)마다 new 또는 existing 가운데 하나를 반드시 적는다.
       - new(새 동작): 지금 코드가 이 진술을 아직 지키지 않아 구현이 필요하다. 그 규칙의 실행은 인수 테스트가 구현 전에 실패해야(Red) 구현으로 넘어간다.
-      - existing(기존 동작 유지): 이미 구현돼 지금 코드가 이 진술을 지킨다. 그 규칙의 실행은 구현 없이 인수 테스트가 지금 코드에서 통과하는지(Green) 확인하고 병합한다.
-      - 고르는 기준은 "이미 구현돼 지금 코드가 이 진술을 지키는가"다. 너는 프로젝트 코드를 볼 수 없으니 요구사항 본문(바꾸라는 것인지 지키라는 것인지)과 자료의 기존 규칙 · 최근 판정으로 판단하고, 판단할 근거가 없으면 new를 적는다.
-      - 선언이 실제와 다르면(new인데 테스트가 이미 통과, existing인데 통과하지 않음) 그 실행은 실패로 끝나고 다른 쪽으로 다시 시작되지 않는다."
+      - existing(기존 동작 유지): 이미 구현돼 지금 코드가 이 진술을 지킨다. 그 규칙의 실행은 코드를 바꾸지 않고, 새 인수 테스트가 지금 코드에서 통과하기만 하면(Green) 병합한다. 그 테스트가 실제로 무엇을 검사하는지는 어떤 단계도 다시 보지 않는다.
+      - 너는 프로젝트 코드를 볼 수 없다. 작업 지시의 자료에는 요구사항 본문과 효력 있는 규칙의 진술 · 최근 판정의 케이스 이름이 있고, 판정의 통과 · 실패는 없다.
+      - existing은 요구사항 본문이 지금 동작을 바꾸지 말고 그대로 지키라고 밝힐 때만 고른다(예: 기존 응답이 깨지지 않아야 한다). 그 밖에는, 판단할 근거가 없을 때를 포함해 모두 new다.
+      - 선언이 실제와 다르면(new인데 테스트가 이미 통과, existing인데 통과하지 않음) 그 실행은 실패로 끝나고 다른 쪽으로 다시 시작되지 않는다.
+      - 판단 대상 규칙을 supersede_rule로 대체할 때 existing으로 선언한 새 규칙은 구현 없이 병합된다. 대체하는 규칙이 지금 코드에 없는 새 구현을 요구하면 new다."
     `);
     const rule = (displayId: string) => ({
       id: displayId,
@@ -1366,19 +1369,29 @@ describe('다시 시작의 하루 한도 문: 비었거나 한도에 이르면 �
     });
     class Rollback extends Error {}
     withProject(h.biveHome, h.project.id, (store) => {
-      // 시드 규칙에는 신규 기록이 없다(선언 모름) → 유형 A. 되돌려 같은 원인을 다시 쓸 수 있게 둔다
-      expect(() =>
-        store.transaction(() => {
-          const outcome = restartAfterContradiction(store, { runId: h.runId }, RESTART_CLOCK);
-          if (outcome.status !== 'started') throw new Error(`다시 시작 안 됨: ${outcome.status}`);
-          expect(outcome.runs.map(({ detail }) => detail.run.type)).toEqual(['A']);
-          const [restarted] = outcome.runs;
-          if (restarted === undefined) throw new Error('실행 없음');
-          expect(checkRunStartBasis(store, restarted.detail.run).mismatch).toBeNull();
-          throw new Rollback();
-        }),
-      ).toThrow(Rollback);
-      expect(store.runs.list()).toHaveLength(1);
+      /** 다시 시작을 부르고 유형 · 시작 근거 대조를 단언한 뒤 되돌린다 (같은 원인을 다시 쓸 수 있게) */
+      const restartTypeThenRollback = (
+        type: 'A' | 'C',
+        extra?: (made: Run, causeSeq: number) => void,
+      ): void => {
+        expect(() =>
+          store.transaction(() => {
+            const outcome = restartAfterContradiction(store, { runId: h.runId }, RESTART_CLOCK);
+            if (outcome.status !== 'started') throw new Error(`다시 시작 안 됨: ${outcome.status}`);
+            const [restarted] = outcome.runs;
+            if (restarted === undefined) throw new Error('실행 없음');
+            expect(outcome.runs.map(({ detail }) => detail.run.type)).toEqual([type]);
+            expect(checkRunStartBasis(store, restarted.detail.run).mismatch).toBeNull();
+            const [causeSeq] = restarted.normChange.detail.causeSeqs ?? [];
+            if (causeSeq === undefined) throw new Error('원인 없음');
+            extra?.(restarted.detail.run, causeSeq);
+            throw new Rollback();
+          }),
+        ).toThrow(Rollback);
+        expect(store.runs.list()).toHaveLength(1);
+      };
+      // 시드 규칙에는 신규 기록이 없다(선언 모름) → 유형 A
+      restartTypeThenRollback('A');
       // 대상 규칙이 기존 동작 선언과 함께 만들어졌으면 다시 시작은 유형 C (끝난 실행의 유형 A를 따르지 않는다)
       store.normChanges.append({
         at: new Date().toISOString(),
@@ -1390,14 +1403,72 @@ describe('다시 시작의 하루 한도 문: 비었거나 한도에 이르면 �
         reason: '시험 근거',
         detail: { after: { ruleId: h.rule.id }, behavior: 'existing' },
       });
+      restartTypeThenRollback('C', (_made, causeSeq) => {
+        // 같은 다시 시작 원인 · 같은 대상 규칙인데 유형이 선언과 다른(A) 실행: 재사용보다 먼저 유형 불일치다
+        const runId = harnessId();
+        saveNewRun(
+          store,
+          store.settings.get(),
+          {
+            runId,
+            ruleIds: [h.rule.id],
+            type: 'A',
+            startedBy: { kind: 'orchestrator', causeSeqs: [causeSeq] },
+          },
+          new Date().toISOString(),
+          harnessId,
+        );
+        store.normChanges.append({
+          at: new Date().toISOString(),
+          kind: 'auto_start',
+          actor: { kind: 'orchestrator' },
+          targetRef: { entity: 'Run', id: runId },
+          sessionId: null,
+          runId,
+          reason: '위조',
+          detail: { causeSeqs: [causeSeq], ruleIds: [h.rule.id] },
+        });
+        const forged = store.runs.get(runId);
+        if (forged === null) throw new Error('실행 없음');
+        expect(checkRunStartBasis(store, forged).mismatch).toBe('type_mismatch');
+      });
+      const edit = (after: { title: string; statement: string }): void => {
+        const before = store.rules.get(h.rule.id);
+        if (before === null) throw new Error('규칙 없음');
+        store.rules.update(h.rule.id, after, new Date().toISOString());
+        store.approvalLog.append({
+          at: new Date().toISOString(),
+          action: 'rule_edit',
+          actor: human,
+          targetRef: { entity: 'Rule', id: h.rule.id },
+          clientId: null,
+          detail: {
+            diff: {
+              before: { title: before.title, statement: before.statement },
+              after,
+            },
+          },
+        });
+      };
+      // 사람이 제목만 고친 편집은 진술 편집이 아니다 (ADR-109): 선언 그대로 유형 C
+      const rule = store.rules.get(h.rule.id);
+      if (rule === null) throw new Error('규칙 없음');
+      edit({ title: `${rule.title} (고침)`, statement: rule.statement });
+      restartTypeThenRollback('C');
+      // 사람이 진술을 고치면 선언은 옛 진술의 판단이라 모름으로 읽는다(조율자 결정): 다시 시작은 유형 A이고 대조를 지난다
+      edit({
+        title: `${rule.title} (고침)`,
+        statement: `${rule.statement.replace(/\.$/u, '')} 그리고 응답 헤더에도 담는다`,
+      });
       const outcome = restartAfterContradiction(store, { runId: h.runId }, RESTART_CLOCK);
       if (outcome.status !== 'started') throw new Error(`다시 시작 안 됨: ${outcome.status}`);
       expect(outcome.runs.map(({ detail }) => [detail.run.type, detail.run.targetRuleIds])).toEqual(
-        [['C', [h.rule.id]]],
+        [['A', [h.rule.id]]],
       );
       const [restarted] = outcome.runs;
       if (restarted === undefined) throw new Error('실행 없음');
       expect(checkRunStartBasis(store, restarted.detail.run).mismatch).toBeNull();
+      expect(runDeclarationOf(store, restarted.detail.run)).toBeNull();
     });
   }, 120_000);
 

@@ -138,7 +138,7 @@ export const autoStartRun = (
         {
           runId,
           ruleIds: [cause.targetRef.id],
-          type: declaredRunTypeOf(declaredBehaviorOf(changes, cause.targetRef.id)),
+          type: declaredRunTypeOf(declaredBehaviorOf(store, cause.targetRef.id, changes)),
           startedBy: { kind: 'orchestrator', causeSeqs: [cause.seq] },
         },
         at,
@@ -220,7 +220,7 @@ export const restartAfterContradiction = (
         {
           runId,
           ruleIds: [ruleId],
-          type: declaredRunTypeOf(declaredBehaviorOf(changes, ruleId)),
+          type: declaredRunTypeOf(declaredBehaviorOf(store, ruleId, changes)),
           startedBy: { kind: 'orchestrator', causeSeqs: [cause.seq] },
         },
         at,

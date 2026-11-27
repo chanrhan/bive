@@ -125,7 +125,7 @@ export interface AgentRuleInput {
   /** 규칙을 만든 에이전트 역할 */
   readonly author: AgentAuthor;
   /**
-   * 동작 선언 (M3-30 #245, ADR-151): 새 동작 · 기존 동작 유지. 신규 기록의 `detail.behavior`에 남고, 오케스트레이터가 시작하는 그 규칙의
+   * 동작 선언 (M3-30 #245, ADR-151): 새 동작 · 기존 동작 유지. 신규 기록 상세의 선언 칸에 남고, 오케스트레이터가 시작하는 그 규칙의
    * 실행 유형을 고른다(`engine/start-basis.ts`의 `declaredBehaviorOf`가 읽는 유일한 자리)
    */
   readonly behavior: RuleBehavior;
