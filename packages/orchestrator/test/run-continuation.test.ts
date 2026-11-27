@@ -39,6 +39,7 @@ import {
   setup as setupMutation,
 } from './helpers/mutation-harness.js';
 import {
+  contentJudge,
   hookAdapter,
   type JudgeCall,
   type JudgeDecision,
@@ -457,15 +458,17 @@ describe('회귀 상한은 사슬 전체로 센다 · 사슬 2단 (M3-60 수용 
     ]);
   }, 90_000);
 
-  it('사슬 2단(원 → 1차 → 2차): 2차는 1차가 멈춘 단계부터 돌고, 1차가 이어받은 단계는 실제로 그 단계를 돈 원 실행의 시도를 가리키며, 회귀 수는 두 실행의 합부터 이어 센다', async () => {
+  it('사슬 2단(원 → 1차 → 2차): 2차는 1차가 멈춘 단계부터 돌고, 1차가 이어받은 단계는 실제로 그 단계를 돈 원 실행의 시도를 가리키며, 회귀 수는 원 실행과 1차의 합부터 이어 센다', async () => {
     const h = setup((cast) => ({
       test_writing: touch,
       red_check: pass,
-      implementation: byRun(cast, { origin: budgetHalt }, touch),
-      // 1차: 검사 미충족 1번(회귀) 뒤 두 번째 검사 시도에서 예산 초과 / 2차: 늘 미충족
+      // 원 실행: 구현 1회차 통과 → 검사 미충족(회귀 1) → 구현 2회차에서 예산 초과
+      implementation: byRun(cast, { origin: byAttempt(touch, budgetHalt) }, touch),
+      // 1차: 검사 미충족 1번(회귀 1) 뒤 두 번째 검사 시도에서 예산 초과 / 원 실행 · 2차: 늘 미충족
       check: byRun(cast, { first: byAttempt(unmet, budgetHalt) }, unmet),
     }));
     const origin = await startRun(h, 'origin');
+    expect(origin.run).toMatchObject({ currentStep: 'implementation', regressionCount: 1 });
     const first = await continueRun(h, origin.run.id, () => h.engine.settled(), {
       cast: h.cast,
       name: 'first',
@@ -481,18 +484,22 @@ describe('회귀 상한은 사슬 전체로 센다 · 사슬 2단 (M3-60 수용 
       red_check: [origin.run.id, lastPassedId(origin, 'red_check')],
       implementation: [first.run.id, lastPassedId(first, 'implementation')],
     });
-    // 2차는 검사부터: 검사 미충족 → 회귀 1 + 1차의 1 = 2 (상한) → 구현 → 검사 미충족 → 3 > 2 상한
-    expect(second.run).toMatchObject({ status: 'failed', failureReason: 'regression_limit' });
+    // 2차는 검사부터: 첫 검사 미충족 → 원 1 + 1차 1 + 이 실행 1 = 3 > 2 상한 (바로 앞 원 실행만 세면 한 번 더 회귀한다)
+    expect(second.run).toMatchObject({
+      status: 'failed',
+      failureReason: 'regression_limit',
+      regressionCount: 0,
+    });
     expect(attempts(second).filter((a) => /^(implementation|check)/.test(a))).toEqual([
       'implementation#1:skipped',
-      'implementation#2:passed',
       'check#1:failed',
-      'check#2:failed',
     ]);
     // 2차의 가지와 마지막 완료 단계 커밋은 1차의 것에서 시작했다
     expect(second.run.baseCommit).toBe(origin.run.baseCommit);
-    const secondImpl = second.steps.find((s) => s.kind === 'implementation' && s.attempt === 2)!;
-    expect(userGit(h.repo, 'rev-parse', `${secondImpl.commit!}^`)).toBe(first.run.headCommit);
+    expect(second.run.headCommit).toBe(first.run.headCommit);
+    expect(userGit(h.repo, 'rev-parse', `refs/heads/${second.run.branch!}`)).toBe(
+      first.run.headCommit,
+    );
   }, 120_000);
 });
 
@@ -568,14 +575,188 @@ describe('판정 근거는 원 실행의 단계 기록에서 읽는다 (M3-60 �
     expect(h.judgeCalls.filter((call) => call.input.runId === next.run.id)).toEqual([]);
   }, 90_000);
 
+  it('검사(판단 세션)에서 멈춘 원 실행을 이으면 검사부터 돌고, 검사 미충족으로 구현을 다시 돈 뒤에는 이 실행의 구현 시도가 근거다 (원 실행의 구현 시도를 고르지 않는다)', async () => {
+    const ref: { origin?: string; next?: string } = {};
+    let checks = 0;
+    const h = setupPipeline({
+      temps,
+      engines,
+      decide: (call) => {
+        if (call.kind === 'check' && call.input.runId !== ref.origin) {
+          checks += 1;
+          // 이어받는 실행의 첫 검사만 RULE-001 실패 (구현으로 회귀)
+          if (checks === 1) return { 'RULE-001': ['failed', 'failed'] };
+        }
+        return contentJudge(call);
+      },
+      // 이어받는 실행의 구현 세션은 새 파일을 하나 더 써서 새 커밋을 만든다
+      wrapAdapter: (adapter) =>
+        hookAdapter(adapter, {
+          beforeResult: (spec) => {
+            if (spec.role !== 'implementer' || spec.runId === ref.origin) return;
+            fs.mkdirSync(path.join(spec.workDir, 'notes'), { recursive: true });
+            fs.writeFileSync(path.join(spec.workDir, 'notes', 'next.md'), '이어받는 실행\n');
+          },
+        }),
+      executors: (defaults) => ({
+        ...defaults,
+        check: (context) =>
+          context.run.id === ref.origin ? budgetHalt(context) : defaults.check(context),
+      }),
+    });
+    ref.origin = h.runId;
+    const origin = await runPipelineToEnd(h);
+    expect(origin.run).toMatchObject({ status: 'budget_exceeded', currentStep: 'check' });
+    const next = await continueRun(harnessOf(h), origin.run.id, () => h.engine.settled());
+    expect(next.run.status).toBe('merged');
+    expect(attempts(next).filter((a) => /^(implementation|check)/.test(a))).toEqual([
+      'implementation#1:skipped',
+      'implementation#2:passed',
+      'check#1:failed',
+      'check#2:passed',
+    ]);
+    const own = next.steps.find((s) => s.kind === 'implementation' && s.attempt === 2)!;
+    expect(own.commit).not.toBe(origin.run.headCommit);
+    expect(checks).toBe(2);
+  }, 90_000);
+
+  it('이어받은 시도의 가리킴은 읽을 때 대조한다: 사슬 밖 실행 · 다른 단계 종류 · 기록과 다른 상태를 가리키면 이어받은 근거를 싣지 않아 구현 단계가 state_inconsistent로 멈춘다', async () => {
+    const halting = new Set<string>();
+    const h = setupPipeline({
+      temps,
+      engines,
+      executors: (defaults) => ({
+        ...defaults,
+        implementation: (context) =>
+          halting.has(context.run.id) ? budgetHalt(context) : defaults.implementation(context),
+      }),
+    });
+    const read = <T>(fn: (store: ProjectStore) => T): T =>
+      withProject(h.biveHome, h.project.id, fn);
+    /** 테스트 작성 · Red 확인을 통과하고 구현에서 예산 초과로 끝난 사람 실행 하나. */
+    const halted = async (id?: string): Promise<RunDetail> => {
+      const runId =
+        id ??
+        read(
+          (store) =>
+            createRun(store, { ruleIds: [h.rule.id], author: human }, { clientId: null }, clock).run
+              .id,
+        );
+      halting.add(runId);
+      h.engine.evaluateApproval(h.project.id, runId);
+      await h.engine.settled();
+      const detail = read((store) => store.runs.getDetail(runId)!);
+      expect(detail.run).toMatchObject({
+        status: 'budget_exceeded',
+        currentStep: 'implementation',
+      });
+      return detail;
+    };
+    const first = await halted(h.runId);
+    const outsider = await halted();
+    /** 원 실행 `origin`을 잇는 실행을 시험이 고른 이어받은 단계로 만든다 (검토 대기열을 거치지 않고 내부 값으로). */
+    const continuationWith = (
+      origin: RunDetail,
+      pointed: { tw: [RunDetail, Step['kind']]; red: [RunDetail, Step['kind']] },
+      redStatus: 'passed' | 'skipped' = 'passed',
+    ): string =>
+      read((store) =>
+        store.transaction(() => {
+          const created = createRun(
+            store,
+            { ruleIds: [h.rule.id], author: human },
+            { clientId: null },
+            clock,
+            {
+              budgetSnapshot: origin.run.budgetSnapshot,
+              inherited: (
+                [
+                  ['test_writing', pointed.tw, 'passed'],
+                  ['red_check', pointed.red, redStatus],
+                ] as const
+              ).map(([kind, [run, pointedKind], fromStatus]) => ({
+                kind,
+                detail: {
+                  reason: 'inherited' as const,
+                  fromRunId: run.run.id,
+                  fromStepId: lastPassedId(run, pointedKind),
+                  fromStatus,
+                },
+              })),
+            },
+          );
+          store.runContinuations.link({
+            runId: created.run.id,
+            originRunId: origin.run.id,
+            createdAt: created.run.createdAt,
+          });
+          return created.run.id;
+        }),
+      );
+    const drive = async (runId: string): Promise<RunDetail> => {
+      h.engine.evaluateApproval(h.project.id, runId);
+      await h.engine.settled();
+      return read((store) => store.runs.getDetail(runId)!);
+    };
+    const expectClosed = (detail: RunDetail, label: string) => {
+      expect(detail.run, label).toMatchObject({
+        status: 'failed',
+        failureReason: 'state_inconsistent',
+      });
+      expect(
+        detail.steps.find((s) => s.kind === 'implementation')?.exitDetail,
+        label,
+      ).toMatchObject({
+        reason: 'state_inconsistent',
+      });
+    };
+    // 사슬 밖 실행(같은 프로젝트의 다른 실행)의 시도를 가리킴
+    expectClosed(
+      await drive(
+        continuationWith(first, {
+          tw: [outsider, 'test_writing'],
+          red: [outsider, 'red_check'],
+        }),
+      ),
+      'outside',
+    );
+    // 다른 단계 종류 (테스트 작성 행 → Red 확인 시도, Red 확인 행 → 테스트 작성 시도)
+    const second = await halted();
+    expectClosed(
+      await drive(
+        continuationWith(second, { tw: [second, 'red_check'], red: [second, 'test_writing'] }),
+      ),
+      'kind',
+    );
+    // 통과한 시도를 생략이라고 기록
+    const third = await halted();
+    expectClosed(
+      await drive(
+        continuationWith(
+          third,
+          { tw: [third, 'test_writing'], red: [third, 'red_check'] },
+          'skipped',
+        ),
+      ),
+      'status',
+    );
+    // 대조군: 바르게 가리키면 구현이 돈다
+    const fourth = await halted();
+    const ok = await drive(
+      continuationWith(fourth, { tw: [fourth, 'test_writing'], red: [fourth, 'red_check'] }),
+    );
+    expect(ok.steps.find((s) => s.kind === 'implementation')?.status).toBe('passed');
+  }, 180_000);
+
   it('이어받는 실행이 아닌 실행은 판정 근거를 읽을 때 저장소를 읽지 않고 그 실행의 단계 그대로다', () => {
     const steps = [{ id: 'x', status: 'passed', exitDetail: null }] as unknown as Step[];
     const context = {
+      run: { id: newId() },
       steps,
       read: () => {
         throw new Error('읽지 않아야 함');
       },
-    } as unknown as Pick<StepContext, 'steps' | 'read'>;
+    } as unknown as Pick<StepContext, 'run' | 'steps' | 'read'>;
     expect(basisSteps(context)).toEqual(steps);
   });
 });
@@ -670,6 +851,39 @@ describe('보강 실행을 이어받은 실행의 재주입 · 더하기만은 �
         store.mutations.listByRun(next.run.id).map((r) => [r.status, r.sessionId]),
       ),
     ).toEqual([['verified', null]]);
+  }, 120_000);
+
+  it('유형 A가 변이 주입 세션에서 멈추면 테스트 작성 · Red 확인 · 구현 · 검사는 이어받고, 이어받는 실행의 변이 주입이 원 실행의 Red 해시 · 구현 커밋으로 돌아 병합된다', async () => {
+    const ref: { origin?: string } = {};
+    const h = setupMutation({
+      rules: [{ blocks: ['health'], risk: 'medium' }],
+      sessions: { 'RULE-001': [{ tool: 'propose_mutant', args: VALID_MUTANT }] },
+      settings: { ...COMPLETE_SETTINGS, dailyBudgetUsd: 10 },
+      noAutoStart: true,
+      executors: (current) => ({
+        ...current,
+        mutation: (context) =>
+          context.run.id === ref.origin ? budgetHalt(context) : current.mutation!(context),
+      }),
+    });
+    ref.origin = h.runId;
+    const origin = await runMutationToEnd(h);
+    expect(origin.run).toMatchObject({ status: 'budget_exceeded', currentStep: 'mutation' });
+    const next = await continueRun(harnessOf(h), origin.run.id, () => settleAll(h));
+    expect(pointers(next)).toEqual({
+      test_writing: [origin.run.id, lastPassedId(origin, 'test_writing')],
+      red_check: [origin.run.id, lastPassedId(origin, 'red_check')],
+      implementation: [origin.run.id, lastPassedId(origin, 'implementation')],
+      check: [origin.run.id, lastPassedId(origin, 'check')],
+    });
+    expect(next.steps.find((step) => step.kind === 'mutation')?.status).toBe('passed');
+    expect(next.run.status).toBe('merged');
+    expect(h.sessions.map((spec) => [spec.role, spec.runId])).toEqual([['mutator', next.run.id]]);
+    expect(
+      withProject(h.biveHome, h.projectId, (store) =>
+        store.mutations.listByRun(next.run.id).map((r) => [r.status, r.commit]),
+      ),
+    ).toEqual([['verified', origin.run.headCommit]]);
   }, 120_000);
 
   it('원 실행의 테스트 작성 커밋이 기준 커밋의 기존 인수 테스트를 바꿨으면(대조를 지나친 변경) 이어받는 실행의 병합 직전 대조가 원 실행의 커밋과 기준 커밋 사이에서 막는다', async () => {

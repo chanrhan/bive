@@ -2954,6 +2954,24 @@ describe('단계 실행기는 판정 근거를 한 함수(basisSteps)로 읽는�
       'steps/mutation.ts',
       'steps/red-check.ts',
     ]);
+    // 실행의 단계 목록을 근거 함수 없이 꺼내는 꼴: 구조 분해(`{ steps … } = context`) · 대괄호 · 별칭(`= context.steps`)은 없고,
+    // `context.steps` 읽기는 앞 시도 사유 · 이의 마무리 · 재개 확인처럼 근거가 아닌 자리만 (파일마다 수를 고정)
+    for (const { rel, text } of files) {
+      expect(/\{[^{}]*\bsteps\b[^{}]*\}\s*=\s*context\b/.test(text), rel).toBe(false);
+      expect(/context\s*\[\s*['"`]steps['"`]\s*\]/.test(text), rel).toBe(false);
+      expect(/=\s*context\.steps\s*[;,)]/.test(text), rel).toBe(false);
+    }
+    expect(
+      Object.fromEntries(
+        files
+          .map((f) => [f.rel, (f.text.match(/\bcontext\.steps\b/g) ?? []).length] as const)
+          .filter(([, count]) => count > 0),
+      ),
+    ).toEqual({
+      'steps/implementation.ts': 3,
+      'steps/merge.ts': 1,
+      'steps/test-writing.ts': 1,
+    });
   });
 });
 

@@ -84,26 +84,45 @@ export const continuationStartOf = (origin: RunDetail): InheritedStep[] => {
  * 이 실행의 단계 시도. 단계 실행기는 Red · Green 확인의 인수 테스트 해시와 단계 산출 커밋(`lastPassed` · `acceptanceBaselineOf`)을 이 목록에서
  * 읽는다(복사하지 않는다). 원 실행의 시작 단계 이후 시도(새 실행이 다시 도는 단계)는 들지 않는다. 마지막 통과 시도를 찾을 때 뒤에 오는 이
  * 실행의 시도가 먼저다. 이어받은 시도가 없는 실행(이어받는 실행이 아닌 실행)은 이 실행의 단계 시도 그대로다(저장소를 읽지 않는다).
+ * 가리킨 시도는 읽을 때 대조한다: 이 실행의 연결 사슬의 조상 실행이고, 그 실행의 단계 시도이며 같은 단계 종류이고, 상태가 기록한 `fromStatus`와
+ * 같고 이어받을 수 있는 상태(통과 · 실행기의 생략)여야 한다. 하나라도 어긋나면 이어받은 근거를 하나도 싣지 않는다(이 실행의 단계뿐): 그 근거가
+ * 필요한 단계 실행기는 기존 길대로 `state_inconsistent`로 멈춘다(닫힌 쪽, 근거 없이 계속하지 않는다).
  */
 export const basisSteps = (context: {
+  readonly run: Pick<Run, 'id'>;
   readonly steps: readonly Step[];
   read<T>(fn: (store: ProjectStore) => T): T;
 }): Step[] => {
-  const pointers = context.steps.flatMap((step) => {
-    const detail = inheritedDetailOf(step);
-    return detail === null ? [] : [detail];
+  const rows = context.steps.flatMap((step) => {
+    const pointer = inheritedDetailOf(step);
+    return pointer === null ? [] : [{ kind: step.kind, pointer }];
   });
-  if (pointers.length === 0) return [...context.steps];
-  const inherited = context.read((store) =>
-    pointers.flatMap((pointer) => {
-      const step = store.runs
-        .steps(pointer.fromRunId)
-        .find((item) => item.id === pointer.fromStepId);
-      return step === undefined ? [] : [step];
-    }),
-  );
-  return [...inherited, ...context.steps];
+  if (rows.length === 0) return [...context.steps];
+  const inherited = context.read((store) => {
+    const chain = new Set(store.runContinuations.ancestorsOf(context.run.id));
+    const found: Step[] = [];
+    for (const { kind, pointer } of rows) {
+      const step = chain.has(pointer.fromRunId)
+        ? store.runs.steps(pointer.fromRunId).find((item) => item.id === pointer.fromStepId)
+        : undefined;
+      if (
+        step === undefined ||
+        step.kind !== kind ||
+        step.status !== pointer.fromStatus ||
+        !(step.status === 'passed' || (step.status === 'skipped' && isExecutorSkip(step)))
+      ) {
+        return null;
+      }
+      found.push(step);
+    }
+    return found;
+  });
+  return inherited === null ? [...context.steps] : [...inherited, ...context.steps];
 };
+
+/** 실행기가 생략한 시도인지 (유형 생략 · 이어받은 시도가 아닌 생략). */
+const isExecutorSkip = (step: Step): boolean =>
+  !isRunTypeSkip(step) && inheritedDetailOf(step) === null;
 
 /** 이 실행이 이어받은 원 실행들 (사슬의 뿌리부터 바로 앞 원 실행까지). 이어받는 실행이 아니면 빈 목록. */
 export const lineageRuns = (store: ProjectStore, runId: string): Run[] =>

@@ -168,7 +168,7 @@ export interface RunContinuationSeed {
    * 새 실행에 `skipped`(사유 이어받음)로 만들 단계 (원 실행이 멈춘 단계보다 파이프라인 순서가 앞인 단계, `continuationStartOf`, M3-60 ·
    * ADR-152). 이 단계들은 새 실행에서 돌지 않고 `passed` 행도 만들지 않는다
    */
-  readonly inherited: readonly InheritedStep[];
+  readonly inherited?: readonly InheritedStep[];
 }
 
 /** 실행 시작 확인 주체는 사람뿐이다 (RUN-02, NFR-01). */
