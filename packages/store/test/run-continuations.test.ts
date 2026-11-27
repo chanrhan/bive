@@ -352,6 +352,40 @@ describe('뷰 run_reinforcement_causes: 이어받는 실행도 사슬을 따라 
     });
   });
 
+  it('사람 보강 연결에서 시작한 사슬(사람 보강 실행 → 이어받는 실행)도 원인 변이 기록에 닿고 연결 종류는 뿌리의 review다', () => {
+    withStore((store) => {
+      const rule = seedRule(store);
+      const { survived, reinforcing } = seedReinforcement(store, rule.id);
+      endRun(store, reinforcing.run.id, 'failed');
+      const [item] = store.reviewQueue.list();
+      if (item?.kind !== 'mutant_survived') throw new Error('변이 생존 항목 없음');
+      const humanRun = createRun(store, [rule.id], 'C');
+      store.reviewQueue.linkReinforcement({
+        reviewSeq: item.seq,
+        runId: humanRun.run.id,
+        mutationResultId: survived.id,
+        createdAt: T2,
+      });
+      endRun(store, humanRun.run.id, 'budget_exceeded');
+      const next = createRun(store, [rule.id], 'C');
+      link(store, next.run.id, humanRun.run.id);
+      expect(store.mutations.reinforcementCauseOfRun(next.run.id)).toBe(survived.id);
+      expect(
+        store.db
+          .prepare(
+            'SELECT run_id, mutation_result_id, link_kind FROM run_reinforcement_causes WHERE run_id IN (?, ?) ORDER BY link_kind, run_id',
+          )
+          .all(humanRun.run.id, next.run.id),
+      ).toEqual(
+        [humanRun.run.id, next.run.id].sort().map((runId) => ({
+          run_id: runId,
+          mutation_result_id: survived.id,
+          link_kind: 'review',
+        })),
+      );
+    });
+  });
+
   it('다시 만든 뷰를 읽는 0028의 자동 등록 트리거가 그대로 돈다: 보강을 이은 실행이 실패로 끝나면 변이 생존 항목, 예산 초과면 그 실행의 새 예산 초과 항목', () => {
     withStore((store) => {
       const rule = seedRule(store);
@@ -398,6 +432,9 @@ describe('review_items: 한도 상향 재개 처리는 이어받는 실행의 �
       link(store, elsewhere.run.id, other.run.id);
       expect(() => resolve(elsewhere.run.id)).toThrow(/이어받는 실행의 연결/);
       link(store, next.run.id, origin.run.id);
+      // 연결이 있어도 처리 결과의 실행이 그 이어받는 실행이 아니면(다른 실행 ID) 거부한다
+      expect(() => resolve(other.run.id)).toThrow(/이어받는 실행의 연결/);
+      expect(store.reviewQueue.get(item.seq)?.resolution).toBeNull();
       expect(resolve(next.run.id).resolution).toEqual({
         action: 'raise_limit_resume',
         by: human,

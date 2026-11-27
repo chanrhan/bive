@@ -23,7 +23,7 @@ import { selectAgent } from '../src/agent/select.js';
 import { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import { runEnding } from '../src/engine/run-ending.js';
 import { checkRunStartBasis } from '../src/engine/start-basis.js';
-import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
+import type { NormJudgeLauncher, StepExecutor, StepExecutors } from '../src/engine/types.js';
 import { createWorktreeManager, GitWorktreeError } from '../src/git/worktree-manager.js';
 import { createRunHandlers } from '../src/ipc/run-handlers.js';
 import { RpcError } from '../src/ipc/server.js';
@@ -586,6 +586,86 @@ describe('새 한도의 검증 (M3-56 수용 기준 2, ADR-147 ④)', () => {
         [first.run.id, 'raise_limit_resume'],
         [second.run.id, null],
       ]);
+    });
+  }, 60_000);
+});
+
+describe('엔진의 사슬 누적 배선: 판단 세션의 실행 잔여 · 집계 초과 (M3-56 수용 기준 2, ADR-147 ④)', () => {
+  it('이어받는 실행 안의 판단 세션(규칙 작성 역할)이 받는 실행 잔여는 새 한도 - 원 실행이 쓴 양이다', async () => {
+    const h = setup();
+    const originId = h.read((store) => budgetEnded(store, h.ruleId, 2, 30));
+    const seq = h.read((store) => openBudgetItem(store, originId).seq);
+    const requests: SessionBudget[] = [];
+    const judgeNorms: NormJudgeLauncher = (request) => {
+      requests.push(request.runBudget);
+      return Promise.resolve({ status: 'not_opened', reason: 'start_failed', detail: '시험' });
+    };
+    const askJudgment: StepExecutor = async (context) => {
+      await context.judgeNorms({
+        cause: { kind: 'objection', seq: 1, text: '시험 이의' },
+        ruleIds: [...context.run.targetRuleIds],
+      });
+      return { status: 'halt', runStatus: 'failed', reason: 'step_unmet' };
+    };
+    const engine = new PipelineEngine({
+      biveHome: h.biveHome,
+      agent: recordingAgent(h.biveHome, []),
+      executors: testExecutors({ test_writing: askJudgment }),
+      judgeNorms,
+    });
+    engines.push(engine);
+    await resume(h, { seq, budget: RAISED, author: human }, engine);
+    await engine.settled();
+    // 실행 전체: 6 - 2 = 4 USD, 200 - 30 = 170턴. 이어 세지 않으면 6 USD · 200턴이다
+    expect(requests).toEqual([{ maxBudgetUsd: 4, maxTurns: 170 }]);
+  }, 60_000);
+
+  it('세션이 끝난 뒤 원 실행의 사용량과 합쳐 한도를 넘으면 이어받는 실행은 budget_aggregate_exceeded로 끝난다 (이 실행의 사용량만으로는 넘지 않는 값)', async () => {
+    const h = setup();
+    // 원 실행: 테스트 작성 역할 1.98 USD (역할 한도 2에 닿지 않음)
+    const originId = h.read((store) => budgetEnded(store, h.ruleId, 1.98, 30));
+    const seq = h.read((store) => openBudgetItem(store, originId).seq);
+    const next: BudgetSnapshot = {
+      ...ORIGIN_BUDGET,
+      roles: { ...ORIGIN_BUDGET.roles, 'test-writer': { maxBudgetUsd: 2.01, maxTurns: 100 } },
+    };
+    const budgets: SessionBudget[] = [];
+    const recording = recordingAgent(h.biveHome, []);
+    // 어댑터의 한도 subtype이 먼저 끝내지 않게 세션 한도를 넓혀 넘긴다 (엔진이 세션 뒤 집계로 잡는지 본다)
+    const agent: AgentAdapter = {
+      kind: recording.kind,
+      startSession: (spec) => {
+        budgets.push(spec.budget);
+        return recording.startSession({ ...spec, budget: { maxBudgetUsd: 100, maxTurns: 1000 } });
+      },
+    };
+    const sessionThenPass: StepExecutor = async (context) => {
+      await context.runSession({
+        workDir: context.git.worktreePath,
+        systemPrompt: '시험',
+        prompt: '시험',
+        vars: { ruleId: 'RULE-001' },
+      });
+      return { status: 'passed' };
+    };
+    const engine = new PipelineEngine({
+      biveHome: h.biveHome,
+      agent,
+      executors: testExecutors({ test_writing: sessionThenPass, red_check: failHalt }),
+    });
+    engines.push(engine);
+    const result = await resume(h, { seq, budget: next, author: human }, engine);
+    await engine.settled();
+    // 엔진이 준 한도는 2.01 - 1.98 = 0.03 USD, 세션은 0.0421 USD를 썼다 (이 실행만으로는 2.01 안)
+    expect(budgets).toEqual([{ maxBudgetUsd: 0.03, maxTurns: 70 }]);
+    const detail = h.read((store) => store.runs.getDetail(result.run.id)!);
+    expect(detail.run).toMatchObject({
+      status: 'budget_exceeded',
+      failureReason: 'budget_aggregate_exceeded',
+    });
+    expect(detail.steps.find((step) => step.kind === 'test_writing')?.exitDetail).toMatchObject({
+      reason: 'budget_aggregate_exceeded',
+      detail: { scope: 'role', measure: 'usd', role: 'test-writer', limit: 2.01, spent: 2.0221 },
     });
   }, 60_000);
 });

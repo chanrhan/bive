@@ -1056,6 +1056,36 @@ describe('이어받는 실행: 사용량은 사슬 전체를 이어 센다 (M3-5
     });
   });
 
+  it('턴만 닿은 값도 쓴 양보다 크게 올려야 한다: 역할 턴 · 실행 전체 턴 각각 그대로 두면 BUDGET_NOT_ABOVE_SPENT, 올리면 받는다', () => {
+    const check = (sessions: Session[], next: BudgetSnapshot): unknown => {
+      try {
+        assertRaisedBudget(SNAPSHOT, next, sessions);
+      } catch (error) {
+        return (error as { data: unknown }).data;
+      }
+      return null;
+    };
+    // 역할 턴: 테스트 작성 10턴 = 역할 한도 10 (USD 0.01은 닿지 않음)
+    const roleTurns = [session('test-writer', 0.01, 10)];
+    expect(check(roleTurns, SNAPSHOT)).toEqual({
+      reason: 'BUDGET_NOT_ABOVE_SPENT',
+      fields: ['roles.test-writer.maxTurns'],
+    });
+    expect(
+      check(roleTurns, {
+        ...SNAPSHOT,
+        roles: { ...SNAPSHOT.roles, 'test-writer': { maxBudgetUsd: 0.1, maxTurns: 11 } },
+      }),
+    ).toBeNull();
+    // 실행 전체 턴: 8 + 12 = 20 = 실행 한도 20 (역할 턴 · USD는 닿지 않음)
+    const runTurns = [session('test-writer', 0.01, 8), session('implementer', 0.01, 12)];
+    expect(check(runTurns, SNAPSHOT)).toEqual({
+      reason: 'BUDGET_NOT_ABOVE_SPENT',
+      fields: ['run.maxTurns'],
+    });
+    expect(check(runTurns, { ...SNAPSHOT, run: { maxBudgetUsd: 0.3, maxTurns: 21 } })).toBeNull();
+  });
+
   it('이어받는 실행이 아닌 실행의 한도 계산은 그 실행의 세션 그대로이고, 이어받는 실행은 원 실행들(뿌리부터)의 세션을 앞에 이어 센다', () => {
     const biveHome = makeBiveHome();
     const seeded = seedProject(biveHome, copyFixture(temps));
@@ -1157,6 +1187,17 @@ describe('이어받는 실행: 사용량은 사슬 전체를 이어 센다 (M3-5
       expect(budgetOverrun(snapshot, 'implementer', chain)).toBeNull();
       // 비용 표시는 실행마다 자기 비용이다 (합치지 않는다)
       expect(store.runs.usage(second.run.id)?.run.costUsd).toBe(0.25);
+      // 다른 예산 초과 실행(세션 있음)이 프로젝트에 있어도 이어받는 실행이 아닌 실행은 자기 세션만 센다
+      endBudget(second.run.id);
+      const plain = start();
+      spend(plain, 'test-writer', 0.1, 2);
+      expect(lineageSessions(store, plain).map((item) => [item.runId, item.totalCostUsd])).toEqual([
+        [plain, 0.1],
+      ]);
+      expect(sessionLimits(snapshot, 'test-writer', lineageSessions(store, plain))).toEqual({
+        maxBudgetUsd: 1.9,
+        maxTurns: 98,
+      });
     });
   });
 });
