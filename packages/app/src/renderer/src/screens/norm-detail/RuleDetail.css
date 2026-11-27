@@ -328,6 +328,45 @@
   white-space: nowrap;
 }
 
+/* 종료 사유 보조 표시 (겹친 파일 · 내장 구조 규칙 없음 안내, ADR-144): 줄의 칸들 아래 줄 전체 폭. 긴 경로는 말줄임(잘렸을 때만
+   공통 툴팁), 블록 이름은 경로 뒤 */
+.rule-history-note {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-1);
+  word-break: keep-all;
+}
+
+.rule-history-overlaps {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rule-history-overlap {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: var(--space-2);
+  min-width: 0;
+}
+
+.rule-history-overlap-path {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rule-history-overlap-blocks {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 /* 좁은 상세(칸이 한 줄에 들어가지 않는 폭)에서는 2칸: 시각 · 판정 / 실행 · 커밋 / 실행 상태. 값은 줄이지 않는다 (#165) */
 @container rule-detail (max-width: 400px) {
   .rule-history-row {
@@ -342,6 +381,10 @@
     grid-column: 1 / -1;
     white-space: normal;
     word-break: keep-all;
+  }
+
+  .rule-history-note {
+    grid-column: 1 / -1;
   }
 }
 

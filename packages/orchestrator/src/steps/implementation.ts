@@ -59,6 +59,7 @@ import {
   recordJudgments,
 } from './judging.js';
 import { acceptanceBaselineOf, missingBaselineMessage } from './run-type.js';
+import { structureRuleDisplayIds } from './structure-check.js';
 
 /** 실행 워크트리 의존성 설치가 실패했을 때의 실행 실패 사유 (`Run.failureReason`). */
 export const DEPENDENCY_INSTALL_FAILED_REASON = 'dependency_install_failed';
@@ -100,8 +101,21 @@ const describeItems = (items: unknown): string[] =>
       })
     : [];
 
-/** 앞 시도의 미충족 결과를 다음 implementer 세션에 줄 문장으로 바꾼다. 모르는 모양이면 `null`. */
-export const describeImplementationUnmet = (exitDetail: unknown): string | null => {
+/** 검사 실패 사유의 머리 문장: 인수 테스트(와 계약 검사) 실패. */
+export const CHECK_FAILED_HEADER = '검사(승인된 규칙 전체 인수 테스트): 실패한 규칙이 있다';
+
+/** 검사 실패 사유의 머리 문장: 내장 구조 규칙(블록 선언 구조 검사) 실패 (M3-51 #296, ADR-144). 인수 테스트 실패가 아니다. */
+export const STRUCTURE_FAILED_HEADER =
+  '구조 검사(블록 선언): 통과하지 않은 내장 구조 규칙이 있다 (인수 테스트 실패가 아니다)';
+
+/**
+ * 앞 시도의 미충족 결과를 다음 implementer 세션에 줄 문장으로 바꾼다. 모르는 모양이면 `null`. `structureRuleIds`는 내장 구조
+ * 규칙의 표시 ID다(검사 실패의 판정 요약 `ruleId`와 같은 값): 그 규칙의 실패는 따로 머리 문장을 둔다.
+ */
+export const describeImplementationUnmet = (
+  exitDetail: unknown,
+  structureRuleIds: ReadonlySet<string>,
+): string | null => {
   if (!isRecord(exitDetail)) return null;
   switch (exitDetail.reason) {
     case 'not_green':
@@ -109,20 +123,28 @@ export const describeImplementationUnmet = (exitDetail: unknown): string | null 
         '구현 뒤 판정: 통과하지 않은 대상 케이스가 있다',
         ...describeItems(exitDetail.failingCases),
       ].join('\n');
-    case 'check_failed':
+    case 'check_failed': {
+      const failing = Array.isArray(exitDetail.judgments)
+        ? exitDetail.judgments.filter(
+            (item): item is Record<string, unknown> => isRecord(item) && item.status !== 'pass',
+          )
+        : [];
+      const describe = (items: readonly Record<string, unknown>[]): string[] =>
+        items.flatMap((item) => [
+          `- ${String(item.ruleId)}`,
+          ...describeItems(item.failedCases).map((line) => `  ${line}`),
+        ]);
+      // 내장 구조 규칙의 실패는 인수 테스트 실패와 다른 머리 문장 아래에 싣는다 (M3-51 #296, ADR-144). 구조 위반이 없으면 예전 글
+      // 그대로다(글자까지)
+      const structure = failing.filter((item) => structureRuleIds.has(String(item.ruleId)));
+      const tested = failing.filter((item) => !structureRuleIds.has(String(item.ruleId)));
+      if (structure.length === 0) return [CHECK_FAILED_HEADER, ...describe(failing)].join('\n');
       return [
-        '검사(승인된 규칙 전체 인수 테스트): 실패한 규칙이 있다',
-        ...(Array.isArray(exitDetail.judgments)
-          ? exitDetail.judgments
-              .filter((item) => isRecord(item) && item.status !== 'pass')
-              .flatMap((item) => [
-                `- ${String((item as Record<string, unknown>).ruleId)}`,
-                ...describeItems((item as Record<string, unknown>).failedCases).map(
-                  (line) => `  ${line}`,
-                ),
-              ])
-          : []),
+        ...(tested.length === 0 ? [] : [CHECK_FAILED_HEADER, ...describe(tested)]),
+        STRUCTURE_FAILED_HEADER,
+        ...describe(structure),
       ].join('\n');
+    }
     case 'collect_error':
       return [
         '판정: 인수 테스트 파일을 불러오거나 수집하지 못했다',
@@ -162,10 +184,11 @@ const clipFeedback = (text: string): string =>
 export const previousImplementationFeedback = (
   steps: readonly Step[],
   current: Step,
+  structureRuleIds: ReadonlySet<string>,
 ): string | null => {
   const last = lastUnmetAttempt(steps, current);
   if (last === undefined) return null;
-  const text = describeImplementationUnmet(last.exitDetail);
+  const text = describeImplementationUnmet(last.exitDetail, structureRuleIds);
   if (text === null) return null;
   return clipFeedback(text);
 };
@@ -194,7 +217,9 @@ const implementationFeedback = (context: StepContext): string | null => {
     const text = context.read((store) => objectionFeedback(store, seq));
     if (text !== null) return clipFeedback(text);
   }
-  const previous = previousImplementationFeedback(context.steps, context.step);
+  // 내장 구조 규칙의 표시 ID (내장 규칙은 폐기 · 대체되지 않는다, ADR-127 ③)
+  const structureRuleIds = context.read((store) => structureRuleDisplayIds(store.rules.list()));
+  const previous = previousImplementationFeedback(context.steps, context.step, structureRuleIds);
   // 검사의 대상 밖 규칙 실패가 모순 아님으로 판단됐으면 그 근거를 덧붙인다 (M7-12, ADR-118)
   const judgedRuleIds = last === undefined ? [] : existingRuleJudgmentOf(last.exitDetail);
   if (judgedRuleIds.length > 0) {

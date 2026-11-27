@@ -13,6 +13,8 @@
 //    없음" 한 번) · 위험도(표시명), 값이 없으면 "없음". 블록 10개가 820 · 1100 · 1280 · 1440px 창에서 넘치거나 겹치지 않음 (ADR-126)
 // 8) 이슈 #283(M3-42): 실행 이력은 규칙 기준 조회(run.list {ruleId}) 1회, 블록 선언 알림 · 재접속 뒤 새 선언으로 "선언 외"를
 //    판단, 접히지 않는 상세에서 실행 이력 줄의 상태 칸이 한 줄 (ADR-135)
+// 9) 이슈 #296(M3-51): 블록 선언 겹침으로 끝난 실행 줄에 겹친 파일(표시 값 · 블록 이름 · "외 N개"), 내장 구조 규칙 없음으로 끝난
+//    실행 줄에 고정 안내. 다른 실행 줄 · 옛 응답(칸 없음)에는 없고, 좁은 창에서 넘치지 않는다 (ADR-144)
 // 규칙 화면(SCR-03)에서 카드를 눌러 들어온다. 데이터는 가짜 브리지의 rule.list · judgment.list · requirement.get ·
 // rule.update · normChange.list · confirmation.set 응답뿐이다.
 import { readFileSync } from 'node:fs';
@@ -30,6 +32,11 @@ import {
   LATEST_RUN,
   NO_BLOCKS,
   NO_CHANGES,
+  NOTE_LONG_PATH,
+  NOTE_RUNS,
+  NOTES,
+  noteRunList,
+  overlapNoteOf,
   PARENT,
   PASSING_HISTORY,
   PASSING_RULE,
@@ -51,6 +58,7 @@ import type {
   RuleLatestRun,
   RuleUpdateResult,
   RuleWithJudgment,
+  RunListResult,
 } from '@bive/shared';
 
 import { RUN_FAILURE_REASON_TEXT as RUN_FAILURE_REASON_LABELS } from '../src/renderer/src/screens/norm-detail/runHistoryView.js';
@@ -1736,6 +1744,165 @@ test.describe('실행 이력: 실행 하나가 한 줄 · 실행 종료 사유 (
       expect(await rowOverlaps(pane)).toEqual([]);
       await page.screenshot({
         path: `${SCREENSHOT_DIR}SCR-06/실행-이력-${String(width)}.png`,
+        fullPage: true,
+      });
+    });
+  }
+});
+
+test.describe('실행 이력: 블록 선언 겹침 · 내장 구조 규칙 없음의 실패 원인 (M3-51 #296, ADR-144)', () => {
+  const rows = (page: Page) => page.getByTestId('history-row');
+  const rowOf = (page: Page, displayId: string) =>
+    page.locator(`[data-testid="history-row"][data-run="${displayId}"]`);
+  // 가짜 응답은 checklists/scr-06.ts (shared 스키마를 지나는지 test/run-history-view.test.ts가 확인한다)
+  const LONG_PATH = NOTE_LONG_PATH;
+  const listResult = noteRunList;
+  const RUNS = NOTE_RUNS;
+
+  const openNotes = async (page: Page, result: RunListResult): Promise<BiveMock> => {
+    const bive = await openRules(page, { 'run.list': { result } });
+    await bive.setResponse('judgment.list', { result: { judgments: [] } });
+    await page.getByTestId('card').filter({ hasText: 'RULE-002' }).click();
+    await expect(page.getByTestId('rule-detail')).toHaveAttribute(
+      'data-selected-id',
+      FAILING_RULE.id,
+    );
+    await expect(rows(page)).toHaveCount(RUNS.length);
+    return bive;
+  };
+
+  test('겹침으로 끝난 실행 줄: 종료 사유 아래 "겹친 파일" · 경로(숨은 글자는 표기) · 블록 이름 · "외 N개". 다른 실행 줄에는 없다', async ({
+    page,
+  }) => {
+    await openNotes(page, listResult(NOTES));
+    const overlap = rowOf(page, 'EXE-007');
+    await expect(overlap.getByTestId('history-run-status')).toHaveText('실패 · 블록 선언 겹침');
+    const note = overlap.getByTestId('history-run-note');
+    await expect(note).toHaveCount(1);
+    await expect(note.locator('.rule-history-note-label')).toHaveText('겹친 파일');
+    await expect(note.getByTestId('overlap-file-path')).toHaveText([
+      'src/app/api/auth/\\u202egpj.ts\\u200b',
+      'src/app/api/auth/session/route.ts',
+      LONG_PATH,
+    ]);
+    await expect(note.getByTestId('overlap-file-blocks')).toHaveText([
+      'auth · app',
+      'auth · app',
+      'health · app',
+    ]);
+    await expect(note.getByTestId('overlap-more')).toHaveText('외 24개');
+    // 보조 표시는 종료 사유 칸 뒤에 온다
+    expect(
+      await overlap.evaluate((row) =>
+        [...row.children].map((child) => child.getAttribute('data-testid') ?? ''),
+      ),
+    ).toEqual(['', '', 'history-run', '', 'history-run-status', 'history-run-note']);
+    // 숨은 글자는 화면 어디에도 글자 그대로 없다
+    expect(await note.evaluate((el) => /[\u202e\u200b]/.test(el.textContent ?? ''))).toBe(false);
+    // 겹침이 아닌 실행 줄(종료 사유가 다른 실행에 잘못 붙어 온 겹침 표시 포함)에는 겹친 파일이 없다
+    await expect(rowOf(page, 'EXE-010').getByTestId('history-run-status')).toHaveText(
+      '실패 · 판정 실행기 오류',
+    );
+    await expect(rowOf(page, 'EXE-010').getByTestId('history-run-note')).toHaveCount(0);
+    await expect(rowOf(page, 'EXE-009').getByTestId('history-run-note')).toHaveCount(0);
+    await expect(page.getByTestId('overlap-file')).toHaveCount(3);
+    const texts = await collectVisibleText(page);
+    expect(findForbiddenText(texts)).toEqual([]);
+    expect(
+      texts.filter(({ text }) => /block_declaration_overlap|builtin_rules_missing/.test(text)),
+    ).toEqual([]);
+  });
+
+  test('겹친 파일이 상한 안이면 "외 N개"가 없다', async ({ page }) => {
+    await openNotes(page, listResult([overlapNoteOf(3)]));
+    await expect(rowOf(page, 'EXE-007').getByTestId('overlap-file')).toHaveCount(3);
+    await expect(page.getByTestId('overlap-more')).toHaveCount(0);
+  });
+
+  test('내장 구조 규칙 없음으로 끝난 실행 줄: 종료 사유 아래 고정 안내. 같은 사유의 다른 실행 줄에는 없다', async ({
+    page,
+  }) => {
+    await openNotes(page, listResult(NOTES));
+    const missing = rowOf(page, 'EXE-008');
+    await expect(missing.getByTestId('history-run-status')).toHaveText('실패 · 실행 상태 불일치');
+    await expect(missing.getByTestId('history-run-note')).toHaveText(
+      '내장 구조 규칙 없음 · 블록 선언 다시 저장 필요',
+    );
+    await expect(missing.getByTestId('overlap-file')).toHaveCount(0);
+    await expect(rowOf(page, 'EXE-009').getByTestId('history-run-status')).toHaveText(
+      '실패 · 실행 상태 불일치',
+    );
+    await expect(rowOf(page, 'EXE-009').getByTestId('history-run-note')).toHaveCount(0);
+    await expect(page.getByTestId('history-run-note')).toHaveCount(2);
+  });
+
+  test('보조 표시 칸이 없는 옛 응답: 줄 · 종료 사유는 그대로이고 보조 표시만 없다', async ({
+    page,
+  }) => {
+    await openNotes(page, listResult());
+    await expect(rows(page).getByTestId('history-run')).toHaveText([
+      'EXE-007',
+      'EXE-008',
+      'EXE-009',
+      'EXE-010',
+    ]);
+    await expect(rows(page).getByTestId('history-run-status')).toHaveText([
+      '실패 · 블록 선언 겹침',
+      '실패 · 실행 상태 불일치',
+      '실패 · 실행 상태 불일치',
+      '실패 · 판정 실행기 오류',
+    ]);
+    await expect(page.getByTestId('history-run-note')).toHaveCount(0);
+    await expect(page.getByTestId('rule-runs-error')).toHaveCount(0);
+  });
+
+  for (const width of [820, 1280] as const) {
+    test(`${String(width)}×800: 겹친 파일 줄이 상세 안에 들어오고, 잘린 긴 경로는 공통 툴팁으로 전체가 보인다 (title 속성 없음)`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await openNotes(page, listResult(NOTES));
+      const pane = page.getByTestId('rule-detail');
+      expect(await horizontalOverflow(pane, '[data-testid="history-row"]')).toEqual([]);
+      // 겹친 파일 줄은 상세 안에 들어오고 넘치지 않는다 (경로 칸만 말줄임으로 잘릴 수 있다: 잘리면 툴팁, 아래)
+      expect(
+        await pane.evaluate((el) => {
+          const right = el.getBoundingClientRect().left + el.clientLeft + el.clientWidth;
+          return [...el.querySelectorAll<HTMLElement>('[data-testid="overlap-file"]')].flatMap(
+            (item, i) => [
+              ...(item.getBoundingClientRect().right > right + 0.5 ? [`줄 ${String(i)} 밖`] : []),
+              ...(item.scrollWidth > item.clientWidth + 0.5 ? [`줄 ${String(i)} 넘침`] : []),
+            ],
+          );
+        }),
+      ).toEqual([]);
+      const path = rowOf(page, 'EXE-007').getByTestId('overlap-file-path');
+      // 경로마다 조건 규칙: 잘렸으면 올림에 공통 툴팁으로 화면 글 전체, 아니면 툴팁 없음 (글꼴 폭에 기대지 않는다)
+      const shown = [
+        'src/app/api/auth/\\u202egpj.ts\\u200b',
+        'src/app/api/auth/session/route.ts',
+        LONG_PATH,
+      ];
+      let clippedCount = 0;
+      for (const [index, text] of shown.entries()) {
+        const target = path.nth(index);
+        await target.scrollIntoViewIfNeeded();
+        await expect(target).not.toHaveAttribute('title');
+        const clipped = await target.evaluate((el) => el.scrollWidth > el.clientWidth);
+        await target.hover();
+        if (clipped) {
+          clippedCount += 1;
+          await expect(page.getByRole('tooltip').getByTestId('tooltip-line')).toHaveText([text]);
+        } else {
+          await expect(page.getByRole('tooltip')).toHaveCount(0);
+        }
+        await page.mouse.move(0, 0);
+        await expect(page.getByRole('tooltip')).toHaveCount(0);
+      }
+      // 아주 긴 경로(약 230자)는 어느 폭에서든 잘린다
+      expect(clippedCount).toBeGreaterThan(0);
+      await page.screenshot({
+        path: `${SCREENSHOT_DIR}SCR-06/실행-이력-겹친-파일-${String(width)}.png`,
         fullPage: true,
       });
     });

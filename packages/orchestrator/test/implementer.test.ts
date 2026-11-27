@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { APPROVAL_LOG_GENESIS_HASH, type JudgmentResult, METHODS } from '@bive/shared';
+import { APPROVAL_LOG_GENESIS_HASH, type JudgmentResult, METHODS, type Rule } from '@bive/shared';
 import {
   bivePaths,
   canonicalJson,
@@ -33,7 +33,18 @@ import {
   type NormInput,
 } from '../src/norms/norm-input.js';
 import { retireAgentRule } from '../src/norms/agent-rule.js';
-import { readContractSource, registerHumanContract } from '../src/norms/contract.js';
+import {
+  contractRuleText,
+  readContractSource,
+  registerHumanContract,
+} from '../src/norms/contract.js';
+import { BUILTIN_STRUCTURE_RULE_TEXTS } from '../src/norms/builtin-rules.js';
+import { structureRuleDisplayIds } from '../src/steps/structure-check.js';
+import {
+  CHECK_FAILED_HEADER,
+  describeImplementationUnmet,
+  STRUCTURE_FAILED_HEADER,
+} from '../src/steps/implementation.js';
 import { NORM_INTEGRITY_STAGE } from '../src/steps/judging.js';
 import {
   human,
@@ -1466,4 +1477,158 @@ describe('구현 세션의 규범 입력: 효력 있는 요구사항 · 규칙�
     );
     expect(prompt).not.toContain(INJECTED);
   }, 60_000);
+});
+
+describe('앞 시도 사유의 머리 문장: 구조 위반은 인수 테스트 실패와 다른 머리 아래 (M3-51 #296, ADR-144)', () => {
+  // 검사 단계 미충족(`check_failed`)의 판정 요약 (검사 실행기가 남기는 모양, steps/check.ts · judging.ts의 judgmentDigest)
+  const acceptance = {
+    judgmentId: 'j1',
+    ruleId: 'RULE-001',
+    status: 'fail',
+    failedCases: [
+      {
+        name: '취소 거절',
+        file: 'bive-acceptance/RULE-001/cancel.acc.ts',
+        line: 3,
+        status: 'failed',
+        message: 'expected 409',
+      },
+    ],
+  };
+  const structure = {
+    judgmentId: 'j2',
+    ruleId: 'RULE-005',
+    status: 'fail',
+    failedCases: [
+      {
+        name: '구조 검사 · 블록 선언 판 1',
+        file: '블록 선언',
+        line: null,
+        status: 'failed',
+        message: '위반 1건',
+      },
+      {
+        name: '선언하지 않은 방향의 가져오기 · health → auth',
+        file: 'src/app/api/health/probe.ts',
+        line: null,
+        status: 'failed',
+        message: '가져온 파일: src/app/api/auth/session/route.ts',
+      },
+    ],
+  };
+  const passed = { judgmentId: 'j3', ruleId: 'RULE-004', status: 'pass', failedCases: [] };
+  const builtin = new Set(['RULE-004', 'RULE-005']);
+  const checkFailed = (...judgments: unknown[]) => ({
+    commit: 'a'.repeat(40),
+    reason: 'check_failed',
+    judgments,
+  });
+  const ACCEPTANCE_TEXT = [
+    '검사(승인된 규칙 전체 인수 테스트): 실패한 규칙이 있다',
+    '- RULE-001',
+    '  - bive-acceptance/RULE-001/cancel.acc.ts:3 취소 거절 (expected 409)',
+  ].join('\n');
+  const STRUCTURE_TEXT = [
+    '구조 검사(블록 선언): 통과하지 않은 내장 구조 규칙이 있다 (인수 테스트 실패가 아니다)',
+    '- RULE-005',
+    '  - 블록 선언 구조 검사 · 블록 선언 판 1 (위반 1건)',
+    '  - src/app/api/health/probe.ts 선언하지 않은 방향의 가져오기 · health → auth (가져온 파일: src/app/api/auth/session/route.ts)',
+  ].join('\n');
+
+  it('머리 문장은 고정 글이다', () => {
+    expect(CHECK_FAILED_HEADER).toBe('검사(승인된 규칙 전체 인수 테스트): 실패한 규칙이 있다');
+    expect(STRUCTURE_FAILED_HEADER).toBe(
+      '구조 검사(블록 선언): 통과하지 않은 내장 구조 규칙이 있다 (인수 테스트 실패가 아니다)',
+    );
+  });
+
+  it('구조 위반만: 구조 검사 머리 아래에만 싣고 인수 테스트 실패 머리는 없다', () => {
+    expect(describeImplementationUnmet(checkFailed(passed, structure), builtin)).toBe(
+      STRUCTURE_TEXT,
+    );
+  });
+
+  it('인수 테스트 실패만: 글자까지 예전과 같다 (내장 구조 규칙이 통과로 함께 있어도, 내장 규칙이 없는 프로젝트여도)', () => {
+    expect(describeImplementationUnmet(checkFailed(acceptance, passed), builtin)).toBe(
+      ACCEPTANCE_TEXT,
+    );
+    expect(describeImplementationUnmet(checkFailed(acceptance), new Set())).toBe(ACCEPTANCE_TEXT);
+  });
+
+  it('둘 다: 인수 테스트 실패 머리 아래 인수 테스트 규칙, 그 뒤 구조 검사 머리 아래 내장 구조 규칙 (판정 요약 순서와 무관)', () => {
+    const both = `${ACCEPTANCE_TEXT}\n${STRUCTURE_TEXT}`;
+    expect(describeImplementationUnmet(checkFailed(structure, passed, acceptance), builtin)).toBe(
+      both,
+    );
+    expect(describeImplementationUnmet(checkFailed(acceptance, structure), builtin)).toBe(both);
+  });
+
+  // 계약 검사 규칙도 내장(builtin) 행이다(norms/contract.ts). 구조 머리 아래로 가는 것은 내장 구조 규칙(고정 제목)뿐이다
+  const ruleRow = (displayId: string, title: string, patch: Partial<Rule> = {}): Rule => ({
+    id: `01JC00000000000000000000${displayId.slice(-2)}`,
+    displayId,
+    title,
+    statement: 'WHILE 블록 선언이 있으면 THE SYSTEM SHALL 따른다',
+    kind: 'architecture',
+    checkKinds: ['structure'],
+    parentRequirementId: null,
+    parentDetachedAt: null,
+    builtin: true,
+    targetBlockIds: [],
+    risk: null,
+    contractId: null,
+    author: { kind: 'human' },
+    normState: 'approved',
+    createdAt: '2026-11-26T00:00:00.000Z',
+    updatedAt: '2026-11-26T00:00:00.000Z',
+    deletedAt: null,
+    confirmation: { state: 'unconfirmed' },
+    ...patch,
+  });
+  const contractRule = ruleRow('RULE-006', contractRuleText('CON-001').title, {
+    kind: 'tech-constraint',
+    checkKinds: ['contract'],
+    contractId: '01JF0000000000000000000001',
+  });
+  const RULES: Rule[] = [
+    ruleRow('RULE-001', '주문 취소 거절', { builtin: false, kind: 'business' }),
+    ruleRow('RULE-004', BUILTIN_STRUCTURE_RULE_TEXTS['structure.public-api-only'].title),
+    ruleRow('RULE-005', BUILTIN_STRUCTURE_RULE_TEXTS['structure.declared-direction'].title),
+    contractRule,
+  ];
+
+  it('구조 머리의 기준(structureRuleDisplayIds)은 내장 구조 규칙의 고정 제목뿐이고, 같은 내장 행인 계약 검사 규칙 · 일반 규칙은 들지 않는다', () => {
+    expect([...structureRuleDisplayIds(RULES)]).toEqual(['RULE-004', 'RULE-005']);
+    expect(structureRuleDisplayIds([contractRule]).size).toBe(0);
+  });
+
+  it('계약 검사 규칙의 실패는 구조 머리가 아니라 기존 머리(CHECK_FAILED_HEADER) 아래에만 실린다 (계약 실패만이면 글자까지 예전과 같다)', () => {
+    const contract = {
+      judgmentId: 'j4',
+      ruleId: 'RULE-006',
+      status: 'fail',
+      failedCases: [
+        {
+          name: '계약과 다른 응답',
+          file: 'openapi.yaml',
+          line: null,
+          status: 'failed',
+          message: 'GET /api/health',
+        },
+      ],
+    };
+    const CONTRACT_ITEM = ['- RULE-006', '  - openapi.yaml 계약과 다른 응답 (GET /api/health)'];
+    const ids = structureRuleDisplayIds(RULES);
+    expect(describeImplementationUnmet(checkFailed(contract, passed), ids)).toBe(
+      [CHECK_FAILED_HEADER, ...CONTRACT_ITEM].join('\n'),
+    );
+    expect(describeImplementationUnmet(checkFailed(contract, structure, acceptance), ids)).toBe(
+      [
+        CHECK_FAILED_HEADER,
+        ...CONTRACT_ITEM,
+        ...ACCEPTANCE_TEXT.split('\n').slice(1),
+        STRUCTURE_TEXT,
+      ].join('\n'),
+    );
+  });
 });

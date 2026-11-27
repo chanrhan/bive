@@ -6,16 +6,21 @@
 // - 실행을 알 수 없는 판정 기록(실행 표시 ID 없음)은 판정 하나가 한 줄이다
 // - 종료 사유는 shared `RUN_FAILURE_REASON_LABELS`를 다시 적은 표로 그리고(시험이 대조), 표에 없는 옛 값은 "알 수 없는 사유"다.
 //   사유의 상세(단계 결과 `exitDetail`)는 이 줄에 싣지 않는다(`run.list`에 없고, 에이전트 · 판정 출력에서 온 글이 섞일 수 있다)
+// - 종료 사유 보조 표시 (M3-51 #296, ADR-144): `run.list`의 `failureNotes`(선택 칸)에 그 실행의 것이 있고 실행이 실패 · 그 종료 사유로
+//   끝났을 때만 줄에 싣는다. 블록 선언 겹침 = 겹친 파일(서버가 준 표시 값을 `visibleDisplayText`로) · 블록 이름 · 넘친 수, 내장 구조
+//   규칙 없음 = 고정 안내. 칸이 없는 옛 응답이면 보조 표시가 없을 뿐이다
 // - 값은 `judgment.list` · `run.list` 응답에서만 만든다(NFR-03)
 import type {
   JudgmentResult,
   Run,
+  RunFailureNote,
   RunFailureReason,
   RunStatus,
   RuleJudgmentEntry,
 } from '@bive/shared';
 
 import { formatCardTime } from '../../components/Card2Line/time.js';
+import { visibleDisplayText } from '../../components/VisibleText/visibleText.js';
 import { RUN_STATUS_TEXT } from '../verification/verificationView.js';
 
 /** 실행 종료 사유 표시명 (shared `RUN_FAILURE_REASON_LABELS`와 같음, 시험이 대조). */
@@ -83,6 +88,44 @@ export const runStatusText = (run: Pick<Run, 'status' | 'failureReason'>): strin
     : status;
 };
 
+/** 종료 사유 보조 표시의 고정 문구 (screens.md 1.1 명사형). */
+export const RUN_FAILURE_NOTE_TEXT = {
+  overlapFiles: '겹친 파일',
+  more: (count: number): string => `외 ${String(count)}개`,
+  builtinRulesMissing: '내장 구조 규칙 없음 · 블록 선언 다시 저장 필요',
+} as const;
+
+/** 실행 이력 줄의 종료 사유 보조 표시 (그릴 글). */
+export type RunHistoryNote =
+  | {
+      readonly kind: 'overlap';
+      readonly files: readonly { readonly file: string; readonly blocks: string }[];
+      /** 목록에 없는 겹친 파일 수 (0이면 "외 N개"가 없다) */
+      readonly more: number;
+    }
+  | { readonly kind: 'builtin_rules_missing'; readonly text: string };
+
+/** 보조 표시 → 그릴 글. 경로는 서버가 준 표시 값이라 `visibleDisplayText`를 거친다(숨은 글자가 섞여 와도 표기로 보인다). */
+export const runHistoryNote = (note: RunFailureNote): RunHistoryNote =>
+  note.kind === 'block_declaration_overlap'
+    ? {
+        kind: 'overlap',
+        files: note.files.map(({ file, blocks }) => ({
+          file: visibleDisplayText(file),
+          blocks: blocks.join(' · '),
+        })),
+        more: Math.max(0, note.total - note.files.length),
+      }
+    : { kind: 'builtin_rules_missing', text: RUN_FAILURE_NOTE_TEXT.builtinRulesMissing };
+
+/** 보조 표시가 그 실행의 종료 사유와 맞는지 (겹침이 아닌 실행에 겹친 파일을 보이지 않는다). */
+const noteFits = (note: RunFailureNote, run: Run): boolean =>
+  run.status === 'failed' &&
+  run.failureReason ===
+    (note.kind === 'block_declaration_overlap'
+      ? 'block_declaration_overlap'
+      : 'state_inconsistent');
+
 /** 실행 이력 한 줄. */
 export interface RunHistoryRow {
   readonly key: string;
@@ -94,6 +137,8 @@ export interface RunHistoryRow {
   readonly judgment: JudgmentResult | null;
   /** 실행 상태 · 종료 사유 글. 실행을 모르면(`run.list`를 못 읽음 · 목록에 없음) null */
   readonly status: string | null;
+  /** 종료 사유 보조 표시. 없으면 null */
+  readonly note: RunHistoryNote | null;
 }
 
 const timeOf = (iso: string): number => {
@@ -111,8 +156,14 @@ export const runHistoryRows = (
   ruleId: string,
   judgments: readonly RuleJudgmentEntry[],
   runs: readonly Run[] | null,
+  notes: readonly RunFailureNote[] = [],
 ): RunHistoryRow[] => {
   const byDisplayId = new Map((runs ?? []).map((run) => [run.displayId, run]));
+  const noteOf = (run: Run | undefined): RunHistoryNote | null => {
+    if (run === undefined) return null;
+    const note = notes.find((item) => item.runId === run.id);
+    return note !== undefined && noteFits(note, run) ? runHistoryNote(note) : null;
+  };
   const rows: (RunHistoryRow & { order: number })[] = [];
   const seen = new Map<string, number>();
   let order = 0;
@@ -126,6 +177,7 @@ export const runHistoryRows = (
         runDisplayId: null,
         judgment,
         status: null,
+        note: null,
         order,
       });
       continue;
@@ -147,6 +199,7 @@ export const runHistoryRows = (
       runDisplayId,
       judgment,
       status: run === undefined ? null : runStatusText(run),
+      note: noteOf(run),
       order: current?.order ?? order,
     };
     if (index === undefined) {
@@ -168,6 +221,7 @@ export const runHistoryRows = (
       runDisplayId: run.displayId,
       judgment: null,
       status: runStatusText(run),
+      note: noteOf(run),
       order: -order,
     });
   }
@@ -180,5 +234,6 @@ export const runHistoryRows = (
       runDisplayId: row.runDisplayId,
       judgment: row.judgment,
       status: row.status,
+      note: row.note,
     }));
 };

@@ -65,6 +65,7 @@ import {
   StepKind,
   StepStatus,
 } from './enums.js';
+import { BLOCK_LIMITS, BlockName } from './blocks.js';
 import { displayIdSchema, Ulid } from './id.js';
 import { RunUsage } from './usage.js';
 
@@ -995,7 +996,7 @@ export type RunGetResult = z.infer<typeof RunGetResult>;
 /**
  * `run.list`: 표시 ID 순(= 생성 순). `status`로 거른다 (생략하면 전부). `ruleId`를 주면 그 규칙의 실행 이력에 드는 실행만
  * (그 규칙이 대상인 실행 + 그 규칙의 판정 기록이 있는 실행, 규칙 상세의 실행 이력, M3-42 #283 · ADR-135). 없는 규칙 ID는 -32004.
- * 결과 형식은 같다.
+ * 결과 형식은 같다. 결과의 `failureNotes`(선택 칸)는 목록 안 실행의 종료 사유 보조 표시다({@link RunFailureNote}).
  */
 export const RunListParams = z.strictObject({
   projectId: Ulid,
@@ -1003,7 +1004,42 @@ export const RunListParams = z.strictObject({
   ruleId: Ulid.optional(),
 });
 export type RunListParams = z.infer<typeof RunListParams>;
-export const RunListResult = z.strictObject({ runs: z.array(Run) });
+/**
+ * 블록 선언 겹침으로 끝난 실행의 겹친 파일 목록 상한 (M3-51 #296, ADR-144). 구조 위반 판정 기록 케이스의 상한(오케스트레이터
+ * `MAX_STRUCTURE_CASES`)과 같은 값이다(시험이 대조한다). 넘는 수는 `total`로 드러난다.
+ */
+export const RUN_OVERLAP_FILES_LIMIT = 20;
+
+/** 겹친 파일 한 개: 경로(판정 기록의 케이스 위치와 같은 표시 값) · 그 파일의 포함 경로에 맞은 블록 이름(선언 순서, 둘 이상). */
+export const RunOverlapFile = z.strictObject({
+  file: z.string().min(1),
+  blocks: z.array(BlockName).min(2).max(BLOCK_LIMITS.blocks),
+});
+export type RunOverlapFile = z.infer<typeof RunOverlapFile>;
+
+/**
+ * 실행 종료 사유의 보조 표시 (`run.list`의 선택 칸, M3-51 #296, ADR-144). 그 실행을 끝낸 단계 시도의 결과(`exitDetail`)에서
+ * 오케스트레이터가 만든다. 에이전트 · 실행기의 글은 싣지 않는다.
+ * - `block_declaration_overlap`: 블록 선언 겹침으로 끝난 실행의 겹친 파일(앞 {@link RUN_OVERLAP_FILES_LIMIT}개)과 전체 수
+ * - `builtin_rules_missing`: 블록 선언은 있는데 내장 구조 규칙 행이 없어 실행 상태 불일치로 끝난 실행 (블록 선언을 다시 저장하면
+ *   없는 규칙이 생긴다, ADR-127 ①)
+ */
+export const RunFailureNote = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('block_declaration_overlap'),
+    runId: Ulid,
+    files: z.array(RunOverlapFile).max(RUN_OVERLAP_FILES_LIMIT),
+    total: z.int().nonnegative(),
+  }),
+  z.strictObject({ kind: z.literal('builtin_rules_missing'), runId: Ulid }),
+]);
+export type RunFailureNote = z.infer<typeof RunFailureNote>;
+
+/** `run.list` 결과. `failureNotes`는 선택 칸이다(옛 오케스트레이터의 응답에는 없다, ADR-144). */
+export const RunListResult = z.strictObject({
+  runs: z.array(Run),
+  failureNotes: z.array(RunFailureNote).optional(),
+});
 export type RunListResult = z.infer<typeof RunListResult>;
 
 /**

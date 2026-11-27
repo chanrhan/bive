@@ -1,7 +1,7 @@
 // 규칙 상세가 목록 항목 밖에서 더 읽는 값 (SCR-03 상세 · SCR-06, NFR-03: 값은 RPC 결과에서만).
 // - 실행 이력: `judgment.list` 1회 → 판정 기록(최신부터) + 실행 표시 ID (ADR-073), `run.list {ruleId}` 1회 → 그 규칙이
 //   대상이거나 그 규칙을 판정한 실행의 상태 · 종료 사유와 판정 없이 끝난 실행 (실행 하나가 한 줄, runHistoryView.ts, ADR-123 ·
-//   규칙 기준 조회 ADR-135)
+//   규칙 기준 조회 ADR-135), 같은 응답의 종료 사유 보조 표시(겹친 파일 · 내장 구조 규칙 없음 안내, ADR-144)
 // - 부모 요구사항: 부모가 있으면 `requirement.get` 1회 → 표시 ID · 문장. 실패하면 보이지 않는다
 // - 변경 이력: `normChange.list` 1회 → 이 규칙이 대상인 규범 변경 기록 (M7-15, ADR-114)
 // - 최신 실행 링크: `rule.get` 1회 → 이 규칙이 대상인 최신 실행의 표시 ID · 실행 합계 비용 · 턴 (M3-16, ADR-134)
@@ -13,6 +13,7 @@ import type {
   RuleJudgmentEntry,
   RuleLatestRun,
   Run,
+  RunFailureNote,
 } from '@bive/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -54,7 +55,11 @@ export const useRuleHistory = (
   return loaded !== null && loaded.ruleId === ruleId ? loaded.load : LOADING;
 };
 
-export type RuleRunsLoad = { state: 'loading' } | { state: 'ready'; runs: Run[] | null };
+/**
+ * `notes`: 응답의 종료 사유 보조 표시(`failureNotes`, 선택 칸, M3-51 #296 · ADR-144). 칸이 없는 옛 응답 · 못 읽음은 빈 목록.
+ */
+export type RuleRunsLoad =
+  { state: 'loading' } | { state: 'ready'; runs: Run[] | null; notes: RunFailureNote[] };
 
 /**
  * 규칙의 실행 이력에 드는 실행 (`run.list {projectId, ruleId}` 1회, M3-42 #283 · ADR-135): 그 규칙이 대상인 실행과 그 규칙을
@@ -69,14 +74,14 @@ export const useRuleRuns = (projectId: string, ruleId: string): RuleRunsLoad => 
   const fetchRuns = useCallback((): Promise<void> => {
     seq.current += 1;
     const mine = seq.current;
-    const settle = (runs: Run[] | null): void => {
+    const settle = (runs: Run[] | null, notes: RunFailureNote[]): void => {
       if (seq.current === mine) {
-        setLoaded({ key: `${projectId}\n${ruleId}`, load: { state: 'ready', runs } });
+        setLoaded({ key: `${projectId}\n${ruleId}`, load: { state: 'ready', runs, notes } });
       }
     };
     return window.bive.invoke('run.list', { projectId, ruleId }).then(
-      ({ runs }) => settle(runs),
-      () => settle(null),
+      ({ runs, failureNotes }) => settle(runs, failureNotes ?? []),
+      () => settle(null, []),
     );
   }, [projectId, ruleId]);
   useEffect(() => {

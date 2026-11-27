@@ -22,6 +22,9 @@ import type {
   RuleLatestRun,
   RuleWithJudgment,
   Run,
+  RunFailureNote,
+  RunListResult,
+  RunOverlapFile,
 } from '@bive/shared';
 
 import { PROJECT, REQUIREMENTS } from './scr-02.js';
@@ -298,6 +301,54 @@ export const RUN_HISTORY_RUNS: Run[] = [
     endedAt: '2026-10-20T01:00:00.000Z',
   }),
 ];
+
+/**
+ * 종료 사유 보조 표시의 `run.list` 가짜 응답 (M3-51 #296, ADR-144, 테스트 전용 데이터): RULE-002가 대상이고 판정 기록 없이 끝난 실행.
+ * EXE-007 블록 선언 겹침(겹친 파일), EXE-008 내장 구조 규칙 없음(안내), EXE-009 다른 실행 상태 불일치(보조 표시 없음), EXE-010 판정
+ * 실행기 오류인데 겹침 표시가 잘못 붙어 온 응답(그 줄에 보이지 않아야 한다). 목록 순서는 표시 ID 순이 아니어도 된다.
+ */
+const noteRunOf = (displayId: string, failureReason: string, endedAt: string): Run =>
+  runOf(displayId, { failureReason, lastCompletedStep: 'implementation', endedAt });
+const OVERLAP_RUN = noteRunOf('EXE-007', 'block_declaration_overlap', '2026-10-24T01:00:00.000Z');
+const MISSING_RUN = noteRunOf('EXE-008', 'state_inconsistent', '2026-10-23T01:00:00.000Z');
+const MISMATCH_RUN = noteRunOf('EXE-010', 'judge_runner_error', '2026-10-21T01:00:00.000Z');
+export const NOTE_RUNS: Run[] = [
+  MISMATCH_RUN,
+  noteRunOf('EXE-009', 'state_inconsistent', '2026-10-22T01:00:00.000Z'),
+  MISSING_RUN,
+  OVERLAP_RUN,
+];
+
+/** 겹친 파일의 긴 경로 (좁은 상세에서 말줄임 + 툴팁). */
+export const NOTE_LONG_PATH = `src/app/api/health/${'nested-folder/'.repeat(12)}very-long-file-name.ts`;
+
+/** 겹친 파일 (서버가 준 표시 값에 숨은 글자 U+202E · 영폭 공백이 섞여 온 경로 포함. 소스에는 이스케이프로 적는다). */
+export const NOTE_FILES: RunOverlapFile[] = [
+  { file: 'src/app/api/auth/\u202egpj.ts\u200b', blocks: ['auth', 'app'] },
+  { file: 'src/app/api/auth/session/route.ts', blocks: ['auth', 'app'] },
+  { file: NOTE_LONG_PATH, blocks: ['health', 'app'] },
+];
+
+/** 겹침 보조 표시 (전체 수 `total`). */
+export const overlapNoteOf = (total: number, runId = OVERLAP_RUN.id): RunFailureNote => ({
+  kind: 'block_declaration_overlap',
+  runId,
+  files: NOTE_FILES,
+  total,
+});
+
+/** 보조 표시: EXE-007 겹친 파일 27개(앞 3개만), EXE-008 안내, EXE-010에 잘못 붙은 겹침 표시. */
+export const NOTES: RunFailureNote[] = [
+  overlapNoteOf(27),
+  { kind: 'builtin_rules_missing', runId: MISSING_RUN.id },
+  overlapNoteOf(3, MISMATCH_RUN.id),
+];
+
+/** 보조 표시 실행의 `run.list` 결과. `failureNotes`를 주지 않으면 칸이 없는 옛 응답이다. */
+export const noteRunList = (failureNotes?: RunFailureNote[]): RunListResult => ({
+  runs: NOTE_RUNS,
+  ...(failureNotes === undefined ? {} : { failureNotes }),
+});
 
 /** `judgment.list` 가짜 응답: 규칙 ID → 이력. */
 export const HISTORY: Record<string, RuleJudgmentEntry[]> = {
