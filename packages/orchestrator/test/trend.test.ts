@@ -25,6 +25,7 @@ import type { PipeServer } from '../src/ipc/server.js';
 import { retireAgentRule } from '../src/norms/agent-rule.js';
 import { isEffectiveRule, isEffectiveRuleBefore } from '../src/norms/effective.js';
 import { createRun } from '../src/runs/run-service.js';
+import { overlayMarks } from '../src/verification/summary.js';
 import { verificationTrend } from '../src/verification/trend.js';
 import type { TestClient } from './helpers/client.js';
 import { cleanup } from './helpers/process.js';
@@ -672,6 +673,8 @@ describe('verification.trend: 상한 · 조회 수 (수용 기준 1)', () => {
         vi.spyOn(store.judgments, 'listByRuns'),
         vi.spyOn(store.mutations, 'list'),
         vi.spyOn(store.rules, 'list'),
+        // 실행 밖 표시(재검증 필요 · 격리)도 한 번에 읽는다 (M3-14 #59, ADR-156)
+        vi.spyOn(store.judgments, 'listUnattached'),
       ];
       const result = verificationTrend(store);
       expect(result.points).toHaveLength(VERIFICATION_TREND_LIMIT);
@@ -703,5 +706,125 @@ describe('rule.list의 변이 상태 (수용 기준 3의 서버 값, ADR-139 · 
       [ids.flipped]: 'verified',
       [ids.survived]: 'survived',
     });
+  });
+});
+
+describe('재검증 필요 · 격리 표시의 지표 반영 (M3-14 #59, JDG-03, ADR-156)', () => {
+  /** 실행 밖 표시 기록 (감시자 · 규칙 편집 · 판정 격리 · 재판정 불일치가 남기는 모양). */
+  const mark = (
+    store: ProjectStore,
+    rule: Rule,
+    status: 'needs_recheck' | 'quarantined',
+    at: number,
+  ): JudgmentResult =>
+    store.judgments.record([
+      {
+        id: newId(),
+        ruleId: rule.id,
+        runId: null,
+        stepId: null,
+        commit: sha(0xfe),
+        judgedAt: iso(at),
+        status,
+        runner: 'vitest',
+        exitCode: null,
+        reporterPath: null,
+        cases: [],
+        quarantineReason: status === 'quarantined' ? '재판정 불일치' : null,
+      },
+    ])[0]!;
+
+  it('판정 기준 판정보다 나중인 표시가 그 규칙의 판정이다: 재검증 필요는 분모에 들고 통과가 아니며 격리는 분모에서 빠진다. 다음 병합의 판정이 더 나중이면 판정 기준 판정 그대로이고, 마지막 점은 요약 카드와 같다', async () => {
+    const ids = h.read((store) => {
+      const a = insertRule(store, '표시 가');
+      const b = insertRule(store, '표시 나');
+      const first = seedRun(store, { ruleIds: [a.id], at: T0 + HOUR, mergeCommit: sha(0xc1) });
+      judge(store, first, a, 'pass');
+      judge(store, first, b, 'pass');
+      // 첫 병합 뒤 · 다음 병합 앞의 재검증 필요 (사람 커밋 등)
+      const recheck = mark(store, a, 'needs_recheck', T0 + 2 * HOUR);
+      const second = seedRun(store, { ruleIds: [a.id], at: T0 + 3 * HOUR, mergeCommit: sha(0xc2) });
+      judge(store, second, a, 'pass');
+      judge(store, second, b, 'pass');
+      return { a: a.id, b: b.id, recheck, rules: { a, b } };
+    });
+    // 첫 점: 그 순간(둘째 병합 직전) 앞의 표시가 첫 실행의 판정보다 나중 → 가는 재검증 필요 (분모에 들고 통과 아님)
+    // 둘째 점 · 요약: 둘째 실행의 판정이 표시보다 나중 → 둘 다 통과
+    expect(tallies(await trend()).map(({ compliance }) => compliance)).toEqual([
+      { passed: 1, judgeable: 2 },
+      { passed: 2, judgeable: 2 },
+    ]);
+    expect((await summary()).compliance).toEqual({ passed: 2, judgeable: 2 });
+
+    // 지금(둘째 병합 뒤)의 표시: 가는 재검증 필요, 나는 격리
+    const later = h.read((store) => ({
+      recheck: mark(store, ids.rules.a, 'needs_recheck', Date.now() - 2_000),
+      quarantine: mark(store, ids.rules.b, 'quarantined', Date.now() - 1_000),
+    }));
+    const now = await summary();
+    expect(now.compliance).toEqual({ passed: 0, judgeable: 1 });
+    expect(now.denominator).toEqual([ids.a]);
+    expect(Object.fromEntries(now.rules.map(({ rule, judgment }) => [rule.id, judgment]))).toEqual({
+      [ids.a]: { status: 'needs_recheck', latest: later.recheck },
+      [ids.b]: { status: 'quarantined', latest: later.quarantine },
+    });
+    const points = tallies(await trend()).map(({ compliance }) => compliance);
+    // 지난 점은 그대로, 마지막 점 = 요약 카드
+    expect(points).toEqual([
+      { passed: 1, judgeable: 2 },
+      { passed: 0, judgeable: 1 },
+    ]);
+    expect(points.at(-1)).toEqual(now.compliance);
+  });
+
+  it('덧씌우는 것은 실행 밖 재검증 필요 · 격리뿐이다: 실행 밖 통과 행(직접 쓴 위조 등) · 실행의 판정은 판정 기준 판정을 바꾸지 않는다', async () => {
+    const ids = h.read((store) => {
+      const a = insertRule(store, '위조 대상');
+      const merged = seedRun(store, { ruleIds: [a.id], at: T0 + HOUR, mergeCommit: sha(0xd1) });
+      judge(store, merged, a, 'fail');
+      store.judgments.record([
+        {
+          id: newId(),
+          ruleId: a.id,
+          runId: null,
+          stepId: null,
+          commit: sha(0xd1),
+          judgedAt: iso(T0 + 3 * HOUR),
+          status: 'pass',
+          runner: 'vitest',
+          exitCode: 0,
+          reporterPath: null,
+          cases: [],
+          quarantineReason: null,
+        },
+      ]);
+      return { a: a.id, basis: verificationTrend(store).points[0] };
+    });
+    expect((await summary()).compliance).toEqual({ passed: 0, judgeable: 1 });
+    expect(ids.basis?.compliance).toEqual({ passed: 0, judgeable: 1 });
+    // 순수 함수: 실행의 판정은 표시로 보지 않는다
+    const basisRecord = h.read((store) => store.judgments.listByRule(ids.a).at(-1)!);
+    const runRecord = {
+      ...basisRecord,
+      id: newId(),
+      judgedAt: iso(T0 + 4 * HOUR),
+      status: 'needs_recheck' as const,
+    };
+    expect(overlayMarks(new Map([[ids.a, basisRecord]]), [runRecord], Infinity).get(ids.a)).toBe(
+      basisRecord,
+    );
+  });
+
+  it('판정 기준이 없으면(병합된 실행 없음) 표시를 덧씌우지 않는다: 모든 규칙이 미판정이다', async () => {
+    h.read((store) => {
+      const a = insertRule(store, '기준 없음');
+      const failed = seedRun(store, { ruleIds: [a.id], at: T0 + HOUR });
+      judge(store, failed, a, 'pass');
+      mark(store, a, 'quarantined', T0 + 2 * HOUR);
+    });
+    const result = await summary();
+    expect(result.basis).toBeNull();
+    expect(result.compliance).toEqual({ passed: 0, judgeable: 1 });
+    expect(result.rules.map(({ judgment }) => judgment.status)).toEqual(['unjudged']);
   });
 });

@@ -7,6 +7,8 @@
 #      git revert --no-edit HEAD 뒤 다시 0건
 #   3. contract-mismatch 변형(M3-47 #292)은 커밋 하나에 헬스 체크 라우트 파일 하나만 바꾸고(ok가 글) 구조 위반은 0건, 되돌리면
 #      원본과 같다 (계약 판정은 orchestrator/test/contract-runner.test.ts)
+#   4. touch-lib 변형(M3-14 #59)은 커밋 하나에 lib 블록 파일 하나의 한 줄 추가만이고 구조 위반은 0건, 되돌리면 원본과 같다
+#   5. flaky 변형(M3-14 #59)은 커밋 하나에 라우트 · RULE-001 인수 테스트 두 파일 추가만이고 구조 위반은 0건, 되돌리면 두 파일이 없다
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -175,6 +177,66 @@ else
     echo "통과: contract-mismatch 되돌린 뒤 원본과 같음"
   else
     echo "실패: contract-mismatch 되돌린 뒤 원본과 다름"
+    fail=1
+  fi
+fi
+
+# touch-lib 변형(M3-14 #59): 커밋 하나에 lib 블록 파일 src/lib/db.ts 하나의 한 줄 추가만, 구조 위반 0건, 되돌리면 원본과 같다
+# (재검증 필요 표시는 orchestrator/test/watcher.test.ts)
+lib_file=src/lib/db.ts
+before_lib="$(md5sum < "$fx/$lib_file")"
+before="$(commits "$fx")"
+if ! "$mv" "$fx" touch-lib > /dev/null; then
+  echo "실패: touch-lib 변형이 0이 아닌 코드로 종료"
+  fail=1
+else
+  numstat="$(g -C "$fx" diff --numstat HEAD~1 HEAD)"
+  if [[ "$(commits "$fx")" != "$((before + 1))" || "$(g -C "$fx" log -1 --format=%s)" != 'variant: touch-lib' ]]; then
+    echo "실패: touch-lib 변형 커밋이 하나가 아님"
+    fail=1
+  elif [[ "$numstat" != "$(printf '1\t0\t%s' "$lib_file")" ]]; then
+    echo "실패: touch-lib 변형이 $lib_file 한 줄 추가가 아님 ($numstat)"
+    fail=1
+  else
+    echo "통과: touch-lib 변형 커밋 하나 · lib 파일 한 줄"
+  fi
+  expect_violations 'touch-lib 구조 위반 0건' 'total 0'
+  g -C "$fx" revert --no-edit HEAD > /dev/null
+  if [[ "$(md5sum < "$fx/$lib_file")" == "$before_lib" ]]; then
+    echo "통과: touch-lib 되돌린 뒤 원본과 같음"
+  else
+    echo "실패: touch-lib 되돌린 뒤 원본과 다름"
+    fail=1
+  fi
+fi
+
+# flaky 변형(M3-14 #59): 커밋 하나에 라우트와 RULE-001 인수 테스트 두 파일만 더하고, 구조 위반 0건, 되돌리면 두 파일이 없다
+# (세 번 판정의 통과 · 실패 · 통과와 재판정 불일치 격리는 orchestrator/test/reproducibility.test.ts)
+before="$(commits "$fx")"
+if ! "$mv" "$fx" flaky > /dev/null; then
+  echo "실패: flaky 변형이 0이 아닌 코드로 종료"
+  fail=1
+else
+  added="$(g -C "$fx" diff --name-status HEAD~1 HEAD | tr '\t' ' ')"
+  expected_added="$(printf 'A bive-acceptance/RULE-001/flaky.acc.ts\nA src/app/api/flaky/route.ts')"
+  if [[ "$(commits "$fx")" != "$((before + 1))" || "$(g -C "$fx" log -1 --format=%s)" != 'variant: flaky' ]]; then
+    echo "실패: flaky 변형 커밋이 하나가 아님"
+    fail=1
+  elif [[ "$added" != "$expected_added" ]]; then
+    echo "실패: flaky 변형의 파일이 다름 ($added)"
+    fail=1
+  elif ! grep -q 'ok: count !== 2' "$fx/src/app/api/flaky/route.ts"; then
+    echo "실패: flaky 변형의 라우트가 두 번째 호출에서만 실패하지 않음"
+    fail=1
+  else
+    echo "통과: flaky 변형 커밋 하나 · 라우트와 인수 테스트 두 파일"
+  fi
+  expect_violations 'flaky 구조 위반 0건' 'total 0'
+  g -C "$fx" revert --no-edit HEAD > /dev/null
+  if [[ ! -e "$fx/src/app/api/flaky" && ! -e "$fx/bive-acceptance/RULE-001" ]]; then
+    echo "통과: flaky 되돌린 뒤 두 파일 없음"
+  else
+    echo "실패: flaky 되돌린 뒤 파일이 남음"
     fail=1
   fi
 fi

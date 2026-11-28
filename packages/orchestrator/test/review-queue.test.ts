@@ -516,15 +516,28 @@ describe('변이 생존 액션 (M3-08 수용 기준 2, PRD TODO-02 · 미결 #7)
     });
     const listed = await h.client.call('rule.list', { projectId: h.project.id });
     expect(listed.rules[0]?.judgment).toEqual({ status: 'quarantined', latest: result.judgment });
-    // 한계 (ADR-145): 격리는 규칙 목록 · 상세의 최신 판정에만 보이고, 판정 기준 실행의 단계 판정만 읽는 준수 지표에는 들지 않는다
-    // (격리 전이와 지표 반영은 M3-14 #59)
-    expect(await h.client.call('verification.summary', { projectId: h.project.id })).toEqual(
-      summaryBefore,
-    );
-    // 준수 추이도 실행의 판정 기록만 읽으므로(실행 없는 격리 기록은 들지 않는다) 점 값이 그대로다
-    expect(await h.client.call('verification.trend', { projectId: h.project.id })).toEqual(
-      trendBefore,
-    );
+    // 지표 반영 (M3-14 #59, ADR-156: ADR-145 ④의 한계를 닫음): 격리 기록이 판정 기준 판정보다 나중이라 준수 지표의 그 규칙 판정이
+    // 격리이고 분모에서 빠진다. 그 밖의 값은 그대로다
+    const summaryAfter = await h.client.call('verification.summary', { projectId: h.project.id });
+    const rowBefore = summaryBefore.rules.find(({ rule }) => rule.id === h.ruleId);
+    expect(summaryBefore.denominator).toContain(h.ruleId);
+    expect(summaryAfter).toEqual({
+      ...summaryBefore,
+      compliance: {
+        passed: summaryBefore.compliance.passed - (rowBefore?.judgment.status === 'pass' ? 1 : 0),
+        judgeable: summaryBefore.compliance.judgeable - 1,
+      },
+      denominator: summaryBefore.denominator.filter((id) => id !== h.ruleId),
+      rules: summaryBefore.rules.map((row) =>
+        row.rule.id === h.ruleId
+          ? { ...row, judgment: { status: 'quarantined', latest: result.judgment }, run: null }
+          : row,
+      ),
+    });
+    // 준수 추이: 마지막 점(지금)만 같은 덧씌움으로 요약 카드와 같고, 격리 앞에 끝난 점은 그대로다
+    const trendAfter = await h.client.call('verification.trend', { projectId: h.project.id });
+    expect(trendAfter.points.slice(0, -1)).toEqual(trendBefore.points.slice(0, -1));
+    expect(trendAfter.points.at(-1)?.compliance).toEqual(summaryAfter.compliance);
     // 변이 상태는 격리와 무관하게 가장 나중 변이 기록('변이 생존') 그대로다
     expect(listed.rules[0]?.mutation).toBe('survived');
     const again = await rejection(
@@ -563,7 +576,7 @@ describe('변이 생존 액션 (M3-08 수용 기준 2, PRD TODO-02 · 미결 #7)
         if (entry.isDirectory()) walk(full);
         else if (
           entry.name.endsWith('.ts') &&
-          /\bjudgments\s*\.\s*(?:latestForRules|latestByRule|listByRule)\(/.test(
+          /\bjudgments\s*\.\s*(?:latestForRules|latestByRule|listByRule|listUnattached)\(/.test(
             fs.readFileSync(full, 'utf8'),
           )
         ) {

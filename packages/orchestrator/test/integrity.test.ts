@@ -1033,6 +1033,12 @@ describe('블록 선언을 쓰는 경로는 사람의 blocks.set 처리기뿐 (M
       'steps/mutation.ts',
       'steps/structure-check.ts',
       'steps/test-writing.ts',
+      // 감시자: 대상 블록 include로 바뀐 파일을 블록에 댄다 (M3-14 #59, ADR-156, 회차마다 지금 판을 한 번 읽는다)
+      'watcher/recheck-watcher.ts',
+    ]);
+    const watcher = files.find((f) => f.rel === 'watcher/recheck-watcher.ts')?.text ?? '';
+    expect(watcher.match(/\.blockDeclarations\.[A-Za-z]+/g)).toEqual([
+      '.blockDeclarations.current',
     ]);
     const structure = files.find((f) => f.rel === 'steps/structure-check.ts')?.text ?? '';
     expect(structure.match(/\.blockDeclarations\.[A-Za-z]+/g)).toEqual([
@@ -1468,6 +1474,8 @@ describe('규칙 폐기 · 대체와 효력 판정의 코드 경로 (M7-09 #221,
       'confirmations/confirmation-list.ts',
       'engine/pipeline-engine.ts',
       'ipc/rule-handlers.ts',
+      // 재검증 필요 표시의 대상: 효력 있는 블록 대상 규칙만 (M3-14 #59, ADR-156, 읽기만)
+      'judgments/judgment-marks.ts',
       'norms/agent-rule.ts',
       // 계약 등록: 부모 요구사항이 효력 있는지 (M3-04 #49, ADR-129)
       'norms/contract.ts',
@@ -1569,17 +1577,22 @@ describe('케이스 이름을 세션 입력에 싣는 자리는 모두 같은 �
   };
 
   it('저장된 판정 기록을 읽는 곳은 고정이고, 세션 입력을 만드는 두 곳(규범 자료 · 인용 출처)은 최근 판정 케이스 이름을 대조 함수로 거른다. 대조 함수는 선택 인자가 아니고, 폐기 · 대체 반영을 부르는 곳은 모두 세션의 기준을 넘긴다', () => {
-    // 판정 기록 읽기: 화면 응답(규칙 상세 · 최신 판정 · 검증 지표) · 엔진의 판정 수 · 케이스 이름 대조 · 세션 입력 두 곳뿐
+    // 판정 기록 읽기: 화면 응답(규칙 상세 · 최신 판정 · 검증 지표 · 준수 추이의 표시 덧씌움) · 엔진의 판정 수 · 케이스 이름 대조 ·
+    // 세션 입력 두 곳 · 재검증 필요 표시(표시 직전의 최신 판정 대조, M3-14 #59 · ADR-156)뿐
     expect(
-      using(/\bjudgments\s*\.\s*(?:latestForRules|latestByRule|listByRule|listByRuns?)\(/),
+      using(
+        /\bjudgments\s*\.\s*(?:latestForRules|latestByRule|listByRule|listByRuns?|listUnattached)\(/,
+      ),
     ).toEqual([
       'engine/pipeline-engine.ts',
       'ipc/rule-handlers.ts',
+      'judgments/judgment-marks.ts',
       'judgments/latest-judgment.ts',
       'norms/agent-rule.ts',
       'norms/case-names.ts',
       'norms/norm-input.ts',
       'verification/summary.ts',
+      'verification/trend.ts',
     ]);
     // 세션 입력 두 곳: 케이스 이름을 읽은 바로 그 자리에서 대조 함수로 거른다
     expect(read('norms/norm-input.ts')).toMatch(
@@ -3149,5 +3162,75 @@ describe('규칙 분할 반영을 쓰는 곳은 반영 모듈 하나, 분할 도
     expect(read('rule-writer/rule-writer-service.ts')).toMatch(
       /guard: \{ tools: tools\.toolNames \},/,
     );
+  });
+});
+
+describe('재검증 필요 · 격리 표시를 쓰는 곳 (M3-14 #59, JDG-01 · JDG-02 · NFR-05, ADR-156, 코드 구조)', () => {
+  const files = () =>
+    sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+  const using = (pattern: RegExp) =>
+    files()
+      .filter((f) => pattern.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+
+  it('판정 기록을 쓰는 곳은 판정 단계 · 검토 대기열 · 표시 모듈 셋이고, 재검증 필요 · 격리 상태를 쓰는 글자는 표시 모듈과 검토 대기열에만 있다. 표시 함수를 부르는 곳은 사람 RPC 처리기 둘 · 감시자 · 재현성 확인뿐이고 재현성 확인은 제품 경로에서 부르지 않는다', () => {
+    expect(using(/\.judgments\s*\.\s*record\(/)).toEqual([
+      'judgments/judgment-marks.ts',
+      'review/review-queue.ts',
+      'steps/judging.ts',
+    ]);
+    expect(using(/status:\s*'needs_recheck'/)).toEqual(['judgments/judgment-marks.ts']);
+    expect(using(/status:\s*'quarantined'/)).toEqual([
+      'judgments/judgment-marks.ts',
+      'review/review-queue.ts',
+    ]);
+    // 표시 모듈을 가져오는 곳
+    expect(using(/from '[./]+\/?(?:judgments\/)?judgment-marks\.js'/)).toEqual([
+      'ipc/block-handlers.ts',
+      'ipc/rule-handlers.ts',
+      'judgments/reproducibility.ts',
+      'watcher/recheck-watcher.ts',
+    ]);
+    // 부르는 곳 (정의 `name = (`는 호출 글자가 아니다)
+    expect(using(/\bmarkStatementEdited\(/)).toEqual(['ipc/rule-handlers.ts']);
+    expect(using(/\bmarkBlocksChanged\(/)).toEqual(['ipc/block-handlers.ts']);
+    expect(using(/\brecordNeedsRecheck\(/)).toEqual([
+      'judgments/judgment-marks.ts',
+      'watcher/recheck-watcher.ts',
+    ]);
+    expect(using(/\brecordRejudgeMismatch\(/)).toEqual(['judgments/reproducibility.ts']);
+    // 재현성 확인(같은 커밋 여러 번 판정)은 요청이 있을 때만: 제품 코드에서 부르거나 가져오는 곳이 없다 (파이프라인 판정 횟수는 그대로)
+    expect(using(/\b(?:checkReproducibility|runnerRounds)\(|reproducibility\.js'/)).toEqual([]);
+    // 감시자를 만드는 곳은 오케스트레이터 기동 하나이고, 감시자는 실행을 만들거나 판정하지 않는다
+    expect(using(/new RecheckWatcher\(/)).toEqual(['orchestrator.ts']);
+    const watcher = files().find((f) => f.rel === 'watcher/recheck-watcher.ts')?.text ?? '';
+    expect(watcher).not.toMatch(
+      /createRun|onRunCreated|PipelineEngine|engine\/|steps\/|JudgeRunner|judge\/|runs\//,
+    );
+    // 에이전트 도구 · 세션 · 엔진 · 단계 · 실행 코드는 표시 모듈도 감시자도 모른다
+    for (const { rel, text } of files()) {
+      if (
+        /^(tools|agent|engine|steps|runs|implementer|test-writer|rule-writer|mutation)\//.test(rel)
+      ) {
+        expect(
+          /judgment-marks\.js'|recheck-watcher\.js'|reproducibility\.js'/.test(text),
+          rel,
+        ).toBe(false);
+      }
+    }
+    // 표시를 부르는 RPC 처리기 둘은 저장소를 열기 전에 사람 주체를 요구한다
+    const rules = files().find((f) => f.rel === 'ipc/rule-handlers.ts')?.text ?? '';
+    expect(rules).toMatch(
+      /'rule\.update': \([^)]*\) => \{\s*\/\/[^\n]*\n\s*const by = requireHuman\(/,
+    );
+    const blocks = files().find((f) => f.rel === 'ipc/block-handlers.ts')?.text ?? '';
+    expect(blocks).toMatch(/'blocks\.set': \([^)]*\) => \{\s*assertHuman\(author\);/);
+    // 고정 사유 글에 문서 기호가 없다
+    const marks = files().find((f) => f.rel === 'judgments/judgment-marks.ts')?.text ?? '';
+    expect(marks).toMatch(/export const REJUDGE_MISMATCH_REASON = '재판정 불일치';/);
   });
 });

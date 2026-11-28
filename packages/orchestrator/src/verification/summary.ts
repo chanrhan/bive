@@ -10,6 +10,9 @@
 //   트리와 같다, ADR-069). 규칙별로 그중 최신(판정 시각 → ID). 구현 단계 판정 · 다른 실행 · 실행 밖 판정 · 미래 시각
 //   기록은 쓰지 않는다. 검사 · 병합 재검사는 승인된 규칙 전체(인수 테스트 폴더가 있는 것)를 판정하므로, 그 커밋에서
 //   판정되지 않은 규칙(그 뒤 승인 · 인수 테스트 없음)과 판정 기준이 없을 때는 미판정이다
+// - 실행 밖 표시(M3-14 #59, ADR-156): 판정 기준이 있으면 그 판정 위에, 규칙마다 판정 기준 판정보다 나중인 가장 나중의 재검증 필요 ·
+//   격리 기록(실행 · 단계 없음: 감시자 · 규칙 편집 · 블록 선언 변경 · 사람의 판정 격리 · 재판정 불일치)을 덧씌운다(`overlayMarks`).
+//   재검증 필요는 분모에 들고 통과가 아니다. 격리는 분모에서 빠진다. 그 뒤 병합된 실행이 다시 판정하면 그 판정이 판정 기준이다
 // - 준수: 분모 = 효력 있는(잠정 승인 · 폐기 제외, JDG-03 · M7-09) 규칙 중 위 판정이 격리가 아닌 것. 통과 = 분모 중 위 판정이 통과.
 //   폐기된 규칙은 규칙 목록(`rules`)에서도 빠진다(판정 이력은 지우지 않는다, ADR-112).
 //   M1에는 격리 판정이 없어 규칙 화면 필터 `준수 집계: 판정 가능`(rulesView.ts `complianceGroup`)과 같은 목록이다
@@ -351,6 +354,38 @@ export const judgmentsAtCommit = (
   return latest;
 };
 
+/** 판정 기록 `a`가 `b`보다 나중인지: 판정 시각 → ID (저장소의 최신 판정 순서와 같다). */
+const isLaterJudgment = (a: JudgmentResult, b: JudgmentResult): boolean =>
+  a.judgedAt > b.judgedAt || (a.judgedAt === b.judgedAt && a.id > b.id);
+
+/**
+ * 판정 기준 판정 위에 실행 밖 표시(재검증 필요 · 격리)를 덧씌운다 (M3-14 #59, ADR-156). 규칙마다 시각 `before`(ms, 그 시각은 들지
+ * 않음) 앞의 가장 나중 표시가 그 규칙의 판정 기준 판정보다 나중이면(판정 기준 판정이 없으면 늘) 그 표시가 그 규칙의 판정이다.
+ * 판정 기준 판정이 표시보다 나중이면(그 뒤 병합된 실행이 다시 판정함) 판정 기준 판정 그대로다. 실행이 낸 판정은 덧씌우지 않는다
+ * (판정 기준이 아닌 실행의 판정은 요약에 들지 않는다, ADR-072). `marks`는 실행 밖 판정 기록(`judgments.listUnattached`: 미래 시각 기록은
+ * 저장소가 이미 뺐다). 실행 밖 기록이라도 재검증 필요 · 격리가 아니면(직접 쓴 통과 · 실패 행) 쓰지 않는다: 통과는 실행의 판정에서만 온다.
+ */
+export const overlayMarks = (
+  judged: ReadonlyMap<Ulid, JudgmentResult>,
+  marks: readonly JudgmentResult[],
+  before: number,
+): Map<Ulid, JudgmentResult> => {
+  const latestMark = new Map<Ulid, JudgmentResult>();
+  for (const mark of marks) {
+    if (mark.runId !== null) continue;
+    if (mark.status !== 'needs_recheck' && mark.status !== 'quarantined') continue;
+    if (!(Date.parse(mark.judgedAt) < before)) continue;
+    const current = latestMark.get(mark.ruleId);
+    if (current === undefined || isLaterJudgment(mark, current)) latestMark.set(mark.ruleId, mark);
+  }
+  const result = new Map(judged);
+  for (const [ruleId, mark] of latestMark) {
+    const basis = judged.get(ruleId);
+    if (basis === undefined || isLaterJudgment(mark, basis)) result.set(ruleId, mark);
+  }
+  return result;
+};
+
 /**
  * 여러 판정 기준 후보의 판정 기준 커밋 판정 (실행 ID → 규칙별 판정). 판정 기록은 질의 1회로 읽고 단계 시도는 받은 것을 쓴다
  * (준수 추이가 점마다 따로 읽지 않게, ADR-146).
@@ -486,7 +521,11 @@ export const verificationSummary = (
     mergeOf: (run) => mergeRecordOf(run, store.runs.steps(run.id)),
     branch: store.getProject()?.baseBranch ?? null,
   });
-  const judged = basisJudgments(store, basis, now);
+  // 판정 기준이 있으면 그 판정 위에 그 뒤의 재검증 필요 · 격리 표시를 덧씌운다 (ADR-156, 추이의 마지막 점과 같은 값)
+  const judged =
+    basis === null
+      ? basisJudgments(store, basis, now)
+      : overlayMarks(basisJudgments(store, basis, now), store.judgments.listUnattached(), Infinity);
   const runsById = new Map(runs.map((run) => [run.id, run]));
 
   const usageCache = new Map<Ulid, UsageTotals | null>();

@@ -28,6 +28,7 @@ import { AutoStarter } from './runs/auto-start.js';
 import { RuleEditAutoStarter } from './runs/rule-edit-start.js';
 import { writeTokenFile } from './token.js';
 import { ORCHESTRATOR_VERSION } from './version.js';
+import { RecheckWatcher } from './watcher/recheck-watcher.js';
 
 export type ShutdownReason = 'idle' | 'signal' | 'requested';
 
@@ -192,6 +193,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
           // 병합된 실행의 테스트 변경 알림 기록이 끝나기를 기다린다 (저장소를 닫은 뒤에 쓰지 않게)
           await testChanges.idle();
           await autoStarter.idle();
+          // 감시자의 다음 회차를 잡지 않고 돌고 있는 회차를 기다린다 (저장소를 닫은 뒤에 쓰지 않게)
+          await watcher.stop();
           await closeAndCleanup();
         } finally {
           resolveClosed(reason);
@@ -264,6 +267,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
     });
     // 사람이 규칙 진술을 고치면 편집이 저장된 뒤 그 규칙의 인수 테스트를 다시 쓰는 실행을 자동 시작한다 (M7-03 #215, ADR-109)
     const ruleEditStarter = new RuleEditAutoStarter({ biveHome: options.biveHome, engine, log });
+    // 기준 브랜치의 사람 커밋이 대상 블록을 바꾸면 영향 규칙을 재검증 필요로 표시한다 (M3-14 #59, ADR-156). 실행을 만들지 않는다
+    const watcher = new RecheckWatcher({ biveHome: options.biveHome, log });
     // 잠금을 잡은 뒤 · 연결을 받기 전: 비정상 종료로 남은 running 실행은 interrupted (PRD 5.1, 자동 재개 없음)
     const interruptedRuns = engine.recoverInterruptedRuns();
     server = new PipeServer({
@@ -308,6 +313,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
     // 연결을 받기 시작한 뒤: 저장된 실행 대기를 생성 순으로 이어간다. 자리를 차지한 실행(진행 중 · 중단)이 있는 프로젝트는
     // 그대로다 (ADR-105). 재기동으로 중단된 실행은 자동으로 이어가지 않는다(위 recoverInterruptedRuns)
     engine.startQueuedRuns();
+    // 연결을 받기 시작한 뒤: 감시자가 기동 때 한 번(꺼져 있던 동안의 커밋 포함) 보고 그 뒤 5초마다 본다. 기다리지 않는다
+    watcher.start();
 
     const listening = server;
     return {

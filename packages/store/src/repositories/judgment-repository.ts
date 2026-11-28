@@ -77,6 +77,7 @@ export class JudgmentRepository {
   readonly #byRun;
   readonly #byRuns;
   readonly #byRule;
+  readonly #unattached;
 
   constructor(db: SqliteDatabase) {
     this.#db = db;
@@ -106,6 +107,9 @@ export class JudgmentRepository {
     this.#byRule = db.prepare<[string, number], JudgmentRow>(
       // 미래 시각 행은 이력에서도 뺀다: 최신부터라 맨 위에 와서 실제 기록을 밀어내므로 건수 제한 전에 SQL에서 거른다 (#146)
       `SELECT ${COLUMNS} FROM judgments WHERE rule_id = ? AND ${NOT_FUTURE} ${LATEST_FIRST} LIMIT ?`,
+    );
+    this.#unattached = db.prepare<[], JudgmentRow>(
+      `SELECT ${COLUMNS} FROM judgments WHERE run_id IS NULL AND ${NOT_FUTURE} ORDER BY judged_at, id`,
     );
   }
 
@@ -164,6 +168,14 @@ export class JudgmentRepository {
   listByRuns(runIds: readonly string[]): JudgmentResult[] {
     if (runIds.length === 0) return [];
     return this.#byRuns.all(JSON.stringify(runIds)).map(toJudgment);
+  }
+
+  /**
+   * 실행 밖 판정 기록 (실행 · 단계 없음: 판정 격리 · 재검증 필요 · 재판정 불일치 격리 표시, M3-08 · M3-14 #59). 판정 시각 → ID 순,
+   * 미래 시각 기록은 뺀다 (질의 1회). 검증 요약 · 추이가 판정 기준 판정 위에 덧씌운다.
+   */
+  listUnattached(): JudgmentResult[] {
+    return this.#unattached.all().map(toJudgment);
   }
 
   /** 규칙의 판정 이력 (최신부터, 기본 50건). 미래 시각 기록은 최신 판정과 같은 기준으로 뺀다. */
