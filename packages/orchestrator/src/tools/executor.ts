@@ -20,8 +20,10 @@ import {
   RaiseObjectionInput,
   ReadFileInput,
   RetireRuleInput,
-  roleToolNames,
   SearchFilesInput,
+  type SessionToolSet,
+  sessionToolNames,
+  SplitRuleInput,
   SupersedeRuleInput,
   UpholdRuleInput,
   WriteFileInput,
@@ -106,14 +108,24 @@ export interface RoleToolsHooks {
     input: ProposeMutantInput,
     context: ProposalContext,
   ) => Promise<string | ToolResult> | string | ToolResult;
-  /** 실행기가 닫힐 때 한 번 (이의 제기 · 판단 완료 · 변이 제안). 세션을 여는 쪽이 이것으로 세션을 끝낸다 */
+  /**
+   * `split_rule`(규칙 분할, M3-57 #320, ADR-153): 분할 세션의 대상 규칙을 새 규칙 2개 이상으로 대체한다(트랜잭션 1개). 결과가 `ok`이면
+   * 실행기가 닫히고(`close('split_complete')`) 그 뒤 호출은 모두 `denied`(`session_closed`)다. 거부 · 오류면 닫지 않는다. 주입하지
+   * 않으면 호출이 `error`(`not_configured`)로 끝난다.
+   */
+  splitRule?: (
+    input: SplitRuleInput,
+    context: ProposalContext,
+  ) => Promise<string | ToolResult> | string | ToolResult;
+  /** 실행기가 닫힐 때 한 번 (이의 제기 · 판단 완료 · 변이 제안 · 분할). 세션을 여는 쪽이 이것으로 세션을 끝낸다 */
   onClose?: (reason: ToolExecutorCloseReason) => void;
   /** 도구 호출이 끝날 때마다 (거부 · 오류 포함) */
   onToolCall?: (record: ToolCallRecord) => void;
 }
 
 /** 실행기를 닫은 이유: 구현 역할의 이의 제기 · 이의 판단 세션의 판단 완료 (M7-11) · 변이 주입 역할의 변이 제안 (M3-07). */
-export type ToolExecutorCloseReason = 'objection_raised' | 'judgment_complete' | 'mutant_proposed';
+export type ToolExecutorCloseReason =
+  'objection_raised' | 'judgment_complete' | 'mutant_proposed' | 'split_complete';
 
 /**
  * 이의 제기가 받아들여졌을 때 도구 결과 끝에 붙이는 고정 문장 (M7-11, ADR-115 검토 1회차). 세션을 중단하지 않고 모델이 스스로
@@ -131,7 +143,12 @@ const CLOSED_TEXT: Record<ToolExecutorCloseReason, string> = {
   objection_raised: '이의를 제기해 이 세션은 끝났다. 더 이상 도구를 부르지 않는다',
   judgment_complete: '판단을 모두 남겨 이 세션은 끝났다. 더 이상 도구를 부르지 않는다',
   mutant_proposed: '변이를 내서 이 세션은 끝났다. 더 이상 도구를 부르지 않는다',
+  split_complete: '규칙을 나눠 이 세션은 끝났다. 더 이상 도구를 부르지 않는다',
 };
+
+/** 분할이 받아들여졌을 때 도구 결과 끝에 붙이는 고정 문장 (M3-57, ADR-153). 모델이 스스로 세션을 끝내게 한다. */
+export const SPLIT_ACCEPTED_TEXT =
+  '규칙을 나눴다. 더 할 일이 없다. 도구를 더 부르지 말고 세션을 끝내라.';
 
 export interface CreateRoleToolsOptions {
   role: AgentRole;
@@ -141,6 +158,10 @@ export interface CreateRoleToolsOptions {
   /** test-writer가 쓸 수 있는 규칙 폴더 (`PathGuardOptions.writableRuleDirs`, ADR-068) */
   writableRuleDirs?: readonly string[];
   hooks?: RoleToolsHooks;
+  /**
+   * 도구 묶음 (기본 역할 목록). `rule_split`은 규칙 작성 역할의 분할 세션(분할 도구 하나, M3-57 · ADR-153)이고 다른 역할에 주면 던진다
+   */
+  toolSet?: SessionToolSet;
   /** 기록에 남길 세션 ID. init 뒤에 `setSessionId`로 정해도 된다 */
   sessionId?: string;
   /** 명령 도구 설정. `cwd` · `guard`는 세션 루트로 정해진다 */
@@ -209,7 +230,7 @@ export class FixedToolExecutor implements ToolExecutor {
 
   constructor(options: CreateRoleToolsOptions) {
     this.role = options.role;
-    this.toolNames = roleToolNames(options.role);
+    this.toolNames = sessionToolNames(options.role, options.toolSet);
     this.guard = new PathGuard(options);
     this.sessionId = options.sessionId ?? null;
     this.hooks = options.hooks ?? {};
@@ -298,6 +319,8 @@ export class FixedToolExecutor implements ToolExecutor {
       return { result: await this.uphold(args), summary: summarizeArgs(args) };
     if (tool === 'raise_objection')
       return { result: await this.objection(args), summary: summarizeArgs(args) };
+    if (tool === 'split_rule')
+      return { result: await this.split(args), summary: summarizeArgs(args) };
     // 변이 글은 기록에 싣지 않는다: 대상 경로만 (파일 도구와 같은 요약)
     if (tool === 'propose_mutant')
       return { result: await this.mutant(args), summary: summaryOf('read_file', args) };
@@ -404,6 +427,27 @@ export class FixedToolExecutor implements ToolExecutor {
     if (result.status !== 'ok') return result;
     this.close('objection_raised');
     return { ...result, content: `${result.content}\n${OBJECTION_ACCEPTED_TEXT}` };
+  }
+
+  /**
+   * 규칙 분할 (M3-57, ADR-153): 인자 검증 뒤 주입된 콜백(대체 반영)에 넘긴다. 콜백이 `ok`를 돌려주면 실행기를 닫고 세션을 끝내라는
+   * 고정 문장을 붙인다(분할은 세션마다 한 번). 거부 · 오류면 닫지 않는다(사유를 읽고 고쳐 다시 부를 수 있다).
+   */
+  private async split(args: Record<string, unknown>): Promise<ToolResult> {
+    const parsed = SplitRuleInput.safeParse(args);
+    if (!parsed.success) return invalidArgs('split_rule', parsed.error);
+    const split = this.hooks.splitRule;
+    if (split === undefined) return failed('not_configured', '규칙 분할 경로가 연결되지 않음');
+    let result: ToolResult;
+    try {
+      const outcome = await split(parsed.data, { role: this.role, sessionId: this.sessionId });
+      result = typeof outcome === 'string' ? ok(outcome) : outcome;
+    } catch (error) {
+      return failed('tool_failed', error instanceof Error ? error.message : String(error));
+    }
+    if (result.status !== 'ok') return result;
+    this.close('split_complete');
+    return { ...result, content: `${result.content}\n${SPLIT_ACCEPTED_TEXT}` };
   }
 
   /**

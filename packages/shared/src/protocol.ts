@@ -535,6 +535,8 @@ export const DomainErrorReason = {
   BudgetLowered: 'BUDGET_LOWERED',
   /** 원 실행(사슬 전체)이 쓴 양이 이미 닿은 값을 새 한도가 쓴 양보다 크게 올리지 않았다 (ADR-147 ④) */
   BudgetNotAboveSpent: 'BUDGET_NOT_ABOVE_SPENT',
+  /** 규칙 분할의 규칙이 그 항목의 실행의 대상 규칙이 아니다 (M3-57 · ADR-147 ⑧ · ADR-153) */
+  SplitRuleNotTarget: 'SPLIT_RULE_NOT_TARGET',
 } as const;
 export type DomainErrorReason = (typeof DomainErrorReason)[keyof typeof DomainErrorReason];
 
@@ -1675,8 +1677,39 @@ export const ReviewQueueResumeWithBudgetResult = z.strictObject({
 });
 export type ReviewQueueResumeWithBudgetResult = z.infer<typeof ReviewQueueResumeWithBudgetResult>;
 
-/** 처리 액션이 -32009로 거부하는 이유 (`error.data.reason`). */
-export const ReviewConflictReason = z.enum(['already_resolved', 'action_not_allowed']);
+/**
+ * `reviewQueue.splitRule`: 예산 초과 항목의 규칙 분할 (M3-57 #320, ADR-147 ⑧, ADR-153). `ruleId`는 그 항목의 실행의 대상 규칙
+ * 가운데 나눌 규칙 하나다(아니면 -32001 `SPLIT_RULE_NOT_TARGET`). 내장 구조 · 계약 검사 규칙(-32009 `builtin_rule`), 효력 없는 규칙
+ * (-32009 `rule_not_effective`), 부모 요구사항이 없는 규칙(-32009 `rule_without_parent`)은 세션을 띄우기 전에 거부한다. 같은 항목의
+ * 분할 세션이 대기 · 진행 중이면 -32009 `split_in_progress`, 하루 한도에 이르렀으면 -32009 `project_daily_budget_exceeded`, 규칙 작성
+ * 역할 설정이 비면 -32010. 실행을 만들지 않고 규칙 작성 역할의 분할 세션 하나를 대기열에 넣는다: 그 세션이 규칙을 새 규칙 2개
+ * 이상으로 대체하면 같은 쓰기 트랜잭션에서 항목이 처리됨(`split_rule`)이 되고, 대체 없이 끝나면 항목은 열림 그대로다. 결과의
+ * `entry`는 세션을 띄운 때의 항목(열림)이다.
+ */
+export const ReviewQueueSplitRuleParams = z.strictObject({
+  projectId: Ulid,
+  seq: z.int().positive(),
+  ruleId: Ulid,
+  author: Author,
+});
+export type ReviewQueueSplitRuleParams = z.infer<typeof ReviewQueueSplitRuleParams>;
+export const ReviewQueueSplitRuleResult = z.strictObject({
+  entry: ReviewQueueEntry,
+  /** 대기열에 넣은 분할 세션의 ID (세션 기록 ID) */
+  sessionId: Ulid,
+});
+export type ReviewQueueSplitRuleResult = z.infer<typeof ReviewQueueSplitRuleResult>;
+
+/** 처리 액션이 -32009로 거부하는 이유 (`error.data.reason`). 뒤 다섯은 규칙 분할만 (M3-57, ADR-153). */
+export const ReviewConflictReason = z.enum([
+  'already_resolved',
+  'action_not_allowed',
+  'builtin_rule',
+  'rule_not_effective',
+  'rule_without_parent',
+  'split_in_progress',
+  'project_daily_budget_exceeded',
+]);
 export type ReviewConflictReason = z.infer<typeof ReviewConflictReason>;
 
 /**
@@ -1731,6 +1764,10 @@ export const METHODS = {
   'reviewQueue.resumeWithBudget': {
     params: ReviewQueueResumeWithBudgetParams,
     result: ReviewQueueResumeWithBudgetResult,
+  },
+  'reviewQueue.splitRule': {
+    params: ReviewQueueSplitRuleParams,
+    result: ReviewQueueSplitRuleResult,
   },
   'settings.get': { params: SettingsGetParams, result: SettingsResult },
   'settings.update': { params: SettingsUpdateParams, result: SettingsResult },

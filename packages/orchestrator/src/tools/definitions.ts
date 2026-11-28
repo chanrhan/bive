@@ -9,6 +9,7 @@ import {
   CheckKind,
   MUTANT_LIMITS,
   Risk,
+  RULE_SPLIT_MAX,
   RuleBehavior,
   RuleKind,
   RuleTargetBlocks,
@@ -54,14 +55,26 @@ export const OBJECTION_TOOL_NAMES = ['raise_objection'] as const;
  * 실행기가 닫힌다(세션마다 변이 1개).
  */
 export const MUTATION_TOOL_NAMES = ['propose_mutant'] as const;
+/**
+ * 규칙 분할 도구 (M3-57 #320, ADR-147 ⑧, ADR-153). 어느 역할의 목록({@link ROLE_TOOL_NAMES})에도 없고, 규칙 작성 역할의 분할 세션
+ * (예산 초과 항목의 규칙 분할 액션이 띄운 세션)에만 이 도구 하나를 준다({@link RULE_SPLIT_SESSION_TOOL_NAMES}). 대상 규칙 하나를 새 규칙
+ * 2개 이상으로 대체한다(폐기 · 새 규칙 · 규범 변경 기록 · 분할 기록을 트랜잭션 1개로).
+ */
+export const SPLIT_TOOL_NAMES = ['split_rule'] as const;
 
 export type FileToolName = (typeof FILE_TOOL_NAMES)[number];
 export type CommandToolName = (typeof COMMAND_TOOL_NAMES)[number];
 export type NormToolName = (typeof NORM_TOOL_NAMES)[number];
 export type ObjectionToolName = (typeof OBJECTION_TOOL_NAMES)[number];
 export type MutationToolName = (typeof MUTATION_TOOL_NAMES)[number];
+export type SplitToolName = (typeof SPLIT_TOOL_NAMES)[number];
 export type FixedToolName =
-  FileToolName | CommandToolName | NormToolName | ObjectionToolName | MutationToolName;
+  | FileToolName
+  | CommandToolName
+  | NormToolName
+  | ObjectionToolName
+  | MutationToolName
+  | SplitToolName;
 
 /**
  * 역할별 허용 도구. 세션 init의 도구 목록은 이것과 정확히 같아야 한다(session-guard.ts).
@@ -89,6 +102,30 @@ export const ROLE_TOOL_NAMES = {
 
 /** 역할의 허용 도구 이름 목록. */
 export const roleToolNames = (role: AgentRole): readonly FixedToolName[] => ROLE_TOOL_NAMES[role];
+
+/**
+ * 규칙 작성 역할의 분할 세션 도구 목록 (M3-57, ADR-153): 분할 도구 하나뿐이다. 그 세션에는 규칙 생성 · 폐기 · 대체 · 유지 도구가 없어
+ * 대상 규칙을 나누는 것만 할 수 있다. 세션 가드 · 실행기 · SDK 노출이 이 목록을 쓴다.
+ */
+export const RULE_SPLIT_SESSION_TOOL_NAMES = [
+  'split_rule',
+] as const satisfies readonly SplitToolName[];
+
+/** 세션 도구 묶음: 역할 목록(기본) 또는 규칙 작성 역할의 분할 세션 목록. */
+export type SessionToolSet = 'role' | 'rule_split';
+
+/**
+ * 세션의 도구 이름 목록. 분할 세션 목록은 규칙 작성 역할에만 있다(다른 역할에 주면 던진다).
+ * @throws {Error} 규칙 작성 역할이 아닌데 분할 세션 목록을 고름
+ */
+export const sessionToolNames = (
+  role: AgentRole,
+  set: SessionToolSet = 'role',
+): readonly FixedToolName[] => {
+  if (set === 'role') return roleToolNames(role);
+  if (role !== 'rule-writer') throw new Error(`분할 세션 도구는 규칙 작성 역할에만 있다: ${role}`);
+  return RULE_SPLIT_SESSION_TOOL_NAMES;
+};
 
 /** 경로 인자. 빈 문자열 · NUL은 스키마에서 거른다. */
 const PathArg = z
@@ -260,6 +297,41 @@ export const SupersedeRuleInput = ProposeRuleInput.extend({
 });
 export type SupersedeRuleInput = z.infer<typeof SupersedeRuleInput>;
 
+/** 진술 대조용 정규화 (NFC, 공백류 연속 → 공백 한 칸, 앞뒤 공백 제거: 폐기 근거의 인용 대조와 같은 규칙). */
+const statementKey = (statement: string): string =>
+  statement.normalize('NFC').replace(/\s+/gu, ' ').trim();
+
+/**
+ * 분할로 만드는 새 규칙 하나 (M3-57, ADR-153): 규칙 생성 입력에서 부모 요구사항을 뺀 칸. 부모는 나누는 규칙의 것을 물려받고 바꿀 수
+ * 없다(칸을 주면 모르는 칸으로 거부). 진술 형식 검사는 규칙 생성과 같은 스키마다. `contradiction`은 나누는 규칙 밖의 효력 있는 규칙과의
+ * 모순 판단이다(나누는 규칙과 같은 호출의 다른 새 규칙은 넣지 않는다).
+ */
+export const SplitRuleItemInput = ProposeRuleInput.omit({ parentRequirementId: true });
+export type SplitRuleItemInput = z.infer<typeof SplitRuleItemInput>;
+
+/**
+ * 규칙 분할 입력 (M3-57 #320, ADR-147 ⑧, ADR-153): 나눌 규칙 · 근거(폐기 근거와 같은 인용 규칙)와 새 규칙 2 ~ {@link RULE_SPLIT_MAX}개.
+ * 새 규칙끼리 진술이 같으면(공백 정리 뒤) 거부한다.
+ */
+export const SplitRuleInput = z.strictObject({
+  ruleId: TargetRuleArg.describe(
+    '나눌 규칙의 표시 ID(RULE-001 형식) 또는 ID. 작업 지시의 그 규칙만',
+  ),
+  grounds: RetirementGrounds,
+  rules: z
+    .array(SplitRuleItemInput)
+    .min(2)
+    .max(RULE_SPLIT_MAX)
+    .refine(
+      (items) => new Set(items.map((item) => statementKey(item.statement))).size === items.length,
+      '새 규칙끼리 진술이 같음',
+    )
+    .describe(
+      `나눈 새 규칙 2 ~ ${String(RULE_SPLIT_MAX)}개. 칸은 propose_rule과 같고 parentRequirementId는 쓰지 않는다(나누는 규칙의 부모 요구사항을 물려받는다)`,
+    ),
+});
+export type SplitRuleInput = z.infer<typeof SplitRuleInput>;
+
 /** 판단 근거의 길이 상한 (유지, ADR-115. 폐기 · 대체 근거와 같다). */
 export const MAX_UPHOLD_GROUNDS = MAX_CONTRADICTION_GROUNDS;
 
@@ -408,6 +480,11 @@ const DEFINITIONS: Record<FixedToolName, ToolDefinition> = {
       '대상 규칙을 어기게 만드는 변이 1개를 낸다: 대상 블록 파일 하나 안에서 정확히 한 번 나오는 글(search)을 다른 글(replace)로 바꾼다. 작업 트리는 바뀌지 않고, 오케스트레이터가 격리된 체크아웃에 적용해 대상 규칙의 인수 테스트로 판정한다. 인수 테스트 · 설정 · 잠금 · 계약 파일은 대상이 아니다. 받아들여지면 이 세션은 끝난다(이후 도구 호출은 모두 거부).',
     inputSchema: ProposeMutantInput,
   },
+  split_rule: {
+    name: 'split_rule',
+    description: `작업 지시의 규칙 하나를 더 작은 새 규칙 2 ~ ${String(RULE_SPLIT_MAX)}개로 나눈다: 그 규칙을 폐기하고 새 규칙들을 한 번에 만든다. 새 규칙의 칸은 propose_rule과 같고(parentRequirementId는 쓰지 않는다: 나누는 규칙의 부모 요구사항을 물려받는다) 진술은 ${EARS_FORMAT} 형식 한 줄. 새 규칙끼리 진술이 같으면 거부된다. 근거에 나누는 규칙의 진술이나 최근 판정의 인수 테스트 케이스 이름의 일부를 글자 그대로(연속 10자 이상) 옮겨야 한다. 새 규칙은 바로 효력을 갖고 규칙마다 실행이 자동으로 시작된다. 받아들여지면 이 세션은 끝난다(이후 도구 호출은 모두 거부).`,
+    inputSchema: SplitRuleInput,
+  },
 };
 
 /** 이름의 도구 정의. */
@@ -416,6 +493,24 @@ export const toolDefinition = (name: FixedToolName): ToolDefinition => DEFINITIO
 /** 역할의 도구 정의 목록 (ROLE_TOOL_NAMES 순서). */
 export const toolDefinitions = (role: AgentRole): ToolDefinition[] =>
   roleToolNames(role).map((name) => DEFINITIONS[name]);
+
+/**
+ * 세션에 노출할 도구 정의 (실행기가 보고한 이름 목록 순서, M3-57 · ADR-153). 그 목록은 역할 목록이거나 규칙 작성 역할의 분할 세션
+ * 목록과 정확히 같아야 한다(그 밖의 목록은 던진다: 실행기 밖에서 도구를 더하는 길을 두지 않는다).
+ * @throws {Error} 허용된 두 목록 어느 것과도 다름
+ */
+export const sessionToolDefinitions = (
+  role: AgentRole,
+  names: readonly string[],
+): ToolDefinition[] => {
+  const same = (allowed: readonly string[]): boolean =>
+    allowed.length === names.length && allowed.every((name, index) => names[index] === name);
+  if (same(roleToolNames(role))) return toolDefinitions(role);
+  if (role === 'rule-writer' && same(RULE_SPLIT_SESSION_TOOL_NAMES)) {
+    return RULE_SPLIT_SESSION_TOOL_NAMES.map((name) => DEFINITIONS[name]);
+  }
+  throw new Error(`역할(${role})의 세션 도구 목록이 아님: ${names.join(', ')}`);
+};
 
 /** 고정 도구 이름인지. */
 export const isFixedToolName = (name: string): name is FixedToolName =>

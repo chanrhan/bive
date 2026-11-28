@@ -201,6 +201,21 @@ const ruleContent = (rule: Rule) => ({
   risk: rule.risk,
 });
 
+/** 검증한 새 규칙 입력. */
+interface ParsedAgentRule {
+  readonly payload: AgentRulePayload;
+  readonly behavior: RuleBehavior;
+}
+
+/**
+ * 새 규칙 입력의 검증 (규칙 생성 · 분할 공통): 본문(`AgentRulePayload`)과 동작 선언.
+ * @throws {ZodError} 본문 스키마 위반 · 모르는 선언
+ */
+const parsedAgentRule = (input: Pick<AgentRuleInput, 'payload' | 'behavior'>): ParsedAgentRule => ({
+  payload: AgentRulePayload.parse(input.payload),
+  behavior: RuleBehavior.parse(input.behavior),
+});
+
 /**
  * 열린 저장소에 규칙을 바로 반영하고 규범 변경 기록(신규 · 모순 판단)을 남긴다 (트랜잭션 1개).
  * @throws {ZodError} 본문 스키마 위반 · 주체가 에이전트가 아님 · 빈 사유 · 빈 근거
@@ -213,17 +228,15 @@ export const createAgentRule = (
   input: AgentRuleInput,
   clock: AgentRuleClock,
 ): AgentRuleResult => {
-  const payload = AgentRulePayload.parse(input.payload);
+  const parsed = parsedAgentRule(input);
   const author = AgentAuthorSchema.parse(input.author);
-  const behavior = RuleBehavior.parse(input.behavior);
   return store.transaction(() => {
     const at = new Date(clock.now()).toISOString();
     // 대상은 새 규칙을 만들기 전에 고른다 (새 규칙 자신을 가리킬 수 없다)
     const contradicts = resolveContradicts(store, input.contradiction);
     return writeAgentRule(store, {
-      payload,
+      ...parsed,
       author,
-      behavior,
       at,
       id: clock.newId(),
       sessionId: input.sessionId,
@@ -474,11 +487,21 @@ const writeRetirement = (
     readonly sessionId: Ulid;
     readonly runId: Ulid | null;
     readonly grounds: string;
-    readonly supersede: {
-      readonly rule: Rule;
-      readonly createdSeq: number;
-      readonly judgmentSeq: number;
-    } | null;
+    /**
+     * 대체한 새 규칙 (폐기만이면 `null`). 규칙 분할(M3-57, ADR-153)이면 `rule`은 첫 새 규칙이고 `split`에 새 규칙들과 각 신규 기록
+     * 순번이 만든 순서대로 있다
+     */
+    readonly supersede:
+      | {
+          readonly rule: Rule;
+          readonly createdSeq: number;
+          readonly judgmentSeq: number;
+        }
+      | {
+          readonly rule: Rule;
+          readonly split: readonly { readonly rule: Rule; readonly createdSeq: number }[];
+        }
+      | null;
   },
 ): RetirementWrite => {
   const { target, supersede } = input;
@@ -495,11 +518,19 @@ const writeRetirement = (
       retirement:
         supersede === null
           ? { supersededBy: null }
-          : {
-              supersededBy: { id: supersede.rule.id, displayId: supersede.rule.displayId },
-              createdSeq: supersede.createdSeq,
-              judgmentSeq: supersede.judgmentSeq,
-            },
+          : 'split' in supersede
+            ? {
+                supersededBy: { id: supersede.rule.id, displayId: supersede.rule.displayId },
+                split: supersede.split.map((item) => ({
+                  rule: { id: item.rule.id, displayId: item.rule.displayId },
+                  createdSeq: item.createdSeq,
+                })),
+              }
+            : {
+                supersededBy: { id: supersede.rule.id, displayId: supersede.rule.displayId },
+                createdSeq: supersede.createdSeq,
+                judgmentSeq: supersede.judgmentSeq,
+              },
     },
   });
   const retirement = store.ruleRetirements.record({
@@ -960,6 +991,150 @@ export const supersedeAgentRule = (
       },
     });
     return { ...created, superseded: target, retirement, objectionJudgment };
+  });
+};
+
+// ── 규칙 분할 (M3-57 #320, ADR-147 ⑧, ADR-153) ─────────────────────────
+
+/** 분할로 만드는 새 규칙 하나: 규칙 생성 입력에서 부모 요구사항을 뺀 것 (부모는 나누는 규칙의 것을 물려받는다). */
+export interface AgentSplitRuleInput {
+  /** 규칙 본문에서 부모 요구사항을 뺀 칸 (부모를 넣어 `AgentRulePayload`로 검증한다) */
+  readonly payload: Readonly<Record<string, unknown>>;
+  /** 사유 · 근거 (신규 기록 `reason`: 나누는 규칙의 어느 부분을 옮겼는지) */
+  readonly rationale: string;
+  /** 동작 선언 (ADR-151: 새 규칙마다 필수) */
+  readonly behavior: RuleBehavior;
+  /** 나누는 규칙 밖의 효력 있는 규칙과의 모순 판단 */
+  readonly contradiction: AgentRuleContradiction;
+}
+
+/** 분할 반영 뒤 같은 트랜잭션 안에서 넘기는 결과 (검토 대기열 항목 처리 등 부른 쪽의 쓰기). */
+export interface AgentSplitWritten {
+  /** 분할로 폐기된 규칙 */
+  readonly ruleId: Ulid;
+  /** 대체한 새 규칙 (만든 순서) */
+  readonly newRuleIds: readonly Ulid[];
+  /** 반영 시각 (모든 기록이 같다) */
+  readonly at: string;
+}
+
+/** 규칙 분할 입력. */
+export interface AgentSplitInput {
+  /** 나눌 규칙의 ID (부른 쪽이 고른 규칙 하나) */
+  readonly ruleId: Ulid;
+  /** 근거 (나누는 규칙의 진술 · 케이스 이름 인용 필수, 분할 기록의 사유) */
+  readonly grounds: string;
+  /** 새 규칙 2개 이상 (만들 순서) */
+  readonly rules: readonly AgentSplitRuleInput[];
+  readonly author: AgentAuthor;
+  readonly sessionId: Ulid;
+  /** 그 세션이 작업 지시로 받은 규범 입력의 요약 (새 규칙마다 판단 기록에 수를 남긴다) */
+  readonly normInput: NormInputSummary;
+  /** 인용 출처로 쓸 케이스 이름의 기준 (없으면 진술만) */
+  readonly isKnownCase?: CaseNameFilter;
+  /**
+   * 반영의 마지막 쓰기로 같은 트랜잭션 안에서 부른다(검토 대기열의 예산 초과 항목 처리). 던지면 트랜잭션이 되돌려져 규칙 · 기록 ·
+   * 폐기 · 분할 기록이 하나도 남지 않는다
+   */
+  readonly settle?: (store: ProjectStore, written: AgentSplitWritten) => void;
+}
+
+export interface AgentSplitResult {
+  /** 분할로 폐기된 규칙 (폐기 직전 내용) */
+  readonly split: Rule;
+  /** 새 규칙마다 규칙 + 신규 기록 + 모순 판단 기록 (만든 순서) */
+  readonly created: readonly AgentRuleResult[];
+  /** 분할 기록 (`superseded`, 분할 상세) + 폐기 기록 + 확인 풀림 */
+  readonly retirement: RetirementWrite;
+}
+
+/**
+ * 규칙 하나를 새 규칙 2개 이상으로 대체한다 (트랜잭션 1개, ADR-100 D6 · B⑨, ADR-147 ⑧): 새 규칙마다 규칙 + 신규 기록(동작 선언) +
+ * 모순 판단 기록(주제 `new_rule`, 나누는 규칙 밖의 효력 있는 규칙과) → 나누는 규칙의 대체 기록(`superseded`, 분할 상세 = 새 규칙들과 신규
+ * 기록 순번, 사유 = 근거) + 폐기 기록(`superseded_by` = 첫 새 규칙) + 확인 풀림(확인됨이었으면) → 분할 기록(저장소 `ruleSplits`, 새 규칙 전부)
+ * → `settle`. 새 규칙의 부모 요구사항은 나누는 규칙의 것이다. 승인 대기 제안 · 승인 기록은 쓰지 않는다(ADR-100 C2). 새 규칙은
+ * 미확인이다.
+ * @throws {ZodError} 본문 스키마 위반 · 주체가 에이전트가 아님 · 빈 사유 · 빈 근거
+ * @throws {NormRetirementInputError} 대상이 없음 · 효력 없음 · 내장 구조 규칙 · 부모 요구사항 없음 · 근거가 인용하지 않음 · 새 규칙
+ *   2개 미만 · 새 규칙끼리 진술이 같음
+ * @throws {NormJudgmentInputError} 모순 대상이 효력 있는 규칙이 아님 · 나누는 규칙을 가리킴
+ * @throws `settle`이 던진 것 (그대로)
+ */
+export const splitAgentRule = (
+  store: ProjectStore,
+  input: AgentSplitInput,
+  clock: AgentRuleClock,
+): AgentSplitResult => {
+  const author = AgentAuthorSchema.parse(input.author);
+  return store.transaction(() => {
+    const target = resolveTarget(store, input.ruleId);
+    const parentRequirementId = target.parentRequirementId;
+    if (parentRequirementId === null) {
+      throw new NormRetirementInputError(
+        'invalid_args',
+        `${target.displayId}는 부모 요구사항이 없어 나눌 수 없음 (새 규칙이 물려받을 부모가 없다)`,
+      );
+    }
+    if (input.rules.length < 2) {
+      throw new NormRetirementInputError(
+        'invalid_args',
+        `새 규칙이 ${String(input.rules.length)}개 (2개 이상으로 나눈다)`,
+      );
+    }
+    const statements = input.rules.map((item) =>
+      normalizeQuoteText(String(item.payload['statement'] ?? '')),
+    );
+    if (new Set(statements).size !== statements.length) {
+      throw new NormRetirementInputError('invalid_args', '새 규칙끼리 진술이 같음');
+    }
+    assertQuoted(store, target, input.grounds, input.isKnownCase ?? NO_KNOWN_CASES);
+    // 본문 · 선언 · 모순 대상은 새 규칙을 만들기 전에 모두 확인한다 (같은 호출의 다른 새 규칙 · 나누는 규칙은 모순 대상이 될 수 없다)
+    const planned = input.rules.map((item) => ({
+      // 동작 선언은 규칙 생성과 같은 검증을 지난다 (읽는 자리를 늘리지 않게 입력을 그대로 넘긴다)
+      parsed: parsedAgentRule({ ...item, payload: { ...item.payload, parentRequirementId } }),
+      rationale: item.rationale,
+      contradiction: item.contradiction,
+      contradicts: resolveContradicts(store, item.contradiction, target),
+    }));
+    const at = new Date(clock.now()).toISOString();
+    const created = planned.map((item) =>
+      writeAgentRule(store, {
+        ...item.parsed,
+        author,
+        at,
+        id: clock.newId(),
+        sessionId: input.sessionId,
+        runId: null,
+        rationale: item.rationale,
+        normInput: input.normInput,
+        judgment: {
+          subject: 'new_rule',
+          contradicts: item.contradicts,
+          reason:
+            item.contradiction.verdict === 'none'
+              ? NO_CONTRADICTION_REASON
+              : item.contradiction.grounds,
+        },
+      }),
+    );
+    const [first] = created;
+    if (first === undefined) throw new Error('분할로 만든 규칙이 없다');
+    const retirement = writeRetirement(store, {
+      target,
+      author,
+      at,
+      sessionId: input.sessionId,
+      runId: null,
+      grounds: input.grounds,
+      supersede: {
+        rule: first.rule,
+        split: created.map((item) => ({ rule: item.rule, createdSeq: item.normChange.seq })),
+      },
+    });
+    const newRuleIds = created.map((item) => item.rule.id);
+    store.ruleSplits.record({ ruleId: target.id, newRuleIds });
+    input.settle?.(store, { ruleId: target.id, newRuleIds, at });
+    return { split: target, created, retirement };
   });
 };
 

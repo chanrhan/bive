@@ -16,7 +16,10 @@
 //   - 한도 상향 재개: 원 실행은 '예산 초과' 그대로 두고, 사람의 실행 RPC 처리기가 `run.create`와 같은 문(`createRun`)으로 원 실행과 같은
 //     유형 · 대상 규칙 · 기준 커밋의 이어받는 실행을 만든다. 이 모듈이 항목 · 원 실행 · 새 한도를 확인하고(`continuationTarget`), 같은 트랜잭션에서
 //     원 실행과의 연결(저장소 `runContinuations`, 0030)을 쓰고 항목을 처리한다(`recordContinuation`). 이어받는 실행의 연결을 쓰는 곳은 이 모듈 하나다
-//   - 허용 목록 축소 재개 · 규칙 분할: 뒤 이슈(M3-58 · M3-57)
+//   - 규칙 분할 (M3-57 #320, ADR-147 ⑧, ADR-153): 실행을 만들지 않는다. 이 모듈이 항목 · 나눌 규칙을 확인하고(`splitTarget`), 사람의
+//     검토 대기열 처리기가 규칙 작성 역할의 분할 세션을 띄운다. 세션이 그 규칙을 새 규칙 2개 이상으로 대체하는 쓰기 트랜잭션의 마지막에
+//     이 모듈의 처리(`splitSettlement`)가 항목을 처리됨으로 남긴다(세션 코드는 이 모듈을 모르고 받은 함수만 부른다)
+//   - 허용 목록 축소 재개: 뒤 이슈(M3-58)
 // - 값은 저장된 항목 · 실행 · 규칙 · 변이 기록에서만 만든다(NFR-03)
 import {
   type AgentRole,
@@ -33,6 +36,7 @@ import {
   type ReviewItemKind,
   type ReviewItemState,
   type ReviewQueueEntry,
+  type Rule,
   type Run,
   type RunCreateResult,
   subtractUsd,
@@ -333,3 +337,58 @@ export const recordContinuation = (
   });
   return reviewQueueEntry(store, resolved);
 };
+
+// ── 예산 초과 액션: 규칙 분할 (M3-57 #320, ADR-147 ⑧, ADR-153) ─────────────
+
+/** 규칙 분할할 열린 예산 초과 항목 · 원 실행 · 나눌 규칙. */
+export interface SplitTarget {
+  readonly item: ReviewItem;
+  readonly origin: Run;
+  readonly rule: Rule;
+}
+
+/**
+ * 규칙 분할을 받을 수 있는지 본다 (분할 세션을 띄우기 전, 열린 저장소에서): 열린 예산 초과 항목이고 `ruleId`가 그 실행의 대상 규칙이며
+ * 내장 구조 · 계약 검사 규칙이 아니다. 효력 · 부모 요구사항 · 하루 한도 · 설정은 세션을 띄우는 쪽이 본다.
+ * @throws {RpcError} -32004 없는 항목 · -32009 이미 처리됨 · 예산 초과 항목이 아님 · 내장 규칙(`builtin_rule`) · -32001 대상 규칙이
+ *   아님(`SPLIT_RULE_NOT_TARGET`)
+ */
+export const splitTarget = (store: ProjectStore, seq: number, ruleId: string): SplitTarget => {
+  const item = openItem(store, seq, 'budget_exceeded');
+  const origin = store.runs.get(item.runId);
+  if (origin === null) {
+    throw new RpcError(ErrorCode.NotFound, `실행을 찾을 수 없습니다: ${item.runId}`);
+  }
+  const rule = origin.targetRuleIds.includes(ruleId) ? store.rules.get(ruleId) : null;
+  if (rule === null) {
+    throw new RpcError(
+      ErrorCode.ValidationFailed,
+      '나눌 규칙이 그 항목의 실행의 대상 규칙이 아닙니다',
+      {
+        reason: DomainErrorReason.SplitRuleNotTarget,
+      },
+    );
+  }
+  if (rule.builtin) {
+    throw conflict('builtin_rule', `내장 규칙은 나눌 수 없습니다: ${rule.displayId}`);
+  }
+  return { item, origin, rule };
+};
+
+/**
+ * 분할 반영과 같은 쓰기 트랜잭션의 마지막 쓰기: 항목이 아직 열려 있으면 처리됨(규칙 분할, 주체 = 액션을 누른 사람)으로 남긴다. 분할 세션의
+ * 반영 모듈이 받은 그대로 부른다. 그 사이 항목이 처리됐으면 던져 반영 전체가 되돌려진다. 처리 결과(그 규칙의 분할 기록)는 DB가 다시 본다.
+ * @throws {RpcError} -32009 이미 처리됨
+ */
+export const splitSettlement =
+  (target: SplitTarget, author: HumanAuthor) =>
+  (store: ProjectStore, written: { readonly ruleId: string; readonly at: string }): void => {
+    const item = openItem(store, target.item.seq, 'budget_exceeded');
+    store.reviewQueue.resolve(item.seq, {
+      action: 'split_rule',
+      by: author,
+      at: written.at,
+      reason: null,
+      ruleId: written.ruleId,
+    });
+  };

@@ -284,6 +284,8 @@ export const startOrchestrator = async (options: OrchestratorOptions): Promise<S
           },
         },
         ruleWriter,
+        // 예산 초과 항목의 규칙 분할 세션 (M3-57 #320, ADR-153): 같은 규칙 작성 서비스의 분할 세션
+        ruleSplitter: ruleWriter,
         engine,
         onProposalChanged: proposalEvents.changed,
         ruleEditStarter,
