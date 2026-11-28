@@ -249,3 +249,107 @@ M3(판정 확장)는 M7(사후 확인 전환, ADR-100) 위에서 시작한다. m
 - **구현 세션의 앞 시도 사유**: 구조 위반은 별도 머리 문장 아래(`steps/implementation.ts`), 기준은 `structureRuleDisplayIds`(내장 구조 규칙의 고정 제목 대조 `isBuiltinStructureRule`). **계약 검사 규칙도 `builtin: true`지만 기존 머리 `CHECK_FAILED_HEADER` 아래 그대로다**(시험이 고정).
 - ADR-127 본문의 한계 문장 두 곳에 "(ADR-144로 닫음)"이 덧붙었다(선례: PR #288 · #298).
 - 후속 후보: 겹침을 내장 구조 규칙 상세에서도 보이기(SCR-16 때), "겹친 파일" 글씨 구분, 병합 재검사의 겹침 표시.
+
+### M3-55 뒤의 로드맵 사실 (PR #318, main `7ab8aea`, ADR-147)
+- M3-08(#53)은 수용 기준 1 · 2(저장 모델 · 자동 등록 · 변이 생존 액션)만 맡는다. 예산 초과 액션은 **M3-56(#319) 이어받는 실행 · 한도 상향 재개**, **M3-57(#320) 규칙 분할**, **M3-58(#321) 허용 목록 축소 재개(M3-56 뒤)**. 화면 M3-09(#54)는 M3-08 · M3-56 · M3-57 · M3-58을 기다린다.
+- ADR-147의 결정(구현 이슈가 따른다): ① 종료 상태 `budget_exceeded`는 그대로(0016 트리거 · `RUN_STATUS_TRANSITIONS` · 저장소 거부를 풀지 않는다). ② 재개 = 이어받는 새 실행(같은 유형 · 대상 · 기준 커밋, 연결은 새 표, 작업 가지는 원 실행의 마지막 완료 단계 산출 커밋에서 시작, 끝나지 않은 이어받는 실행은 원 실행 하나에 하나). ③ 이어받은 단계는 새 실행에서 `skipped`(사유 이어받음)이고 `passed` 행을 만들지 않는다. 판정 근거(Red 해시 · 단계 산출 커밋)는 연결을 거쳐 원 실행의 단계 기록에서 읽는다. ④ 새 한도 = 새 실행의 예산 값(`budgetSnapshot`의 `run` · `roles`, 각 `maxBudgetUsd` · `maxTurns`): 내리면 `-32001`, 이미 닿은 값은 쓴 양보다 커야 함, 사용량은 사슬 전체 누적. ⑤ 사람의 `run.create`의 문 그대로(하루 한도는 세션을 열 때 본다: 닿아 있으면 다시 `budget_exceeded`). ⑥ 허용 목록 축소 = 제외 경로 목록(1개 이상), 쓸 수 있는 곳 = 대상 블록 include의 합에서 제외를 뺀 경로(블록 밖도 거부), 처음 목록이 비면 거부, 새 한도 함께. ⑦ 보강 실행을 이어받은 실행도 보강 실행으로 판별(연결 사슬). ⑧ 규칙 분할: 사람이 나눌 규칙 하나를 줌, 내장 구조 규칙은 RPC 입구에서 거부, 2개 미만이면 항목 열림, 나머지 대상 규칙은 자동으로 다시 시작되지 않음.
+- 코드 사실: `worktree-manager.create`는 기준 브랜치의 지금 커밋에서 가지를 만든다(넓혀야 함). `sessionLimits`는 그 실행의 세션 기록만 센다(넓혀야 함). `supersede_rule`은 1 → 1, 폐기 기록의 `superseded_by`는 값 1개.
+
+### M3-15 (#60, PR #315, main `64bac0e`, ADR-146, 마이그레이션 없음)
+- **`verification.trend {projectId}` → `{points, truncated}`**(`orchestrator/src/verification/trend.ts`): 점 = 병합 커밋이 기록된 실행, 순서 = 판정 기준을 고르는 순서(`summary.ts`의 `orderedBasisCandidates`, `basisOf`와 공유), 최근 30개. **한 점의 값은 그 실행이 판정 기준이던 동안의 끝(다음 병합 직전, 마지막 점은 지금)의 값**이라 마지막 점 = 요약 카드. 새 표 없이 기록에서 다시 계산한다.
+- 통과율 = `verification.summary`의 준수와 같은 정의(`judgmentsAtCommit` 공유: 그 실행 자신의 병합 커밋 판정, 없으면 `headCommit`의 검사 판정. 앞 실행의 판정을 이어받지 않는다. 판정 없는 규칙은 미판정으로 분모에 든다). 변이 검증됨 = 그 점까지 **병합된 실행**의 변이 기록에서 규칙별 가장 나중 기록, 기록 있는 효력 규칙(`tested`) 대비 검증됨(`verified`).
+- `verification.summary`에 필수 칸 `mutation {verified, tested}`. `rule.list` 항목에 선택 칸 `mutation`(모든 기록의 가장 나중 상태, 없으면 미검증, 질의 1회).
+- `norms/effective.ts`에 지난 시점 효력 `isEffectiveRuleBefore` · `retirementTimesOf`(순간이 무한대면 `isEffectiveRule`과 같음을 성질 시험이 고정). store 묶음 읽기: `judgments.listByRuns` · `runs.stepsOfMergedRuns` · `mutations.list` · `mutations.latestForRules`.
+- 화면: SCR-05에 SVG 그래프(통과율 실선 · 변이 검증됨 점선, 눈금 100 · 50 · 0%, 가로축은 첫 · 마지막 병합 시각)와 변이 검증됨 카드(누르면 SCR-03 `변이: 생존`). SCR-03 변이 칩 값 "검증됨 · 미검증 · 생존", 카드 예외 '변이 생존'은 판정 예외 바로 뒤 · 추적성 결함 · 미확인 앞.
+- 구조 시험: 효력 판정 모듈 사용처 목록에 `verification/trend.ts`(읽기만), 판정 기록 읽기 정규식이 `listByRuns`도 묶는다.
+- 한계(후속 후보): 검증 화면의 변이 값(병합된 실행 기록)과 규칙 화면의 변이 상태(모든 기록의 마지막)가 변이 단계 뒤 병합 실패에서 갈린다, `rule.list` 변이 상태는 미래 시각 기록을 거르지 않는다, 그래프 중간 점 값은 눈금으로만 읽힌다(툴팁 · 화면 읽기 없음), `verification.summary`의 판정 기준 계산이 병합된 실행마다 단계를 따로 읽는다(N+1).
+
+### M3-08 (#53, PR #317, main `22c66c7`, ADR-145, 마이그레이션 `project/0028_review_queue`)
+- **표 `review_items`**(`seq, kind, run_id, mutation_result_id, created_at, resolved_at, action, resolved_by, reason, detail`): 종류 `budget_exceeded` · `mutant_survived`. 열린 항목은 실행마다 하나(부분 UNIQUE). 처리는 한 번, 사람 주체만, 처리 결과가 실제로 있어야 함(보강 연결 / 같은 규칙 · 같은 사유의 격리 판정), 수정 · 삭제 거부(트리거).
+- **자동 등록은 DB 트리거**(`AFTER UPDATE OF status ON runs` 둘): `budget_exceeded` → 예산 초과 항목(보강 실행 포함, 하나뿐). 보강 실행이 `failed`이고 원인 규칙이 지금도 '변이 생존' → 변이 생존 항목. 유형 A의 생존 · 생략된 자동 보강은 항목 아님. **0028 전에 끝난 실행은 되채우지 않는다.** 엔진 코드에는 등록 코드가 없다.
+- **사람 보강 연결 `review_reinforcements`** + **뷰 `run_reinforcement_causes(run_id, mutation_result_id, link_kind)`**(`auto` = 0027 · `review` = 0028). 자동 등록 트리거와 `MutationResultRepository.reinforcementCauseOfRun`이 이 뷰 하나를 읽는다 → `isReinforcementRun` · 재주입 · 변이 자료 · "더하기만" · 자동 보강의 중복 확인이 두 시작 길에 똑같이 걸린다. **M3-56은 이 뷰를 바꿔 이어받는 실행을 사슬로 잇는다**(뷰를 다시 만드는 새 마이그레이션). 한 실행은 두 연결 가운데 하나만(양쪽 넣기 거부 트리거).
+- **RPC**: `reviewQueue.list {kind?, state?}` · `get {seq}` · `reinforce` · `quarantine`(사람만, 에이전트 -32020). 응답 항목 `{item, run: {id, displayId, type, status, failureReason}, rules: [{id, displayId, title}]}`. 알림 `event.reviewQueue.changed {projectId}`(`ipc/project-store-access.ts`가 저장소 사용 전후의 변경 표지를 비교). 이의 제기 메서드는 없다(-32601).
+- **`reviewQueue.reinforce` 처리기는 `ipc/run-handlers.ts`에 있다**(구조 시험 "`createRun(`을 부르는 곳은 `run-handlers.ts`뿐"). 항목 확인 · 연결 · 처리는 `review/review-queue.ts`(처리와 사람 연결을 쓰는 유일한 모듈, 구조 시험). 실행 생성 · 연결 · 처리는 트랜잭션 1개. **M3-56 · M3-57 · M3-58의 재개 · 분할 처리기도 실행을 만들면 `run-handlers.ts`에 둔다.**
+- **판정 격리**: `judgments` 1행(`quarantined`, 사유, `runId`/`stepId` = null, 커밋 = 원인 변이 기록의 판정 커밋, 케이스 없음). 규칙 목록 · 상세의 최신 판정에만 보이고 `verification.summary` · `verification.trend`에는 들지 않는다(둘 다 실행의 기록만 읽는다). 검사 단계 · 병합 재검사 · 자동 시작은 저장된 판정을 읽지 않는다. 격리된 규칙의 자동 보강 · 변이 주입은 계속되고 변이 상태는 '변이 생존' 그대로. 격리를 되돌리는 길 없음. **격리의 지표 반영 · 전이는 M3-14(#59).**
+- 앱: 렌더러는 `rpc-bridge.ts`의 `isMethodName`으로 새 메서드를 이미 부를 수 있다. M3-09에 남는 것은 화면과 앱 표시명 표.
+- 한계(후속 후보): 폐기된 규칙의 변이 생존 항목에서 테스트 보강이 거부되지 않아 승인 단계에서 끝나는 실행과 새 항목이 생긴다(#266 쪽), `reviewQueue.list`가 전체를 읽고 항목마다 조회 3번 · 저장소 사용마다 `count(*)` 2번, 숨은 글자만으로 된 사유.
+- **다음 번호**: ADR-149(148 = #294), 마이그레이션 0030(0029 = #294).
+
+### M3-59 뒤의 로드맵 사실 (PR #324, main `bf4d534`, ADR-150)
+- M3-56(#319)은 "이어받는 실행 만들기 · 연결 표 · 새 한도의 검증과 누적 · 사람의 문과 트랜잭션 · 항목 처리 · 다시 예산 초과의 새 항목 · 보강 사슬 판별"만 맡는다. **M3-56까지의 동작: 이어받는 실행은 기준 커밋에서 첫 단계부터 돈다.** 중간 시작은 **M3-60(#325)**.
+- ADR-150의 결정(M3-60이 구현): ⓐ 시작 단계 = 원 실행에서 예산 초과를 낸 시도의 단계(기존 `interrupted` 재개와 같은 자리). **이어받는 것은 파이프라인 순서에서 그 앞 단계뿐**(새 실행에 `skipped`, 사유 이어받음, 원 실행의 그 단계 시도를 가리킴. `passed` 행을 만들지 않는다). **시작 단계와 그 뒤의 단계는 원 실행의 앞 시도가 `passed`였어도 다시 돈다**(회귀 중 예산 초과: 구현 2회차에서 초과면 구현 · Green 확인 · 검사를 다시 돈다). ⓑ 작업 가지 = 원 실행의 `headCommit`(없으면 기준 커밋)에서 시작, 커밋되지 않은 변경은 이어받지 않는다. ⓒ 판정 근거를 읽는 자리는 한 함수(원 실행들의 단계 + 자기 단계), 복사하지 않는다. ⓓ 회귀 상한은 사슬 전체로 센다.
+- 판정 근거를 읽는 지금 자리: `green-check.ts` · `merge.ts`는 `lastPassed`, `check.ts` · `implementation.ts` · `mutation.ts`는 `acceptanceBaselineOf`, `red-check.ts`는 `context.steps`와 `run.headCommit`을 직접.
+- M3-58(#321)은 M3-56에만 기댄다. M3-09(#54)는 M3-56 · M3-57 · M3-58에 기댄다. M3 흐름 4번은 M3-60까지 끝나야 성립한다.
+
+### M3-49 (#294, PR #322, main `25bc959`, ADR-148, 마이그레이션 `project/0029_asyncapi_judge_runner`)
+- **AsyncAPI 계약 검사 규칙이 판정된다**(유효성만. 구현 일치 검사는 범위 밖: ADR-033). 실행기 값 `asyncapi-parser`(shared `JudgeRunner`, `judgments.runner` CHECK). DB 스키마(Prisma)는 그대로 `no_runner`(M3-48 보류, #287).
+- **도구**: `@asyncapi/parser@3.6.3` + 루트 `pnpm.overrides` 세 줄(`@asyncapi/parser@3.6.3>@stoplight/spectral-core: 1.23.0` · `…>spectral-functions: 1.10.3` · `spectral-functions@1.10.3>spectral-formats: 1.8.3`). 최신 3.6.6은 `@scarf/scarf`(postinstall로 사용 기록 전송)를 끌어온다. **도구 판을 올릴 때**: scarf가 닫힘에 들어오는지, 시험 "사전 검사를 건너뛰어 진입 스크립트를 불러도 가로채는 리졸버가 읽지 않는다"가 통과하는지 본다(둘째 겹은 라이브러리의 `__unstable` 선택 항목에 기댄다).
+- **모듈**: `orchestrator/runner/asyncapi-validate.mjs`(도구 자식 프로세스의 진입 스크립트) · `contract-check/asyncapi-document.ts`(사전 검사: `$ref` · `$dynamicRef` · `$recursiveRef`가 `#`로 시작하지 않으면 도구를 부르지 않음, 검사하지 못하는 `schemaFormat`) · `contract-check/asyncapi.ts` · `steps/contract-check.ts`(계약 종류별 실행기 표 `CONTRACT_JUDGE_RUNNERS`).
+- **결과**: 유효 = `pass`. 유효성 오류 · 읽지 못하는 문서 · 지원하지 않는 판 = 막지 않는 `fail`(OpenAPI 형식 오류와 같은 길). 바깥 참조 · `unsupported_schema_format`(Avro 등) = 판정 없음. 도구 오류 = `judge_runner_error`(`stage: contract`). **판정할 문서 = 등록 때 커밋의 내용**(판정 커밋의 파일이 바뀌어도, 시험이 고정). 지원 판 2.0.0 ~ 2.6.0 · 3.0.0 · 3.1.0.
+- 유형 B가 AsyncAPI 계약 검사 규칙을 대상으로 받는다(실행기가 있는 종류만 받는 기존 규칙의 결과).
+- **0029는 `judgments` 표를 다시 만든다. 뒤에 `judgments`를 다시 만드는 마이그레이션은 0028의 트리거 `review_items_resolve_quarantine`을 표를 지우기 전에 지웠다가 0028과 글자까지 같게 다시 만들어야 한다**(안 그러면 표 이름 바꾸기가 `no such table: main.judgments`로 실패).
+- **시험 소스에 숨은 글자를 글자 그대로 넣지 않는다**: `String.fromCodePoint(0x202e)` 같은 식으로 만든다(편집 도구가 `‮` 표기를 실제 글자로 바꿔 넣는 경우가 있다).
+- 한계(후속 후보): `pnpm audit --prod`가 기존 의존성에서 18건(높음 4)을 보고한다(이 PR이 더한 112개에는 0건). 패키징된 Electron 앱에서 진입 스크립트 경로 미확인. 형식이 틀린 계약이 있어도 실행은 병합된다(ADR-132와 같음).
+
+### M3-56 (#319, PR #326, main `e5a8816`, ADR-149, 마이그레이션 `project/0030_run_continuations`)
+- **한도 상향 재개 = 이어받는 새 실행**(원 실행은 `budget_exceeded` 그대로: 0016 트리거 · `RUN_STATUS_TRANSITIONS`를 풀지 않는다). **이 행까지의 동작: 이어받는 실행은 원 실행의 기준 커밋에서 첫 단계부터 돈다**(`skipped` 이어받음 행 없음, 판정 근거와 회귀 수는 그 실행 자신의 것). 중간 시작은 M3-60(#325).
+- **표 `run_continuations`**: 이어받는 실행 ID UNIQUE, **원 실행 ID UNIQUE**(사슬 원 → 1차 → 2차는 되고 가지는 없다). 넣을 때의 조건(트리거): 원 실행이 `budget_exceeded`, 새 실행이 막 만든 사람 시작 실행, 유형 · 대상 규칙이 같음. 기준 커밋은 새 실행의 `base_commit`을 쓸 때 원 실행과 같은지 본다(`runs_continuation_base_commit`). 수정 · 삭제 거부. 저장소 `RunContinuationRepository`(`ancestorsOf` 등).
+- **뷰 `run_reinforcement_causes`는 0030에서 `WITH RECURSIVE`로 다시 만들어졌다**(사슬을 따라 원인 변이 기록에 닿음, `link_kind`는 사슬 뿌리의 종류). 이어받는 실행은 보강 연결 표 둘에 직접 행을 가질 수 없다(트리거).
+- **RPC `reviewQueue.resumeWithBudget`**(`ipc/run-handlers.ts`, 사람만 -32020): 항목 확인 → 한도 검증 → `createRun`(다섯째 인자 `RunContinuationSeed`: 사람의 `run.create`로는 닿지 않음) → 연결 → 항목 처리(액션 `raise_limit_resume`), 트랜잭션 1개. 처리 결과 트리거 `review_items_resolve_raise_limit`.
+- **한도**: 새 한도는 `BudgetSnapshot` 모양으로 새 실행의 예산 값이 된다. 검증 `assertRaisedBudget`(-32001 + `data.fields`): `BUDGET_SHAPE_MISMATCH` · `BUDGET_LOWERED` · `BUDGET_NOT_ABOVE_SPENT`(닿은 값은 USD · 턴 모두, `session-budget.ts`의 `budgetValueUsages` · `limitReached`). 엔진의 `sessionLimits` · `budgetOverrun` · `runRemaining`(판단 세션 포함)은 `lineageSessions`(사슬 전체의 세션)를 센다. 이어받는 실행이 아니면 자기 세션 그대로. 설정은 바뀌지 않는다. 하루 한도는 사람 실행 규칙(세션을 열 때).
+- **작업 가지**: `worktree-manager.create`에 `start` 입력(시작 커밋이 원 실행 브랜치에 있고 기준 커밋이 그 조상인지 git 객체로 확인, 아니면 `start_commit_unavailable`). 지금 시작 커밋 = 기준 커밋(`runs/run-continuation.ts`의 `continuationWorktreeStart`). **M3-60이 이것을 원 실행의 `headCommit`으로 바꾼다.**
+- 한계: 사람이 원 실행 브랜치를 지웠으면 이어받는 실행은 `worktree_error`로 실패하고 원 실행은 다시 이을 수 없다(새 `run.create`만). 이어받는 실행이 예산 초과가 아닌 이유로 끝나도 원 실행은 다시 이을 수 없다. 실행 목록에 실행이 둘, 비용은 실행마다. 날 SQL로 이어받는 실행에 `run_target_rules` 행을 더할 수 있다(0005부터의 느슨함). `narrow_allowlist_resume` · `split_rule` 처리에는 결과 확인 트리거가 아직 없다(M3-58 · M3-57 몫).
+- **M3-60(#325)이 알 것**: 중간 시작의 작업 패치 `a319-full-wip.patch`(시험 없음, 0030 병합 전 기준). 단계 실행기 6개가 판정 근거를 `context.steps`에서 읽는다 → 한 함수(`basisSteps`: 원 실행들의 단계 + 자기 단계)로 모은다. 회귀 상한은 지금 실행마다 센다 → 사슬 전체로. `skipped`(사유 `inherited`)의 표시명. 이 PR의 엔진 배선 시험(판단 세션의 사슬 잔여 · `budget_aggregate_exceeded`)을 재사용.
+- **다음 번호**: ADR-152(151 = PR #327), 마이그레이션 0031.
+
+### M3-30 (#245, PR #327, main `1b486c2`, ADR-151, 마이그레이션 없음)
+- **동작 선언**: `propose_rule` · `supersede_rule`의 필수 칸 `behavior: 'new' | 'existing'`(shared `RuleBehavior`, 빠지면 `invalid_args`). 그 규칙의 신규 기록(`norm_changes`의 `created`) `detail.behavior`에만 남는다. **시험 · 시나리오에서 이 도구를 부를 때는 선언을 넣어야 한다.**
+- **읽는 곳은 `engine/start-basis.ts`의 `declaredBehaviorOf` 하나**(구조 시험: 낱말 `behavior`가 나오는 파일 목록을 고정). 선언 없는 옛 기록 = 모름. **그 규칙에 진술이 바뀐 사람의 편집(`rule_edit`)이 있으면 모름**(제목만 고친 편집은 아님).
+- **유형 고르기**: 자동 시작(`autoStartRun`)과 다시 시작(`restartAfterContradiction`)이 선언으로 고른다(`existing` → 유형 C, `new` · 모름 → 유형 A). 다시 시작은 끝난 실행의 유형이 아니라 규칙의 선언을 따른다. 변이 보강 = 늘 유형 C 보강, 진술 편집 뒤 시작 = A, 사람의 [실행] · 이어받는 실행 = 선언 무시. 유형 C "기존 동작" 실행은 보강 실행이 아니다(변이 주입 `skipped` `run_type`).
+- **시작 근거 대조에 `type_mismatch`**: 신규 기록 · 다시 시작이 원인인 오케스트레이터 실행은 유형이 선언과 맞아야 한다(아니면 `run_without_log`). 편집 전에 대기 · 진행 중이던 유형 C 실행은 편집 뒤 `type_mismatch`로 끝난다. **편집 뒤 자동 시작(`runs/rule-edit-start.ts`)의 `pending` 탐색은 시작 근거 대조가 맞는 대기 실행만 센다** → 새 유형 A 실행이 만들어진다.
+- **어긋남**: 새 동작인데 Red 확인에서 이미 통과 · 기존 동작인데 Green 확인에서 실패 → 둘 다 `test_retry_limit`. 유형 · 대상 규칙 불변, 반대 유형의 실행은 자동으로 생기지 않는다. 실행을 끝낸 Red · Green 확인 시도의 종료 상세에 `declaredBehavior`(오케스트레이터가 신규 기록 · 다시 시작으로 시작한 실행에만).
+- 프롬프트 `RULE_BEHAVIOR_GUIDE`(요구사항 · 이의 판단 · 검사 실패 판단 · 요구사항 수정 재판단): `existing`은 요구사항 본문이 지금 동작의 유지를 밝힐 때만, 그 밖에는 `new`. 판단 세션에는 `JUDGMENT_SUPERSEDE_BEHAVIOR_LINE`.
+- **한계(사람에게 알림)**: 기존 동작으로 선언된 규칙은 코드를 바꾸지 않고 새 테스트가 지금 코드에서 통과하기만 하면 병합되고, 그 테스트가 무엇을 검사하는지는 변이 주입을 포함해 어떤 단계도 다시 보지 않는다. 선언은 코드를 보지 못한 추정이고 틀렸다는 표시는 실행 기록의 종료 상세에만 남는다(화면 없음). 진행 중이던 C 실행이 편집 뒤 끝날 때 사유가 `run_without_log`뿐이라 원인을 읽을 수 없다.
+- 후속 후보: 선언 · 어긋남의 화면 표시, 기존 동작 실행에도 변이 주입, 같은 유형 규칙 묶기(ADR-110 다시 볼 조건).
+
+### M3-60 (#325, PR #328, main `ed376f0`, ADR-152, 마이그레이션 없음)
+- **이어받는 실행은 원 실행에서 예산 초과를 낸 단계부터 돈다**(`runs/run-continuation.ts`의 `continuationStartOf`, `createRun`의 `RunContinuationSeed.inherited`). 시작 단계 = 원 실행의 `currentStep`. 파이프라인 순서에서 그 앞 단계의 마지막 시도가 통과 · 실행기의 생략이면 새 실행에 `skipped` + shared `InheritedStepDetail = {reason:'inherited', fromRunId, fromStepId, fromStatus}`로 남는다(`passed` 행을 만들지 않는다). 유형 생략(`run_type`) 단계는 이어받지 않고 엔진이 다시 유형 생략으로 기록한다. 사슬 2단에서는 실제로 그 단계를 돈 시도를 가리킨다. 시작 단계와 그 뒤는 다시 돈다.
+- **작업 가지 · `headCommit`** = 원 실행의 `headCommit`(없으면 기준 커밋). 엔진 `#drive`는 `#prepare`가 저장한 레코드로 첫 단계를 돈다. 원 브랜치를 지웠으면 `start_commit_unavailable` → `worktree_error`.
+- **판정 근거는 `basisSteps(context)` 하나**(이어받은 시도가 가리키는 시도 + 자기 단계, 이 순서: 자기 시도가 나중이라 `lastPassed`가 자기 것을 고른다). 단계 실행기(check · green-check · implementation · merge · mutation · red-check)는 `lastPassed` · `acceptanceBaselineOf`에 `context.steps`를 직접 넘기지 않는다(구조 시험: 단계 폴더의 `context.steps` 구조 분해 · 별칭 금지, 읽기 수 고정). **새 단계 실행기를 쓸 때 근거는 `basisSteps`로 읽는다.**
+- **가리킴은 읽을 때 대조한다**: 가리킨 실행이 연결 사슬의 조상, 같은 단계 종류, 상태가 `fromStatus`와 같고 통과 · 실행기의 생략. 어긋나면 이어받은 근거를 하나도 싣지 않아 근거가 필요한 실행기가 `state_inconsistent`로 멈춘다.
+- **회귀 상한은 사슬 전체**(엔진 `#unmet`의 `lineageCounts`: 구현 · 검사 회귀는 사슬의 `regressionCount` 합 + 자기 회귀, 테스트 작성 재시도는 원 실행들의 시도에서 재기동 중단 · 이어받은 시도 · 멈춘 시도를 뺀 수).
+- 보통 실행(이어받는 실행 아님)은 저장소를 읽지 않고 그대로다.
+- 한계(후속 후보): 이어받는 실행의 첫 구현 세션이 원 실행의 앞 시도 사유(ADR-128)를 받지 않는다(비용), 이어받음 표시명 없음(앱은 단계 `exitDetail`을 보이지 않음), 실행기의 생략 · 변이 주입 통과를 이어받을 때 그 사이 바뀐 블록 선언을 다시 보지 않는다(병합 재검사가 다시 판정).
+- **다음 번호**: ADR-154(153 = #320), 마이그레이션 0031(#320이 쓸 수 있음).
+
+### M3-61 (#329, PR #330, main `322bc72`, ADR-154)
+- CI `checks` 잡의 제한 시간은 **40분**(묶음 40분, 집계 잡 5분 그대로). `scripts/test_ci_workflow.py`가 제한 값 · `needs` · 잡 이름 네 개를 단언한다.
+- 실측(2026-11-28): `checks`는 보통 16 ~ 18분(단위 테스트 9분대 · 화면 e2e 6분대). 러너가 느리면 같은 트리에서도 25분(단위 14분대 · 화면 e2e 9분대). 묶음은 14.6 ~ 24.0분.
+- 다시 정하는 조건: `checks`가 35분을 넘으면 단위 테스트를 따로 잡으로 나눈다(그때 CLAUDE.md 5장의 CI 서술을 사람이 고쳐야 하므로 needs-human 이슈).
+
+### M3-57 (#320, PR #331, main `0580ad2`, ADR-153, 마이그레이션 `project/0031_rule_splits`)
+- **RPC `reviewQueue.splitRule {projectId, seq, ruleId, author}` → `{entry, sessionId}`**(`ipc/review-queue-handlers.ts`: 실행을 만들지 않는다). 거부 순서: 에이전트 -32020 → 없는 항목 -32004 / 처리됨 · 다른 종류 -32009 → 대상 규칙 아님 -32001 `SPLIT_RULE_NOT_TARGET` → 내장 규칙 `builtin_rule` → 효력 없음 `rule_not_effective` · 부모 없음 `rule_without_parent` → 같은 항목의 분할 세션이 대기 · 진행 중 `split_in_progress` → 설정 미비 -32010 · 하루 한도. 어느 거부도 세션을 열지 않는다.
+- **새 도구 `split_rule {ruleId, grounds, rules: 2 ~ 5}`은 분할 세션에만 있다**(`RULE_SPLIT_SESSION_TOOL_NAMES`, 실행기 `toolSet: 'rule_split'`, `sessionToolDefinitions`). 새 규칙 칸은 `ProposeRuleInput`에서 부모만 뺀 것(동작 선언 필수). 분할 세션에는 다른 규범 도구가 없고 다른 세션에는 `split_rule`이 없다. **`agent/claude-sdk-adapter.ts`는 역할이 아니라 실행기의 이름 목록으로 SDK `allowedTools`와 MCP `tools/list`를 만든다**(기존 역할은 글자까지 같음: integrity의 역할별 `buildQueryOptions` 대조).
+- **반영 `splitAgentRule`**(`norms/agent-rule.ts`, 트랜잭션 1개): 새 규칙마다 규칙 + 신규 기록(동작 선언) + 모순 판단 기록(`new_rule`) → 나눈 규칙의 `superseded` 기록(`detail.retirement.split`) + 폐기 기록 + 확인 풀림 → 분할 기록 → 처리 함수 `settle`(처리기가 `splitSettlement`로 만들어 세션 요청에 실어 넘긴다: 세션 코드는 검토 대기열을 모른다). 거부: 2개 미만 · 새 규칙끼리 같은 진술 · **나눈 규칙과 같은 진술** · 부모를 칸으로 줌.
+- **0031**: 표 `rule_splits(rule_id → rule_retirements, position, new_rule_id UNIQUE)`(폐기 기록의 `superseded_by`는 첫 새 규칙, 나머지는 이 표). 트리거 `rule_splits_insert`(위치 연속 · 위치 1 = `superseded_by` · 새 규칙이 살아 있고 폐기되지 않았으며 내장이 아니고 부모가 같음) · 수정 · 삭제 거부 · `review_items_resolve_split_rule`(`detail.ruleId`가 그 항목 실행의 대상 규칙, 분할 행 2개 이상이고 그 수 = 분할 상세의 수).
+- 분할 세션: 규칙 작성 역할, 실행 밖 세션(요구사항 세션과 같은 예산 문), 작업 지시는 나눌 규칙의 제목 · 진술 · 부모 요구사항과 원 실행의 표시 ID · 종료 사유 · 멈춘 단계, 규범 자료. 세션이 정상 종료하면 기존 자동 시작이 새 규칙마다 실행 1개를 선언대로의 유형으로 만든다.
+- 한계(후속 후보): 뜻이 같은 다른 글로 "나눈 척"은 가리지 못한다, 규칙 진술의 숨은 글자(U+200B 등) 정규화, 원 실행의 나머지 대상 규칙은 처리 액션이 없고 다시 시작되지 않는다, 화면의 대체 규칙 링크는 첫 새 규칙만, 분할 세션의 중복 잠금은 프로세스 메모리, 반영 뒤 세션이 정상 종료가 아니면 새 규칙의 실행이 자동으로 생기지 않는다.
+- **다음 번호**: ADR-156(155 = #321), 마이그레이션 0033(0032 = #321).
+
+## M3-58 허용 목록 축소 재개 (#321, PR #333, main `0ca39c2`, ADR-155)
+- RPC `reviewQueue.resumeNarrowed {projectId, seq, budget, exclude, author}`(`ipc/run-handlers.ts`). 순서: 사람 주체 -32020(저장소 열기 전) → 제외 형식 -32001(저장소 열기 전: 빈 목록 `WRITE_SCOPE_EXCLUDE_REQUIRED`, 형식 `WRITE_SCOPE_EXCLUDE_INVALID` + `data.fields`) → 트랜잭션 1개(열린 예산 초과 항목 → `assertRaisedBudget`(`budgetContinuation`) → 처음 목록(비면 `WRITE_SCOPE_ALLOW_EMPTY`) → `createRun` → 연결 → 범위 저장 → 처리 `narrow_allowlist_resume`).
+- 제외 문법 = 블록 선언 include와 같은 문법 · 매처(shared `blockPatternProblem` · `matchesBlockPattern`). 요청당 20개, 실행당 100개, 중복 거부. **`src/x`는 그 경로 하나만 막고 폴더 아래는 막지 않는다(`src/x/**`가 필요): 화면 안내 문구는 M3-09 몫.**
+- 처음 목록 = 이어받는 실행을 만드는 순간의 블록 선언에서 대상 블록 include의 합. 실행에 고정.
+- 0032 `run_write_scopes`(실행 ID 기본 키, 추가 전용) + 트리거 6. 사슬은 복사: 한도 상향 재개는 원 실행의 범위를 그대로, 다시 좁히기는 허용 그대로 + 제외 합집합. `raise_limit_resume` 처리 트리거는 "이어받는 실행의 범위가 원 실행과 같을 것".
+- 경로 가드 `PathGuardOptions.writeScope`(선택 칸, implementer의 쓰기만, 기존 금지 뒤). 값이 가드에 닿는 길은 엔진 `#runSession` 하나. 고정 거부 문장 `WRITE_SCOPE_DENIALS.outside` · `.excluded`.
+- 병합 전 대조 `steps/write-scope.ts`의 `writeScopeViolations`: 검사 단계를 열 때 + 병합 직전, 시작 커밋 → 판정할 커밋의 git 객체 비교. 위반이면 `guard_violation`(`stage: 'write_scope'`, `changed` 경로 50개까지).
+- 한계(후속 후보): 범위가 붙은 실행에서 `install_package` · `prisma_migrate`를 쓰면 검사 단계의 대조에서 끝난다(쓰는 순간이 아님), 구현 세션의 작업 지시에 범위가 실리지 않는다, 범위는 이어받는 사슬에만(보강 · 자동 시작 · 분할 뒤 실행 · `run.create`는 물려받지 않음), SQL 수준에서 `[""]` 원소를 받는다(읽기가 던짐).
+- 검토 대기열의 RPC 전체(M3-09가 쓴다): `reviewQueue.list` · `get` · `reinforce` · `quarantine` · `resumeWithBudget` · `resumeNarrowed` · `splitRule`, 알림 `event.reviewQueue.changed`.
+
+## M3-14 재검증 필요 · 격리 전이 · 감시자 (#59, PR #334, main `c82f705`, ADR-156)
+- 표시는 `judgments`의 실행 밖 기록 1건(`runId` · `stepId` = null, 케이스 없음). 쓰는 곳은 `judgments/judgment-marks.ts` 하나(상태는 `needs_recheck` · `quarantined` 둘뿐: 동작 시험 + 구조 시험). 마이그레이션 없음. 근거 칸은 없다(감시자 표시 = 커밋이 그때의 머리, 편집 = 같은 시각의 승인 기록 `rule_edit`, 선언 = 같은 시각의 선언 판).
+- 감시자 `watcher/recheck-watcher.ts`: 기동 뒤 한 번 + 앞 회차가 끝나고 5초마다. 머리 = 판정 기준이면 끝. 다르면 블록 대상 규칙마다 "최신 판정 커밋과 머리의 공통 조상 → 머리"의 변경 파일(`--no-renames`, 지운 파일 포함)이 대상 블록 include에 걸리면 표시. 조상이 아니거나 커밋이 없으면 닫힌 쪽으로 표시. 실행을 만들지 않는다. 격리인 규칙은 덮지 않는다.
+- 규칙 변경: `rule.update`의 진술 편집(같은 트랜잭션), `blocks.set`(블록 지움 · 이름 바꿈 · include 변경, 같은 트랜잭션). 제목만 · 첫 선언 · public/위험도만 바뀐 판은 표시 안 함.
+- 재현성 `judgments/reproducibility.ts` `checkReproducibility`: **제품 호출처 0곳**(시험만). 사유 고정 글 '재판정 불일치'. `flaky` 변형은 같은 체크아웃을 다시 판정할 때만 흔들린다(제품의 `judgeCommit`은 새 체크아웃).
+- 지표: `overlayMarks`가 요약 · 추이(지난 점은 그 시각 앞의 표시만)에 덧씌운다. 재검증 필요는 분모에 들고 통과 아님, 격리는 분모에서 빠짐. M3-08의 사람 격리도 같은 규칙(ADR-145 ④ 닫힘).
+- **한계(후속 필수)**: 감시자 표시 뒤 화면 알림이 없다 → 로드맵 M3 완료 기준 흐름 8번("10초 안에 SCR-03")은 화면 다시 읽기 알림이 있어야 충족(#332의 항목 ㊳). 그 밖: 재현성 확인의 요청 창구 없음, 블록 밖 변경 · 작업 트리는 못 잡음, 감시자 회차마다 저장소 읽기, 사람 격리와 재판정 불일치를 가르는 주체 칸 없음.
