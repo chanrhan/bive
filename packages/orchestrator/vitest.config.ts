@@ -7,6 +7,8 @@ const JUDGE_TESTS = [
   'test/judge-runner.test.ts',
   'test/test-writer.test.ts',
   'test/contract-runner.test.ts',
+  // 같은 커밋을 실제 판정 러너로 세 번 판정한다 (M3-14 #59, ADR-156)
+  'test/reproducibility.test.ts',
 ];
 
 export default defineConfig({

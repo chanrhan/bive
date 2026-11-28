@@ -15,8 +15,11 @@
 //   규칙 편집(`rules.update`)을 부르는 유일한 곳이다. 역할 세션의 도구에는 규칙 편집 도구가 없다
 // - 진술이 바뀐 편집이 저장되면 그 뒤에 오케스트레이터 배선이 넘긴 창구(`ruleEditStarter`)로 인수 테스트를 다시 쓰는 실행을
 //   자동 시작한다(규범 변경 기록 `auto_start`, 원인 = 이 편집의 승인 기록 순번). 제목만 바뀌면 실행이 없다
+// - 진술이 바뀐 편집은 같은 트랜잭션에서 그 규칙의 최신 판정을 재검증 필요로 표시한다(`judgments/judgment-marks.ts`, M3-14 #59 ·
+//   ADR-156). 판정이 없거나 이미 재검증 필요 · 격리면 표시하지 않는다
 import {
   type ApprovalLogEntry,
+  createUlidGenerator,
   DomainErrorReason,
   ErrorCode,
   type HumanAuthor,
@@ -34,6 +37,7 @@ import {
 import type { ProjectStore } from '@bive/store';
 
 import { confirmHumanRuleEdit, requireHuman } from '../confirmations/confirmation-service.js';
+import { markStatementEdited } from '../judgments/judgment-marks.js';
 import {
   type LatestJudgmentLookup,
   type LatestJudgmentSource,
@@ -69,6 +73,9 @@ export interface RuleHandlerDeps {
   /** 진술이 바뀐 편집 뒤 실행 자동 시작 (생략하면 실행을 만들지 않는다: 처리기만 시험할 때) */
   ruleEditStarter?: RuleEditStarter;
 }
+
+/** 재검증 필요 표시 기록의 ID. */
+const markId = createUlidGenerator();
 
 type RuleMethods = Pick<MethodHandlers, 'rule.list' | 'rule.get' | 'rule.update' | 'judgment.list'>;
 
@@ -239,6 +246,11 @@ const editRuleByHuman = (
     });
     // 사람이 고친 규칙은 저장이 곧 확인됨이다. 근거는 이 편집의 승인 기록 (ADR-100 B② · A8)
     const confirmation = confirmHumanRuleEdit(store, approvalLog);
+    // 진술이 바뀌면 그 규칙의 최신 판정은 옛 진술의 판정이다: 같은 트랜잭션에서 재검증 필요로 표시한다 (M3-14 #59, ADR-156).
+    // 제목만 바뀐 편집은 판정 대상이 그대로라 표시하지 않는다
+    if (change.statement !== undefined) {
+      markStatementEdited(store, current.id, { now: Date.parse(at), newId: markId });
+    }
     const rule: Rule = { ...edited, confirmation };
     return {
       item: withJudgment(rule, lookup()),

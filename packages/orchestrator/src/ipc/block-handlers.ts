@@ -3,6 +3,8 @@
 // - `blocks.set`: 사람 주체만(-32020은 저장소를 열기 전). 선언을 검사해 어긴 곳을 -32001(`BLOCKS_INVALID`)로 돌려주고, 통과하면
 //   새 판으로 저장한다. 바꾼 기록은 판 목록 자체다(저장 주체 · 시각 · 본문, 추가 전용)
 // - 같은 트랜잭션에서 내장 구조 규칙 두 개를 없으면 만든다(`norms/builtin-rules.ts`, M3-03 #48 · ADR-127). 있으면 그대로 둔다
+// - 같은 트랜잭션에서 앞 판에 있던 블록이 없어졌거나(지움 · 이름 바꿈) include가 바뀌면 그 블록을 대상으로 하는 규칙을 재검증 필요로
+//   표시한다(`judgments/judgment-marks.ts`, M3-14 #59 · ADR-156). 첫 선언 · public · dependsOn · 위험도만 바뀐 판은 표시하지 않는다
 // - 블록 선언을 쓰는 곳은 이 처리기 하나다. 에이전트 도구 · 세션 · 엔진 · 단계는 이 처리기도 저장소의 선언 쓰기도 모른다
 //   (구조 시험 `integrity.test.ts`, ADR-005)
 // - 새 판을 저장한 뒤(커밋 뒤) `onChanged`로 알린다(`event.blocks.changed`, 열린 상세가 선언을 다시 읽는다, M3-42 #283 ·
@@ -16,6 +18,9 @@ import {
   ErrorCode,
 } from '@bive/shared';
 
+import { type ProjectStore, StoredBlockDeclarationError } from '@bive/store';
+
+import { markBlocksChanged, UNREADABLE_DECLARATION } from '../judgments/judgment-marks.js';
 import { ensureBuiltinStructureRules } from '../norms/builtin-rules.js';
 import { withProjectStore } from './project-store-access.js';
 import { RpcError, type MethodHandlers } from './server.js';
@@ -59,6 +64,18 @@ const parseDeclaration = (declaration: unknown): BlockDeclaration => {
   throw new RpcError(ErrorCode.ValidationFailed, `블록 선언 검증 실패: ${summary}`, data);
 };
 
+/** 저장 전의 지금 선언. 없으면 `null`, 가장 큰 판의 행이 깨졌으면 읽지 못함(새 판 저장은 그대로 받는다: 그것이 푸는 길이다). */
+const previousDeclaration = (
+  store: ProjectStore,
+): BlockDeclaration | null | typeof UNREADABLE_DECLARATION => {
+  try {
+    return store.blockDeclarations.current()?.declaration ?? null;
+  } catch (error) {
+    if (error instanceof StoredBlockDeclarationError) return UNREADABLE_DECLARATION;
+    throw error;
+  }
+};
+
 export const createBlockHandlers = ({
   biveHome,
   now,
@@ -75,8 +92,14 @@ export const createBlockHandlers = ({
     const result = withProjectStore(biveHome, projectId, (store) =>
       store.transaction(() => {
         const at = new Date(now()).toISOString();
+        const previous = previousDeclaration(store);
         const current = store.blockDeclarations.set(parsed, { at, by: author });
         ensureBuiltinStructureRules(store, { declaration: current, at, newId });
+        // 대상 블록이 없어졌거나(지움 · 이름 바꿈) include가 바뀐 규칙은 재검증 필요 (M3-14 #59, ADR-156)
+        markBlocksChanged(store, previous, current.declaration, {
+          now: Date.parse(at),
+          newId,
+        });
         return { current };
       }),
     );

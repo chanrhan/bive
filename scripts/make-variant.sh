@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 테스트 대상 픽스처 사본에 변형 하나를 커밋한다 (M3-02 #47, ADR-125 ⑥. contract-mismatch는 M3-47 #292, ADR-132).
+# 테스트 대상 픽스처 사본에 변형 하나를 커밋한다 (M3-02 #47, ADR-125 ⑥. contract-mismatch는 M3-47 #292, ADR-132.
+# touch-lib · flaky는 M3-14 #59, ADR-156).
 #
 # 사용법: scripts/make-variant.sh <dir> <이름>
 #   <dir>: scripts/reset-fixture.sh로 만든 픽스처 사본 (저장소 안 · 원본 fixtures/sample-next-app은 거부)
@@ -9,7 +10,7 @@
 # 변형을 더할 때: variant_<이름> 함수 하나를 더하고 VARIANTS에 이름을 적는다. 함수는 <dir> 안에서 돈다
 set -euo pipefail
 
-VARIANTS=(undeclared-import cycle contract-mismatch)
+VARIANTS=(undeclared-import cycle contract-mismatch touch-lib flaky)
 
 usage() {
   echo "사용법: $0 <dir> <이름> (이름: ${VARIANTS[*]})" >&2
@@ -102,6 +103,53 @@ export async function GET(): Promise<Response> {
   await getDb().item.count();
   return Response.json({ ok: 'true' });
 }
+EOF
+}
+
+# 블록 lib 파일의 한 줄 변경 (M3-14 #59): 기준 브랜치에 사람이 직접 커밋한 lib 변경. 감시자가 lib 대상 규칙을 재검증 필요로 표시한다
+variant_touch_lib() {
+  printf '%s\n' '// 변형 touch-lib: lib 블록 파일 한 줄 변경' >> src/lib/db.ts
+}
+
+# 흔들리는 인수 테스트 하나 (M3-14 #59): 라우트 GET /api/flaky는 서버 작업 폴더(판정 체크아웃 루트)의 파일로 호출 횟수를 세어
+# 두 번째 호출에서만 ok가 false다. 규칙 RULE-001 폴더의 인수 테스트가 그 라우트를 한 번 부르므로, 같은 체크아웃을 세 번 판정하면
+# 통과 · 실패 · 통과다(시각 · 난수 없이 횟수로 정해진다). 판정마다 새로 만드는 임시 DB · 빌드 폴더(.next) · 환경 변수는 회차 사이에
+# 남지 않아 횟수를 세는 자리로 쓰지 않는다. 재판정 불일치 격리는 orchestrator/test/reproducibility.test.ts
+variant_flaky() {
+  mkdir -p src/app/api/flaky bive-acceptance/RULE-001
+  cat > src/app/api/flaky/route.ts << 'EOF'
+import { readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+
+// 요청마다 실행한다(빌드 시점 정적 생성 금지).
+export const dynamic = 'force-dynamic';
+
+/** 호출 횟수 파일: 서버 작업 폴더(판정 체크아웃 루트)라 같은 체크아웃의 재판정 사이에 남는다. */
+const COUNTER = path.join(process.cwd(), '.bive-flaky-count');
+
+/** 변형 flaky: 같은 체크아웃에서 두 번째 호출만 ok가 false다. */
+export function GET(): Response {
+  let count = 0;
+  try {
+    count = Number.parseInt(readFileSync(COUNTER, 'utf8'), 10) || 0;
+  } catch {
+    count = 0;
+  }
+  count += 1;
+  writeFileSync(COUNTER, String(count));
+  return Response.json({ ok: count !== 2 });
+}
+EOF
+  cat > bive-acceptance/RULE-001/flaky.acc.ts << 'EOF'
+import { describe, expect, inject, it } from 'vitest';
+
+describe('변형 flaky', () => {
+  it('호출 횟수를 세는 응답의 ok는 true', async () => {
+    const res = await fetch(new URL('/api/flaky', inject('baseUrl')));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+});
 EOF
 }
 
