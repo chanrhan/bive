@@ -26,7 +26,12 @@ import { z } from 'zod';
 
 import { settingsIncompleteError } from '../settings/settings-service.js';
 import { COMMAND_ENV_ALLOWLIST } from '../tools/commands.js';
-import { BIVE_MCP_SERVER, type ToolDefinition, toolDefinitions } from '../tools/definitions.js';
+import {
+  BIVE_MCP_SERVER,
+  sessionToolDefinitions,
+  type ToolDefinition,
+  toolDefinitions,
+} from '../tools/definitions.js';
 import {
   BIVE_TOOL_PREFIX,
   normalizeToolName,
@@ -194,13 +199,18 @@ export const toolInputJsonSchema = (definition: ToolDefinition): Tool['inputSche
   return { ...schema, type: 'object' };
 };
 
-/** 역할의 `tools/list` 응답 도구 목록 (`toolDefinitions(role)` 순서). */
-export const biveMcpToolList = (role: AgentRole): Tool[] =>
-  toolDefinitions(role).map((definition) => ({
-    name: definition.name,
-    description: definition.description,
-    inputSchema: toolInputJsonSchema(definition),
-  }));
+/**
+ * 역할의 `tools/list` 응답 도구 목록 (`toolDefinitions(role)` 순서). 실행기의 이름 목록을 주면 그 세션의 목록이다(역할 목록 또는 규칙
+ * 작성 역할의 분할 세션 목록만, `sessionToolDefinitions`, M3-57 · ADR-153).
+ */
+export const biveMcpToolList = (role: AgentRole, names?: readonly string[]): Tool[] =>
+  (names === undefined ? toolDefinitions(role) : sessionToolDefinitions(role, names)).map(
+    (definition) => ({
+      name: definition.name,
+      description: definition.description,
+      inputSchema: toolInputJsonSchema(definition),
+    }),
+  );
 
 /**
  * 역할의 고정 도구를 노출하는 인프로세스 MCP 서버 `bive` (ADR-052 · ADR-059).
@@ -221,7 +231,7 @@ export const createBiveMcpServer = (
     version: ORCHESTRATOR_VERSION,
     tools: [],
   });
-  const tools = biveMcpToolList(role);
+  const tools = biveMcpToolList(role, executor.toolNames);
   const { server } = config.instance;
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -292,7 +302,9 @@ const assertRunnable = (spec: SessionSpec): void => {
  */
 export const buildQueryOptions = (spec: SessionSpec, deps: QueryOptionsDeps): Options => {
   assertRunnable(spec);
-  const allowedTools = toolDefinitions(spec.role).map((definition) => sdkToolName(definition.name));
+  const allowedTools = sessionToolDefinitions(spec.role, spec.tools.toolNames).map((definition) =>
+    sdkToolName(definition.name),
+  );
   const allowed = new Set(allowedTools);
   const canUseTool: CanUseTool = (toolName, input) =>
     Promise.resolve(

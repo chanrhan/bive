@@ -26,7 +26,7 @@ import { runEnding } from '../src/engine/run-ending.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
 import { createRunHandlers } from '../src/ipc/run-handlers.js';
 import { RpcError } from '../src/ipc/server.js';
-import { WRITE_SCOPE_ALLOW_EMPTY_MESSAGE } from '../src/review/review-queue.js';
+import { splitTarget, WRITE_SCOPE_ALLOW_EMPTY_MESSAGE } from '../src/review/review-queue.js';
 import { reinforceSurvivedMutants } from '../src/runs/auto-start.js';
 import { createRun, evaluateApprovalStep } from '../src/runs/run-service.js';
 import { createCheckExecutor } from '../src/steps/check.js';
@@ -306,6 +306,12 @@ describe('허용 목록 축소 재개 = 쓰기 허용 범위가 붙은 이어받
       narrow(h, { seq, budget: RAISED, exclude: EXCLUDE, author: human }),
     );
     expect([again.code, again.data]).toEqual([
+      ErrorCode.StateConflict,
+      { reason: 'already_resolved' },
+    ]);
+    // 같은 항목에서 액션이 갈라지지 않는다: 허용 목록 축소 재개로 처리된 항목은 규칙 분할도 받지 않는다
+    const split = await rejection(() => h.read((store) => splitTarget(store, seq, h.ruleId)));
+    expect([split.code, split.data]).toEqual([
       ErrorCode.StateConflict,
       { reason: 'already_resolved' },
     ]);

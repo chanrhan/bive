@@ -25,6 +25,7 @@ import { RunContinuationRepository } from './repositories/run-continuation-repos
 import { RunWriteScopeRepository } from './repositories/run-write-scope-repository.js';
 import { RuleRepository } from './repositories/rule-repository.js';
 import { RuleRetirementRepository } from './repositories/rule-retirement-repository.js';
+import { RuleSplitRepository } from './repositories/rule-split-repository.js';
 import { RuleWriterRequestRepository } from './repositories/rule-writer-request-repository.js';
 import { RunRepository } from './repositories/run-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
@@ -103,6 +104,11 @@ export class ProjectStore {
    */
   readonly runContinuations: RunContinuationRepository;
   /**
+   * 규칙 분할 기록 (TODO-02 · NRM-02, M3-57 #320, ADR-153). 분할로 폐기된 규칙과 그것을 대체한 새 규칙들. 추가 전용이고 쓰기는 폐기 기록과
+   * 같은 트랜잭션에서 오케스트레이터의 규칙 반영 모듈만 한다.
+   */
+  readonly ruleSplits: RuleSplitRepository;
+  /**
    * 이어받는 실행의 쓰기 허용 범위 (TODO-02 · NFR-02, M3-58 #321, ADR-155). 추가 전용이고 쓰기는 오케스트레이터의 검토 대기열 모듈만
    * 한다(허용 목록 축소 재개와, 범위가 붙은 실행의 한도 상향 재개).
    */
@@ -135,6 +141,7 @@ export class ProjectStore {
     this.mutations = new MutationResultRepository(db);
     this.reviewQueue = new ReviewQueueRepository(db);
     this.runContinuations = new RunContinuationRepository(db);
+    this.ruleSplits = new RuleSplitRepository(db);
     this.runWriteScopes = new RunWriteScopeRepository(db);
   }
 

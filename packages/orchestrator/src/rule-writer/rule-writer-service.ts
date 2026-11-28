@@ -78,11 +78,13 @@ import {
   type AgentCheckJudgment,
   type AgentObjectionJudgment,
   type AgentRequirementChangeJudgment,
+  type AgentSplitWritten,
   createAgentRule,
   NormJudgmentInputError,
   NormRetirementInputError,
   retireAgentRule,
   settleRequirementChange,
+  splitAgentRule,
   supersedeAgentRule,
   upholdAgentRule,
 } from '../norms/agent-rule.js';
@@ -110,6 +112,7 @@ import { displayText } from '../text-limit.js';
 import type {
   ProposeRuleInput,
   RetireRuleInput,
+  SplitRuleInput,
   SupersedeRuleInput,
   UpholdRuleInput,
 } from '../tools/definitions.js';
@@ -126,11 +129,14 @@ import {
   RULE_WRITER_JUDGMENT_SYSTEM_PROMPT,
   RULE_WRITER_REQUIREMENT_DELETED_SYSTEM_PROMPT,
   RULE_WRITER_REQUIREMENT_UPDATED_SYSTEM_PROMPT,
+  RULE_WRITER_SPLIT_SYSTEM_PROMPT,
   RULE_WRITER_SYSTEM_PROMPT,
   ruleWriterCheckJudgmentPrompt,
   ruleWriterJudgmentPrompt,
   ruleWriterRejudgePrompt,
+  ruleWriterSplitPrompt,
   ruleWriterTaskPrompt,
+  type SplitPromptRun,
 } from './prompts.js';
 
 /** 이 세션의 역할. 설정 검사도 이 역할만 본다 (ADR-057: 실행 전체 한도는 항상 함께 검사). */
@@ -247,6 +253,50 @@ export interface RuleWriterLauncher {
    * 중이면 1건으로 접는다). 재판단할 것이 아니면(본문이 같음 · 효력 있는 자식 규칙 없음) `null`
    */
   rejudge(store: ProjectStore, input: RuleWriterRejudgeInput): RuleWriterStartResult | null;
+}
+
+/**
+ * 규칙 분할 세션 요청 (M3-57 #320, ADR-147 ⑧, ADR-153). 부른 쪽(사람의 예산 초과 항목 처리기)이 대상 규칙(그 실행의 대상 · 내장 아님 ·
+ * 효력 · 부모 있음)을 이미 확인했다. 세션은 그 규칙을 새 규칙 2개 이상으로 대체하는 것만 할 수 있다.
+ */
+export interface RuleSplitRequest {
+  readonly projectId: string;
+  /** 같은 키의 분할 세션이 대기 · 진행 중이면 띄우지 않는다 (부른 쪽의 요청 단위: 검토 대기열 항목) */
+  readonly key: string;
+  /** 나눌 규칙 ID */
+  readonly ruleId: string;
+  /** 작업 지시에 싣는 원 실행 자료 (오케스트레이터가 남긴 값만) */
+  readonly run: SplitPromptRun;
+  /** 분할 반영과 같은 쓰기 트랜잭션의 마지막 쓰기 (던지면 반영이 모두 되돌려진다) */
+  readonly settle: (store: ProjectStore, written: AgentSplitWritten) => void;
+}
+
+/** 사람의 규칙 분할 처리기가 쓰는 창구 (M3-57, ADR-153). */
+export interface RuleSplitLauncher {
+  /**
+   * 분할 세션을 대기열에 넣는다(실행 밖 규칙 작성 세션, 요구사항 세션과 같은 대기열 · 한도). 세션은 비동기로 돈다.
+   * @throws {RpcError} -32009 같은 키의 세션이 대기 · 진행 중(`split_in_progress`) · 하루 한도에 이름(`project_daily_budget_exceeded`),
+   *   -32010 규칙 작성 역할 설정 미비, -32603 종료 중
+   */
+  split(store: ProjectStore, request: RuleSplitRequest): { readonly sessionId: string };
+}
+
+/** 분할 세션 1개의 문맥. */
+interface SplitSession {
+  readonly id: string;
+  readonly projectId: string;
+  /** 같은 요청의 중복을 막는 열쇠 (프로젝트 + 요청 키) */
+  readonly lock: string;
+  readonly ruleId: string;
+  readonly run: SplitPromptRun;
+  readonly settle: RuleSplitRequest['settle'];
+  readonly model: string;
+  budget: SessionBudget;
+  /** 세션을 열 때 다시 읽은 나눌 규칙 (열기 전이면 `null`) */
+  rule: JudgmentPromptRule | null;
+  normInput: NormInputSummary | null;
+  isKnownCase: CaseNameFilter;
+  tools: FixedToolExecutor | null;
 }
 
 export interface RuleWriterServiceOptions {
@@ -378,7 +428,7 @@ const rejudgeTargets = (
       parentRequirementId: rule.parentRequirementId,
     }));
 
-export class RuleWriterService implements RuleWriterLauncher {
+export class RuleWriterService implements RuleWriterLauncher, RuleSplitLauncher {
   readonly #biveHome: string;
   readonly #adapter: AgentAdapter;
   readonly #now: () => number;
@@ -408,6 +458,8 @@ export class RuleWriterService implements RuleWriterLauncher {
    */
   readonly #caseFilters = new Map<string, CaseNameFilter>();
   readonly #controllers = new Set<AbortController>();
+  /** 대기 · 진행 중인 분할 세션의 열쇠 (M3-57: 같은 요청에 분할 세션을 둘 띄우지 않는다) */
+  readonly #splitLocks = new Set<string>();
   /** 세션을 하나씩 돌리는 대기열 */
   #chain: Promise<void> = Promise.resolve();
   #closed = false;
@@ -1386,7 +1438,7 @@ export class RuleWriterService implements RuleWriterLauncher {
 
   /** 폐기 · 대체 도구의 저장소 오류를 도구 결과로 바꾼다 (모르는 오류는 다시 던진다). */
   #retirementError(
-    tool: 'retire_rule' | 'supersede_rule' | 'uphold_rule',
+    tool: 'retire_rule' | 'supersede_rule' | 'uphold_rule' | 'split_rule',
     error: unknown,
   ): ToolResult {
     if (error instanceof NormRetirementInputError) {
@@ -1694,6 +1746,337 @@ export class RuleWriterService implements RuleWriterLauncher {
       rejudge.change === 'deleted'
         ? `자식 규칙 ${rule.displayId} 유지로 판단 (부모 요구사항 없는 규칙으로 효력 유지, 사람은 나중에 봄)`
         : `자식 규칙 ${rule.displayId} 유지로 판단 (규칙 · 인수 테스트는 그대로, 사람은 나중에 봄)`,
+    );
+  }
+
+  // ── 규칙 분할 세션 (M3-57 #320, ADR-147 ⑧, ADR-153) ─────────────────────
+
+  /**
+   * 분할 세션을 대기열에 넣는다 (사람의 예산 초과 항목 처리기만 부른다). 문은 요구사항 세션과 같다: 규칙 작성 역할 설정(실행 전체 한도
+   * 포함) · 프로젝트 하루 한도(이르렀으면 열지 않음, 한도는 하루 잔여로 묶음)이고 실행 밖 세션이라 실행 잔여는 없다. 같은 요청 키의 세션이
+   * 대기 · 진행 중이면 거부한다. 세션을 열 때 하루 잔여 · 대상 규칙을 다시 본다.
+   * @throws {RpcError} {@link RuleSplitLauncher.split}
+   */
+  split(store: ProjectStore, request: RuleSplitRequest): { readonly sessionId: string } {
+    if (this.#closed) throw new RpcError(ErrorCode.InternalError, '오케스트레이터 종료 중입니다');
+    const lock = keyOf(request.projectId, request.key);
+    if (this.#splitLocks.has(lock)) {
+      throw new RpcError(
+        ErrorCode.StateConflict,
+        '같은 항목의 규칙 분할 세션이 이미 대기 · 진행 중입니다',
+        {
+          reason: 'split_in_progress',
+        },
+      );
+    }
+    // 나눌 규칙: 효력 있고(삭제 · 폐기 · 잠정이 아님) 부모 요구사항이 있어야 한다 (새 규칙이 부모를 물려받는다)
+    const rule = effectiveRules(store).find((item) => item.id === request.ruleId);
+    if (rule === undefined) {
+      throw new RpcError(ErrorCode.StateConflict, '효력 없는 규칙은 나눌 수 없습니다', {
+        reason: 'rule_not_effective',
+      });
+    }
+    if (rule.parentRequirementId === null) {
+      throw new RpcError(ErrorCode.StateConflict, '부모 요구사항이 없는 규칙은 나눌 수 없습니다', {
+        reason: 'rule_without_parent',
+      });
+    }
+    const settings = store.settings.get();
+    const daily = projectDailyBudget(store, settings, this.#now());
+    // 설정 미비면 -32010 (실행 전체 한도까지 검사, ADR-057)
+    const role = roleSessionSettings(
+      settings,
+      RULE_WRITER_ROLE,
+      daily === null ? {} : { maxBudgetUsd: daily.remaining },
+    );
+    if (dailyBudgetReached(daily)) {
+      throw new RpcError(ErrorCode.StateConflict, PROJECT_DAILY_BUDGET_EXCEEDED_TEXT, {
+        reason: 'project_daily_budget_exceeded',
+      });
+    }
+    const session: SplitSession = {
+      id: this.#newId(),
+      projectId: request.projectId,
+      lock,
+      ruleId: request.ruleId,
+      run: request.run,
+      settle: request.settle,
+      model: role.model,
+      budget: { ...role.budget },
+      rule: null,
+      normInput: null,
+      isKnownCase: NO_KNOWN_CASES,
+      tools: null,
+    };
+    this.#splitLocks.add(lock);
+    this.#log(`규칙 분할 세션 대기 (${session.id}, 원 실행 ${request.run.displayId})`);
+    const task = this.#tasks?.beginTask();
+    this.#chain = this.#chain.then(async () => {
+      try {
+        await this.#runSplit(session);
+      } catch (error) {
+        this.#log(`규칙 분할 세션 실패 (${session.id}): ${errorMessage(error)}`);
+      } finally {
+        this.#splitLocks.delete(lock);
+        task?.end();
+      }
+    });
+    return { sessionId: session.id };
+  }
+
+  /** 분할 세션 1개를 끝까지 돌린다. 열지 못하면 로그만 남긴다(항목은 열림 그대로). */
+  async #runSplit(session: SplitSession): Promise<void> {
+    const label = `분할 ${session.run.displayId}`;
+    if (this.#closed) {
+      this.#log(`규칙 분할 세션 생략 (${label}, 오케스트레이터 종료 중)`);
+      return;
+    }
+    const workDir = path.join(this.#biveHome, 'work', session.projectId, 'sessions', session.id);
+    let prepared: { readonly requirement: Requirement; readonly norms: NormInput } | string;
+    try {
+      session.isKnownCase = await this.#caseFilter(session.projectId);
+      prepared = withRegisteredProjectStore(this.#biveHome, session.projectId, (store) =>
+        this.#prepareSplit(store, session, workDir),
+      );
+    } catch (error) {
+      this.#log(`규칙 분할 세션 시작 실패 (${label}): ${errorMessage(error)}`);
+      return;
+    }
+    if (typeof prepared === 'string') {
+      this.#log(`규칙 분할 세션 생략 (${label}, ${prepared})`);
+      return;
+    }
+    const rule = session.rule;
+    if (rule === null) return;
+    const { requirement, norms } = prepared;
+    const controller = new AbortController();
+    this.#controllers.add(controller);
+    this.#log(
+      `규칙 분할 세션 시작 (${label}, 대상 ${rule.displayId}, 모델 ${session.model}, ` +
+        `한도 USD ${String(session.budget.maxBudgetUsd)} · 턴 ${String(session.budget.maxTurns)})`,
+    );
+    let endReason: SessionEndReason = 'error_during_execution';
+    let detail: string | null = null;
+    let result: SessionResultEvent | null = null;
+    try {
+      mkdirSync(workDir, { recursive: true, mode: 0o700 });
+      // 분할 세션의 도구는 분할 도구 하나다 (규칙 생성 · 폐기 · 대체 · 유지 도구가 없다, ADR-153)
+      const tools = createRoleTools({
+        role: RULE_WRITER_ROLE,
+        toolSet: 'rule_split',
+        sessionRoot: workDir,
+        biveHome: this.#biveHome,
+        now: () => new Date(this.#now()),
+        hooks: {
+          splitRule: (input) => this.#splitRule(session, input),
+          onToolCall: (call) => {
+            this.#quietlyPersistSplit(session, (store) =>
+              store.sessions.appendToolCall({
+                id: this.#newId(),
+                runId: null,
+                sessionId: session.id,
+                at: call.at,
+                role: call.role,
+                name: call.name,
+                argsSummary: call.argsSummary,
+                status: call.status,
+                reason: call.reason ?? null,
+                durationMs: Math.max(0, Math.round(call.durationMs)),
+              }),
+            );
+            const name = displayText(call.name, TOOL_CALL_NAME_DISPLAY_MAX).text;
+            this.#log(
+              `규칙 분할 도구 호출 (${label}, ${name} ${call.status}` +
+                `${call.reason === undefined ? '' : ` ${call.reason}`})`,
+            );
+          },
+        },
+      });
+      session.tools = tools;
+      const outcome = await runGuardedSession({
+        adapter: this.#adapter,
+        controller,
+        guard: { tools: tools.toolNames },
+        spec: {
+          role: RULE_WRITER_ROLE,
+          systemPrompt: RULE_WRITER_SPLIT_SYSTEM_PROMPT,
+          prompt: ruleWriterSplitPrompt({ rule, requirement, run: session.run, norms }),
+          workDir,
+          tools,
+          budget: session.budget,
+          model: session.model,
+          vars: {
+            projectId: session.projectId,
+            requirementId: requirement.id,
+            requirementDisplayId: requirement.displayId,
+            judgment: 'rule_split',
+            runId: session.run.displayId,
+            ruleId: rule.displayId,
+          },
+        },
+        onInit: (_manifest, init) => {
+          tools.setSessionId(init.sessionId);
+          this.#quietlyPersistSplit(session, (store) =>
+            store.sessions.recordInit(session.id, {
+              sdkSessionId: init.sessionId,
+              tools: init.tools,
+              mcpServers: init.mcpServers,
+            }),
+          );
+        },
+      });
+      result = outcome.result;
+      endReason = outcome.endReason;
+      detail = outcome.detail;
+    } catch (error) {
+      detail = errorMessage(error);
+    } finally {
+      this.#controllers.delete(controller);
+      rmSync(workDir, { recursive: true, force: true });
+    }
+    this.#quietlyPersistSplit(session, (store) =>
+      store.sessions.end(session.id, {
+        endReason,
+        error: detail,
+        totalCostUsd: result?.total_cost_usd ?? null,
+        numTurns: result?.num_turns ?? null,
+        modelUsage: Object.fromEntries(
+          Object.entries(result?.modelUsage ?? {}).map(([name, usage]) => [
+            name,
+            {
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              cacheReadInputTokens: usage.cacheReadInputTokens,
+              cacheCreationInputTokens: usage.cacheCreationInputTokens,
+              costUsd: usage.costUSD,
+            },
+          ]),
+        ),
+        endedAt: this.#timestamp(),
+      }),
+    );
+    this.#log(
+      `규칙 분할 세션 종료 (${label}, ${endReason}, 분할 ${session.tools?.closed === 'split_complete' ? '반영' : '없음'}` +
+        `${detail === null ? '' : `, ${detail}`})`,
+    );
+    // 분할로 생긴 새 규칙의 실행 자동 시작 (요구사항 · 판단 세션과 같은 배선, 정상 종료일 때만 만든다)
+    try {
+      this.#onSessionEnded?.(session.projectId, session.id, endReason);
+    } catch (error) {
+      this.#log(`규칙 분할 세션 후속 처리 실패 (${label}): ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * 분할 세션을 열기 전 (열린 저장소): 대상 규칙이 지금도 효력 있고 내장이 아니며 부모 요구사항이 살아 있는지, 하루 한도에 이르지 않았는지
+   * 다시 보고, 규범 입력(초점 = 그 규칙 · 부모 요구사항)을 읽고 세션 행을 만든다. 열지 않으면 그 사유 문장.
+   */
+  #prepareSplit(
+    store: ProjectStore,
+    session: SplitSession,
+    workDir: string,
+  ): { readonly requirement: Requirement; readonly norms: NormInput } | string {
+    const rule = effectiveRules(store).find((item) => item.id === session.ruleId);
+    if (rule === undefined || rule.builtin || rule.parentRequirementId === null) {
+      return '나눌 규칙이 효력 있는 규칙이 아님';
+    }
+    const requirement = store.requirements.get(rule.parentRequirementId);
+    if (requirement === null || requirement.deletedAt !== null) return '부모 요구사항 없음';
+    const daily = projectDailyBudget(store, store.settings.get(), this.#now());
+    if (dailyBudgetReached(daily)) return PROJECT_DAILY_BUDGET_EXCEEDED_TEXT;
+    if (daily !== null) {
+      session.budget = {
+        ...session.budget,
+        maxBudgetUsd: Math.min(session.budget.maxBudgetUsd, daily.remaining),
+      };
+    }
+    session.rule = {
+      id: rule.id,
+      displayId: rule.displayId,
+      title: rule.title,
+      statement: rule.statement,
+      parentRequirementId: rule.parentRequirementId,
+    };
+    const isKnownCase = session.isKnownCase;
+    const norms = collectNormInput(
+      store,
+      { requirementIds: [requirement.id], ruleIds: [rule.id] },
+      { isKnownCase },
+    );
+    session.normInput = norms.summary;
+    // 세션 행은 하루 예산 합산의 원천이다: 남기지 못하면 열지 않는다 (던져서 시작 실패로)
+    store.sessions.start({
+      id: session.id,
+      runId: null,
+      stepId: null,
+      requirementId: requirement.id,
+      role: RULE_WRITER_ROLE,
+      model: session.model,
+      workDir,
+      budget: session.budget,
+      normInput: normInputRecord(norms),
+      startedAt: this.#timestamp(),
+    });
+    return { requirement, norms };
+  }
+
+  /** 분할 세션 기록 쓰기 (실패는 로그만). */
+  #quietlyPersistSplit(session: SplitSession, fn: (store: ProjectStore) => unknown): void {
+    try {
+      withRegisteredProjectStore(this.#biveHome, session.projectId, fn);
+    } catch (error) {
+      this.#log(`규칙 분할 세션 기록 저장 실패 (${session.id}): ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * `split_rule`(규칙 분할) 콜백 (ADR-153): 세션이 나눌 규칙만 받고(다른 규칙이면 `denied` `invalid_args`), 반영 모듈이 새 규칙들 · 대체
+   * 기록 · 폐기 · 분할 기록과 요청한 쪽의 처리(`settle`)를 트랜잭션 1개로 남긴다. 부모 요구사항은 반영 모듈이 대상 규칙에서 물려준다.
+   * 처리가 거부되면(항목이 그 사이 처리됨 등) 아무것도 남지 않고 `error`(`state_conflict`).
+   */
+  #splitRule(session: SplitSession, input: SplitRuleInput): ToolResult {
+    const rule = session.rule;
+    const normInput = session.normInput;
+    if (rule === null || normInput === null) {
+      return failed('not_configured', '분할 세션이 준비되지 않음');
+    }
+    if (input.ruleId !== rule.id && input.ruleId !== rule.displayId) {
+      return denied(
+        'invalid_args',
+        `split_rule 인자 오류: ${JSON.stringify(input.ruleId)}는 이 세션이 나눌 규칙이 아님 (${rule.displayId}만 나눌 수 있음)`,
+      );
+    }
+    let created;
+    try {
+      created = withRegisteredProjectStore(this.#biveHome, session.projectId, (store) =>
+        splitAgentRule(
+          store,
+          {
+            ruleId: rule.id,
+            grounds: input.grounds,
+            rules: input.rules.map(({ rationale, contradiction, behavior, ...payload }) => ({
+              payload,
+              rationale,
+              behavior,
+              contradiction,
+            })),
+            author: { kind: 'agent', role: RULE_WRITER_ROLE },
+            sessionId: session.id,
+            normInput,
+            isKnownCase: session.isKnownCase,
+            settle: session.settle,
+          },
+          { now: this.#now, newId: this.#newId },
+        ),
+      );
+    } catch (error) {
+      if (error instanceof RpcError)
+        return failed('state_conflict', `split_rule: ${error.message}`);
+      return this.#retirementError('split_rule', error);
+    }
+    const ids = created.created.map((item) => item.rule.displayId).join(', ');
+    return ok(
+      `규칙 ${rule.displayId}을 폐기하고 ${ids}로 나눔 (바로 효력, 새 규칙마다 실행이 자동으로 시작된다, 사람은 나중에 봄)`,
     );
   }
 

@@ -61,7 +61,12 @@ import {
   NORM_TOOL_NAMES,
   MUTATION_TOOL_NAMES,
   OBJECTION_TOOL_NAMES,
+  isFixedToolName,
   roleToolNames,
+  RULE_SPLIT_SESSION_TOOL_NAMES,
+  sessionToolDefinitions,
+  sessionToolNames,
+  SPLIT_TOOL_NAMES,
 } from '../src/tools/definitions.js';
 import { FixedToolExecutor } from '../src/tools/executor.js';
 import { normalizeToolName, REQUIRED_PERMISSION_MODE } from '../src/tools/session-guard.js';
@@ -3057,5 +3062,144 @@ describe('실행의 쓰기 허용 범위를 쓰는 곳 · 구현 세션의 가�
     // 처음 목록은 지금 블록 선언을 한 번 읽는다 (읽기만)
     const queue = fs.readFileSync(path.join(SRC_DIR, 'review/review-queue.ts'), 'utf8');
     expect(queue.match(/\.blockDeclarations\.[A-Za-z]+/g)).toEqual(['.blockDeclarations.current']);
+  });
+});
+
+describe('규칙 분할 반영을 쓰는 곳은 반영 모듈 하나, 분할 도구는 분할 세션에만 (M3-57 #320, TODO-02 · NRM-02 · NFR-01 · NFR-02, ADR-147 ⑧, ADR-153, 코드 구조)', () => {
+  const files = () =>
+    sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+  const using = (pattern: RegExp) =>
+    files()
+      .filter((f) => pattern.test(f.text))
+      .map((f) => f.rel)
+      .sort();
+  const read = (rel: string) => fs.readFileSync(path.join(SRC_DIR, rel), 'utf8');
+
+  it('분할 기록 쓰기는 반영 모듈 하나(날 SQL 없음), 분할 반영 함수를 부르는 곳은 규칙 작성 서비스의 분할 세션 하나(세션의 케이스 기준 · 받은 처리 함수를 넘김), 항목 확인 · 처리 함수를 부르는 곳은 사람 주체를 먼저 보는 검토 대기열 처리기 하나이고 그 처리기는 실행을 만들지 않는다', () => {
+    expect(using(/\.ruleSplits\s*\.\s*record\(/)).toEqual(['norms/agent-rule.ts']);
+    expect(using(/\bruleSplits\b/)).toEqual(['norms/agent-rule.ts']);
+    expect(using(/\brule_splits\b/)).toEqual([]);
+    // 규칙 생성 · 폐기 기록을 쓰는 곳은 기존 목록 그대로다 (분할은 같은 반영 모듈 안의 쓰기)
+    expect(using(/\.rules\.create\(/)).toEqual([
+      'norms/agent-rule.ts',
+      'norms/builtin-rules.ts',
+      'norms/contract.ts',
+      'proposals/proposal-service.ts',
+    ]);
+    expect(using(/\.ruleRetirements\.record\(/)).toEqual(['norms/agent-rule.ts']);
+    expect(using(/\bsplitAgentRule\(/)).toEqual(['rule-writer/rule-writer-service.ts']);
+    const service = read('rule-writer/rule-writer-service.ts');
+    const calls = service.match(/splitAgentRule\(/g) ?? [];
+    expect(calls).toHaveLength(1);
+    const call = service.slice(service.indexOf('splitAgentRule(\n'));
+    expect(call).toMatch(
+      /^splitAgentRule\(\n[\s\S]*?isKnownCase: session\.isKnownCase,\n\s*settle: session\.settle,/,
+    );
+    // 분할 세션의 실행기 · 콜백을 만드는 곳은 서비스의 분할 세션 하나
+    expect(using(/toolSet: 'rule_split'/)).toEqual(['rule-writer/rule-writer-service.ts']);
+    expect(service.match(/toolSet: 'rule_split'/g)).toHaveLength(1);
+    expect(using(/\bsplitRule:/)).toEqual(['rule-writer/rule-writer-service.ts']);
+    // 항목 확인 · 처리 함수와 분할 세션 창구를 부르는 곳: 검토 대기열 처리기 하나. 사람 주체를 먼저 보고, 실행을 만들지 않는다
+    expect(using(/\bsplitTarget\(|\bsplitSettlement\(/)).toEqual(['ipc/review-queue-handlers.ts']);
+    expect(using(/\bruleSplitter\.split\(/)).toEqual(['ipc/review-queue-handlers.ts']);
+    const handlers = read('ipc/review-queue-handlers.ts');
+    expect(handlers).toMatch(
+      /'reviewQueue\.splitRule': \([^)]*author[^)]*\) => \{\s*const human = assertHuman\(author\);/,
+    );
+    expect(handlers).not.toMatch(/createRun|saveNewRun|runs\.create/);
+    // 처리(`split_rule`)를 쓰는 곳은 검토 대기열 모듈 하나 (세션 · 반영 모듈은 받은 함수만 부른다)
+    expect(using(/action: 'split_rule'/)).toEqual(['review/review-queue.ts']);
+    // 분할 세션 뒤 실행은 기존 자동 시작 배선(세션 종료 알림)만 만든다: 서비스 · 반영 모듈은 실행 · 자동 시작을 모른다
+    for (const rel of ['rule-writer/rule-writer-service.ts', 'norms/agent-rule.ts']) {
+      expect(read(rel), rel).not.toMatch(/autoStartRun|saveNewRun|createRun|\.runs\.create/);
+    }
+  });
+
+  it('분할 도구는 어느 역할의 도구 목록에도 없고 규칙 작성 역할의 분할 세션 목록(그 도구 하나)에만 있다: 실행기 · MCP tools/list · SDK 허용 목록이 같고, 다른 세션 · 역할의 실행기는 콜백이 있어도 이름만 보고 거부한다', async () => {
+    expect(isFixedToolName('split_rule')).toBe(true);
+    expect([...SPLIT_TOOL_NAMES]).toEqual(['split_rule']);
+    expect([...RULE_SPLIT_SESSION_TOOL_NAMES]).toEqual(['split_rule']);
+    for (const role of ROLES) {
+      expect(roleToolNames(role).includes('split_rule' as never), role).toBe(false);
+      expect(
+        biveMcpToolList(role).map((tool) => tool.name),
+        role,
+      ).not.toContain('split_rule');
+      if (role !== 'rule-writer') {
+        expect(() => sessionToolNames(role, 'rule_split'), role).toThrow(/규칙 작성 역할에만/);
+      }
+    }
+    // 분할 세션: 실행기 · MCP · SDK 허용 목록이 분할 도구 하나
+    const root = tempDir();
+    let reached = 0;
+    const split = new FixedToolExecutor({
+      role: 'rule-writer',
+      toolSet: 'rule_split',
+      sessionRoot: root,
+      biveHome: tempDir(),
+      hooks: {
+        proposeRule: () => {
+          reached += 1;
+          return '반영';
+        },
+        splitRule: () => {
+          reached += 1;
+          return '나눔';
+        },
+      },
+    });
+    expect([...split.toolNames]).toEqual(['split_rule']);
+    expect(biveMcpToolList('rule-writer', split.toolNames).map((tool) => tool.name)).toEqual([
+      'split_rule',
+    ]);
+    const options = buildQueryOptions(specFor('rule-writer', split, root), {
+      env: {},
+      configDir: path.join(root, 'agent'),
+      abortController: new AbortController(),
+    });
+    expect(options.allowedTools).toEqual(['mcp__bive__split_rule']);
+    // 분할 세션에는 규칙 생성 · 폐기 · 대체 · 유지 도구가 없다
+    for (const name of NORM_TOOL_NAMES) {
+      await expect(
+        split.execute(name, OTHER_ROLE_TOOL_ARGS[name] ?? {}),
+        name,
+      ).resolves.toMatchObject({
+        status: 'denied',
+        reason: 'unknown_tool',
+      });
+    }
+    // 다른 세션(규칙 작성 역할의 기본 목록) · 다른 역할의 실행기는 분할 도구를 이름만 보고 거부한다
+    for (const role of ROLES) {
+      const executor = new FixedToolExecutor({
+        role,
+        sessionRoot: tempDir(),
+        biveHome: tempDir(),
+        hooks: {
+          splitRule: () => {
+            reached += 1;
+            return '나눔';
+          },
+        },
+      });
+      await expect(executor.execute('split_rule', {}), role).resolves.toMatchObject({
+        status: 'denied',
+        reason: 'unknown_tool',
+      });
+    }
+    expect(reached).toBe(0);
+    // 허용된 두 목록 밖의 이름 목록은 SDK 노출이 받지 않는다 (실행기 밖에서 도구를 더하는 길이 없다)
+    expect(() => sessionToolDefinitions('rule-writer', ['split_rule', 'propose_rule'])).toThrow(
+      /세션 도구 목록이 아님/,
+    );
+    expect(() => sessionToolDefinitions('implementer', ['split_rule'])).toThrow(
+      /세션 도구 목록이 아님/,
+    );
+    // 분할 세션을 여는 곳의 세션 가드는 그 실행기의 목록을 기대한다
+    expect(read('rule-writer/rule-writer-service.ts')).toMatch(
+      /guard: \{ tools: tools\.toolNames \},/,
+    );
   });
 });

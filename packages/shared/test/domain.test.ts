@@ -1261,6 +1261,46 @@ describe('규칙 폐기 · 대체 기록 (M7-09 #221, ADR-112)', () => {
     ).toBe(false);
   });
 
+  it('규칙 분할(M3-57, ADR-153): 대체 기록의 분할 상세는 새 규칙 2 ~ 5개(중복 없음)와 각 신규 순번이고, 첫 새 규칙이 supersededBy이며 신규 · 판단 순번 칸은 없다. 폐기 기록에는 분할 상세가 없다', () => {
+    const RULE_C = '01ARZ3NDEKTSV4RRFFQ69G5FAX';
+    const third = { id: RULE_C, displayId: 'RULE-003' };
+    const split = [
+      { rule: supersededBy, createdSeq: 1 },
+      { rule: third, createdSeq: 3 },
+    ];
+    const superseded = (retirement: Record<string, unknown>) =>
+      ok({ ...base, kind: 'superseded', detail: { before: {}, retirement } });
+    expect(superseded({ supersededBy, split })).toBe(true);
+    const sixth = Array.from({ length: 6 }, (_, index) => ({
+      rule: {
+        id: `01ARZ3NDEKTSV4RRFFQ69G5FB${String(index)}`,
+        displayId: `RULE-01${String(index)}`,
+      },
+      createdSeq: index + 1,
+    }));
+    for (const retirement of [
+      // 새 규칙 1개 · 6개 · 같은 규칙 둘
+      { supersededBy, split: split.slice(0, 1) },
+      { supersededBy: sixth[0]!.rule, split: sixth },
+      { supersededBy, split: [split[0], split[0]] },
+      // supersededBy가 첫 새 규칙이 아님 · 없음
+      { supersededBy: third, split },
+      { supersededBy: null, split },
+      // 대체의 신규 · 판단 순번 칸과 섞음
+      { supersededBy, split, createdSeq: 1 },
+      { supersededBy, split, judgmentSeq: 2 },
+    ]) {
+      expect(superseded(retirement), JSON.stringify(retirement)).toBe(false);
+    }
+    expect(
+      ok({
+        ...base,
+        kind: 'retired',
+        detail: { before: {}, retirement: { supersededBy: null, split } },
+      }),
+    ).toBe(false);
+  });
+
   it('판단 주제 supersede는 결과가 모순이고 새 규칙의 신규 기록 순번이 필요하다', () => {
     const judgment = {
       subject: 'supersede',

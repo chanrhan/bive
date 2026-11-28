@@ -69,7 +69,9 @@ const toItem = (row: ItemRow): ReviewItem =>
 const detailOf = (resolution: ReviewResolution): Record<string, unknown> =>
   resolution.action === 'quarantine'
     ? { judgmentId: resolution.judgmentId }
-    : { runId: resolution.runId };
+    : resolution.action === 'split_rule'
+      ? { ruleId: resolution.ruleId }
+      : { runId: resolution.runId };
 
 export class ReviewQueueRepository {
   readonly #all;

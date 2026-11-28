@@ -1,6 +1,6 @@
 // 인증된 연결이 부를 수 있는 메서드 처리기. 메서드는 각 이슈에서 여기에 더한다.
 import type { ProposalChangeListener } from '../events/proposal-events.js';
-import type { RuleWriterLauncher } from '../rule-writer/rule-writer-service.js';
+import type { RuleSplitLauncher, RuleWriterLauncher } from '../rule-writer/rule-writer-service.js';
 import type { RunEngineHooks } from './run-handlers.js';
 import { createBlockHandlers } from './block-handlers.js';
 import { createCodeOpenHandlers } from './code-open-handlers.js';
@@ -38,6 +38,8 @@ export interface HandlerDeps {
   now?: () => number;
   /** `requirement.create` 뒤 규칙 자동 생성 세션 창구 (M1-08). 생략하면 세션을 띄우지 않는다 */
   ruleWriter?: RuleWriterLauncher;
+  /** 예산 초과 항목의 규칙 분할 세션 창구 (M3-57, ADR-153). 생략하면 규칙 분할 RPC가 -32603 */
+  ruleSplitter?: RuleSplitLauncher;
   /** 실행 엔진 (M1-14): 실행 생성 · 규칙 승인 뒤 승인 단계 판정, `run.resume`. 생략하면 실행이 진행되지 않는다 */
   engine?: RunEngineHooks;
   /** 제안 처리가 저장된 뒤 부른다 (제안 알림 `event.proposal.changed`, M1-36, ADR-076). 생략하면 알리지 않는다 */
@@ -54,6 +56,7 @@ export const createHandlers = ({
   biveHome,
   now = Date.now,
   ruleWriter,
+  ruleSplitter,
   engine,
   onProposalChanged,
   ruleEditStarter,
@@ -95,7 +98,11 @@ export const createHandlers = ({
   ...createContractHandlers({ biveHome, now }),
   ...createSettingsHandlers({ biveHome, now }),
   ...createRunHandlers({ biveHome, now, ...(engine === undefined ? {} : { engine }) }),
-  ...createReviewQueueHandlers({ biveHome, now }),
+  ...createReviewQueueHandlers({
+    biveHome,
+    now,
+    ...(ruleSplitter === undefined ? {} : { ruleSplitter }),
+  }),
   ...createVerificationHandlers({ biveHome }),
   ...createToolCallHandlers({ biveHome }),
   ...createCodeOpenHandlers({ biveHome, now }),

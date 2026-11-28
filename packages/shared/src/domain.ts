@@ -1222,16 +1222,31 @@ export const NormJudgmentDetail = z
   });
 export type NormJudgmentDetail = z.infer<typeof NormJudgmentDetail>;
 
+/** 규칙 분할 한 번에 만드는 새 규칙 수 상한 (하한은 2, M3-57 #320, ADR-153). 새 규칙마다 실행이 자동 시작된다. */
+export const RULE_SPLIT_MAX = 5;
+
 /**
  * 폐기 · 대체 상세 (종류 `retired` · `superseded`, M7-09 #221, ADR-112). 근거 글은 기록의 `reason`, 폐기 직전 규칙 내용은
  * `before`에 있다.
  * - `supersededBy`: 대체한 새 규칙 (대체면 필수, 폐기만이면 `null`)
  * - `createdSeq` · `judgmentSeq`: 대체면 같은 트랜잭션에서 남긴 새 규칙의 신규 · 판단 기록 순번(필수), 폐기만이면 없음
+ * - `split`: 규칙 분할(예산 초과 항목의 액션, M3-57 #320, ADR-153)이면 대체한 새 규칙들(2 ~ {@link RULE_SPLIT_MAX}개, 만든 순서)과
+ *   각각의 신규 기록 순번. 그때 `supersededBy`는 첫 새 규칙이고 `createdSeq` · `judgmentSeq`는 없다(새 규칙마다 판단 기록은 규칙 생성과
+ *   같은 모순 판단이다)
  */
 export const NormRetirementDetail = z.strictObject({
   supersededBy: NormJudgmentRuleRef.nullable(),
   createdSeq: z.int().positive().optional(),
   judgmentSeq: z.int().positive().optional(),
+  split: z
+    .array(z.strictObject({ rule: NormJudgmentRuleRef, createdSeq: z.int().positive() }))
+    .min(2)
+    .max(RULE_SPLIT_MAX)
+    .refine(
+      (rules) => new Set(rules.map((item) => item.rule.id)).size === rules.length,
+      '분할로 생긴 규칙이 중복됐습니다',
+    )
+    .optional(),
 });
 export type NormRetirementDetail = z.infer<typeof NormRetirementDetail>;
 
@@ -1507,15 +1522,25 @@ export const NormChangeEntry = z
     }
     if (retirement !== undefined) {
       const superseding = entry.kind === 'superseded';
+      const { split } = retirement;
       const complete =
         retirement.supersededBy !== null &&
+        split === undefined &&
         retirement.createdSeq !== undefined &&
         retirement.judgmentSeq !== undefined;
-      const bare =
-        retirement.supersededBy === null &&
+      // 규칙 분할 (M3-57, ADR-153): 첫 새 규칙이 `supersededBy`, 순번은 새 규칙마다 `split`에
+      const splitComplete =
+        split !== undefined &&
+        retirement.supersededBy !== null &&
+        split[0]?.rule.id === retirement.supersededBy.id &&
         retirement.createdSeq === undefined &&
         retirement.judgmentSeq === undefined;
-      if (superseding ? !complete : !bare) {
+      const bare =
+        retirement.supersededBy === null &&
+        split === undefined &&
+        retirement.createdSeq === undefined &&
+        retirement.judgmentSeq === undefined;
+      if (superseding ? !(complete || splitComplete) : !bare) {
         ctx.addIssue({
           code: 'custom',
           message:
@@ -2148,6 +2173,8 @@ export const QUARANTINE_REASON_MAX = 4000;
  * - `reinforce`: 사람이 시작한 유형 C 테스트 보강 실행(`runId`). 사유 없음
  * - `quarantine`: 그 규칙의 판정 격리 기록(`judgmentId`, 판정 상태 '격리'). 사유 필수
  * - `raise_limit_resume`: 예산 초과 항목의 한도 상향 재개. 그 항목의 실행을 이어받는 새 실행(`runId`, M3-56 #319, ADR-149). 사유 없음
+ * - `split_rule`: 예산 초과 항목의 규칙 분할. 그 항목의 실행의 대상 규칙 가운데 사람이 고른 규칙(`ruleId`)을 규칙 작성 역할 세션이 새 규칙
+ *   2개 이상으로 대체했다(M3-57 #320, ADR-153). 처리는 그 대체와 같은 쓰기 트랜잭션이고 주체는 액션을 누른 사람이다. 사유 없음
  */
 export const ReviewResolution = z.discriminatedUnion('action', [
   z.strictObject({
@@ -2170,6 +2197,13 @@ export const ReviewResolution = z.discriminatedUnion('action', [
     at: Timestamp,
     reason: z.null(),
     runId: Ulid,
+  }),
+  z.strictObject({
+    action: z.literal('split_rule'),
+    by: HumanAuthor,
+    at: Timestamp,
+    reason: z.null(),
+    ruleId: Ulid,
   }),
   // 허용 목록 축소 재개: 쓰기 허용 범위가 붙은 이어받는 실행(`runId`, M3-58 #321, ADR-155). 사유 없음
   z.strictObject({

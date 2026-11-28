@@ -610,10 +610,42 @@ describe('review_items: 허용 목록 축소 재개 · 한도 상향 재개 처�
       expect(() => resolveAs(store, item.seq, 'raise_limit_resume', second.run.id)).toThrow(
         /쓰기 허용 범위를 그대로/,
       );
+      // 한 항목에서 액션이 갈라지지 않는다: 처리된 항목은 다른 재개 · 규칙 분할로 다시 처리할 수 없다 (아래에서 처리한 뒤 확인)
       // 제외를 더한 범위는 허용 목록 축소 재개(다시 좁히기)로 처리한다
       expect(
         resolveAs(store, item.seq, 'narrow_allowlist_resume', second.run.id).resolution?.action,
       ).toBe('narrow_allowlist_resume');
+      const resolved = store.reviewQueue.get(item.seq)?.resolution;
+      expect(() => resolveAs(store, item.seq, 'raise_limit_resume', second.run.id)).toThrow();
+      expect(() =>
+        store.reviewQueue.resolve(item.seq, {
+          action: 'split_rule',
+          by: human,
+          at: T2,
+          reason: null,
+          ruleId: rule.id,
+        }),
+      ).toThrow();
+      expect(store.reviewQueue.get(item.seq)?.resolution).toEqual(resolved);
+    });
+  });
+
+  it('규칙 분할 처리(0031)는 분할 기록이 없으면 거부되고, 재개 처리 결과의 실행으로는 분할 처리가 되지 않는다 (세 처리 결과 트리거가 어긋난 처리를 막는다)', () => {
+    withStore((store) => {
+      const { rule, origin, next } = continued(store);
+      attach(store, next.run.id);
+      const item = store.reviewQueue.list().find((entry) => entry.runId === origin.run.id)!;
+      // 범위 · 연결이 있어도 분할 기록이 없으면 규칙 분할로 처리할 수 없다
+      expect(() =>
+        store.reviewQueue.resolve(item.seq, {
+          action: 'split_rule',
+          by: human,
+          at: T2,
+          reason: null,
+          ruleId: rule.id,
+        }),
+      ).toThrow(/규칙 분할 처리/);
+      expect(store.reviewQueue.get(item.seq)?.resolution).toBeNull();
     });
   });
 });
