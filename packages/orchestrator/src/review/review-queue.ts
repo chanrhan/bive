@@ -16,10 +16,14 @@
 //   - 한도 상향 재개: 원 실행은 '예산 초과' 그대로 두고, 사람의 실행 RPC 처리기가 `run.create`와 같은 문(`createRun`)으로 원 실행과 같은
 //     유형 · 대상 규칙 · 기준 커밋의 이어받는 실행을 만든다. 이 모듈이 항목 · 원 실행 · 새 한도를 확인하고(`continuationTarget`), 같은 트랜잭션에서
 //     원 실행과의 연결(저장소 `runContinuations`, 0030)을 쓰고 항목을 처리한다(`recordContinuation`). 이어받는 실행의 연결을 쓰는 곳은 이 모듈 하나다
-//   - 허용 목록 축소 재개 · 규칙 분할: 뒤 이슈(M3-58 · M3-57)
+//   - 허용 목록 축소 재개 (M3-58 #321, ADR-147 ⑥, ADR-155): 한도 상향 재개와 같은 길(같은 새 한도 검증 · 같은 연결)로 이어받는 실행을
+//     만들고 그 실행에만 쓰기 허용 범위(저장소 `runWriteScopes`, 0032: 처음 목록 = 대상 블록 포함 경로의 합, 제외 = 사람이 준 경로)를
+//     붙인다. 범위가 붙은 실행의 한도 상향 재개는 같은 범위를 잇고, 다시 좁히기는 제외를 더한다(합집합). 범위를 쓰는 곳은 이 모듈 하나다
+//   - 규칙 분할: 뒤 이슈(M3-57)
 // - 값은 저장된 항목 · 실행 · 규칙 · 변이 기록에서만 만든다(NFR-03)
 import {
   type AgentRole,
+  blockPatternProblem,
   type BudgetLimits,
   type BudgetSnapshot,
   DomainErrorReason,
@@ -35,7 +39,9 @@ import {
   type ReviewQueueEntry,
   type Run,
   type RunCreateResult,
+  RunWriteScope,
   subtractUsd,
+  WRITE_SCOPE_LIMITS,
 } from '@bive/shared';
 import type { ProjectStore } from '@bive/store';
 
@@ -281,23 +287,22 @@ export const assertRaisedBudget = (
   }
 };
 
-/** 한도 상향 재개할 열린 예산 초과 항목 · 원 실행 · 이어받는 실행을 만들 값. */
+/** 이어받는 실행으로 재개할 열린 예산 초과 항목 · 원 실행 · 이어받는 실행을 만들 값 · 붙일 쓰기 허용 범위. */
 export interface ContinuationTarget {
   readonly item: ReviewItem;
   readonly origin: Run;
   readonly seed: RunContinuationSeed;
+  /** 항목의 처리 액션 (한도 상향 재개 · 허용 목록 축소 재개) */
+  readonly action: 'raise_limit_resume' | 'narrow_allowlist_resume';
+  /**
+   * 이어받는 실행에 붙일 쓰기 허용 범위 (ADR-155). 허용 목록 축소 재개는 늘 있고, 한도 상향 재개는 원 실행에 붙은 범위를 그대로 잇는다
+   * (원 실행에 없으면 `null`)
+   */
+  readonly scope: RunWriteScope | null;
 }
 
-/**
- * 한도 상향 재개를 받을 수 있는지 본다 (실행을 만들기 전, 같은 쓰기 트랜잭션 안에서 부른다). 새 한도는 원 실행의 사슬 전체 사용량으로
- * 검증한다(`assertRaisedBudget`).
- * @throws {RpcError} -32004 없는 항목 · -32009 이미 처리됨 · 예산 초과 항목이 아님 · -32001 새 한도
- */
-export const continuationTarget = (
-  store: ProjectStore,
-  seq: number,
-  budget: BudgetSnapshot,
-): ContinuationTarget => {
+/** 두 재개 액션이 같이 지나는 확인: 열린 예산 초과 항목 → 원 실행 → 새 한도(`assertRaisedBudget`, 사슬 전체 사용량). */
+const budgetContinuation = (store: ProjectStore, seq: number, budget: BudgetSnapshot) => {
   const item = openItem(store, seq, 'budget_exceeded');
   const origin = store.runs.getDetail(item.runId);
   if (origin === null) {
@@ -313,9 +318,127 @@ export const continuationTarget = (
 };
 
 /**
- * 사람이 시작한 이어받는 실행(사람의 실행 생성 `createRun`으로 막 만든 것)을 원 실행과 잇고 예산 초과 항목을 처리됨(한도 상향 재개)으로
- * 남긴다. 실행 생성과 같은 쓰기 트랜잭션 안에서 부른다(하나라도 실패하면 실행도 남지 않는다). 실행을 만드는 곳은 사람의 실행 RPC
- * 처리기(`ipc/run-handlers.ts`)다.
+ * 한도 상향 재개를 받을 수 있는지 본다 (실행을 만들기 전, 같은 쓰기 트랜잭션 안에서 부른다). 새 한도는 원 실행의 사슬 전체 사용량으로
+ * 검증한다(`assertRaisedBudget`). 원 실행에 쓰기 허용 범위가 붙어 있으면 이어받는 실행도 같은 범위를 잇는다(ADR-155: 한 번 좁힌 범위가
+ * 다음 이어받기에서 풀리지 않는다).
+ * @throws {RpcError} -32004 없는 항목 · -32009 이미 처리됨 · 예산 초과 항목이 아님 · -32001 새 한도
+ */
+export const continuationTarget = (
+  store: ProjectStore,
+  seq: number,
+  budget: BudgetSnapshot,
+): ContinuationTarget => {
+  const target = budgetContinuation(store, seq, budget);
+  return {
+    ...target,
+    action: 'raise_limit_resume',
+    scope: store.runWriteScopes.ofRun(target.origin.id),
+  };
+};
+
+// ── 예산 초과 액션: 허용 목록 축소 재개 (M3-58 #321, ADR-147 ⑥, ADR-155) ─────────────
+
+const scopeRejected = (reason: DomainErrorReason, message: string, fields?: string[]): RpcError =>
+  new RpcError(
+    ErrorCode.ValidationFailed,
+    message,
+    fields === undefined ? { reason } : { reason, fields },
+  );
+
+/**
+ * 허용 목록 축소 재개의 제외 경로 형식 (저장소를 열기 전에 본다). 패턴 문법은 블록 선언의 포함 경로와 같다(`blockPatternProblem`: 빈 값 ·
+ * 길이 · 받는 글자(숨은 글자 · 공백 · 역슬래시 없음) · 절대 경로 · `.` · `..` · 빈 구간 · 구간 안의 `**` · 잇달은 `**`).
+ * - 비면 -32001 `WRITE_SCOPE_EXCLUDE_REQUIRED`
+ * - 개수 상한 초과 · 패턴 형식 오류 · 중복은 -32001 `WRITE_SCOPE_EXCLUDE_INVALID`(`data.fields` = `exclude` 또는 `exclude.<번호>`)
+ * @throws {RpcError} -32001
+ */
+export const assertExcludePatterns = (exclude: readonly string[]): void => {
+  if (exclude.length === 0) {
+    throw scopeRejected(DomainErrorReason.WriteScopeExcludeRequired, '제외 경로가 비어 있습니다');
+  }
+  if (exclude.length > WRITE_SCOPE_LIMITS.exclude) {
+    throw scopeRejected(
+      DomainErrorReason.WriteScopeExcludeInvalid,
+      `제외 경로는 ${String(WRITE_SCOPE_LIMITS.exclude)}개까지입니다`,
+      ['exclude'],
+    );
+  }
+  const wrong = exclude.flatMap((pattern, index) =>
+    blockPatternProblem(pattern) !== null || exclude.indexOf(pattern) !== index
+      ? [`exclude.${String(index)}`]
+      : [],
+  );
+  if (wrong.length > 0) {
+    throw scopeRejected(
+      DomainErrorReason.WriteScopeExcludeInvalid,
+      '제외 경로의 형식이 블록 선언의 경로 패턴과 맞지 않거나 중복됐습니다',
+      wrong,
+    );
+  }
+};
+
+/** 처음 목록이 비어 거부할 때의 고정 사유. */
+export const WRITE_SCOPE_ALLOW_EMPTY_MESSAGE =
+  '대상 블록의 포함 경로가 없어 쓰기 허용 범위를 만들 수 없습니다';
+
+/**
+ * 처음 목록 (ADR-147 ⑥, ADR-155): 원 실행 대상 규칙들의 대상 블록 포함 경로의 합(지금 블록 선언, 선언의 블록 순 · 포함 경로 순, 중복 없음).
+ * 선언에 없는 블록 이름은 아무 경로도 더하지 않는다. 선언이 없거나 합이 비면 -32001 `WRITE_SCOPE_ALLOW_EMPTY`.
+ */
+const initialAllowList = (store: ProjectStore, origin: Run): string[] => {
+  const declaration = store.blockDeclarations.current();
+  const names = new Set(
+    origin.targetRuleIds.flatMap((id) => store.rules.get(id)?.targetBlockIds ?? []),
+  );
+  const allow = [
+    ...new Set(
+      (declaration?.declaration.blocks ?? [])
+        .filter((block) => names.has(block.name))
+        .flatMap((block) => block.include),
+    ),
+  ];
+  if (allow.length === 0) {
+    throw scopeRejected(DomainErrorReason.WriteScopeAllowEmpty, WRITE_SCOPE_ALLOW_EMPTY_MESSAGE);
+  }
+  return allow;
+};
+
+/**
+ * 허용 목록 축소 재개를 받을 수 있는지 보고 붙일 범위를 정한다 (실행을 만들기 전, 같은 쓰기 트랜잭션 안에서 부른다). 제외 경로의 형식은
+ * 부른 쪽이 저장소를 열기 전에 봤다(`assertExcludePatterns`). 한도 상향 재개와 같은 확인(`assertRaisedBudget`)을 지난 뒤:
+ * - 원 실행에 범위가 없으면: 허용 = 처음 목록(지금 블록 선언에서 읽어 이 실행에 고정), 제외 = 받은 값
+ * - 원 실행에 범위가 있으면(다시 좁히기): 허용 = 원 실행의 허용 그대로(선언을 다시 읽지 않는다: 넓어지는 길이 없다), 제외 = 원 실행의
+ *   제외 ∪ 받은 값(합이 상한을 넘으면 -32001 `WRITE_SCOPE_EXCLUDE_INVALID`)
+ * @throws {RpcError} -32004 없는 항목 · -32009 이미 처리됨 · 예산 초과 항목이 아님 · -32001 새 한도 · 처음 목록 빔 · 제외 합 상한
+ */
+export const narrowedContinuationTarget = (
+  store: ProjectStore,
+  seq: number,
+  budget: BudgetSnapshot,
+  exclude: readonly string[],
+): ContinuationTarget => {
+  const target = budgetContinuation(store, seq, budget);
+  const inheritedScope = store.runWriteScopes.ofRun(target.origin.id);
+  const allow = inheritedScope?.allow ?? initialAllowList(store, target.origin);
+  const merged = [...new Set([...(inheritedScope?.exclude ?? []), ...exclude])];
+  if (merged.length > WRITE_SCOPE_LIMITS.excludeTotal) {
+    throw scopeRejected(
+      DomainErrorReason.WriteScopeExcludeInvalid,
+      `실행에 붙는 제외 경로는 ${String(WRITE_SCOPE_LIMITS.excludeTotal)}개까지입니다`,
+      ['exclude'],
+    );
+  }
+  return {
+    ...target,
+    action: 'narrow_allowlist_resume',
+    scope: RunWriteScope.parse({ allow, exclude: merged }),
+  };
+};
+
+/**
+ * 사람이 시작한 이어받는 실행(사람의 실행 생성 `createRun`으로 막 만든 것)을 원 실행과 잇고, 범위가 있으면 그 실행에 붙이고, 예산 초과
+ * 항목을 처리됨(한도 상향 재개 · 허용 목록 축소 재개)으로 남긴다. 실행 생성과 같은 쓰기 트랜잭션 안에서 부른다(하나라도 실패하면 실행도
+ * 남지 않는다). 실행을 만드는 곳은 사람의 실행 RPC 처리기(`ipc/run-handlers.ts`)다. 연결과 쓰기 허용 범위를 쓰는 곳은 여기 하나다.
  */
 export const recordContinuation = (
   store: ProjectStore,
@@ -329,8 +452,11 @@ export const recordContinuation = (
     originRunId: target.origin.id,
     createdAt: at,
   });
+  if (target.scope !== null) {
+    store.runWriteScopes.record({ runId: created.run.id, scope: target.scope, createdAt: at });
+  }
   const resolved = store.reviewQueue.resolve(target.item.seq, {
-    action: 'raise_limit_resume',
+    action: target.action,
     by: author,
     at,
     reason: null,

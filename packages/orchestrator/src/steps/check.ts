@@ -72,6 +72,11 @@ import {
   unjudgedStaticTargets,
 } from './run-type.js';
 import { ACCEPTANCE_DIR } from '../judge/config.js';
+import {
+  WRITE_SCOPE_STAGE,
+  WRITE_SCOPE_VIOLATION_MESSAGE,
+  writeScopeViolations,
+} from './write-scope.js';
 
 export type CheckOptions = JudgingOptions;
 
@@ -112,6 +117,20 @@ export const createCheckExecutor =
             ? '구현 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다'
             : '테스트 작성 커밋이 실행의 마지막 완료 단계 커밋이 아닙니다',
         commit,
+      });
+    }
+    // 쓰기 허용 범위가 붙은 실행: 판정할 커밋의 변경이 범위 안이어야 한다 (경로 가드를 지나지 않는 쓰기까지 닫는다, ADR-155)
+    const outsideScope = await writeScopeViolations(
+      context,
+      options.git ?? createGitRunner(),
+      commit,
+    );
+    if (outsideScope.length > 0) {
+      return halt('guard_violation', {
+        commit,
+        stage: WRITE_SCOPE_STAGE,
+        message: WRITE_SCOPE_VIOLATION_MESSAGE,
+        changed: outsideScope.slice(0, MAX_LISTED),
       });
     }
     const baseline = acceptanceBaselineOf(context.run, basis);

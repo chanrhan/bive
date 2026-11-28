@@ -22,6 +22,7 @@ import { ProposalRepository } from './repositories/proposal-repository.js';
 import { RequirementRepository } from './repositories/requirement-repository.js';
 import { ReviewQueueRepository } from './repositories/review-queue-repository.js';
 import { RunContinuationRepository } from './repositories/run-continuation-repository.js';
+import { RunWriteScopeRepository } from './repositories/run-write-scope-repository.js';
 import { RuleRepository } from './repositories/rule-repository.js';
 import { RuleRetirementRepository } from './repositories/rule-retirement-repository.js';
 import { RuleWriterRequestRepository } from './repositories/rule-writer-request-repository.js';
@@ -101,6 +102,11 @@ export class ProjectStore {
    * 쓰기는 오케스트레이터의 검토 대기열 모듈만 한다(한도 상향 재개).
    */
   readonly runContinuations: RunContinuationRepository;
+  /**
+   * 이어받는 실행의 쓰기 허용 범위 (TODO-02 · NFR-02, M3-58 #321, ADR-155). 추가 전용이고 쓰기는 오케스트레이터의 검토 대기열 모듈만
+   * 한다(허용 목록 축소 재개와, 범위가 붙은 실행의 한도 상향 재개).
+   */
+  readonly runWriteScopes: RunWriteScopeRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -129,6 +135,7 @@ export class ProjectStore {
     this.mutations = new MutationResultRepository(db);
     this.reviewQueue = new ReviewQueueRepository(db);
     this.runContinuations = new RunContinuationRepository(db);
+    this.runWriteScopes = new RunWriteScopeRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

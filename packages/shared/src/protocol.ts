@@ -535,6 +535,12 @@ export const DomainErrorReason = {
   BudgetLowered: 'BUDGET_LOWERED',
   /** 원 실행(사슬 전체)이 쓴 양이 이미 닿은 값을 새 한도가 쓴 양보다 크게 올리지 않았다 (ADR-147 ④) */
   BudgetNotAboveSpent: 'BUDGET_NOT_ABOVE_SPENT',
+  /** 허용 목록 축소 재개의 제외 경로 목록이 비었다 (M3-58 · ADR-155) */
+  WriteScopeExcludeRequired: 'WRITE_SCOPE_EXCLUDE_REQUIRED',
+  /** 제외 경로의 형식 오류 (패턴 문법 · 길이 · 개수 · 중복, `data.fields`) */
+  WriteScopeExcludeInvalid: 'WRITE_SCOPE_EXCLUDE_INVALID',
+  /** 처음 목록(대상 블록 포함 경로의 합)이 빈다: 대상 블록이 없는 규칙뿐이거나 블록 선언이 없다 */
+  WriteScopeAllowEmpty: 'WRITE_SCOPE_ALLOW_EMPTY',
 } as const;
 export type DomainErrorReason = (typeof DomainErrorReason)[keyof typeof DomainErrorReason];
 
@@ -1675,6 +1681,22 @@ export const ReviewQueueResumeWithBudgetResult = z.strictObject({
 });
 export type ReviewQueueResumeWithBudgetResult = z.infer<typeof ReviewQueueResumeWithBudgetResult>;
 
+/**
+ * `reviewQueue.resumeNarrowed`: 예산 초과 항목의 허용 목록 축소 재개 (M3-58 #321, ADR-147 ⑥, ADR-155). `reviewQueue.resumeWithBudget`과
+ * 같은 길(같은 새 한도 검증)로 이어받는 실행을 만들고 그 실행에만 쓰기 허용 범위를 붙인다: 구현 세션은 처음 목록(원 실행 대상 규칙들의
+ * 대상 블록 포함 경로의 합)에 들고 `exclude`에 들지 않는 경로에만 쓸 수 있다. `exclude`는 블록 선언의 포함 경로와 같은 패턴 문법이다:
+ * 비면 -32001 `WRITE_SCOPE_EXCLUDE_REQUIRED`, 형식이 틀리면 -32001 `WRITE_SCOPE_EXCLUDE_INVALID`(`data.fields`), 처음 목록이 비면 -32001
+ * `WRITE_SCOPE_ALLOW_EMPTY`. 형식 검사는 저장소를 열기 전에 하므로 요청 스키마는 글자 배열만 본다.
+ */
+export const ReviewQueueResumeNarrowedParams = z.strictObject({
+  projectId: Ulid,
+  seq: z.int().positive(),
+  budget: BudgetSnapshot,
+  exclude: z.array(z.string()),
+  author: Author,
+});
+export type ReviewQueueResumeNarrowedParams = z.infer<typeof ReviewQueueResumeNarrowedParams>;
+
 /** 처리 액션이 -32009로 거부하는 이유 (`error.data.reason`). */
 export const ReviewConflictReason = z.enum(['already_resolved', 'action_not_allowed']);
 export type ReviewConflictReason = z.infer<typeof ReviewConflictReason>;
@@ -1730,6 +1752,10 @@ export const METHODS = {
   },
   'reviewQueue.resumeWithBudget': {
     params: ReviewQueueResumeWithBudgetParams,
+    result: ReviewQueueResumeWithBudgetResult,
+  },
+  'reviewQueue.resumeNarrowed': {
+    params: ReviewQueueResumeNarrowedParams,
     result: ReviewQueueResumeWithBudgetResult,
   },
   'settings.get': { params: SettingsGetParams, result: SettingsResult },

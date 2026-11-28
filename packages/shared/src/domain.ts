@@ -2171,6 +2171,14 @@ export const ReviewResolution = z.discriminatedUnion('action', [
     reason: z.null(),
     runId: Ulid,
   }),
+  // 허용 목록 축소 재개: 쓰기 허용 범위가 붙은 이어받는 실행(`runId`, M3-58 #321, ADR-155). 사유 없음
+  z.strictObject({
+    action: z.literal('narrow_allowlist_resume'),
+    by: HumanAuthor,
+    at: Timestamp,
+    reason: z.null(),
+    runId: Ulid,
+  }),
 ]);
 export type ReviewResolution = z.infer<typeof ReviewResolution>;
 

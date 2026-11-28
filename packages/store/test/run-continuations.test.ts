@@ -446,3 +446,174 @@ describe('review_items: 한도 상향 재개 처리는 이어받는 실행의 �
     });
   });
 });
+
+// ── 쓰기 허용 범위 (M3-58 #321, TODO-02 · NFR-01 · NFR-02, ADR-147 ⑥, ADR-155, 0032) ──────────
+
+const SCOPE = { allow: ['src/app/api/health/**'], exclude: ['src/app/api/health/route.ts'] };
+const attach = (store: ProjectStore, runId: string, scope = SCOPE) =>
+  store.runWriteScopes.record({ runId, scope, createdAt: T2 });
+/** 예산 초과로 끝난 원 실행과 그것을 이은 막 만든 실행. */
+const continued = (store: ProjectStore) => {
+  const rule = seedRule(store);
+  const origin = createRun(store, [rule.id]);
+  endRun(store, origin.run.id, 'budget_exceeded');
+  const next = createRun(store, [rule.id]);
+  link(store, next.run.id, origin.run.id);
+  return { rule, origin, next };
+};
+const rawInsert = (store: ProjectStore, runId: string, allow: string, exclude: string) =>
+  store.db
+    .prepare(
+      'INSERT INTO run_write_scopes (run_id, allow_patterns, exclude_patterns, created_at) VALUES (?, ?, ?, ?)',
+    )
+    .run(runId, allow, exclude, T2);
+
+describe('run_write_scopes: 넣을 때의 조건 · 추가 전용 (0032, ADR-155)', () => {
+  it('막 만든 이어받는 실행에만 붙고 읽힌다. 이어받는 실행이 아님 · 막 만든 실행이 아님 · 빈 허용 · 빈 제외 · 글자 아닌 원소는 거부된다', () => {
+    withStore((store) => {
+      const { rule, origin, next } = continued(store);
+      expect(store.runWriteScopes.ofRun(next.run.id)).toBeNull();
+      // 이어받는 실행이 아님 (원 실행 · 연결 없는 막 만든 실행)
+      expect(() => attach(store, origin.run.id)).toThrow(/막 만든 이어받는 실행/);
+      const plain = createRun(store, [rule.id]);
+      expect(() => attach(store, plain.run.id)).toThrow(/막 만든 이어받는 실행/);
+      // 날 SQL로도: 빈 배열 · 배열 아님 · 글자 아닌 원소
+      expect(() => rawInsert(store, next.run.id, '[]', '["a/b"]')).toThrow();
+      expect(() => rawInsert(store, next.run.id, '["a/**"]', '[]')).toThrow();
+      expect(() => rawInsert(store, next.run.id, '"a/**"', '["a/b"]')).toThrow();
+      expect(() => rawInsert(store, next.run.id, '["a/**"]', '[1]')).toThrow(
+        /막 만든 이어받는 실행/,
+      );
+      expect(() => rawInsert(store, next.run.id, '[null]', '["a/b"]')).toThrow(
+        /막 만든 이어받는 실행/,
+      );
+      expect(store.runWriteScopes.ofRun(next.run.id)).toBeNull();
+      expect(attach(store, next.run.id)).toEqual({
+        runId: next.run.id,
+        scope: SCOPE,
+        createdAt: T2,
+      });
+      expect(store.runWriteScopes.ofRun(next.run.id)).toEqual(SCOPE);
+      // 실행마다 하나
+      expect(() => attach(store, next.run.id)).toThrow();
+      // 진행을 시작한 이어받는 실행에는 붙일 수 없다 (막 만든 실행만)
+      const { next: started } = continued(store);
+      endRun(store, started.run.id, 'failed');
+      expect(() => attach(store, started.run.id)).toThrow(/막 만든 이어받는 실행/);
+    });
+  });
+
+  it('실행에 붙은 값은 바뀌지 않는다: 수정 · 삭제(날 SQL)는 거부된다', () => {
+    withStore((store) => {
+      const { next } = continued(store);
+      attach(store, next.run.id);
+      expect(() =>
+        store.db
+          .prepare('UPDATE run_write_scopes SET exclude_patterns = ? WHERE run_id = ?')
+          .run('["other/**"]', next.run.id),
+      ).toThrow(/바꿀 수 없습니다/);
+      expect(() =>
+        store.db.prepare('DELETE FROM run_write_scopes WHERE run_id = ?').run(next.run.id),
+      ).toThrow(/지울 수 없습니다/);
+      expect(store.runWriteScopes.ofRun(next.run.id)).toEqual(SCOPE);
+    });
+  });
+
+  it('원 실행에 범위가 있으면 이어받는 실행은 같은 허용 목록과 원 실행의 제외를 모두 담은 제외 목록만 받는다 (넓어지는 길 없음)', () => {
+    withStore((store) => {
+      const { rule, next: first } = continued(store);
+      attach(store, first.run.id);
+      endRun(store, first.run.id, 'budget_exceeded');
+      const second = createRun(store, [rule.id]);
+      link(store, second.run.id, first.run.id);
+      // 허용 목록이 다름 (넓힘)
+      expect(() =>
+        attach(store, second.run.id, { allow: ['src/**'], exclude: SCOPE.exclude }),
+      ).toThrow(/넓힐 수 없습니다/);
+      // 원 실행의 제외 하나를 뺌
+      expect(() =>
+        attach(store, second.run.id, { allow: SCOPE.allow, exclude: ['src/app/api/health/x.ts'] }),
+      ).toThrow(/넓힐 수 없습니다/);
+      // 같은 값 · 제외를 더한 값은 받는다
+      const widerExclude = { allow: SCOPE.allow, exclude: [...SCOPE.exclude, 'src/app/api/x.ts'] };
+      expect(attach(store, second.run.id, widerExclude).scope).toEqual(widerExclude);
+    });
+  });
+});
+
+describe('review_items: 허용 목록 축소 재개 · 한도 상향 재개 처리와 쓰기 허용 범위의 짝 (0032, ADR-155)', () => {
+  const resolveAs = (
+    store: ProjectStore,
+    seq: number,
+    action: 'raise_limit_resume' | 'narrow_allowlist_resume',
+    runId: string,
+  ) => store.reviewQueue.resolve(seq, { action, by: human, at: T2, reason: null, runId });
+
+  it('허용 목록 축소 재개 처리는 그 항목의 실행을 이은 실행에 범위가 붙어 있어야 한다 (값 없이 처리 거부)', () => {
+    withStore((store) => {
+      const { origin, next } = continued(store);
+      const item = store.reviewQueue.list().find((entry) => entry.runId === origin.run.id)!;
+      expect(() => resolveAs(store, item.seq, 'narrow_allowlist_resume', next.run.id)).toThrow(
+        /허용 목록 축소 재개 처리/,
+      );
+      attach(store, next.run.id);
+      expect(resolveAs(store, item.seq, 'narrow_allowlist_resume', next.run.id).resolution).toEqual(
+        {
+          action: 'narrow_allowlist_resume',
+          by: human,
+          at: T2,
+          reason: null,
+          runId: next.run.id,
+        },
+      );
+    });
+  });
+
+  it('범위 없는 원 실행의 한도 상향 재개는 범위가 붙은 실행으로 처리할 수 없다 (값이 있는데 raise_limit_resume)', () => {
+    withStore((store) => {
+      const { origin, next } = continued(store);
+      attach(store, next.run.id);
+      const item = store.reviewQueue.list().find((entry) => entry.runId === origin.run.id)!;
+      expect(() => resolveAs(store, item.seq, 'raise_limit_resume', next.run.id)).toThrow(
+        /쓰기 허용 범위를 그대로/,
+      );
+      expect(store.reviewQueue.get(item.seq)?.resolution).toBeNull();
+    });
+  });
+
+  it('범위가 붙은 원 실행의 한도 상향 재개는 같은 범위를 이은 실행으로만 처리된다 (범위 없음 · 제외를 더함은 거부)', () => {
+    withStore((store) => {
+      const { rule, next: first } = continued(store);
+      attach(store, first.run.id);
+      endRun(store, first.run.id, 'budget_exceeded');
+      const item = store.reviewQueue.list().find((entry) => entry.runId === first.run.id)!;
+      const bare = createRun(store, [rule.id]);
+      link(store, bare.run.id, first.run.id);
+      // 범위 없이 이으면 한도 상향 재개로 처리할 수 없다 (조용히 풀리지 않는다)
+      expect(() => resolveAs(store, item.seq, 'raise_limit_resume', bare.run.id)).toThrow(
+        /쓰기 허용 범위를 그대로/,
+      );
+      // 같은 범위를 붙이면 처리된다
+      attach(store, bare.run.id);
+      expect(resolveAs(store, item.seq, 'raise_limit_resume', bare.run.id).resolution?.action).toBe(
+        'raise_limit_resume',
+      );
+    });
+    withStore((store) => {
+      const { rule, next: first } = continued(store);
+      attach(store, first.run.id);
+      endRun(store, first.run.id, 'budget_exceeded');
+      const item = store.reviewQueue.list().find((entry) => entry.runId === first.run.id)!;
+      const second = createRun(store, [rule.id]);
+      link(store, second.run.id, first.run.id);
+      attach(store, second.run.id, { allow: SCOPE.allow, exclude: [...SCOPE.exclude, 'a.ts'] });
+      expect(() => resolveAs(store, item.seq, 'raise_limit_resume', second.run.id)).toThrow(
+        /쓰기 허용 범위를 그대로/,
+      );
+      // 제외를 더한 범위는 허용 목록 축소 재개(다시 좁히기)로 처리한다
+      expect(
+        resolveAs(store, item.seq, 'narrow_allowlist_resume', second.run.id).resolution?.action,
+      ).toBe('narrow_allowlist_resume');
+    });
+  });
+});

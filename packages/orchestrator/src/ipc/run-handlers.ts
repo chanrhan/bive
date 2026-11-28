@@ -11,6 +11,8 @@
 // - `reviewQueue.resumeWithBudget`(M3-56 #319, ADR-147, ADR-149)는 검토 대기열의 한도 상향 재개다: 사람만, `run.create`와 같은 문으로 예산
 //   초과로 끝난 원 실행을 이어받는 실행 1개(원 실행과 같은 유형 · 대상 규칙, 예산 값 = 새 한도)를 만들고 같은 트랜잭션에서 원 실행과 잇고
 //   항목을 처리한다. 유형 · 대상 규칙은 원 실행에서 정해진다(요청이 바꿔 넣을 수 없다)
+// - `reviewQueue.resumeNarrowed`(M3-58 #321, ADR-147 ⑥, ADR-155)는 검토 대기열의 허용 목록 축소 재개다: 한도 상향 재개와 같은 길에 더해 이어받는
+//   실행에 쓰기 허용 범위(대상 블록 포함 경로의 합 − 사람이 준 제외 경로)를 같은 트랜잭션에서 붙인다
 import {
   type Author,
   createUlidGenerator,
@@ -22,7 +24,9 @@ import {
 import type { ProjectStore, RunDetail } from '@bive/store';
 
 import {
+  assertExcludePatterns,
   continuationTarget,
+  narrowedContinuationTarget,
   recordContinuation,
   recordReinforcement,
   reinforcementTarget,
@@ -59,6 +63,7 @@ type RunMethods = Pick<
   | 'run.resume'
   | 'reviewQueue.reinforce'
   | 'reviewQueue.resumeWithBudget'
+  | 'reviewQueue.resumeNarrowed'
 >;
 
 /** ULID 또는 표시 ID(`EXE-001`)로 실행을 찾는다. 없으면 -32004. */
@@ -155,6 +160,28 @@ export const createRunHandlers = ({ biveHome, now, engine }: RunHandlerDeps): Ru
       const outcome = withProjectStore(biveHome, projectId, (store) =>
         store.transaction(() => {
           const target = continuationTarget(store, seq, budget);
+          const created = createRun(
+            store,
+            { ruleIds: target.origin.targetRuleIds, author: human, type: target.origin.type },
+            { clientId: `pipe-${String(context.connectionId)}` },
+            clock,
+            target.seed,
+          );
+          return { ...created, entry: recordContinuation(store, target, created, human) };
+        }),
+      );
+      engine?.onRunCreated(projectId, outcome.run.id);
+      return outcome;
+    },
+    // 검토 대기열의 허용 목록 축소 재개 (M3-58 #321, ADR-155): 한도 상향 재개와 같은 문 · 같은 트랜잭션에서 이어받는 실행에 쓰기 허용 범위를
+    // 붙인다. 제외 경로의 형식은 저장소를 열기 전에 본다
+    'reviewQueue.resumeNarrowed': ({ projectId, seq, budget, exclude, author }, context) => {
+      assertHumanRunStarter(author);
+      assertExcludePatterns(exclude);
+      const human = { kind: 'human' } as const;
+      const outcome = withProjectStore(biveHome, projectId, (store) =>
+        store.transaction(() => {
+          const target = narrowedContinuationTarget(store, seq, budget, exclude);
           const created = createRun(
             store,
             { ruleIds: target.origin.targetRuleIds, author: human, type: target.origin.type },

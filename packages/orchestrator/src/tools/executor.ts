@@ -27,7 +27,7 @@ import {
   WriteFileInput,
 } from './definitions.js';
 import { listFiles, readFile, searchFiles, writeFile } from './file-tools.js';
-import { PathGuard } from './path-guard.js';
+import { PathGuard, type WriteScope } from './path-guard.js';
 import { denied, failed, invalidArgs, ok } from './result.js';
 
 /** 도구 호출 기록 (NFR-02). 경로 또는 명령 · 시각 · 결과 · 소요 시간. */
@@ -140,6 +140,8 @@ export interface CreateRoleToolsOptions {
   biveHome: string;
   /** test-writer가 쓸 수 있는 규칙 폴더 (`PathGuardOptions.writableRuleDirs`, ADR-068) */
   writableRuleDirs?: readonly string[];
+  /** implementer의 쓰기 허용 범위 (`PathGuardOptions.writeScope`, 허용 목록 축소 재개로 만든 실행만, ADR-155) */
+  writeScope?: WriteScope;
   hooks?: RoleToolsHooks;
   /** 기록에 남길 세션 ID. init 뒤에 `setSessionId`로 정해도 된다 */
   sessionId?: string;
