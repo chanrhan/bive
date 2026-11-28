@@ -52,6 +52,7 @@ import {
 } from '@bive/store';
 
 import { runEnding } from '../engine/run-ending.js';
+import type { InheritedStep } from './run-continuation.js';
 import { effectiveContracts, ineffectiveRuleIds } from '../norms/effective.js';
 import { contractRunnerOf } from '../steps/contract-check.js';
 import { withRegisteredProjectStore } from '../ipc/project-store-access.js';
@@ -163,6 +164,11 @@ const timestamp = (clock: RunClock): string => new Date(clock.now()).toISOString
 export interface RunContinuationSeed {
   /** 새 실행의 예산 값 (설정의 한도 대신. 부른 쪽이 원 실행과 같은 모양 · 내리지 않음 · 쓴 양보다 큼을 검증했다) */
   readonly budgetSnapshot: BudgetSnapshot;
+  /**
+   * 새 실행에 `skipped`(사유 이어받음)로 만들 단계 (원 실행이 멈춘 단계보다 파이프라인 순서가 앞인 단계, `continuationStartOf`, M3-60 ·
+   * ADR-152). 이 단계들은 새 실행에서 돌지 않고 `passed` 행도 만들지 않는다
+   */
+  readonly inherited?: readonly InheritedStep[];
 }
 
 /** 실행 시작 확인 주체는 사람뿐이다 (RUN-02, NFR-01). */
@@ -221,6 +227,9 @@ export const saveNewRun = (
   const { modelSnapshot } = snapshots;
   // 이어받는 실행은 사람이 준 새 한도가 예산 값이다 (`runs_identity_immutable`을 풀지 않고 생성 때 정한다, ADR-147 ④)
   const budgetSnapshot = input.continuation?.budgetSnapshot ?? snapshots.budgetSnapshot;
+  const inherited = new Map(
+    (input.continuation?.inherited ?? []).map((step) => [step.kind, step.detail]),
+  );
   return store.runs.create({
     id: input.runId,
     type,
@@ -231,15 +240,30 @@ export const saveNewRun = (
     modelSnapshot,
     startedBy: input.startedBy,
     createdAt: at,
-    // 승인 단계는 생성과 함께 시작한다(승인 단계 진행 중). 나머지는 대기
-    steps: plan.map((kind, index) => ({
-      id: newId(),
-      kind,
-      attempt: 1,
-      status: index === 0 ? 'running' : 'pending',
-      role: STEP_ROLES[kind],
-      startedAt: index === 0 ? at : null,
-    })),
+    // 승인 단계는 생성과 함께 시작한다(승인 단계 진행 중). 나머지는 대기. 이어받는 실행이 이어받은 단계는 생략(사유 이어받음)으로
+    // 만들어 돌지 않는다(`passed` 행을 만들지 않는다, ADR-147 ③ · ADR-150 ③ⓐ)
+    steps: plan.map((kind, index) => {
+      const detail = index === 0 ? undefined : inherited.get(kind);
+      return detail === undefined
+        ? {
+            id: newId(),
+            kind,
+            attempt: 1,
+            status: index === 0 ? ('running' as const) : ('pending' as const),
+            role: STEP_ROLES[kind],
+            startedAt: index === 0 ? at : null,
+          }
+        : {
+            id: newId(),
+            kind,
+            attempt: 1,
+            status: 'skipped' as const,
+            role: STEP_ROLES[kind],
+            exitDetail: detail,
+            startedAt: at,
+            endedAt: at,
+          };
+    }),
   });
 };
 

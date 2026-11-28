@@ -72,7 +72,12 @@ import {
   QUEUED_TARGET_UNAVAILABLE,
   startNextQueuedRun,
 } from '../runs/run-service.js';
-import { continuationWorktreeStart, lineageSessions } from '../runs/run-continuation.js';
+import {
+  continuationWorktreeStart,
+  countedTestWritingAttempts,
+  lineageCounts,
+  lineageSessions,
+} from '../runs/run-continuation.js';
 import { createCheckExecutor } from '../steps/check.js';
 import { createGreenCheckExecutor } from '../steps/green-check.js';
 import { createImplementationExecutor } from '../steps/implementation.js';
@@ -228,11 +233,6 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
-
-const isInterruptedAttempt = (step: Step): boolean =>
-  typeof step.exitDetail === 'object' &&
-  step.exitDetail !== null &&
-  (step.exitDetail as { interrupted?: unknown }).interrupted === true;
 
 /** 구동 중인 실행 · 단계 시도 · git 참조. */
 interface DriveState {
@@ -844,20 +844,18 @@ export class PipelineEngine {
         const prepared = await this.#prepare(projectId, loaded.project, run);
         if (signal.aborted) return;
         if ('git' in prepared) current = { run, step, git: prepared.git };
+        // 이어받는 실행은 워크트리를 만들 때 마지막 완료 단계 커밋을 원 실행의 것으로 저장한다: 그 실행 레코드로 이 단계를 돈다 (ADR-152)
+        const detail =
+          'run' in prepared && prepared.run !== undefined
+            ? { ...loaded.detail, run: prepared.run }
+            : loaded.detail;
         const outcome =
           'halt' in prepared
             ? prepared.halt
-            : await this.#execute(
-                projectId,
-                loaded.project,
-                loaded.detail,
-                step,
-                prepared.git,
-                signal,
-              );
+            : await this.#execute(projectId, loaded.project, detail, step, prepared.git, signal);
         if (outcome === null || signal.aborted) return;
         const git = 'git' in prepared ? prepared.git : null;
-        await this.#apply(projectId, loaded.detail, step, outcome, git);
+        await this.#apply(projectId, detail, step, outcome, git);
       }
     } catch (error) {
       if (!signal.aborted) {
@@ -915,7 +913,7 @@ export class PipelineEngine {
     projectId: string,
     project: Project,
     run: Run,
-  ): Promise<{ git: RunGitRef } | { halt: StepOutcome }> {
+  ): Promise<{ git: RunGitRef; run?: Run } | { halt: StepOutcome }> {
     // 실행마다 시작 근거가 정확히 1건이어야 한다: 사람의 실행 시작 확인(승인 기록 run_start) 또는 실행 자동 시작(규범 변경
     // 기록 auto_start, 원인 = 대상 규칙의 신규 기록). 같은 대상 규칙이어야 한다 (NFR-01, ADR-107)
     const basis = this.#store(projectId, (store) => checkRunStartBasis(store, run));
@@ -985,10 +983,17 @@ export class PipelineEngine {
         },
       };
     }
-    // 이어받는 실행 (ADR-147 ②, ADR-149): 기준 커밋은 원 실행과 같고 가지는 원 실행 브랜치에 있는 커밋에서 만든다. 원 실행이 워크트리를
-    // 만들기 전에 끝났으면 보통 실행처럼 기준 브랜치의 지금 커밋에서
+    // 이어받는 실행 (ADR-147 ②, ADR-150 ③ⓑ): 기준 커밋은 원 실행과 같고 가지는 원 실행의 마지막 산출 커밋(없으면 기준 커밋)에서 만든다.
+    // 원 실행이 워크트리를 만들기 전에 끝났으면 보통 실행처럼 기준 브랜치의 지금 커밋에서
+    const continued = this.#store(projectId, (store) => continuationWorktreeStart(store, run.id));
     const start =
-      this.#store(projectId, (store) => continuationWorktreeStart(store, run.id)) ?? undefined;
+      continued === null
+        ? undefined
+        : {
+            baseCommit: continued.baseCommit,
+            commit: continued.commit,
+            fromBranch: continued.fromBranch,
+          };
     let git: RunGitRef;
     try {
       git = await this.#worktrees.create({
@@ -1008,13 +1013,19 @@ export class PipelineEngine {
         },
       };
     }
-    this.#save(projectId, (store) =>
+    const saved = this.#save(projectId, (store) =>
       store.runs.transition(run.id, {
         expectedStatus: 'running',
-        run: { branch: git.branch, worktreePath: git.worktreePath, baseCommit: git.baseCommit },
+        run: {
+          branch: git.branch,
+          worktreePath: git.worktreePath,
+          baseCommit: git.baseCommit,
+          // 이어받는 실행의 마지막 완료 단계 커밋 = 원 실행의 것 (단계 실행기의 앞 단계 산출 커밋 대조 · 회귀 · 재개의 되돌리기 자리)
+          ...(continued?.headCommit == null ? {} : { headCommit: continued.headCommit }),
+        },
       }),
     );
-    return { git };
+    return continued?.headCommit == null ? { git } : { git, run: saved.run };
   }
 
   async #execute(
@@ -1174,16 +1185,18 @@ export class PipelineEngine {
       return;
     }
     const patch: RunPatch = {};
+    // 이어받는 실행은 사슬의 원 실행들이 쓴 회귀 · 재시도 수부터 이어 센다 (이어받기로 상한을 넘기지 못한다, ADR-150 ③ⓓ · ADR-152).
+    // 이어받는 실행이 아니면 0 · 0이고 이어받은 시도도 없어 지금까지와 같다
+    const inherited = this.#store(projectId, (store) => lineageCounts(store, run.id));
     if (policy.counter === 'regression') {
       const next = run.regressionCount + 1;
-      if (next > MAX_REGRESSION_COUNT) {
+      if (inherited.regressions + next > MAX_REGRESSION_COUNT) {
         await this.#halt(projectId, run, step, 'failed', 'regression_limit', exitDetail, git);
         return;
       }
       patch.regressionCount = next;
     } else {
-      const used =
-        steps.filter((s) => s.kind === 'test_writing' && !isInterruptedAttempt(s)).length - 1;
+      const used = inherited.testWritingAttempts + countedTestWritingAttempts(steps).length - 1;
       if (used >= MAX_TEST_RETRY_COUNT) {
         // 동작 선언으로 유형을 고른 실행(M3-30, ADR-151)이 Red · Green 확인을 넘지 못하고 끝나면 그 선언을 종료 상세에 싣는다:
         // 선언과 실제가 달랐는지(새 동작인데 이미 통과 · 기존 동작인데 실패)를 사람이 실행 기록에서 본다. 유형 · 대상은 바꾸지 않는다.

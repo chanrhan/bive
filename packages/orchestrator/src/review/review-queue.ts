@@ -45,7 +45,7 @@ import type { ProjectStore } from '@bive/store';
 
 import { budgetValueUsages, limitReached } from '../engine/session-budget.js';
 import { RpcError } from '../ipc/server.js';
-import { lineageSessions } from '../runs/run-continuation.js';
+import { continuationStartOf, lineageSessions } from '../runs/run-continuation.js';
 import type { RunClock, RunContinuationSeed } from '../runs/run-service.js';
 
 const conflict = (reason: ReviewConflictReason, message: string): RpcError =>
@@ -308,7 +308,12 @@ export const continuationTarget = (
     throw new RpcError(ErrorCode.NotFound, `실행을 찾을 수 없습니다: ${item.runId}`);
   }
   assertRaisedBudget(origin.run.budgetSnapshot, budget, lineageSessions(store, origin.run.id));
-  return { item, origin: origin.run, seed: { budgetSnapshot: budget } };
+  // 원 실행이 멈춘 단계보다 앞인 단계를 이어받는다 (ADR-150 ③ⓐ)
+  return {
+    item,
+    origin: origin.run,
+    seed: { budgetSnapshot: budget, inherited: continuationStartOf(origin) },
+  };
 };
 
 /**

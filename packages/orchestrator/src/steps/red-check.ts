@@ -23,6 +23,7 @@ import {
 } from '../judge/checkout.js';
 import type { JudgeProfileName } from '../judge/profiles/types.js';
 import { ruleIdOfAcceptanceFile } from '../judge/report.js';
+import { basisSteps } from '../runs/run-continuation.js';
 import { type JudgeRunInput, JudgeRunner, type JudgeRunResult } from '../judge/runner.js';
 
 /** Red 확인 판정 제한 시간 (기본): 서버 빌드 · 기동 · vitest 전체. */
@@ -131,7 +132,7 @@ export const createRedCheckExecutor =
   async (context): Promise<StepOutcome> => {
     // 판정할 커밋 = 마지막 완료 단계(테스트 작성) 커밋
     const commit = context.run.headCommit;
-    const lastWriting = context.steps
+    const lastWriting = basisSteps(context)
       .filter((step) => step.kind === 'test_writing' && step.status === 'passed')
       .at(-1);
     if (commit === null || lastWriting?.commit !== commit) {

@@ -710,7 +710,7 @@ describe('사람 실행의 문 · 작업 가지 (M3-56 수용 기준 3, ADR-147 
     expect(h.read((store) => store.runs.get(result.run.id)?.status)).toBe('queued');
   }, 60_000);
 
-  it('이어받는 실행은 기준 커밋에서 첫 단계부터 돈다: 기준 커밋은 원 실행과 같고(그 사이 기준 브랜치가 움직여도) 원 실행이 끝낸 테스트 작성 · Red 확인도 이 실행에서 다시 돌며 이어받은 단계(skipped)는 없다. 원 실행의 브랜치 · 작업 폴더 · 기록은 바뀌지 않는다 (ADR-150)', async () => {
+  it('이어받는 실행은 원 실행이 멈춘 단계부터 돈다: 기준 커밋은 원 실행과 같고(그 사이 기준 브랜치가 움직여도) 원 실행이 끝낸 테스트 작성 · Red 확인은 skipped(이어받음)이며 작업 가지는 원 실행의 마지막 산출 커밋에서 시작한다. 원 실행의 브랜치 · 작업 폴더 · 기록은 바뀌지 않는다 (ADR-150 · ADR-152)', async () => {
     const h = setup();
     const engine = newEngine(h, {
       implementation: (context) =>
@@ -748,22 +748,37 @@ describe('사람 실행의 문 · 작업 가지 (M3-56 수용 기준 3, ADR-147 
     }));
     expect(steps.map((step) => `${step.kind}#${String(step.attempt)}:${step.status}`)).toEqual([
       'approval#1:passed',
-      'test_writing#1:passed',
-      'red_check#1:passed',
+      'test_writing#1:skipped',
+      'red_check#1:skipped',
       'implementation#1:failed',
       'check#1:pending',
       'mutation#1:pending',
       'merge#1:pending',
       'screen_update#1:pending',
     ]);
-    expect(steps.filter((step) => step.status === 'skipped')).toEqual([]);
-    const writing = steps.find((step) => step.kind === 'test_writing')!;
-    expect(sessions.map((session) => [session.role, session.stepId])).toEqual([
-      ['test-writer', writing.id],
+    const originStep = (kind: string) =>
+      before.detail!.steps.filter((step) => step.kind === kind && step.status === 'passed').at(-1)!;
+    expect(
+      steps.filter((step) => step.status === 'skipped').map((step) => step.exitDetail),
+    ).toEqual([
+      {
+        reason: 'inherited',
+        fromRunId: originId,
+        fromStepId: originStep('test_writing').id,
+        fromStatus: 'passed',
+      },
+      {
+        reason: 'inherited',
+        fromRunId: originId,
+        fromStepId: originStep('red_check').id,
+        fromStatus: 'passed',
+      },
     ]);
-    // 테스트 작성 커밋은 이 실행이 기준 커밋 위에 새로 만든 것이다 (원 실행의 산출 커밋이 아니다)
-    expect(writing.commit).not.toBe(origin.headCommit);
-    expect(userGit(h.repo, 'rev-parse', `${writing.commit!}^`)).toBe(origin.baseCommit);
+    // 테스트 작성 세션은 다시 열지 않았다 (구현은 시험 실행기가 바로 끝냈다)
+    expect(sessions).toEqual([]);
+    // 작업 가지 = 원 실행의 마지막 산출 커밋(테스트 작성 커밋), 마지막 완료 단계 커밋도 그 값
+    expect(next.headCommit).toBe(origin.headCommit);
+    expect(userGit(h.repo, 'rev-parse', `refs/heads/${next.branch!}`)).toBe(origin.headCommit);
     expect(next.branch).not.toBe(origin.branch);
     // 이어받는 실행의 가지는 기준 커밋 위에 있다 (main의 새 커밋이 없다)
     expect(userGit(h.repo, 'merge-base', '--is-ancestor', origin.baseCommit!, next.branch!)).toBe(

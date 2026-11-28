@@ -73,6 +73,7 @@ import {
   normHalt,
   recordJudgments,
 } from './judging.js';
+import { basisSteps } from '../runs/run-continuation.js';
 import {
   missingStructureJudgments,
   readStructurePlan,
@@ -254,10 +255,11 @@ export const createMergeExecutor =
     const git = options.git ?? createGitRunner();
     const headCommit = context.run.headCommit;
     const headKind = headStepKindOf(context.run.type);
+    const basis = basisSteps(context);
     if (
       headCommit === null ||
-      lastPassed(context.steps, 'check') === undefined ||
-      lastPassed(context.steps, headKind)?.commit !== headCommit
+      lastPassed(basis, 'check') === undefined ||
+      lastPassed(basis, headKind)?.commit !== headCommit
     ) {
       return halt('state_inconsistent', {
         message:

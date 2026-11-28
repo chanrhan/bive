@@ -639,6 +639,27 @@ describe('규칙 분할: 세션을 띄우기 전 RPC 입구의 거부 (수용 �
     expect(h.logs.some((line) => line.includes('규칙 분할 세션 대기'))).toBe(false);
   }, 120_000);
 
+  it('이어받는 실행이 이미 있는 원 실행의 항목(한도 상향 재개로 처리됨)은 분할할 수 없고 세션이 열리지 않는다', async () => {
+    const h = await prepare(scenarioOf([{ turns: [VALID_SPLIT], result: RESULT }]));
+    const [target] = h.rules;
+    const origin = originDetail(h);
+    const resumed = await h.client.call('reviewQueue.resumeWithBudget', {
+      projectId: h.projectId,
+      seq: h.seq,
+      budget: origin.run.budgetSnapshot,
+      author: human,
+    });
+    expect(resumed.entry.item.resolution?.action).toBe('raise_limit_resume');
+    const rejected = await rejection(split(h, target.id));
+    expect([rejected.code, rejected.data]).toEqual([
+      ErrorCode.StateConflict,
+      { reason: 'already_resolved' },
+    ]);
+    await h.orchestrator.ruleWriter.idle();
+    expect(h.logs.some((line) => line.includes('규칙 분할 세션 대기'))).toBe(false);
+    expect(h.read((store) => store.ruleSplits.newRulesOf(target.id))).toEqual([]);
+  }, 120_000);
+
   it('같은 항목의 분할 세션이 대기 · 진행 중이면 또 띄우지 않는다 (-32009 split_in_progress). 그 세션이 끝나면 다시 띄울 수 있다', async () => {
     const h = await prepare(scenarioOf([{ turns: [{ message: '나누지 않음' }], result: RESULT }]));
     const [target] = h.rules;
