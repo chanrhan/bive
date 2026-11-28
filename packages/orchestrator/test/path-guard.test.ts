@@ -696,5 +696,12 @@ describe('쓰기 허용 범위가 붙은 implementer (M3-58 수용 기준 2)', (
     expect(writeScopeDenial(scope, 'App/x.ts')).toBe(WRITE_SCOPE_DENIALS.outside);
     expect(writeScopeDenial(scope, 'app\\private\\a.ts')).toBe(WRITE_SCOPE_DENIALS.excluded);
     expect(writeScopeDenial(scope, '.')).toBe(WRITE_SCOPE_DENIALS.outside);
+    // include와 같은 문법: 폴더 이름만인 제외는 그 폴더 아래를 막지 않는다 (아래를 빼려면 `/**`)
+    const folder = { allow: ['src/**'], exclude: ['src/x'] };
+    expect(writeScopeDenial(folder, 'src/x')).toBe(WRITE_SCOPE_DENIALS.excluded);
+    expect(writeScopeDenial(folder, 'src/x/a.ts')).toBeNull();
+    expect(writeScopeDenial({ ...folder, exclude: ['src/x/**'] }, 'src/x/a.ts')).toBe(
+      WRITE_SCOPE_DENIALS.excluded,
+    );
   });
 });

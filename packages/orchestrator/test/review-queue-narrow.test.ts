@@ -653,6 +653,8 @@ interface ProbeResult {
 const probingAgent = (
   biveHome: string,
   results: Map<string, { writes: ProbeResult[]; reads: string[] }>,
+  /** 세션마다의 쓰기 결과 (실행 ID와 함께 연 순서대로, 같은 실행의 두 번째 구현 세션을 보려고) */
+  sessions: { runId: string; writes: ProbeResult[] }[] = [],
 ): AgentAdapter => {
   const inner = selectAgent({ BIVE_AGENT: 'scripted' }, { biveHome }).adapter;
   return {
@@ -677,6 +679,7 @@ const probingAgent = (
             reads.push((await spec.tools.execute('read_file', { path: target })).status);
           }
           results.set(spec.runId ?? '', { writes, reads });
+          sessions.push({ runId: spec.runId ?? '', writes });
         }
       })(),
   };
@@ -779,6 +782,68 @@ describe('쓰기 허용 범위가 붙은 실행의 구현 세션 (M3-58 수용 �
     expect(results.get(originId)!.writes.every((write) => write.status === 'ok')).toBe(true);
     expect(statusOf(results.get(originId)!.writes)['package.json']).not.toContain('거부됨');
   }, 120_000);
+
+  it('같은 실행에서 회귀로 다시 열린 구현 세션(두 번째 구현 시도)에도 범위가 걸린다: 첫 시도가 검사에서 미충족 → 두 번째 구현 세션의 제외 경로 · 블록 밖 쓰기가 거부된다', async () => {
+    const h = setup();
+    const results = new Map<string, { writes: ProbeResult[]; reads: string[] }>();
+    const sessions: { runId: string; writes: ProbeResult[] }[] = [];
+    let originId = '';
+    const implementation: StepExecutor = async (context) => {
+      await context.runSession({
+        workDir: context.git.worktreePath,
+        systemPrompt: '시험',
+        prompt: '시험',
+        vars: { ruleId: 'RULE-001' },
+      });
+      if (context.run.id === originId) return budgetHalt(context);
+      if (context.step.attempt > 1) {
+        return { status: 'halt', runStatus: 'failed', reason: 'step_unmet' };
+      }
+      // 첫 시도는 범위 안 파일을 바꿔 통과한다 (엔진이 커밋한다)
+      fs.writeFileSync(
+        path.join(context.git.worktreePath, 'src/app/api/health/route.ts'),
+        'export const GET = () => 1;\n',
+      );
+      return { status: 'passed' };
+    };
+    // 검사: 이어받는 실행의 첫 검사는 미충족 → 구현으로 회귀
+    const check: StepExecutor = () => Promise.resolve({ status: 'unmet' });
+    const engine = new PipelineEngine({
+      biveHome: h.biveHome,
+      agent: probingAgent(h.biveHome, results, sessions),
+      executors: testExecutors({ implementation, check }),
+    });
+    engines.push(engine);
+    const origin = await originStoppedAtImplementation(h, engine, (id) => {
+      originId = id;
+    });
+    const result = await narrow(
+      h,
+      { seq: origin.seq, budget: RAISED, exclude: EXCLUDE, author: human },
+      engine,
+    );
+    await engine.settled();
+    const own = sessions.filter((session) => session.runId === result.run.id);
+    // 이 실행의 구현 세션이 두 번 열렸다 (회귀)
+    expect(own).toHaveLength(2);
+    const contentOf = (writes: ProbeResult[], target: string) =>
+      writes.find((write) => write.path === target)?.content;
+    for (const session of own) {
+      expect(contentOf(session.writes, 'src/app/api/health/internal/new.ts')).toBe(
+        `거부됨: ${WRITE_SCOPE_DENIALS.excluded}`,
+      );
+      expect(contentOf(session.writes, 'src/lib/new.ts')).toBe(
+        `거부됨: ${WRITE_SCOPE_DENIALS.outside}`,
+      );
+      expect(
+        session.writes.find((write) => write.path === 'src/app/api/health/extra.ts')?.status,
+      ).toBe('ok');
+    }
+    const steps = h.read((store) => store.runs.steps(result.run.id));
+    expect(
+      steps.filter((step) => step.kind === 'implementation').map((step) => step.attempt),
+    ).toEqual([1, 2]);
+  }, 120_000);
 });
 
 describe('병합 전 대조: 경로 가드를 지나지 않은 범위 밖 변경 (ADR-155)', () => {
@@ -835,6 +900,52 @@ describe('병합 전 대조: 경로 가드를 지나지 않은 범위 밖 변경
         changed: ['src/app/api/health/internal/x.ts', 'src/lib/outside.ts'],
       },
     });
+  }, 120_000);
+
+  /** 구현 단계: 작업 트리에서 파일을 지우거나 옮기고(명령 도구가 실행한 코드의 대역) 통과한다. 원 실행은 예산 초과. */
+  const directOps =
+    (originOf: () => string, ops: (worktree: string) => void): StepExecutor =>
+    (context) => {
+      if (context.run.id === originOf()) return budgetHalt(context);
+      ops(context.git.worktreePath);
+      return Promise.resolve({ status: 'passed' });
+    };
+
+  it('검사 단계: 범위 밖 기존 파일을 지운 커밋도 guard_violation(write_scope)이고 지운 경로가 changed에 있다', async () => {
+    const detail = await runScoped((originOf) => ({
+      implementation: directOps(originOf, (worktree) => {
+        fs.rmSync(path.join(worktree, 'src/lib/db.ts'));
+      }),
+      check: createCheckExecutor(),
+    }));
+    expect(detail.run).toMatchObject({ status: 'failed', failureReason: 'guard_violation' });
+    expect(detail.steps.find((step) => step.kind === 'check')?.exitDetail).toEqual({
+      reason: 'guard_violation',
+      detail: {
+        commit: detail.run.headCommit,
+        stage: WRITE_SCOPE_STAGE,
+        message: WRITE_SCOPE_VIOLATION_MESSAGE,
+        changed: ['src/lib/db.ts'],
+      },
+    });
+  }, 120_000);
+
+  it('검사 단계: 범위 안 파일을 범위 밖으로 옮긴 커밋은 범위 밖 쪽 경로만 위반이다 (범위 안에서 지워진 쪽은 위반이 아님)', async () => {
+    const detail = await runScoped((originOf) => ({
+      implementation: directOps(originOf, (worktree) => {
+        fs.renameSync(
+          path.join(worktree, 'src/app/api/health/route.ts'),
+          path.join(worktree, 'src/lib/route.ts'),
+        );
+      }),
+      check: createCheckExecutor(),
+    }));
+    expect(detail.run).toMatchObject({ status: 'failed', failureReason: 'guard_violation' });
+    const exit = detail.steps.find((step) => step.kind === 'check')?.exitDetail as {
+      detail: { changed: string[] };
+    };
+    expect(exit.detail.changed).toEqual(['src/lib/route.ts']);
+    expect(exit.detail.changed).not.toContain('src/app/api/health/route.ts');
   }, 120_000);
 
   it('검사 단계: 범위 안 변경만이면 대조를 지나 다음 확인으로 간다 (이 시험의 Red 확인 대역에는 해시가 없어 state_inconsistent)', async () => {
