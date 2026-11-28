@@ -24,6 +24,7 @@ import { ReviewQueueRepository } from './repositories/review-queue-repository.js
 import { RunContinuationRepository } from './repositories/run-continuation-repository.js';
 import { RuleRepository } from './repositories/rule-repository.js';
 import { RuleRetirementRepository } from './repositories/rule-retirement-repository.js';
+import { RuleSplitRepository } from './repositories/rule-split-repository.js';
 import { RuleWriterRequestRepository } from './repositories/rule-writer-request-repository.js';
 import { RunRepository } from './repositories/run-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
@@ -101,6 +102,11 @@ export class ProjectStore {
    * 쓰기는 오케스트레이터의 검토 대기열 모듈만 한다(한도 상향 재개).
    */
   readonly runContinuations: RunContinuationRepository;
+  /**
+   * 규칙 분할 기록 (TODO-02 · NRM-02, M3-57 #320, ADR-153). 분할로 폐기된 규칙과 그것을 대체한 새 규칙들. 추가 전용이고 쓰기는 폐기 기록과
+   * 같은 트랜잭션에서 오케스트레이터의 규칙 반영 모듈만 한다.
+   */
+  readonly ruleSplits: RuleSplitRepository;
 
   constructor(
     readonly projectId: Ulid,
@@ -129,6 +135,7 @@ export class ProjectStore {
     this.mutations = new MutationResultRepository(db);
     this.reviewQueue = new ReviewQueueRepository(db);
     this.runContinuations = new RunContinuationRepository(db);
+    this.ruleSplits = new RuleSplitRepository(db);
   }
 
   /** 함수를 쓰기 트랜잭션 안에서 실행한다 (`withTransaction`). */

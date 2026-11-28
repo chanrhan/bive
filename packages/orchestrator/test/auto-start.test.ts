@@ -25,7 +25,12 @@ import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import { selectAgent } from '../src/agent/select.js';
 import { PipelineEngine } from '../src/engine/pipeline-engine.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
-import { createAgentRule, retireAgentRule, supersedeAgentRule } from '../src/norms/agent-rule.js';
+import {
+  createAgentRule,
+  retireAgentRule,
+  splitAgentRule,
+  supersedeAgentRule,
+} from '../src/norms/agent-rule.js';
 import { checkRunStartBasis } from '../src/engine/start-basis.js';
 import { runEnding } from '../src/engine/run-ending.js';
 import {
@@ -1258,6 +1263,115 @@ describe('autoStartRun: 폐기 · 대체 뒤 (M7-09 #221 수용 기준 4, ADR-10
       advance.failed.map((detail) => [detail.run.id, detail.run.status, detail.run.failureReason]),
     ).toEqual([[oldRunId, 'failed', 'target_rule_unavailable']]);
     expect(advance.started?.run).toMatchObject({ id: newRun.detail.run.id, status: 'running' });
+  });
+});
+
+describe('autoStartRun: 규칙 분할 뒤 (M3-57 #320 수용 기준 3, ADR-147 ⑧, ADR-153)', () => {
+  /** 분할 세션이 RULE-001을 새 규칙 둘(새 동작 · 기존 동작)로 나눈 것과 같은 기록 (반영 모듈 그대로). */
+  const splitRule = (h: StoreHarness, sessionId: string) =>
+    h.read((store) =>
+      splitAgentRule(
+        store,
+        {
+          ruleId: store.rules.list().find((rule) => rule.displayId === 'RULE-001')!.id,
+          grounds: SEED_GROUNDS,
+          rules: [
+            {
+              payload: {
+                title: '서버 시각 필드',
+                statement:
+                  'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL 응답 JSON에 time 필드를 둔다',
+                kind: 'business',
+                checkKinds: ['test'],
+                targetBlocks: ['health'],
+                risk: 'medium',
+              },
+              rationale: '필드가 있는지',
+              behavior: 'new',
+              contradiction: { verdict: 'none' },
+            },
+            {
+              payload: {
+                title: '서버 시각 형식',
+                statement:
+                  'WHEN 클라이언트가 GET /api/health를 요청하면 THE SYSTEM SHALL time 필드를 ISO 8601 시각으로 담는다',
+                kind: 'business',
+                checkKinds: ['test'],
+                targetBlocks: ['health'],
+                risk: 'medium',
+              },
+              rationale: '값의 형식',
+              behavior: 'existing',
+              contradiction: { verdict: 'none' },
+            },
+          ],
+          author: { kind: 'agent', role: 'rule-writer' },
+          sessionId,
+          normInput: NORM_INPUT_ONE,
+        },
+        clock,
+      ),
+    );
+
+  it('분할 세션의 새 규칙마다 기존 자동 시작이 실행 1개(대상 규칙 1개 · 원인 = 그 규칙의 신규 기록 1건)를 선언대로의 유형(새 동작 A · 기존 동작 C)으로 만들고, 분할 기록은 원인이 아니며, 둘째 실행은 프로젝트당 실행 1개라 실행 대기다', () => {
+    const h = storeHarness();
+    const session = newId();
+    const { created, split } = splitRule(h, session);
+    const outcome = h.read((store) => autoStartRun(store, { sessionId: session }, clock));
+    if (outcome.status !== 'started') throw new Error(`시작 안 됨: ${outcome.status}`);
+    expect(
+      outcome.runs.map(({ detail }) => ({
+        type: detail.run.type,
+        targetRuleIds: detail.run.targetRuleIds,
+        startedBy: detail.run.startedBy,
+      })),
+    ).toEqual(
+      created.map((item, index) => ({
+        type: index === 0 ? 'A' : 'C',
+        targetRuleIds: [item.rule.id],
+        startedBy: { kind: 'orchestrator', causeSeqs: [item.normChange.seq] },
+      })),
+    );
+    // 나눈 규칙(폐기됨)의 실행은 없다
+    expect(outcome.runs.some(({ detail }) => detail.run.targetRuleIds.includes(split.id))).toBe(
+      false,
+    );
+    expect(h.read((store) => store.normChanges.list().map((entry) => entry.kind))).toEqual([
+      'created',
+      'judgment',
+      'created',
+      'judgment',
+      'superseded',
+      'auto_start',
+      'auto_start',
+    ]);
+    const [first, second] = outcome.runs;
+    if (first === undefined || second === undefined) throw new Error('실행 둘이 아님');
+    h.read((store) => {
+      for (const { detail } of outcome.runs) {
+        expect(checkRunStartBasis(store, detail.run).mismatch).toBeNull();
+      }
+      expect(evaluateApprovalStep(store, first.detail.run.id, clock).run.status).toBe('running');
+      expect(evaluateApprovalStep(store, second.detail.run.id, clock).run.status).toBe('queued');
+    });
+    // 같은 세션으로 다시 불러도 늘지 않는다 (멱등)
+    expect(h.read((store) => autoStartRun(store, { sessionId: session }, clock))).toMatchObject({
+      status: 'duplicate',
+    });
+    expect(h.read(counts)).toEqual({ runs: 2, autoStarts: 2, approvals: 0 });
+  });
+
+  it('하루 한도가 비어 있으면 분할로 생긴 규칙도 실행을 만들지 않고 생략 기록 1건만 남긴다 (자동 시작의 문 그대로)', () => {
+    const h = storeHarness(COMPLETE_SETTINGS);
+    const session = newId();
+    splitRule(h, session);
+    expect(h.read((store) => autoStartRun(store, { sessionId: session }, clock))).toEqual({
+      status: 'skipped',
+      reason: 'project_daily_budget_unset',
+      missing: [],
+    });
+    expect(h.read(counts)).toEqual({ runs: 0, autoStarts: 0, approvals: 0 });
+    expect(h.read((store) => store.autoStartSkips.get(session))).not.toBeNull();
   });
 });
 

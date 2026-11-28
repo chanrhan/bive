@@ -448,6 +448,36 @@ describe('bive MCP 서버 (MCP 클라이언트 경유, 고정 도구 실행기�
     }
   });
 
+  it('tools/list는 실행기의 이름 목록을 따른다: 규칙 작성 역할의 분할 세션 실행기는 split_rule 하나(M3-57, ADR-153), 같은 역할의 기본 실행기는 역할 목록 그대로이고 split_rule이 없다', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'bive-sdk-mcp-split-'));
+    tempDirs.push(root);
+    const split = createRoleTools({
+      role: 'rule-writer',
+      toolSet: 'rule_split',
+      sessionRoot: root,
+      biveHome: path.join(root, 'home'),
+    });
+    const splitClient = await connectBive(createBiveMcpServer('rule-writer', split));
+    const roleClient = await connectBive(
+      createBiveMcpServer('rule-writer', noTools('rule-writer')),
+    );
+    try {
+      const listed = (await splitClient.listTools()).tools;
+      expect(listed.map((item) => item.name)).toEqual(['split_rule']);
+      expect(listed[0]?.inputSchema).toMatchObject({
+        type: 'object',
+        additionalProperties: false,
+        required: ['ruleId', 'grounds', 'rules'],
+      });
+      const roleListed = (await roleClient.listTools()).tools.map((item) => item.name);
+      expect(roleListed).toEqual([...roleToolNames('rule-writer')]);
+      expect(roleListed).not.toContain('split_rule');
+    } finally {
+      await splitClient.close();
+      await roleClient.close();
+    }
+  });
+
   it.each(['rule-writer', 'planner', 'test-writer', 'implementer', 'chat'] as const)(
     '%s: 모든 도구의 입력 스키마가 모르는 인자를 받지 않고 방언 표시($schema)가 없다',
     (role) => {
