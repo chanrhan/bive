@@ -22,7 +22,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { type Scenario, ScenarioSchema } from '../src/agent/scenario.js';
 import { ScriptedAdapter } from '../src/agent/scripted-adapter.js';
 import type { StepExecutor, StepExecutors } from '../src/engine/types.js';
-import { createAgentRule, retireAgentRule, splitAgentRule } from '../src/norms/agent-rule.js';
+import {
+  createAgentRule,
+  RELEASE_REASON,
+  retireAgentRule,
+  splitAgentRule,
+} from '../src/norms/agent-rule.js';
+import { createRunHandlers } from '../src/ipc/run-handlers.js';
 import { type Orchestrator, startOrchestrator } from '../src/orchestrator.js';
 import { splitSettlement, splitTarget } from '../src/review/review-queue.js';
 import { reinforceSurvivedMutants } from '../src/runs/auto-start.js';
@@ -660,6 +666,50 @@ describe('규칙 분할: 세션을 띄우기 전 RPC 입구의 거부 (수용 �
     expect(h.read((store) => store.ruleSplits.newRulesOf(target.id))).toEqual([]);
   }, 120_000);
 
+  it('분할 세션이 대기 중인 사이 그 항목이 한도 상향 재개로 처리되면, 세션의 split_rule은 error(state_conflict)이고 반영 전체가 되돌려진다 (새 규칙 · 기록 · 폐기 · 분할 기록 없음)', async () => {
+    const h = await prepare(scenarioOf([{ turns: [VALID_SPLIT], result: RESULT }]));
+    const [target] = h.rules;
+    const budget = originDetail(h).run.budgetSnapshot;
+    const norms = () =>
+      h.read((store) => ({
+        rules: store.rules.list().map((rule) => rule.id),
+        changes: store.normChanges.list().length,
+        retired: [...store.ruleRetirements.retiredRuleIds()],
+        splits: store.ruleSplits.newRulesOf(target.id),
+      }));
+    const before = norms();
+    const handlers = createRunHandlers({ biveHome: h.biveHome, now: Date.now });
+    type ResumeContext = Parameters<
+      NonNullable<(typeof handlers)['reviewQueue.resumeWithBudget']>
+    >[1];
+    // 같은 동기 구간: 분할 세션을 대기열에 넣고(아직 돌지 않는다) 바로 같은 항목을 다른 길로 처리한다
+    const { sessionId } = h.read((store) =>
+      h.orchestrator.ruleWriter.split(store, {
+        projectId: h.projectId,
+        key: `review:${String(h.seq)}`,
+        ruleId: target.id,
+        run: { displayId: 'EXE-001', failureReason: null, stoppedAt: null },
+        settle: splitSettlement(splitTarget(store, h.seq, target.id), human),
+      }),
+    );
+    void handlers['reviewQueue.resumeWithBudget']!(
+      { projectId: h.projectId, seq: h.seq, budget, author: human },
+      { connectionId: 1 } as ResumeContext,
+    );
+    await h.orchestrator.ruleWriter.idle();
+    expect(
+      h.read((store) =>
+        store.sessions
+          .toolCallsBySession(sessionId)
+          .map((call) => [call.name, call.status, call.reason ?? null]),
+      ),
+    ).toEqual([['split_rule', 'error', 'state_conflict']]);
+    expect(norms()).toEqual(before);
+    expect(h.read((store) => store.reviewQueue.get(h.seq)?.resolution?.action)).toBe(
+      'raise_limit_resume',
+    );
+  }, 120_000);
+
   it('같은 항목의 분할 세션이 대기 · 진행 중이면 또 띄우지 않는다 (-32009 split_in_progress). 그 세션이 끝나면 다시 띄울 수 있다', async () => {
     const h = await prepare(scenarioOf([{ turns: [{ message: '나누지 않음' }], result: RESULT }]));
     const [target] = h.rules;
@@ -919,6 +969,43 @@ describe('규칙 분할 반영: 쓰기 트랜잭션 1개 (수용 기준 1, ADR-1
     expect(written.after.approvals).toBe(before.approvals);
   });
 
+  it('나눈 규칙이 사람이 확인한 규칙이면 대체와 같은 확인 풀림 기록(주체 오케스트레이터 · 원인 = 분할 기록 · 앞선 확인)이 같은 트랜잭션에 남고 미확인이 된다. 새 규칙은 미확인이다', () => {
+    const h = storeHarness();
+    h.read((store) => {
+      const previous = store.confirmations.confirm(
+        { entity: 'Rule', id: h.target.id },
+        { by: human, at: at(), basis: { kind: 'approval_log', seq: 1 } },
+      );
+      const result = splitAgentRule(store, splitInput(store, h), clock);
+      const released = result.retirement.released;
+      expect(released).toMatchObject({
+        kind: 'unconfirmed',
+        actor: { kind: 'orchestrator' },
+        targetRef: { entity: 'Rule', id: h.target.id },
+        sessionId: null,
+        runId: null,
+        reason: RELEASE_REASON,
+        detail: { unconfirm: { causeSeq: result.retirement.normChange.seq, previous } },
+      });
+      expect(
+        store.normChanges
+          .list()
+          .slice(-2)
+          .map((entry) => [entry.kind, entry.targetRef.id]),
+      ).toEqual([
+        ['superseded', h.target.id],
+        ['unconfirmed', h.target.id],
+      ]);
+      expect(store.confirmations.get({ entity: 'Rule', id: h.target.id }).state).toBe(
+        'unconfirmed',
+      );
+      for (const item of result.created) {
+        expect(store.rules.get(item.rule.id)?.confirmation.state).toBe('unconfirmed');
+      }
+      expect(store.reviewQueue.get(h.seq)?.resolution?.action).toBe('split_rule');
+    });
+  });
+
   it('반영 모듈의 거부: 새 규칙 1개 · 같은 진술 둘 · 인용 없는 근거 · 나누는 규칙을 모순 대상으로 · 내장 규칙 · 이미 폐기된 규칙 · 부모 없는 규칙은 아무것도 남기지 않는다', () => {
     const h = storeHarness();
     const before = h.read((store) => state(store, h));
@@ -937,6 +1024,19 @@ describe('규칙 분할 반영: 쓰기 트랜잭션 1개 (수용 기준 1, ADR-1
             clock,
           ),
         /진술이 같음/,
+      ],
+      [
+        '나누는 규칙과 같은 진술 (나눈 척)',
+        (store) =>
+          splitAgentRule(
+            store,
+            splitInput(store, h, [
+              time,
+              { ...version, statement: `  ${statement(COMBINED).normalize('NFD')} ` },
+            ]),
+            clock,
+          ),
+        /나누는 규칙의 진술과 같음/,
       ],
       [
         '인용 없음',

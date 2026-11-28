@@ -191,6 +191,36 @@ describe('rule_splits: 분할 기록 (0031, ADR-153)', () => {
     });
   });
 
+  it('이미 폐기된 규칙은 새 규칙으로 이을 수 없다 (위치 2 이후도, 날 SQL)', () => {
+    withStore((store) => {
+      const { target, first, second } = seedSplit(store);
+      // 둘째 새 규칙을 먼저 폐기만 한다 (짝 기록 `retired` + 폐기 행)
+      const retired = store.normChanges.append({
+        at: T1,
+        kind: 'retired',
+        actor: agent,
+        targetRef: { entity: 'Rule', id: second.id },
+        sessionId: newId(),
+        runId: null,
+        reason: '폐기',
+        detail: { before: { displayId: second.displayId }, retirement: { supersededBy: null } },
+      });
+      store.ruleRetirements.record({
+        ruleId: second.id,
+        retiredAt: T1,
+        supersededBy: null,
+        normChangeSeq: retired.seq,
+      });
+      retireBySplit(store, target, [first, second]);
+      const insert = store.db.prepare(
+        'INSERT INTO rule_splits (rule_id, position, new_rule_id) VALUES (?, ?, ?)',
+      );
+      insert.run(target.id, 1, first.id);
+      expect(() => insert.run(target.id, 2, second.id)).toThrow(/rule_splits/);
+      expect(store.ruleSplits.newRulesOf(target.id)).toEqual([first.id]);
+    });
+  });
+
   it('분할 행은 고치거나 지울 수 없다', () => {
     withStore((store) => {
       const { target, first, second } = seedSplit(store);
@@ -258,6 +288,37 @@ describe('review_items: 규칙 분할 처리의 결과 확인 (0031, ADR-153)', 
         ruleId: target.id,
       });
       // 처리는 한 번
+      expect(() =>
+        store.reviewQueue.resolve(item.seq, {
+          action: 'split_rule',
+          by: human,
+          at: T1,
+          reason: null,
+          ruleId: target.id,
+        }),
+      ).toThrow();
+    });
+  });
+
+  it('분할 상세가 새 규칙 3개인데 분할 행이 2개뿐이면 처리가 거부되고, 셋째 행까지 넣으면 처리된다', () => {
+    withStore((store) => {
+      const { requirement, target, first, second } = seedSplit(store);
+      const third = seedRule(store, requirement.id, '호스트');
+      const { item } = budgetItem(store, [target.id]);
+      retireBySplit(store, target, [first, second, third]);
+      const insert = store.db.prepare(
+        'INSERT INTO rule_splits (rule_id, position, new_rule_id) VALUES (?, ?, ?)',
+      );
+      insert.run(target.id, 1, first.id);
+      insert.run(target.id, 2, second.id);
+      expect(() => resolveRaw(store, item.seq, target.id)).toThrow(/규칙 분할 처리/);
+      expect(store.reviewQueue.get(item.seq)?.resolution).toBeNull();
+      insert.run(target.id, 3, third.id);
+      resolveRaw(store, item.seq, target.id);
+      expect(store.reviewQueue.get(item.seq)?.resolution).toMatchObject({
+        action: 'split_rule',
+        ruleId: target.id,
+      });
       expect(() =>
         store.reviewQueue.resolve(item.seq, {
           action: 'split_rule',

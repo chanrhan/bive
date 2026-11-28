@@ -1087,6 +1087,13 @@ export const splitAgentRule = (
     if (new Set(statements).size !== statements.length) {
       throw new NormRetirementInputError('invalid_args', '새 규칙끼리 진술이 같음');
     }
+    // 나눈 척의 가장 낮은 문턱: 나누는 규칙과 같은 진술(같은 정규화)의 새 규칙은 받지 않는다
+    if (statements.includes(normalizeQuoteText(target.statement))) {
+      throw new NormRetirementInputError(
+        'invalid_args',
+        '새 규칙의 진술이 나누는 규칙의 진술과 같음 (더 작은 규칙으로 나눈다)',
+      );
+    }
     assertQuoted(store, target, input.grounds, input.isKnownCase ?? NO_KNOWN_CASES);
     // 본문 · 선언 · 모순 대상은 새 규칙을 만들기 전에 모두 확인한다 (같은 호출의 다른 새 규칙 · 나누는 규칙은 모순 대상이 될 수 없다)
     const planned = input.rules.map((item) => ({
