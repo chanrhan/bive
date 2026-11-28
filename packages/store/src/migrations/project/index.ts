@@ -33,6 +33,7 @@ import { migration as m0028 } from './0028_review_queue.js';
 import { migration as m0029 } from './0029_asyncapi_judge_runner.js';
 import { migration as m0030 } from './0030_run_continuations.js';
 import { migration as m0031 } from './0031_rule_splits.js';
+import { migration as m0032 } from './0032_run_write_scopes.js';
 
 export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0001,
@@ -66,4 +67,5 @@ export const PROJECT_MIGRATIONS: readonly Migration[] = [
   m0029,
   m0030,
   m0031,
+  m0032,
 ];

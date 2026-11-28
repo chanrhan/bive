@@ -5,10 +5,11 @@
 // - 하드 링크(링크 수 2 이상인 파일)는 쓰기 거부, 읽기는 `node_modules` 안(pnpm 저장소 링크)만 허용
 // - 역할별 쓰기 금지: implementer는 `bive-acceptance/**` · `node_modules/**`,
 //   test-writer는 `bive-acceptance/<규칙 폴더>/…` 밖 전부(규칙 폴더를 지정하면 그 폴더만, ADR-068)
+// - 쓰기 허용 범위가 붙은 실행의 implementer는 위 금지를 지난 쓰기도 범위 안 경로만(허용 목록 축소 재개, M3-58 #321, ADR-155)
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { AgentRole } from '@bive/shared';
+import { type AgentRole, matchesBlockPattern } from '@bive/shared';
 
 /** 인수 테스트 디렉터리 (ADR-026). */
 export const ACCEPTANCE_DIR = 'bive-acceptance';
@@ -41,7 +42,25 @@ export interface PathGuardOptions {
    * 테스트 작성 단계는 대상 규칙 폴더만 넘겨 다른 규칙의 기존 인수 테스트를 고치지 못하게 한다 (ADR-068)
    */
   writableRuleDirs?: readonly string[];
+  /**
+   * implementer의 쓰기 허용 범위 (허용 목록 축소 재개로 만든 실행만, M3-58 #321, ADR-155). 주면 기존 금지를 모두 지난 쓰기도 `allow`의
+   * 어느 패턴에 들고 `exclude`의 어느 패턴에도 들지 않아야 한다({@link writeScopeDenial}). 생략하면 지금 동작 그대로다. 읽기 · 목록 ·
+   * 검색과 다른 역할에는 쓰지 않는다
+   */
+  writeScope?: WriteScope;
 }
+
+/** 쓰기 허용 범위 (shared `RunWriteScope`와 같은 모양, 패턴은 블록 선언의 포함 경로 문법). */
+export interface WriteScope {
+  readonly allow: readonly string[];
+  readonly exclude: readonly string[];
+}
+
+/** 쓰기 허용 범위의 거부 사유 (고정 문장, 패턴 · 경로를 싣지 않는다). */
+export const WRITE_SCOPE_DENIALS = {
+  excluded: '사람이 이 실행의 쓰기 허용 범위에서 뺀 경로라 쓰기 불가',
+  outside: '이 실행의 쓰기 허용 범위(대상 블록 포함 경로) 밖이라 쓰기 불가',
+} as const;
 
 /** `a`가 `b`와 같거나 그 아래인지 (둘 다 절대 · 정규화된 경로). */
 export const isWithin = (child: string, parent: string): boolean => {
@@ -57,6 +76,33 @@ const fold = (segment: string): string => segment.toLowerCase().replace(/[. ]+$/
 
 const toSegments = (rel: string): string[] =>
   rel.split(/[\\/]+/u).filter((s) => s !== '' && s !== '.');
+
+/**
+ * 쓰기 허용 범위의 판정 (M3-58 #321, ADR-155). 루트 기준 상대 경로(`/` · 역슬래시 구분)가 범위 밖이면 거부 사유, 안이면 `null`.
+ * 매처는 블록 선언의 포함 경로와 같은 `matchesBlockPattern`이다.
+ * - 제외: 글자 그대로 맞거나, 구간마다 `fold`(대소문자 · 끝의 점 · 공백)한 경로가 `fold`한 패턴에 맞으면 거부(대소문자를 구분하지 않는 파일
+ *   시스템에서 `SRC/A.ts`로 제외 `src/a.ts`에 쓰는 길을 막는다)
+ * - 허용: 글자 그대로만 본다(`fold`로 허용을 넓히지 않는다)
+ * 경로 가드는 글자 그대로의 경로와 링크를 따라간 실경로 둘 다 이 판정에 넣는다. 병합 전 대조(`steps/write-scope.ts`)도 같은 판정을 쓴다.
+ */
+export const writeScopeDenial = (scope: WriteScope, rel: string): string | null => {
+  const raw = toSegments(rel);
+  const exact = raw.join('/');
+  const folded = raw.map(fold).join('/');
+  const foldPattern = (pattern: string): string => pattern.split('/').map(fold).join('/');
+  if (
+    scope.exclude.some(
+      (pattern) =>
+        matchesBlockPattern(pattern, exact) || matchesBlockPattern(foldPattern(pattern), folded),
+    )
+  ) {
+    return WRITE_SCOPE_DENIALS.excluded;
+  }
+  if (!scope.allow.some((pattern) => matchesBlockPattern(pattern, exact))) {
+    return WRITE_SCOPE_DENIALS.outside;
+  }
+  return null;
+};
 
 const isErrno = (error: unknown, ...codes: string[]): boolean =>
   error instanceof Error && 'code' in error && codes.includes(String(error.code));
@@ -100,11 +146,16 @@ export class PathGuard {
   readonly root: string;
   private readonly homeAreas: HomeArea[];
   private readonly writableRuleDirs: readonly string[] | null;
+  private readonly writeScope: WriteScope | null;
 
   constructor(options: PathGuardOptions) {
     this.role = options.role;
     this.writableRuleDirs =
       options.writableRuleDirs === undefined ? null : [...options.writableRuleDirs];
+    this.writeScope =
+      options.writeScope === undefined
+        ? null
+        : { allow: [...options.writeScope.allow], exclude: [...options.writeScope.exclude] };
     const root = resolveReal(path.resolve(options.sessionRoot));
     if (root === null || !fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) {
       throw new Error('세션 루트가 폴더가 아님');
@@ -194,7 +245,8 @@ export class PathGuard {
     if (this.role === 'implementer') {
       if (segments[0] === ACCEPTANCE_DIR) return '인수 테스트 쓰기 불가';
       if (segments.includes(DEPENDENCY_DIR)) return `${DEPENDENCY_DIR} 쓰기 불가`;
-      return null;
+      // 쓰기 허용 범위가 붙은 실행: 기존 금지를 모두 지난 쓰기만 범위로 좁힌다 (M3-58 #321, ADR-155)
+      return this.writeScope === null ? null : writeScopeDenial(this.writeScope, rel);
     }
     return '이 역할은 파일 쓰기 불가';
   }

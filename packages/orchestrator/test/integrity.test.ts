@@ -1029,6 +1029,8 @@ describe('블록 선언을 쓰는 경로는 사람의 blocks.set 처리기뿐 (M
       'ipc/block-handlers.ts',
       'norms/agent-rule.ts',
       'norms/norm-input.ts',
+      // 허용 목록 축소 재개의 처음 목록: 원 실행 대상 규칙의 대상 블록 include (M3-58 #321, ADR-155, 지금 판을 한 번 읽는다)
+      'review/review-queue.ts',
       // 변이 주입 단계: 대상 규칙의 대상 블록 include (M3-07 #52, ADR-139, 지금 판을 한 번 읽는다)
       'steps/mutation.ts',
       'steps/structure-check.ts',
@@ -3010,6 +3012,56 @@ describe('이어받는 실행의 연결을 쓰는 곳은 검토 대기열 모듈
     );
     expect(runCreate).toMatch(/createRun\([\s\S]*clock,\n\s*\),\n\s*\);/);
     expect(using(/\btarget\.seed\b/)).toEqual(['ipc/run-handlers.ts']);
+  });
+});
+
+describe('실행의 쓰기 허용 범위를 쓰는 곳 · 구현 세션의 가드에 닿는 길은 하나 (M3-58 #321, TODO-02 · NFR-02, ADR-155, 코드 구조)', () => {
+  it('범위 쓰기는 review/review-queue.ts 하나, 범위 저장소를 아는 파일은 쓰는 모듈 · 엔진의 세션 · 병합 전 대조뿐(날 SQL 없음)이고, 가드에 넘기는 곳은 엔진의 구현 세션 하나이며 처리기는 사람 주체를 먼저 본다', () => {
+    const files = sourceFiles(SRC_DIR).map((file) => ({
+      rel: path.relative(SRC_DIR, file).split(path.sep).join('/'),
+      text: fs.readFileSync(file, 'utf8'),
+    }));
+    const using = (pattern: RegExp) =>
+      files
+        .filter((f) => pattern.test(f.text))
+        .map((f) => f.rel)
+        .sort();
+    expect(using(/\.runWriteScopes\s*\.\s*record\(/)).toEqual(['review/review-queue.ts']);
+    expect(using(/\brunWriteScopes\b/)).toEqual([
+      'engine/pipeline-engine.ts',
+      'review/review-queue.ts',
+      'steps/write-scope.ts',
+    ]);
+    expect(using(/\brun_write_scopes\b/)).toEqual([]);
+    // 가드의 선택 칸(`writeScope`)을 채우는 곳: 엔진의 세션 하나(역할이 구현일 때만 읽는다). 도구 실행기 · 가드는 받기만 한다
+    expect(using(/\bwriteScope\b/)).toEqual([
+      'engine/pipeline-engine.ts',
+      'tools/executor.ts',
+      'tools/path-guard.ts',
+    ]);
+    const engine = fs.readFileSync(path.join(SRC_DIR, 'engine/pipeline-engine.ts'), 'utf8');
+    expect(engine.match(/\brunWriteScopes\b/g)).toHaveLength(1);
+    expect(engine).toMatch(
+      /writeScope: role === 'implementer' \? store\.runWriteScopes\.ofRun\(run\.id\) : null/,
+    );
+    expect(engine.match(/\.\.\.\(writeScope === null \? \{\} : \{ writeScope \}\)/g)).toHaveLength(
+      1,
+    );
+    // 단계 실행기 · 시작 요청은 범위를 넘기지 않는다 (세션 요청 타입에 칸이 없다)
+    const types = fs.readFileSync(path.join(SRC_DIR, 'engine/types.ts'), 'utf8');
+    expect(types).not.toMatch(/\bwriteScope\b/);
+    expect(using(/\bnarrowedContinuationTarget\(|\bassertExcludePatterns\(/)).toEqual([
+      'ipc/run-handlers.ts',
+    ]);
+    const handlers = fs.readFileSync(path.join(SRC_DIR, 'ipc/run-handlers.ts'), 'utf8');
+    expect(handlers).toMatch(
+      /'reviewQueue\.resumeNarrowed': \([^)]*author[^)]*\)[^{]*=> \{\s*assertHumanRunStarter\(author\);\s*assertExcludePatterns\(exclude\);/,
+    );
+    // 병합 전 대조를 부르는 곳: 검사 단계와 병합 단계
+    expect(using(/\bwriteScopeViolations\(/)).toEqual(['steps/check.ts', 'steps/merge.ts']);
+    // 처음 목록은 지금 블록 선언을 한 번 읽는다 (읽기만)
+    const queue = fs.readFileSync(path.join(SRC_DIR, 'review/review-queue.ts'), 'utf8');
+    expect(queue.match(/\.blockDeclarations\.[A-Za-z]+/g)).toEqual(['.blockDeclarations.current']);
   });
 });
 
