@@ -80,8 +80,11 @@ export const toFormValues = (
   return values as FormValues;
 };
 
-/** 빈 칸 = 미설정. 한도 USD는 0보다 큰 수, 턴은 1 이상 정수. 맞지 않으면 `undefined`(입력 오류). */
-const parseUsd = (raw: string): number | null | undefined => {
+/**
+ * 빈 칸 = 미설정. 한도 USD는 0보다 큰 수, 턴은 1 이상 정수. 맞지 않으면 `undefined`(입력 오류). 검토 대기열의 새 한도 입력도
+ * 같은 규칙으로 읽는다(ADR-157).
+ */
+export const parseUsd = (raw: string): number | null | undefined => {
   const trimmed = raw.trim();
   if (trimmed === '') return null;
   // 소수 표기만 받는다 (`Number`가 받는 16진수 · 지수 표기 `0x10` · `1e2`는 입력 오류)
@@ -99,7 +102,7 @@ const parseDailyUsd = (raw: string): number | null | undefined => {
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 };
 
-const parseTurns = (raw: string): number | null | undefined => {
+export const parseTurns = (raw: string): number | null | undefined => {
   const trimmed = raw.trim();
   if (trimmed === '') return null;
   if (!/^\d+$/.test(trimmed)) return undefined;

@@ -20,9 +20,10 @@ export const AppLayout = (): React.JSX.Element => (
 const LayoutBody = (): React.JSX.Element => {
   const connection = useConnection();
   const { project } = useProject();
-  // 할 일 배지 · 툴팁 = 확인할 것 목록 (ADR-100 A7, ADR-119)
-  const { load } = useTodoList();
+  // 할 일 배지 · 툴팁 = 확인할 것 + 검토 대기열의 열린 항목 (ADR-100 A7 · "할 일 공통", ADR-119 · ADR-157)
+  const { load, review: reviewLoad } = useTodoList();
   const todo = load.status === 'ready' ? load.result : null;
+  const review = reviewLoad.status === 'ready' ? reviewLoad.result : null;
   // 기준 폭은 토큰 하나(--bp-chat-collapse)에서 읽는다. 미디어 쿼리 안에서는 CSS 변수를 못 쓴다
   const breakpoint = useMemo(() => readToken('--bp-chat-collapse', '1100px'), []);
   const collapsed = useMediaQuery(`(width < ${breakpoint})`);
@@ -35,8 +36,8 @@ const LayoutBody = (): React.JSX.Element => {
     >
       <Sidebar
         projectName={project?.name ?? null}
-        todoCount={todoBadgeTotal(todo)}
-        todoBreakdown={todoBreakdown(todo)}
+        todoCount={todoBadgeTotal(todo, review)}
+        todoBreakdown={todoBreakdown(todo, review)}
         connection={connection}
       />
       <MainArea />

@@ -1,7 +1,8 @@
 // 할 일 진입 · 알림 배지 · 툴팁 (이슈 #226 수용 기준 3, screens.md 6장 할 일 · SCR-17 자리, TODO-01, ADR-100 A7 · D8 · 명세 변경
 // "할 일 공통", ADR-035 · ADR-056 · ADR-113 · ADR-119).
-// - 배지 = 확인할 것 `total`(+ 검토 대기열, 아직 없음). 상한 표시 · 빨강 경고 없음. 툴팁에 종류별 건수(자르기 전 수)
-// - 할 일 머리 탭은 [확인할 것] 하나(옛 승인 대기 · 계약 변경 승인 탭 없음, 검토 대기열은 그 화면 이슈가 더한다)
+// - 배지 = 확인할 것 `total` + 검토 대기열의 열린 항목 수(이슈 #54 수용 기준 3, ADR-157). 상한 표시 · 빨강 경고 없음. 툴팁에
+//   종류별 건수(자르기 전 수). 어느 한쪽 조회가 실패하면 합계를 모르므로 배지 없음
+// - 할 일 머리 탭은 [확인할 것] · [검토 대기열](옛 승인 대기 · 계약 변경 승인 탭 없음), 마지막 탭은 앱 실행 동안 기억(ADR-034)
 // 옛 "배지 = proposal.count 대기 건수" · 안 읽음 점 · 처리 상태 기본 대기 시험은 확인할 것으로 대체되어(ADR-056 배지 규칙 ·
 // ADR-063 대체, ADR-119) 이 시험으로 바뀌었다. 데이터는 가짜 브리지(e2e/checklists/scr-17.ts)로만 만든다.
 import { expect, type Locator, type Page, test } from '@playwright/test';
@@ -15,17 +16,23 @@ import {
   PROJECT,
   TODO_TAB_LABELS,
 } from './checklists/scr-17.js';
-import { type BiveMock, mockBive } from './support/bive-mock.js';
+import { REVIEW_EMPTY, REVIEW_LIST } from './checklists/scr-18.js';
+import { allSettled, type BiveMock, mockBive, type MockResponses } from './support/bive-mock.js';
 import { expectScreen } from './support/expectScreen.js';
 
 const STATUS = { version: '0.0.0-e2e', uptimeMs: 1000, connections: 1, runsInProgress: 0 } as const;
 
-const setup = async (page: Page, list = FIXTURE_LIST): Promise<BiveMock> => {
+const setup = async (
+  page: Page,
+  list = FIXTURE_LIST,
+  review: MockResponses['reviewQueue.list'] = { result: REVIEW_EMPTY },
+): Promise<BiveMock> => {
   const bive = await mockBive(page, {
     responses: {
       'system.status': { result: STATUS },
       'project.current': { result: { project: PROJECT } },
       'confirmation.list': { result: list },
+      ...(review !== undefined && { 'reviewQueue.list': review }),
     },
   });
   await page.goto('/');
@@ -138,8 +145,52 @@ test.describe('알림 배지 · 툴팁 (수용 기준 3)', () => {
   });
 });
 
+test.describe('검토 대기열을 더한 배지 (이슈 #54 수용 기준 3)', () => {
+  test('배지 = 확인할 것 total + 검토 대기열 열린 항목 수, 툴팁에 검토 대기열 종류, 처리된 항목은 세지 않음', async ({
+    page,
+  }) => {
+    // 확인할 것 7 + 검토 대기열 열림 2 (예산 초과 1 · 변이 생존 1, 처리됨 2는 세지 않음)
+    const bive = await setup(page, FIXTURE_LIST, { result: REVIEW_LIST });
+    await expect(badge(page)).toHaveText('9');
+    await expect(todoButton(page)).toHaveAttribute(
+      'title',
+      '미확인 3 · 테스트 변경 2 · 폐기 1 · 대체 1 · 예산 초과 1 · 변이 생존 1',
+    );
+    expect(await callsOf(bive, 'reviewQueue.list')).toContainEqual({ projectId: PROJECT.id });
+    // 상한 표시 없음: 숫자뿐
+    await expect(badge(page)).toHaveText(/^\d+$/);
+  });
+
+  test('검토 대기열만 있으면 그 수, 확인할 것 0건이어도 배지가 보인다', async ({ page }) => {
+    await setup(page, listOf([]), { result: REVIEW_LIST });
+    await expect(badge(page)).toHaveText('2');
+    await expect(todoButton(page)).toHaveAttribute('title', '예산 초과 1 · 변이 생존 1');
+  });
+
+  test('한쪽 조회만 실패해도 합계를 모르므로 배지 없음 · 툴팁은 이름', async ({ page }) => {
+    const bive = await setup(page, FIXTURE_LIST, {
+      error: { code: -32603, message: '내부 오류' },
+    });
+    await expect.poll(() => callsOf(bive, 'reviewQueue.list')).not.toHaveLength(0);
+    await expect.poll(() => callsOf(bive, 'confirmation.list')).not.toHaveLength(0);
+    await expect(badge(page)).toHaveCount(0);
+    await expect(todoButton(page)).toHaveAttribute('title', '할 일');
+    // 확인할 것 쪽만 실패해도 같다
+    await bive.setResponse('reviewQueue.list', { result: REVIEW_LIST });
+    await bive.setResponse('confirmation.list', { error: { code: -32603, message: '내부 오류' } });
+    const before = (await callsOf(bive, 'reviewQueue.list')).length;
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await expect
+      .poll(async () => (await callsOf(bive, 'reviewQueue.list')).length)
+      .toBe(before + 1);
+    await allSettled(bive, 'reviewQueue.list');
+    await allSettled(bive, 'confirmation.list');
+    await expect(badge(page)).toHaveCount(0);
+  });
+});
+
 test.describe('할 일 머리 탭', () => {
-  test('확인할 것 탭만 있고 승인 대기 · 검토 대기열 · 계약 변경 승인 탭은 없다', async ({
+  test('탭은 확인할 것 · 검토 대기열 순서, 승인 대기 · 계약 변경 승인 탭은 없다', async ({
     page,
   }) => {
     await setup(page);
@@ -159,5 +210,38 @@ test.describe('할 일 머리 탭', () => {
     await setup(page, listOf([]));
     await todoButton(page).click();
     await expectScreen(page, 'SCR-17', '빈', { screenshot: false });
+  });
+
+  test('마지막 탭을 앱 실행 동안 기억한다: 다른 화면에 갔다 와도 검토 대기열, 다시 띄우면 확인할 것 (ADR-034)', async ({
+    page,
+  }) => {
+    await setup(page, FIXTURE_LIST, { result: REVIEW_LIST });
+    await todoButton(page).click();
+    const tab = (name: string): Locator => page.getByRole('tab', { name, exact: true });
+    await expect(tab('확인할 것')).toHaveAttribute('aria-selected', 'true');
+    await tab('검토 대기열').click();
+    await expect(tab('검토 대기열')).toHaveAttribute('aria-selected', 'true');
+    await expect(tab('확인할 것')).toHaveAttribute('aria-selected', 'false');
+    await expect(page.getByTestId('todo-review')).toBeVisible();
+    await expect(page.getByTestId('todo-confirmation')).toHaveCount(0);
+
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await expect(page.getByTestId('main-area')).toHaveAttribute('data-route', 'rules');
+    await todoButton(page).click();
+    await expect(tab('검토 대기열')).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByTestId('todo-review')).toBeVisible();
+
+    // 확인할 것으로 돌아가도 기억한다
+    await tab('확인할 것').click();
+    await page.getByRole('button', { name: '규칙', exact: true }).click();
+    await todoButton(page).click();
+    await expect(tab('확인할 것')).toHaveAttribute('aria-selected', 'true');
+    await tab('검토 대기열').click();
+
+    // 앱을 다시 띄우면(새 문서) 처음 탭
+    await page.reload();
+    await expect(page.getByTestId('sidebar-project')).toHaveText(PROJECT.name);
+    await todoButton(page).click();
+    await expect(tab('확인할 것')).toHaveAttribute('aria-selected', 'true');
   });
 });

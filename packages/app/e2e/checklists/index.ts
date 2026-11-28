@@ -7,6 +7,7 @@ import { contractsChecklist } from './scr-04.js';
 import { verificationChecklist } from './scr-05.js';
 import { ruleDetailChecklist } from './scr-06.js';
 import { confirmationChecklist } from './scr-17.js';
+import { reviewQueueChecklist } from './scr-18.js';
 import { settingsChecklist } from './scr-21.js';
 import type { ScreenChecklist, ScreenId } from './types.js';
 
@@ -19,5 +20,6 @@ export const CHECKLISTS: Partial<Record<ScreenId, ScreenChecklist>> = {
   'SCR-05': verificationChecklist,
   'SCR-06': ruleDetailChecklist,
   'SCR-17': confirmationChecklist,
+  'SCR-18': reviewQueueChecklist,
   'SCR-21': settingsChecklist,
 };

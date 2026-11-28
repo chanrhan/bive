@@ -169,14 +169,14 @@ test.describe('합치기 (수용 기준 3)', () => {
     expect(await countCalls(bive, 'verification.summary')).toBe(base + 2);
   });
 
-  test('화면을 떠나면 재접속 구독도 끊는다 (배지의 구독 1개만 남음)', async ({ page }) => {
+  test('화면을 떠나면 재접속 구독도 끊는다 (배지의 구독만 남음)', async ({ page }) => {
     const bive = await open(page, '검증');
     await expect(page.getByTestId('pipeline-current')).toHaveText('구현');
-    // 사이드바 연결 표시 1 + 배지 1 + 검증 화면 1
-    await expect.poll(async () => (await bive.listenerCounts())['system.connection']).toBe(3);
+    // 사이드바 연결 표시 1 + 배지 2(확인할 것 · 검토 대기열, ADR-157) + 검증 화면 1
+    await expect.poll(async () => (await bive.listenerCounts())['system.connection']).toBe(4);
     // 구독이 없는 화면(추적성 맵)으로 간다. 요구사항 화면은 블록 칩의 규칙 목록이, 계약 화면은 계약 목록이 재접속을 구독한다
     // (ADR-126 · ADR-133)
     await page.getByRole('button', { name: '추적성 맵', exact: true }).click();
-    await expect.poll(async () => (await bive.listenerCounts())['system.connection']).toBe(2);
+    await expect.poll(async () => (await bive.listenerCounts())['system.connection']).toBe(3);
   });
 });
