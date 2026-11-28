@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""".github/workflows/ci.yml 의 잡 제한 시간 · 집계 잡의 needs 시험 (M3-52, ADR-138).
+""".github/workflows/ci.yml 의 잡 제한 시간 · 집계 잡의 needs · 잡 이름 시험 (M3-52 · M3-61, ADR-138 · ADR-154).
 
 CI 러너의 기본 파이썬에 YAML 파서가 있다고 기대하지 않으므로 표준 라이브러리만 쓴다.
 `jobs:` 아래 두 칸 들여쓴 잡 키로 잡 블록을 나누고, 블록 안의 네 칸 들여쓴 키 값을 읽는다.
@@ -73,8 +73,9 @@ class CiWorkflowTest(unittest.TestCase):
     def setUpClass(cls):
         cls.blocks = job_blocks(WORKFLOW.read_text(encoding="utf-8"))
 
-    def test_checks_timeout_is_30(self):
-        self.assertEqual(timeout_minutes(self.blocks, "checks"), 30)
+    def test_checks_timeout_is_40(self):
+        # ADR-154: 30 → 40
+        self.assertEqual(timeout_minutes(self.blocks, "checks"), 40)
 
     def test_pipeline_group_timeout_is_40(self):
         self.assertEqual(timeout_minutes(self.blocks, "pipeline-e2e-group"), 40)
@@ -86,6 +87,17 @@ class CiWorkflowTest(unittest.TestCase):
     def test_aggregate_job_needs_unchanged(self):
         self.assertEqual(needs(self.blocks, "ci"), ["checks", "pipeline-e2e"])
         self.assertEqual(needs(self.blocks, "pipeline-e2e"), ["pipeline-e2e-group"])
+
+    def test_job_names_unchanged(self):
+        # 잡 키 네 개와 그 이름. `ci`는 브랜치 보호의 필수 검사 이름이고 CLAUDE.md 5장이 세 검사를 이 이름으로 부른다 (ADR-154)
+        self.assertEqual(sorted(self.blocks), sorted(["checks", "pipeline-e2e-group", "pipeline-e2e", "ci"]))
+        self.assertEqual(job_value(self.blocks, "checks", "name"), "checks")
+        self.assertEqual(
+            job_value(self.blocks, "pipeline-e2e-group", "name"),
+            "pipeline-e2e-group (${{ matrix.group }})",
+        )
+        self.assertEqual(job_value(self.blocks, "pipeline-e2e", "name"), "pipeline-e2e")
+        self.assertEqual(job_value(self.blocks, "ci", "name"), "ci")
 
 
 class ParserTest(unittest.TestCase):
