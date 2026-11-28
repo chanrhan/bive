@@ -16,15 +16,20 @@ import {
   type Run,
   type Step,
 } from '@bive/shared';
-import { openProjectStore, registerProject, type ProjectStore } from '@bive/store';
-import { afterEach, describe, expect, it } from 'vitest';
+import {
+  JudgmentRepository,
+  openProjectStore,
+  registerProject,
+  type ProjectStore,
+} from '@bive/store';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { selectAgent } from '../src/agent/select.js';
 import type { GitRunner } from '../src/git/git-exec.js';
 import { createGitRunner } from '../src/git/git-exec.js';
 import type { PipeServer } from '../src/ipc/server.js';
 import { startOrchestrator } from '../src/orchestrator.js';
-import { recordNeedsRecheck } from '../src/judgments/judgment-marks.js';
+import { recordNeedsRecheck, recordRejudgeMismatch } from '../src/judgments/judgment-marks.js';
 import { createRun } from '../src/runs/run-service.js';
 import { RecheckWatcher, WATCH_INTERVAL_MS } from '../src/watcher/recheck-watcher.js';
 import type { TestClient } from './helpers/client.js';
@@ -140,7 +145,14 @@ const stepOf = (steps: readonly Step[], kind: Step['kind']): Step => {
  */
 const seedRun = (
   store: ProjectStore,
-  input: { at: number; head: string; mergeCommit?: string; target: Rule; judged: Rule[] },
+  input: {
+    at: number;
+    head: string;
+    mergeCommit?: string;
+    target: Rule;
+    judged: Rule[];
+    status?: 'pass' | 'fail';
+  },
 ): { run: Run; judgments: JudgmentResult[] } => {
   const created = createRun(
     store,
@@ -174,9 +186,9 @@ const seedRun = (
       stepId: stepOf(created.steps, 'check').id,
       commit: input.head,
       judgedAt: iso(input.at + 500),
-      status: 'pass' as const,
+      status: input.status ?? 'pass',
       runner: 'vitest' as const,
-      exitCode: 0,
+      exitCode: input.status === 'fail' ? 1 : 0,
       reporterPath: null,
       cases: [],
       quarantineReason: null,
@@ -428,6 +440,26 @@ describe('감시자: 기동 때 · 주기 비교 (수용 기준 1)', () => {
     await watcher.stop();
     // 멈춘 뒤에는 다음 회차를 잡지 않는다
     expect(scheduler.pending.every((entry) => entry.cancelled)).toBe(true);
+  }, 30_000);
+
+  it('lib 블록 파일을 지운 사람 커밋: lib 대상 규칙만 재검증 필요다 (지운 파일도 바뀐 파일)', async () => {
+    const w = watchedProject();
+    git(w.repo, 'rm', '-q', 'src/lib/db.ts');
+    git(w.repo, 'commit', '-q', '-m', 'human: remove');
+    const head = git(w.repo, 'rev-parse', 'HEAD');
+    await watcherOf(w).watcher.tick();
+    expect(w.marks()).toEqual([{ rule: '라이브러리', commit: head }]);
+    expect(w.latest(w.rules.auth)).toBe('pass');
+  }, 30_000);
+
+  it('lib 블록 파일을 블록 밖 경로로 옮긴 사람 커밋: lib 대상 규칙이 재검증 필요다 (이름 바꿈은 옛 경로도 바뀐 파일)', async () => {
+    const w = watchedProject();
+    git(w.repo, 'mv', 'src/lib/db.ts', 'src/moved-db.ts');
+    git(w.repo, 'commit', '-q', '-m', 'human: move');
+    const head = git(w.repo, 'rev-parse', 'HEAD');
+    await watcherOf(w).watcher.tick();
+    expect(w.marks()).toEqual([{ rule: '라이브러리', commit: head }]);
+    expect(w.latest(w.rules.auth)).toBe('pass');
   }, 30_000);
 
   it('오케스트레이터 기동이 감시자를 띄운다: 꺼져 있던 동안의 lib 커밋이 기동 뒤 재검증 필요가 된다', async () => {
@@ -884,6 +916,131 @@ describe('규칙 변경의 재검증 필요 (수용 기준 2)', () => {
       ),
     ).toEqual([]);
   });
+
+  it('표시 모듈이 쓰는 상태는 둘뿐이다: 낡은 판정이 통과든 실패든 감시자 · 진술 편집의 표시는 재검증 필요이고, 재판정 불일치는 격리다', async () => {
+    // 감시자: lib(최신 통과) · auth(최신 실패, 병합되지 않은 실행)가 모두 바뀐 사람 커밋
+    const w = watchedProject();
+    w.read((store) =>
+      seedRun(store, {
+        at: T0 + 5 * 60_000,
+        head: w.basis,
+        target: w.rules.auth,
+        judged: [w.rules.auth],
+        status: 'fail',
+      }),
+    );
+    expect(w.latest(w.rules.auth)).toBe('fail');
+    commit(w.repo, {
+      'src/lib/db.ts': 'export const db = 13;\n',
+      'src/app/api/auth/route.ts': 'export const auth = 13;\n',
+    });
+    await watcherOf(w).watcher.tick();
+    const watched = w.read((store) => store.judgments.listUnattached());
+    expect(watched.map((record) => [record.ruleId, record.status]).sort()).toEqual(
+      [
+        [w.rules.lib.id, 'needs_recheck'],
+        [w.rules.auth.id, 'needs_recheck'],
+      ].sort(),
+    );
+    // 진술 편집: 최신 통과(lib) · 최신 실패(auth)
+    const { h, lib, auth } = await ruleHarness();
+    h.read((store) =>
+      seedRun(store, {
+        at: T0 + 2 * 60_000,
+        head: 'a'.repeat(40),
+        target: auth,
+        judged: [auth],
+        status: 'fail',
+      }),
+    );
+    for (const rule of [lib, auth]) {
+      await h.client.call('rule.update', {
+        projectId: h.project.id,
+        id: rule.id,
+        author: human,
+        statement: `WHEN ${rule.title} 편집 THE SYSTEM SHALL 요청을 받아들인다`,
+      });
+    }
+    // 재판정 불일치
+    h.read((store) =>
+      recordRejudgeMismatch(store, [{ ruleId: lib.id, commit: 'a'.repeat(40), runner: 'vitest' }], {
+        now: T0 + 20 * 60_000,
+        newId,
+      }),
+    );
+    const edited = h.read((store) => store.judgments.listUnattached());
+    expect(edited.map((record) => [record.ruleId, record.status, record.quarantineReason])).toEqual(
+      [
+        [lib.id, 'needs_recheck', null],
+        [auth.id, 'needs_recheck', null],
+        [lib.id, 'quarantined', '재판정 불일치'],
+      ],
+    );
+    expect(new Set([...watched, ...edited].map((record) => record.status))).toEqual(
+      new Set(['needs_recheck', 'quarantined']),
+    );
+  }, 30_000);
+
+  it('진술 편집의 표시는 편집과 같은 트랜잭션이다: 표시 쓰기가 실패하면 편집이 실패하고 진술 · 승인 기록 · 판정 기록이 그대로다', async () => {
+    const { h, lib, statusOf } = await ruleHarness();
+    const before = h.read((store) => ({
+      rule: store.rules.get(lib.id),
+      approvals: store.approvalLog.list().length,
+      judgments: store.judgments.listByRule(lib.id),
+    }));
+    const mocked = vi.spyOn(JudgmentRepository.prototype, 'record').mockImplementation(() => {
+      throw new Error('표시 쓰기 실패');
+    });
+    try {
+      await expect(
+        h.client.call('rule.update', {
+          projectId: h.project.id,
+          id: lib.id,
+          author: human,
+          statement: 'WHEN 라이브러리 요청 THE SYSTEM SHALL 요청을 받아들인다',
+        }),
+      ).rejects.toMatchObject({ code: ErrorCode.InternalError });
+    } finally {
+      mocked.mockRestore();
+    }
+    expect(
+      h.read((store) => ({
+        rule: store.rules.get(lib.id),
+        approvals: store.approvalLog.list().length,
+        judgments: store.judgments.listByRule(lib.id),
+      })),
+    ).toEqual(before);
+    expect(await statusOf(lib)).toBe('pass');
+  }, 30_000);
+
+  it('블록 선언 저장의 표시는 선언 저장과 같은 트랜잭션이다: 표시 쓰기가 실패하면 저장이 실패하고 선언 판 · 규칙 · 판정 기록이 그대로다', async () => {
+    const { h, health, statusOf } = await ruleHarness();
+    const snapshot = () =>
+      h.read((store) => ({
+        version: store.blockDeclarations.current()?.version,
+        rules: store.rules.list().length,
+        judgments: store.judgments.listByRule(health.id),
+      }));
+    const before = snapshot();
+    const mocked = vi.spyOn(JudgmentRepository.prototype, 'record').mockImplementation(() => {
+      throw new Error('표시 쓰기 실패');
+    });
+    try {
+      // health 블록을 지운 판: 헬스 규칙에 표시를 쓰려다 실패한다
+      await expect(
+        h.client.call('blocks.set', {
+          projectId: h.project.id,
+          author: human,
+          declaration: { blocks: DECLARATION.blocks.filter((block) => block.name !== 'health') },
+        }),
+      ).rejects.toMatchObject({ code: ErrorCode.InternalError });
+    } finally {
+      mocked.mockRestore();
+    }
+    // 새 판 · 내장 구조 규칙도 남지 않는다
+    expect(snapshot()).toEqual(before);
+    expect(await statusOf(health)).toBe('pass');
+  }, 30_000);
 
   it('편집이 거부되면(형식 오류) 표시도 남지 않는다 (같은 트랜잭션)', async () => {
     const { h, lib, statusOf } = await ruleHarness();
