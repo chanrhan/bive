@@ -1338,7 +1338,7 @@ export class PipelineEngine {
     const model = run.modelSnapshot[role];
     // 프로젝트 하루 한도(ADR-104)는 실행 스냅샷이 아니라 지금 설정과 저장된 오늘의 세션 기록에서 읽는다
     // 사용량은 이어받는 실행이면 사슬 전체(원 실행들의 세션부터)를 센다 (ADR-147 ④, 이어받는 실행이 아니면 이 실행의 세션 그대로)
-    const { limits, index, daily } = this.#store(projectId, (store) => {
+    const { limits, index, daily, writeScope } = this.#store(projectId, (store) => {
       const sessions = store.sessions.listByRun(run.id);
       const daily = projectDailyBudget(store, store.settings.get(), this.#now());
       return {
@@ -1350,6 +1350,8 @@ export class PipelineEngine {
         ),
         index: sessions.filter((session) => session.role === role).length,
         daily,
+        // 쓰기 허용 범위는 구현 세션의 경로 가드에만 건다 (허용 목록 축소 재개로 만든 실행, ADR-155). 값이 구현 세션의 가드에 닿는 곳은 여기 하나다
+        writeScope: role === 'implementer' ? store.runWriteScopes.ofRun(run.id) : null,
       };
     });
     if (model === undefined || limits === undefined) {
@@ -1392,6 +1394,7 @@ export class PipelineEngine {
       ...(request.writableRuleDirs === undefined
         ? {}
         : { writableRuleDirs: request.writableRuleDirs }),
+      ...(writeScope === null ? {} : { writeScope }),
       hooks: {
         ...request.hooks,
         onToolCall: (record) => {

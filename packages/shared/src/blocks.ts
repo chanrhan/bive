@@ -249,3 +249,24 @@ export type BlockDeclaration = z.infer<typeof BlockDeclaration>;
 /** 규칙의 대상 블록 (NRM-09): 블록 이름 1개 이상, 중복 없음. 새로 만드는 규칙에만 강제한다(옛 행은 빈 목록, ADR-122). */
 export const RuleTargetBlocks = uniqueList(BlockName, 1, BLOCK_LIMITS.ruleTargets, '대상 블록');
 export type RuleTargetBlocks = z.infer<typeof RuleTargetBlocks>;
+
+/** 실행에 붙는 쓰기 허용 범위의 상한 (허용 목록 축소 재개, M3-58 #321, ADR-155). */
+export const WRITE_SCOPE_LIMITS = {
+  /** 요청 하나의 제외 패턴 수 (블록 하나의 포함 경로 수와 같다) */
+  exclude: BLOCK_LIMITS.patterns,
+  /** 실행에 붙는 제외 패턴 수 (다시 좁히기의 합집합 포함) */
+  excludeTotal: 100,
+  /** 허용 패턴 수 (대상 블록 포함 경로의 합: 블록 수 × 패턴 수) */
+  allow: BLOCK_LIMITS.blocks * BLOCK_LIMITS.patterns,
+} as const;
+
+/**
+ * 이어받는 실행에 붙는 쓰기 허용 범위 (TODO-02 · NFR-02, M3-58 #321, ADR-147 ⑥, ADR-155). 패턴은 블록 선언의 포함 경로와 같은 문법 ·
+ * 같은 매처({@link matchesBlockPattern})다. 구현 세션은 `allow`의 어느 패턴에 들고 `exclude`의 어느 패턴에도 들지 않는 경로에만 쓸 수
+ * 있다. `allow` = 원 실행 대상 규칙들의 대상 블록 포함 경로의 합(이어받는 실행을 만드는 순간의 선언), `exclude` = 사람이 준 제외 경로.
+ */
+export const RunWriteScope = z.strictObject({
+  allow: uniqueList(BlockPattern, 1, WRITE_SCOPE_LIMITS.allow, '허용 경로'),
+  exclude: uniqueList(BlockPattern, 1, WRITE_SCOPE_LIMITS.excludeTotal, '제외 경로'),
+});
+export type RunWriteScope = z.infer<typeof RunWriteScope>;

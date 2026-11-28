@@ -23,7 +23,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createRoleTools, type FixedToolExecutor } from '../src/tools/executor.js';
-import { PathGuard } from '../src/tools/path-guard.js';
+import { PathGuard, WRITE_SCOPE_DENIALS, writeScopeDenial } from '../src/tools/path-guard.js';
 
 const SECRET = 'SECRET-OUTSIDE-CONTENT';
 const DB_MARK = 'NORM-STORE-CONTENT';
@@ -545,5 +545,163 @@ describe.skipIf(isWindows)('FIFO · 특수 파일', () => {
       status: 'error',
       reason: 'not_a_file',
     });
+  });
+});
+
+// ── 쓰기 허용 범위 (허용 목록 축소 재개, M3-58 #321, NFR-02, ADR-147 ⑥, ADR-155) ─────────────
+
+describe('쓰기 허용 범위가 붙은 implementer (M3-58 수용 기준 2)', () => {
+  const SCOPE = {
+    allow: ['src/app/api/health/**', 'src/lib/**', 'bive-acceptance/**'],
+    exclude: ['src/app/api/health/route.ts', 'src/lib/secret/**'],
+  };
+  const scoped = (): FixedToolExecutor =>
+    createRoleTools({
+      role: 'implementer',
+      sessionRoot: worktree,
+      biveHome: home,
+      sessionId: 's-impl-scoped',
+      writeScope: SCOPE,
+    });
+  const ROUTE = 'export const GET = () => 1;\n';
+  const KEY = 'export const key = 1;\n';
+  beforeEach(() => {
+    put(path.join(worktree, 'src', 'app', 'api', 'health', 'route.ts'), ROUTE);
+    put(path.join(worktree, 'src', 'lib', 'secret', 'key.ts'), KEY);
+    // 허용 범위 안의 링크가 제외 경로를 가리킨다 (파일 · 폴더)
+    link(
+      path.join(worktree, 'src', 'app', 'api', 'health', 'route.ts'),
+      path.join(worktree, 'src', 'app', 'api', 'health', 'alias.ts'),
+    );
+    link(
+      path.join(worktree, 'src', 'lib', 'secret'),
+      path.join(worktree, 'src', 'app', 'api', 'health', 'libdir'),
+      'dir',
+    );
+  });
+  const write = (tools: FixedToolExecutor, target: string) =>
+    tools.execute('write_file', { path: target, content: 'PWNED\n' });
+
+  it('허용 목록에 들고 제외 목록에 들지 않는 경로는 쓰고, 새 파일 · 새 폴더도 만든다', async () => {
+    const tools = scoped();
+    expect((await write(tools, 'src/app/api/health/util.ts')).status).toBe('ok');
+    expect((await write(tools, 'src/app/api/health/deep/new/file.ts')).status).toBe('ok');
+    expect((await write(tools, 'src/lib/a.ts')).status).toBe('ok');
+    expect(
+      readFileSync(
+        path.join(worktree, 'src', 'app', 'api', 'health', 'deep', 'new', 'file.ts'),
+        'utf8',
+      ),
+    ).toBe('PWNED\n');
+  });
+
+  it.each([
+    ['제외 파일', 'src/app/api/health/route.ts', 'excluded'],
+    ['제외 폴더 아래 기존 파일', 'src/lib/secret/key.ts', 'excluded'],
+    ['제외 폴더 아래 새 파일', 'src/lib/secret/new.ts', 'excluded'],
+    ['링크를 거친 제외 파일', 'src/app/api/health/alias.ts', 'excluded'],
+    ['링크 폴더를 거친 제외 폴더', 'src/app/api/health/libdir/key.ts', 'excluded'],
+    ['대소문자만 다른 제외 파일', 'src/app/api/health/ROUTE.ts', 'excluded'],
+    ['대소문자만 다른 제외 폴더', 'SRC/LIB/Secret/key.ts', 'excluded'],
+    ['끝에 점이 붙은 제외 파일', 'src/app/api/health/route.ts.', 'excluded'],
+    ['대상 블록 밖 기존 파일', 'src/a.ts', 'outside'],
+    ['대상 블록 밖 새 파일', 'package.json', 'outside'],
+    ['대상 블록 밖 새 폴더', 'src/other/x.ts', 'outside'],
+    ['대소문자만 다른 허용 경로(허용을 넓히지 않음)', 'SRC/app/api/health/util.ts', 'outside'],
+  ] as const)('%s(%s)는 거부되고 고정 사유를 받는다', async (_name, target, kind) => {
+    const tools = scoped();
+    const result = await write(tools, target);
+    expect(result).toEqual({
+      status: 'denied',
+      reason: 'path_denied',
+      content: `거부됨: ${WRITE_SCOPE_DENIALS[kind]}`,
+    });
+    // 아무 파일도 바뀌지 않는다
+    expect(
+      readFileSync(path.join(worktree, 'src', 'app', 'api', 'health', 'route.ts'), 'utf8'),
+    ).toBe(ROUTE);
+    expect(readFileSync(path.join(worktree, 'src', 'lib', 'secret', 'key.ts'), 'utf8')).toBe(KEY);
+    expect(readFileSync(path.join(worktree, 'src', 'a.ts'), 'utf8')).toBe('export const a = 1;\n');
+    expect(existsSync(path.join(worktree, 'package.json'))).toBe(false);
+    expect(existsSync(path.join(worktree, 'src', 'other'))).toBe(false);
+    expect(existsSync(path.join(worktree, 'src', 'lib', 'secret', 'new.ts'))).toBe(false);
+  });
+
+  it('기존 금지(인수 테스트 · node_modules · .git · .bive.json)는 범위 판정보다 먼저 같은 사유로 걸린다', async () => {
+    const tools = scoped();
+    expect(await write(tools, 'bive-acceptance/RULE-001/time.acc.ts')).toMatchObject({
+      status: 'denied',
+      content: '거부됨: 인수 테스트 쓰기 불가',
+    });
+    expect(await write(tools, 'src/lib/node_modules/x.js')).toMatchObject({
+      status: 'denied',
+      content: '거부됨: node_modules 쓰기 불가',
+    });
+    expect(await write(tools, 'src/lib/.git/config')).toMatchObject({
+      status: 'denied',
+      content: '거부됨: .git 접근 불가',
+    });
+    expect(await write(tools, '.bive.json')).toMatchObject({
+      status: 'denied',
+      content: '거부됨: .bive.json 접근 불가',
+    });
+  });
+
+  it('읽기 · 목록 · 검색은 범위가 없는 실행과 같다 (좁히는 것은 쓰기뿐)', async () => {
+    const tools = scoped();
+    const plain = implementer();
+    for (const [name, args] of [
+      ['read_file', { path: 'src/a.ts' }],
+      ['read_file', { path: 'src/app/api/health/route.ts' }],
+      ['read_file', { path: 'src/lib/secret/key.ts' }],
+      ['list_files', { path: 'src' }],
+      ['search_files', { query: 'export' }],
+    ] as const) {
+      const got = await tools.execute(name, args);
+      expect(got.status, name).toBe('ok');
+      expect(got).toEqual(await plain.execute(name, args));
+    }
+  });
+
+  it('범위가 없는 implementer의 가드는 그대로다: 같은 경로를 쓸 수 있다', async () => {
+    const tools = implementer();
+    for (const target of ['src/a.ts', 'package.json', 'src/app/api/health/route.ts']) {
+      expect((await write(tools, target)).status, target).toBe('ok');
+    }
+  });
+
+  it('범위는 implementer에만 걸린다: test-writer에 주어도 쓰기 판정이 바뀌지 않는다', () => {
+    const guard = new PathGuard({
+      role: 'test-writer',
+      sessionRoot: session,
+      biveHome: home,
+      writeScope: { allow: ['src/**'], exclude: ['bive-acceptance/**'] },
+    });
+    expect(guard.check('bive-acceptance/RULE-001/a.acc.ts', 'write').ok).toBe(true);
+    expect(guard.check('src/a.ts', 'write')).toEqual({
+      ok: false,
+      detail: 'bive-acceptance/<규칙 폴더>/ 밖 쓰기 불가',
+    });
+  });
+
+  it('판정 함수: 블록 선언과 같은 매처(** · *)이고, 제외는 대소문자 · 끝의 점을 접어 보지만 허용은 글자 그대로다', () => {
+    const scope = { allow: ['src/*.ts', 'app/**'], exclude: ['app/private/**', 'app/*.secret.ts'] };
+    expect(writeScopeDenial(scope, 'src/a.ts')).toBeNull();
+    expect(writeScopeDenial(scope, 'src/sub/a.ts')).toBe(WRITE_SCOPE_DENIALS.outside);
+    expect(writeScopeDenial(scope, 'app/x/y/z.ts')).toBeNull();
+    expect(writeScopeDenial(scope, 'app/private/a.ts')).toBe(WRITE_SCOPE_DENIALS.excluded);
+    expect(writeScopeDenial(scope, 'app/Private/a.ts')).toBe(WRITE_SCOPE_DENIALS.excluded);
+    expect(writeScopeDenial(scope, 'app/k.secret.ts')).toBe(WRITE_SCOPE_DENIALS.excluded);
+    expect(writeScopeDenial(scope, 'app/K.SECRET.TS')).toBe(WRITE_SCOPE_DENIALS.excluded);
+    expect(writeScopeDenial(scope, 'App/x.ts')).toBe(WRITE_SCOPE_DENIALS.outside);
+    expect(writeScopeDenial(scope, 'app\\private\\a.ts')).toBe(WRITE_SCOPE_DENIALS.excluded);
+    expect(writeScopeDenial(scope, '.')).toBe(WRITE_SCOPE_DENIALS.outside);
+    // include와 같은 문법: 폴더 이름만인 제외는 그 폴더 아래를 막지 않는다 (아래를 빼려면 `/**`)
+    const folder = { allow: ['src/**'], exclude: ['src/x'] };
+    expect(writeScopeDenial(folder, 'src/x')).toBe(WRITE_SCOPE_DENIALS.excluded);
+    expect(writeScopeDenial(folder, 'src/x/a.ts')).toBeNull();
+    expect(writeScopeDenial({ ...folder, exclude: ['src/x/**'] }, 'src/x/a.ts')).toBe(
+      WRITE_SCOPE_DENIALS.excluded,
+    );
   });
 });

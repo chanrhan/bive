@@ -75,6 +75,11 @@ import {
 } from './judging.js';
 import { basisSteps } from '../runs/run-continuation.js';
 import {
+  WRITE_SCOPE_STAGE,
+  WRITE_SCOPE_VIOLATION_MESSAGE,
+  writeScopeViolations,
+} from './write-scope.js';
+import {
   missingStructureJudgments,
   readStructurePlan,
   STRUCTURE_STAGE,
@@ -307,6 +312,16 @@ export const createMergeExecutor =
           });
         }
       }
+    }
+    // 쓰기 허용 범위가 붙은 실행: 병합되는 변경이 범위 안인지 병합 전에 다시 본다 (검사 단계와 같은 대조, 닫힌 쪽, ADR-155)
+    const outsideScope = await writeScopeViolations(context, git, headCommit);
+    if (outsideScope.length > 0) {
+      return halt('guard_violation', {
+        stage: WRITE_SCOPE_STAGE,
+        message: WRITE_SCOPE_VIOLATION_MESSAGE,
+        changed: outsideScope.slice(0, 50),
+        headCommit,
+      });
     }
     const tip = await git(
       ['rev-parse', '--verify', '--quiet', `refs/heads/${context.git.branch}^{commit}`],

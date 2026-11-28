@@ -29,7 +29,7 @@ import {
   WriteFileInput,
 } from './definitions.js';
 import { listFiles, readFile, searchFiles, writeFile } from './file-tools.js';
-import { PathGuard } from './path-guard.js';
+import { PathGuard, type WriteScope } from './path-guard.js';
 import { denied, failed, invalidArgs, ok } from './result.js';
 
 /** 도구 호출 기록 (NFR-02). 경로 또는 명령 · 시각 · 결과 · 소요 시간. */
@@ -157,6 +157,8 @@ export interface CreateRoleToolsOptions {
   biveHome: string;
   /** test-writer가 쓸 수 있는 규칙 폴더 (`PathGuardOptions.writableRuleDirs`, ADR-068) */
   writableRuleDirs?: readonly string[];
+  /** implementer의 쓰기 허용 범위 (`PathGuardOptions.writeScope`, 허용 목록 축소 재개로 만든 실행만, ADR-155) */
+  writeScope?: WriteScope;
   hooks?: RoleToolsHooks;
   /**
    * 도구 묶음 (기본 역할 목록). `rule_split`은 규칙 작성 역할의 분할 세션(분할 도구 하나, M3-57 · ADR-153)이고 다른 역할에 주면 던진다
