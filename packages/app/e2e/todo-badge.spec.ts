@@ -22,6 +22,7 @@ import {
   listOf,
   PROJECT,
 } from './checklists/scr-17.js';
+import { ENTRY_BUDGET, ENTRY_RAISED, REVIEW_EMPTY } from './checklists/scr-18.js';
 import {
   allSettled,
   type BiveMock,
@@ -45,6 +46,8 @@ const open = async (page: Page, responses: MockResponses = {}): Promise<BiveMock
       'project.current': { result: { project: PROJECT } },
       'requirement.list': { result: { requirements: REQUIREMENTS } },
       'confirmation.list': { result: listOf([]) },
+      // 배지 합계에 드는 검토 대기열 (비어 있음, ADR-157)
+      'reviewQueue.list': { result: REVIEW_EMPTY },
       ...responses,
     },
   });
@@ -196,5 +199,33 @@ test.describe('규범 변경 알림 → 화면 다시 읽기', () => {
     await expect
       .poll(async () => (await bive.listenerCounts())['event.normChange.appended'])
       .toBe(1);
+  });
+});
+
+test.describe('검토 대기열 알림 → 할 일 배지 (ADR-157)', () => {
+  test('이 프로젝트의 event.reviewQueue.changed면 reviewQueue.list만 다시 읽어 배지가 바뀐다 (다른 프로젝트 무시)', async ({
+    page,
+  }) => {
+    const bive = await open(page);
+    await expect.poll(() => countCalls(bive, 'reviewQueue.list')).toBeGreaterThan(0);
+    await expect(badge(page)).toHaveCount(0);
+    await allSettled(bive, 'reviewQueue.list');
+    const reviews = await countCalls(bive, 'reviewQueue.list');
+    const confirmations = await countCalls(bive, 'confirmation.list');
+
+    // 실행이 예산 초과로 끝나 항목이 등록됨 (열린 항목 1, 처리된 항목은 세지 않음)
+    await bive.setResponse('reviewQueue.list', {
+      result: { entries: [ENTRY_BUDGET, ENTRY_RAISED] },
+    });
+    await bive.emit('event.reviewQueue.changed', { projectId: PROJECT.id });
+    await expect(badge(page)).toHaveText('1');
+    await expect(page.getByTestId('todo-button')).toHaveAttribute('title', '예산 초과 1');
+    expect(await countCalls(bive, 'reviewQueue.list')).toBe(reviews + 1);
+    // 확인할 것은 이 알림으로 다시 읽지 않는다
+    expect(await countCalls(bive, 'confirmation.list')).toBe(confirmations);
+
+    await bive.emit('event.reviewQueue.changed', { projectId: OTHER_PROJECT_ID });
+    await page.waitForTimeout(300);
+    expect(await countCalls(bive, 'reviewQueue.list')).toBe(reviews + 1);
   });
 });

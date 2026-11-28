@@ -1,6 +1,6 @@
 // SCR-17 자리: 확인할 것 (screens.md 6장 할 일 · SCR-17, TODO-01 · NRM-04, ADR-100 명세 변경 SCR-17 · 할 일 공통 · A7 · D8,
 // ADR-029 · ADR-035 · ADR-113 · ADR-119).
-// 사이드바 알림 아이콘 → 할 일. 머리 탭은 [확인할 것] 하나(검토 대기열은 그 화면 이슈가 더한다, 계약 변경 승인 탭은 없어짐).
+// 사이드바 알림 아이콘 → 할 일. 머리 탭은 [확인할 것] · [검토 대기열](ADR-157, 계약 변경 승인 탭은 없어짐).
 // 왼쪽 확인할 것 목록(검색 · 필터 칩 4종 · 2줄 카드, 서버 순서 그대로), 오른쪽 상세("선택 항목"): 머리(종류 태그 · 제목 · ID ·
 // 예외 · 시각 · [확인]) → 변경 내용 → 기록(사유 · 근거 · 생성 주체) → 변경 파일 → 판단 → 대상 링크.
 // 옛 [거절] [수정] [승인] · 상한 머리줄은 없다(D8). 상태: 기본(항목 있음) · 빈("확인할 항목 없음", ADR-029).
@@ -15,11 +15,11 @@ import type {
 
 import type { ElementCheck, ScreenChecklist, StateChecklist } from './types.js';
 
-/** 할 일 머리 탭. todo-entry.spec.ts도 이 표를 쓴다. */
-export const TODO_TAB_LABELS = ['확인할 것'] as const;
+/** 할 일 머리 탭 (검토 대기열은 M3-09가 확인할 것 옆에 더했다, ADR-157). todo-entry.spec.ts도 이 표를 쓴다. */
+export const TODO_TAB_LABELS = ['확인할 것', '검토 대기열'] as const;
 
-/** 없는 탭: 옛 승인 대기 · 계약 변경 승인(ADR-100 명세 변경 "할 일 공통" · SCR-19)과 아직 없는 검토 대기열(ADR-035). */
-export const HIDDEN_TODO_TABS = ['승인 대기', '검토 대기열', '계약 변경 승인'] as const;
+/** 없는 탭: 옛 승인 대기 · 계약 변경 승인(ADR-100 명세 변경 "할 일 공통" · SCR-19). */
+export const HIDDEN_TODO_TABS = ['승인 대기', '계약 변경 승인'] as const;
 
 /** 필터 칩 4종 (수용 기준 4): 기준 ID · 이름. */
 export const CONFIRMATION_FILTERS = [

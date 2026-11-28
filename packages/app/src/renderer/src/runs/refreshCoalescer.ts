@@ -15,6 +15,9 @@ export const RUN_EVENT_NAMES = ['event.run.updated', 'event.step.updated'] as co
  */
 export const NORM_CHANGE_EVENT_NAMES = ['event.normChange.appended'] as const;
 
+/** 할 일 배지 · 검토 대기열이 다시 조회하는 알림 이름 (shared `REVIEW_QUEUE_EVENT_NAMES`와 같음, 시험이 대조한다, ADR-157). */
+export const REVIEW_QUEUE_EVENT_NAMES = ['event.reviewQueue.changed'] as const;
+
 /** 규칙 · 검증 화면이 다시 조회하는 알림: 실행 알림 + 규범 변경 알림 (폐기 · 대체 · 새 규칙은 실행 알림 없이도 생긴다). */
 export const NORM_VIEW_EVENT_NAMES = [...RUN_EVENT_NAMES, ...NORM_CHANGE_EVENT_NAMES] as const;
 

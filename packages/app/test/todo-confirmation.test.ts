@@ -426,13 +426,18 @@ describe('[확인] 실패 문구', () => {
 });
 
 describe('배지 · 툴팁 (ADR-100 A7 · D8)', () => {
+  // 검토 대기열이 빈 경우(검토 대기열을 더한 합계 · 툴팁은 test/todo-review-queue.test.ts)
+  const noReview = { entries: [] };
+
   it('배지 = total, 툴팁은 자르기 전 종류별 수를 건수 많은 순으로', () => {
-    expect(todoBadgeTotal(FIXTURE_LIST)).toBe(7);
-    expect(todoBadgeTotal(null)).toBeNull();
-    expect(todoBreakdown(FIXTURE_LIST)).toBe('미확인 3 · 테스트 변경 2 · 폐기 1 · 대체 1');
-    expect(todoBreakdown(FIXTURE_LIST_AFTER_RULE4)).toBe('미확인 3 · 폐기 1 · 대체 1');
-    expect(todoBreakdown(null)).toBe('');
-    expect(todoBreakdown({ items: [], total: 0, truncated: false })).toBe('');
+    expect(todoBadgeTotal(FIXTURE_LIST, noReview)).toBe(7);
+    expect(todoBadgeTotal(null, noReview)).toBeNull();
+    expect(todoBreakdown(FIXTURE_LIST, noReview)).toBe(
+      '미확인 3 · 테스트 변경 2 · 폐기 1 · 대체 1',
+    );
+    expect(todoBreakdown(FIXTURE_LIST_AFTER_RULE4, noReview)).toBe('미확인 3 · 폐기 1 · 대체 1');
+    expect(todoBreakdown(null, noReview)).toBe('');
+    expect(todoBreakdown({ items: [], total: 0, truncated: false }, noReview)).toBe('');
   });
 
   it('잘린 목록: 종류별 수(totalByKind)가 있으면 그것으로(합 = 배지), 없으면 툴팁을 비운다', () => {
@@ -442,11 +447,11 @@ describe('배지 · 툴팁 (ADR-100 A7 · D8)', () => {
       truncated: true,
       totalByKind: { retired: 0, superseded: 1, test_changed: 0, unconfirmed_norm: 249 },
     };
-    expect(todoBadgeTotal(truncated)).toBe(250);
-    expect(todoBreakdown(truncated)).toBe('미확인 249 · 대체 1');
-    expect(todoBreakdown({ ...truncated, totalByKind: undefined })).toBe('');
+    expect(todoBadgeTotal(truncated, noReview)).toBe(250);
+    expect(todoBreakdown(truncated, noReview)).toBe('미확인 249 · 대체 1');
+    expect(todoBreakdown({ ...truncated, totalByKind: undefined }, noReview)).toBe('');
     // 잘리지 않았으면 항목에서 센다
-    expect(todoBreakdown({ ...FIXTURE_LIST, totalByKind: undefined })).toBe(
+    expect(todoBreakdown({ ...FIXTURE_LIST, totalByKind: undefined }, noReview)).toBe(
       '미확인 3 · 테스트 변경 2 · 폐기 1 · 대체 1',
     );
   });

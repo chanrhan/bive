@@ -12,6 +12,8 @@ import type {
   ConfirmationTarget,
   NormChangeActor,
   NormChangeView,
+  ReviewItemKind,
+  ReviewQueueListResult,
   Risk,
 } from '@bive/shared';
 
@@ -30,6 +32,7 @@ import {
   UNKNOWN_TEXT,
 } from '../norm-detail/normChangeView.js';
 import { RISK_LABELS } from '../rules/rulesView.js';
+import { openReviewByKind, openReviewCount, REVIEW_ITEM_KIND_TEXT } from './reviewQueueView.js';
 
 /** 화면 문구 (screens.md 1.1 명사형). */
 export const CONFIRMATION_TEXT = {
@@ -561,22 +564,38 @@ export const confirmErrorText = (error: unknown): string => {
 // ── 배지 · 툴팁 ──────────────────────────────────────────────
 
 /**
- * 사이드바 알림 배지 숫자 (ADR-100 A7 · 명세 변경 "할 일 공통": 확인할 것 + 검토 대기열, ADR-113 · ADR-119).
- * 확인할 것은 `confirmation.list`의 `total`(자르기 전 수). 검토 대기열(SCR-18, M3-08)은 아직 없어 더할 수가 없다.
- * 상한 · 빨강 경고는 없다(D8). 모르면(프로젝트 없음 · 조회 전 · 실패) null — 배지를 보이지 않는다.
+ * 사이드바 알림 배지 숫자 (ADR-100 A7 · 명세 변경 "할 일 공통": 확인할 것 + 검토 대기열, ADR-113 · ADR-119 · ADR-157).
+ * 확인할 것은 `confirmation.list`의 `total`(자르기 전 수), 검토 대기열은 `reviewQueue.list`의 열린 항목 수. 상한 · 빨강 경고는
+ * 없다(D8). 어느 한쪽이라도 모르면(프로젝트 없음 · 조회 전 · 실패) 합계를 모르므로 null — 배지를 보이지 않는다(ADR-157).
  */
-export const todoBadgeTotal = (result: ConfirmationListResult | null): number | null =>
-  result === null ? null : result.total;
+export const todoBadgeTotal = (
+  result: ConfirmationListResult | null,
+  review: ReviewQueueListResult | null,
+): number | null => {
+  const open = openReviewCount(review);
+  return result === null || open === null ? null : result.total + open;
+};
 
-const KIND_ORDER = Object.keys(CONFIRMATION_ITEM_KIND_TEXT) as ConfirmationItemKind[];
+type TodoKind = ConfirmationItemKind | ReviewItemKind;
+
+/** 툴팁 종류 이름 · 같은 건수일 때의 순서: 확인할 것 종류 → 검토 대기열 종류. */
+const KIND_TEXT: Readonly<Record<TodoKind, string>> = {
+  ...CONFIRMATION_ITEM_KIND_TEXT,
+  ...REVIEW_ITEM_KIND_TEXT,
+};
+const KIND_ORDER = Object.keys(KIND_TEXT) as TodoKind[];
 
 /**
- * 알림 아이콘 툴팁의 종류별 건수: "미확인 3 · 폐기 1". 0건 종류는 빼고, 건수 많은 순, 같으면 종류 순서(ADR-056과 같은 규칙).
- * 종류별 수는 자르기 전 수(`totalByKind`)를 쓴다: 목록이 잘려도 합이 배지 숫자와 같다. 그 칸이 없는 응답이면 받은 항목에서
- * 세되, 잘렸으면 합이 맞지 않으므로 비운다(툴팁은 "할 일"). 항목이 없으면 빈 문자열.
+ * 알림 아이콘 툴팁의 종류별 건수: "미확인 3 · 예산 초과 2 · 폐기 1". 0건 종류는 빼고, 건수 많은 순, 같으면 종류 순서(ADR-056과 같은
+ * 규칙). 확인할 것은 자르기 전 수(`totalByKind`)를 쓴다: 목록이 잘려도 합이 배지 숫자와 같다. 그 칸이 없는 응답이면 받은 항목에서
+ * 세되, 잘렸으면 합이 맞지 않으므로 비운다(툴팁은 "할 일"). 검토 대기열은 열린 항목을 종류별로 센다(목록은 자르지 않는다).
+ * 어느 한쪽이라도 모르면 비운다(배지와 같은 규칙). 항목이 없으면 빈 문자열.
  */
-export const todoBreakdown = (result: ConfirmationListResult | null): string => {
-  if (result === null) return '';
+export const todoBreakdown = (
+  result: ConfirmationListResult | null,
+  review: ReviewQueueListResult | null,
+): string => {
+  if (result === null || review === null) return '';
   let counts: Readonly<Record<ConfirmationItemKind, number>>;
   if (result.totalByKind !== undefined) {
     counts = result.totalByKind;
@@ -586,9 +605,10 @@ export const todoBreakdown = (result: ConfirmationListResult | null): string => 
     for (const item of result.items) counted[item.kind] += 1;
     counts = counted;
   }
-  return KIND_ORDER.map((kind) => ({ kind, n: counts[kind] }))
+  const all: Readonly<Record<TodoKind, number>> = { ...counts, ...openReviewByKind(review) };
+  return KIND_ORDER.map((kind) => ({ kind, n: all[kind] }))
     .filter(({ n }) => n > 0)
     .sort((a, b) => b.n - a.n || KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind))
-    .map(({ kind, n }) => `${CONFIRMATION_ITEM_KIND_TEXT[kind]} ${String(n)}`)
+    .map(({ kind, n }) => `${KIND_TEXT[kind]} ${String(n)}`)
     .join(' · ');
 };

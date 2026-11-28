@@ -322,9 +322,9 @@ const Detail = ({
 
 /**
  * 대상 링크: 그 화면의 목록을 표시 ID로 검색한 상태로 열고 그 카드를 고른다(상세가 열린다). 폐기된 규칙은 [폐기 포함]을 켠다.
- * 목록에 없는 대상(지워진 요구사항 · 규칙)이면 검색 결과가 0개이고 아무것도 고르지 않는다(ADR-123).
+ * 목록에 없는 대상(지워진 요구사항 · 규칙)이면 검색 결과가 0개이고 아무것도 고르지 않는다(ADR-123). 검토 대기열 상세도 쓴다.
  */
-const useOpenLink = (): ((link: TargetLink) => void) => {
+export const useOpenLink = (): ((link: TargetLink) => void) => {
   const { navigate } = useNavigation();
   return useCallback(
     (link: TargetLink) => {
@@ -346,7 +346,7 @@ const useOpenLink = (): ((link: TargetLink) => void) => {
   );
 };
 
-const Field = ({
+export const Field = ({
   id,
   name,
   value,
@@ -385,7 +385,7 @@ const DiffList = ({ rows }: { rows: readonly DiffRow[] }): React.JSX.Element => 
   </dl>
 );
 
-const DetailSection = ({
+export const DetailSection = ({
   id,
   title,
   children,

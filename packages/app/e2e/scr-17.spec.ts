@@ -42,6 +42,7 @@ import {
   RULE5_STATEMENT,
   SUPERSEDE_GROUNDS,
 } from './checklists/scr-17.js';
+import { REVIEW_EMPTY } from './checklists/scr-18.js';
 import {
   allSettled,
   type BiveMock,
@@ -92,6 +93,8 @@ const setup = async (
       'confirmation.list': { result: list },
       'normChange.list': { result: FIXTURE_CHANGE_LIST },
       'confirmation.set': { result: FIXTURE_CONFIRM_RULE4 },
+      // 배지 합계 = 확인할 것 + 검토 대기열 (검토 대기열이 비어 배지는 확인할 것 수, ADR-157)
+      'reviewQueue.list': { result: REVIEW_EMPTY },
       ...extra,
     },
   });

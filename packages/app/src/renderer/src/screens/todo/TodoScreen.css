@@ -319,3 +319,88 @@
   color: var(--color-text-muted);
   font-size: var(--font-size-2);
 }
+
+/* 검토 대기열 (SCR-18, ADR-157): 액션 버튼 · 입력. 머리 · 구획은 확인할 것과 같은 모양을 쓴다 */
+.review-action {
+  flex: none;
+  height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--font-size-2);
+  cursor: pointer;
+}
+
+.review-action[aria-pressed='true'] {
+  border-color: var(--color-accent);
+}
+
+.review-action:disabled,
+.review-action[aria-disabled='true'] {
+  opacity: var(--opacity-dimmed);
+  cursor: default;
+}
+
+.review-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2);
+  background: var(--color-surface);
+}
+
+.review-form-field,
+.review-budget,
+.review-split {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2);
+}
+
+.review-budget-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 120px);
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.review-split-rule {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.review-form input[type='text'],
+.review-form textarea {
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-2);
+}
+
+.review-form textarea {
+  min-height: 64px;
+  resize: vertical;
+}
+
+.review-form textarea[data-testid='review-exclude'] {
+  font-family: var(--font-mono);
+}
